@@ -23,8 +23,10 @@ use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
-use datafusion_common::{TableReference, ToDFSchema};
-use datafusion_expr::{col, DmlStatement, LogicalPlan};
+use datafusion::datasource::DefaultTableSource;
+use datafusion::logical_expr::col;
+use datafusion_common::TableReference;
+use datafusion_expr::{DmlStatement, LogicalPlan};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
@@ -36,6 +38,7 @@ use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableInfo;
+use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
@@ -424,20 +427,13 @@ impl PipelineTable {
             table_info.name.clone(),
         );
 
-        let df_schema = Arc::new(
-            table_info
-                .meta
-                .schema
-                .arrow_schema()
-                .clone()
-                .to_dfschema()
-                .context(BuildDfLogicalPlanSnafu)?,
-        );
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
         // create dml stmt
         let stmt = DmlStatement::new(
             table_name,
-            df_schema,
+            table_source,
             datafusion_expr::WriteOp::Delete,
             Arc::new(dataframe.into_parts().1),
         );

@@ -44,9 +44,10 @@ use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
-use datafusion_common::DFSchema;
+use datafusion_common::{DFSchema, NullEquality};
+use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, lit, ExprSchemable, SortExpr};
+use datafusion_expr::{col, lit, ExprSchemable, Literal, SortExpr};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -1299,11 +1300,11 @@ impl PromPlanner {
                 .field_with_unqualified_name(&matcher.name)
                 .is_err()
             {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None).alias(matcher.name)
             } else {
                 DfExpr::Column(Column::from_name(matcher.name))
             };
-            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
+            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),
@@ -1317,29 +1318,37 @@ impl PromPlanner {
                         continue;
                     }
                     if re.as_str() == "^(?:.+)$" {
-                        col.not_eq(DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))))
+                        col.not_eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
                     } else {
                         DfExpr::BinaryExpr(BinaryExpr {
                             left: Box::new(col),
                             op: Operator::RegexMatch,
-                            right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                                re.as_str().to_string(),
-                            )))),
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
                         })
                     }
                 }
                 MatchOp::NotRe(re) => {
                     if re.as_str() == "^(?:.*)$" {
-                        DfExpr::Literal(ScalarValue::Boolean(Some(false)))
+                        DfExpr::Literal(ScalarValue::Boolean(Some(false)), None)
                     } else if re.as_str() == "^(?:.+)$" {
-                        col.eq(DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))))
+                        col.eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
                     } else {
                         DfExpr::BinaryExpr(BinaryExpr {
                             left: Box::new(col),
                             op: Operator::RegexNotMatch,
-                            right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                                re.as_str().to_string(),
-                            )))),
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
                         })
                     }
                 }
@@ -1383,16 +1392,20 @@ impl PromPlanner {
         if (end - start) / interval > MAX_SCATTER_POINTS || interval <= INTERVAL_1H {
             let single_time_range = time_index_expr
                 .clone()
-                .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                    Some(self.ctx.start + offset_duration - self.ctx.lookback_delta - range),
+                .gt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
+                        Some(self.ctx.start + offset_duration - self.ctx.lookback_delta - range),
+                        None,
+                    ),
                     None,
-                )))
-                .and(
-                    time_index_expr.lt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
+                ))
+                .and(time_index_expr.lt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
                         Some(self.ctx.end + offset_duration + self.ctx.lookback_delta),
                         None,
-                    ))),
-                );
+                    ),
+                    None,
+                )));
             return Ok(Some(single_time_range));
         }
 
@@ -1402,15 +1415,19 @@ impl PromPlanner {
             filters.push(
                 time_index_expr
                     .clone()
-                    .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(timestamp + offset_duration - lookback_delta - range),
+                    .gt_eq(DfExpr::Literal(
+                        ScalarValue::TimestampMillisecond(
+                            Some(timestamp + offset_duration - lookback_delta - range),
+                            None,
+                        ),
                         None,
-                    )))
+                    ))
                     .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
                             Some(timestamp + offset_duration + lookback_delta),
                             None,
                         ),
+                        None,
                     ))),
             )
         }
@@ -1473,6 +1490,7 @@ impl PromPlanner {
                             table: table_ref.to_quoted_string(),
                         })?
                         .clone(),
+                    metadata: None,
                 })))
                 .collect::<Vec<_>>();
             scan_plan = LogicalPlanBuilder::from(scan_plan)
@@ -1563,7 +1581,7 @@ impl PromPlanner {
                     self.ctx.interval,
                     SPECIAL_TIME_FUNCTION.to_string(),
                     DEFAULT_FIELD_COLUMN.to_string(),
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(0.0)))),
+                    Some(lit(0.0f64)),
                 )
                 .context(DataFusionPlanningSnafu)?,
             ),
@@ -1716,13 +1734,14 @@ impl PromPlanner {
                 //     'days',
                 //     (date_trunc('month', <TIME INDEX>::date) + interval '1 month - 1 day')
                 // );
-                let day_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("day".to_string())));
-                let month_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("month".to_string())));
+                let day_lit_expr = "day".lit();
+                let month_lit_expr = "month".lit();
                 let interval_1month_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)));
-                let interval_1day_lit_expr = DfExpr::Literal(ScalarValue::IntervalDayTime(Some(
-                    IntervalDayTime::new(1, 0),
-                )));
+                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
+                let interval_1day_lit_expr = DfExpr::Literal(
+                    ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
+                    None,
+                );
                 let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(interval_1month_lit_expr),
                     op: Operator::Minus,
@@ -1810,7 +1829,7 @@ impl PromPlanner {
             }
             "round" => {
                 if other_input_exprs.is_empty() {
-                    other_input_exprs.push_front(DfExpr::Literal(ScalarValue::Float64(Some(0.0))));
+                    other_input_exprs.push_front(0.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
@@ -1965,7 +1984,7 @@ impl PromPlanner {
     ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
@@ -1975,14 +1994,14 @@ impl PromPlanner {
         // Validate the destination label name
         Self::validate_label_name(&dst_label)?;
         let replacement = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), _)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected replacement string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let src_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)))) => s,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)), None)) => s,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected src_label string literal, but found {:?}", other),
             }
@@ -1990,7 +2009,7 @@ impl PromPlanner {
         };
 
         let regex = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), None)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected regex string literal, but found {:?}", other),
             }
@@ -2020,7 +2039,7 @@ impl PromPlanner {
                 // the replacement is not empty, always adds dst_label with replacement value.
                 return Ok(Some((
                     // alias literal `replacement` as dst_label
-                    DfExpr::Literal(ScalarValue::Utf8(Some(replacement))).alias(&dst_label),
+                    lit(replacement).alias(&dst_label),
                     dst_label,
                 )));
             }
@@ -2041,12 +2060,12 @@ impl PromPlanner {
         // regexp_replace(src_label, regex, replacement)
         let args = vec![
             if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())))
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             } else {
                 DfExpr::Column(Column::from_name(src_label))
             },
-            DfExpr::Literal(ScalarValue::Utf8(Some(regex))),
-            DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
+            DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
+            DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
         ];
 
         Ok(Some((
@@ -2068,14 +2087,14 @@ impl PromPlanner {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
 
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let separator = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected separator string literal, but found {:?}", other),
             }
@@ -2096,15 +2115,15 @@ impl PromPlanner {
             .map(|expr| {
                 // Cast source label into column or null literal
                 match expr {
-                    DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                    DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
-                            Ok(DfExpr::Literal(ScalarValue::Null))
+                            Ok(DfExpr::Literal(ScalarValue::Null, None))
                         } else if available_columns.contains(label.as_str()) {
                             // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
                         } else {
                             // Label doesn't exist, treat as empty string (null)
-                            Ok(DfExpr::Literal(ScalarValue::Null))
+                            Ok(DfExpr::Literal(ScalarValue::Null, None))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {
@@ -2132,7 +2151,7 @@ impl PromPlanner {
 
         // concat_ws(separator, src_label_1, src_label_2, ...) as dst_label
         let mut args = Vec::with_capacity(1 + src_labels.len());
-        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator))));
+        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator)), None));
         args.extend(src_labels);
 
         Ok((
@@ -2203,7 +2222,7 @@ impl PromPlanner {
 
         tags.iter()
             .map(|col| match col {
-                DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
                     Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
                 }
                 other => UnexpectedPlanExprSnafu {
@@ -2416,14 +2435,17 @@ impl PromPlanner {
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
 
-                DfExpr::WindowFunction(WindowFunction {
+                DfExpr::WindowFunction(Box::new(WindowFunction {
                     fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
-                    args: vec![],
-                    partition_by: group_exprs.clone(),
-                    order_by: sort_exprs,
-                    window_frame: WindowFrame::new(Some(true)),
-                    null_treatment: None,
-                })
+                    params: WindowFunctionParams {
+                        args: vec![],
+                        partition_by: group_exprs.clone(),
+                        order_by: sort_exprs,
+                        window_frame: WindowFrame::new(Some(true)),
+                        null_treatment: None,
+                        distinct: false,
+                    },
+                }))
             })
             .collect();
 
@@ -2617,7 +2639,7 @@ impl PromPlanner {
                 .with_context(|| ValueNotFoundSnafu {
                     table: self.ctx.table_name.clone().unwrap_or_default(),
                 })?;
-        let first_value_expr = first_value(first_field_expr, None);
+        let first_value_expr = first_value(first_field_expr, vec![]);
 
         let ordered_aggregated_input = LogicalPlanBuilder::from(input)
             .aggregate(
@@ -2663,14 +2685,8 @@ impl PromPlanner {
     /// `None` if the input is not a literal expression.
     fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
         match expr {
-            PromExpr::NumberLiteral(NumberLiteral { val }) => {
-                let scalar_value = ScalarValue::Float64(Some(*val));
-                Some(DfExpr::Literal(scalar_value))
-            }
-            PromExpr::StringLiteral(StringLiteral { val }) => {
-                let scalar_value = ScalarValue::Utf8(Some(val.to_string()));
-                Some(DfExpr::Literal(scalar_value))
-            }
+            PromExpr::NumberLiteral(NumberLiteral { val }) => Some(val.lit()),
+            PromExpr::StringLiteral(StringLiteral { val }) => Some(val.lit()),
             PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
             | PromExpr::Extension(_)
@@ -2866,7 +2882,7 @@ impl PromPlanner {
                         .collect::<Vec<_>>(),
                 ),
                 None,
-                true,
+                NullEquality::NullEqualsNull,
             )
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -3002,7 +3018,7 @@ impl PromPlanner {
                     JoinType::LeftSemi,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -3015,7 +3031,7 @@ impl PromPlanner {
                     JoinType::LeftAnti,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -3121,7 +3137,7 @@ impl PromPlanner {
         // step 1: align schema using project, fill non-exist columns with null
         let left_proj_exprs = all_columns.iter().map(|col| {
             if tags_not_in_left.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3153,7 +3169,7 @@ impl PromPlanner {
                     right_field_col,
                 ))
             } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3302,7 +3318,6 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some(date_part.to_string())));
         let input_expr = datafusion::logical_expr::col(
             self.ctx
                 .time_index_column
@@ -3314,7 +3329,7 @@ impl PromPlanner {
         );
         let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: datafusion_functions::datetime::date_part(),
-            args: vec![lit_expr, input_expr],
+            args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
     }
@@ -3916,7 +3931,7 @@ mod test {
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
-    async fn indie_query_plan_compare(query: &str, expected: String) {
+    async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
         let prom_expr = parser::parse(query).unwrap();
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -3945,7 +3960,7 @@ mod test {
                 .await
                 .unwrap();
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        assert_eq!(plan.display_indent_schema().to_string(), expected.as_ref());
     }
 
     #[tokio::test]
@@ -3966,8 +3981,8 @@ mod test {
     #[tokio::test]
     async fn binary_op_literal_literal() {
         let query = r#"1 + 1"#;
-        let expected = String::from("EmptyMetric: range=[0..100000000], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]");
-
+        let expected = r#"EmptyMetric: range=[0..100000000], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]
+  TableScan: dummy [time:Timestamp(Millisecond, None), value:Float64;N]"#;
         indie_query_plan_compare(query, expected).await;
     }
 
@@ -4966,21 +4981,22 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = "UnionDistinctOn: on col=[[\"job\"]], ts_col=[greptime_timestamp] [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n  SubqueryAlias: metric_exists [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n    Projection: metric_exists.greptime_timestamp, metric_exists.job, sum(metric_exists.greptime_value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]\
-        \n      Sort: metric_exists.job ASC NULLS LAST, metric_exists.greptime_timestamp ASC NULLS LAST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]\
-        \n        Aggregate: groupBy=[[metric_exists.job, metric_exists.greptime_timestamp]], aggr=[[sum(metric_exists.greptime_value)]] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]\
-        \n          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n            PromSeriesDivide: tags=[\"job\"] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n              Sort: metric_exists.job ASC NULLS FIRST, metric_exists.greptime_timestamp ASC NULLS FIRST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                Filter: metric_exists.greptime_timestamp >= TimestampMillisecond(-1000, None) AND metric_exists.greptime_timestamp <= TimestampMillisecond(100001000, None) [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                  TableScan: metric_exists [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n  SubqueryAlias:  [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]\
-        \n    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]\
-        \n      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
-        \n        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
-        \n          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
+        let expected = r#"UnionDistinctOn: on col=[["job"]], ts_col=[greptime_timestamp] [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+  SubqueryAlias: metric_exists [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+    Projection: metric_exists.greptime_timestamp, metric_exists.job, sum(metric_exists.greptime_value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
+      Sort: metric_exists.job ASC NULLS LAST, metric_exists.greptime_timestamp ASC NULLS LAST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]
+        Aggregate: groupBy=[[metric_exists.job, metric_exists.greptime_timestamp]], aggr=[[sum(metric_exists.greptime_value)]] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(metric_exists.greptime_value):Float64;N]
+          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+            PromSeriesDivide: tags=["job"] [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+              Sort: metric_exists.job ASC NULLS FIRST, metric_exists.greptime_timestamp ASC NULLS FIRST [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                Filter: metric_exists.greptime_timestamp >= TimestampMillisecond(-1000, None) AND metric_exists.greptime_timestamp <= TimestampMillisecond(100001000, None) [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                  TableScan: metric_exists [job:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+  SubqueryAlias:  [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]
+    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]
+      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), sum(.value):Float64;N]
+        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(Millisecond, None), sum(.value):Float64;N]
+          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]
+            TableScan: dummy [time:Timestamp(Millisecond, None), value:Float64;N]"#;
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }

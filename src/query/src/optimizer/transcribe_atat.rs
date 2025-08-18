@@ -125,7 +125,7 @@ mod tests {
             Field::new("a", DataType::Utf8, false),
             Field::new("b", DataType::Utf8, false),
         ]);
-        let table = MemTable::try_new(SchemaRef::from(schema), vec![]).unwrap();
+        let table = MemTable::try_new(SchemaRef::from(schema), vec![vec![]]).unwrap();
         LogicalPlanBuilder::scan("t", provider_as_source(Arc::new(table)), None).unwrap()
     }
 

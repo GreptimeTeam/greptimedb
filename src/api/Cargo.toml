@@ -19,6 +19,3 @@ paste.workspace = true
 prost.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-
-[build-dependencies]
-tonic-build = "0.11"

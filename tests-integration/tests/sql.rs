@@ -161,9 +161,11 @@ pub async fn test_mysql_stmts(store_type: StorageType) {
     conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
 
     // empty statements
-    let err = conn.execute("      -------  ;").await.unwrap_err();
+    // Only when "--" is followed by a whitespace is it considered a valid comment in MySQL,
+    // see https://dev.mysql.com/doc/refman/8.4/en/ansi-diff-comments.html
+    let err = conn.execute("      -- -----  ;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
-    let err = conn.execute("----------\n;").await.unwrap_err();
+    let err = conn.execute("-- --------\n;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
     let err = conn.execute("        ;").await.unwrap_err();
     assert!(err.to_string().contains("empty statements"));
@@ -603,7 +605,7 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
         .unwrap();
 
     // The slow query will run at least longer than 1s.
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
 
     // Simulate a slow query.
     sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
@@ -718,7 +720,7 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
         .await
         .unwrap();
 
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
     let _ = sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
 
     // Wait for the slow query to be recorded.

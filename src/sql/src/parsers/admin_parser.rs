@@ -46,7 +46,7 @@ impl ParserContext<'_> {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::ast::FunctionArguments;
+    use sqlparser::ast::{FunctionArguments, ValueWithSpan};
 
     use super::*;
     use crate::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
@@ -71,7 +71,7 @@ mod tests {
                 assert_eq!(arg_list.args.len(), 1);
                 assert!(matches!(&arg_list.args[0],
                                  FunctionArg::Unnamed(FunctionArgExpr::Expr(
-                                     Expr::Value(Value::SingleQuotedString(s))
+                                     Expr::Value(ValueWithSpan { value: Value::SingleQuotedString(s), ..})
                                  )) if s == "test"));
             }
             _ => unreachable!(),

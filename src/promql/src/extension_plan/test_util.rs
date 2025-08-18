@@ -21,13 +21,14 @@ use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
 };
-use datafusion::physical_plan::memory::MemoryExec;
+use datafusion::datasource::memory::MemorySourceConfig;
+use datafusion::datasource::source::DataSourceExec;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow_array::StringArray;
 
 pub(crate) const TIME_INDEX_COLUMN: &str = "timestamp";
 
-pub(crate) fn prepare_test_data() -> MemoryExec {
+pub(crate) fn prepare_test_data() -> DataSourceExec {
     let schema = Arc::new(Schema::new(vec![
         Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
         Field::new("value", DataType::Float64, true),
@@ -46,10 +47,12 @@ pub(crate) fn prepare_test_data() -> MemoryExec {
     )
     .unwrap();
 
-    MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    DataSourceExec::new(Arc::new(
+        MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+    ))
 }
 
-pub(crate) fn prepare_test_data_with_nan() -> MemoryExec {
+pub(crate) fn prepare_test_data_with_nan() -> DataSourceExec {
     let schema = Arc::new(Schema::new(vec![
         Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
         Field::new("value", DataType::Float64, true),
@@ -60,5 +63,7 @@ pub(crate) fn prepare_test_data_with_nan() -> MemoryExec {
     let field_column = Arc::new(Float64Array::from(vec![0.0, f64::NAN, 6.0, f64::NAN, 12.0])) as _;
     let data = RecordBatch::try_new(schema.clone(), vec![timestamp_column, field_column]).unwrap();
 
-    MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    DataSourceExec::new(Arc::new(
+        MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+    ))
 }

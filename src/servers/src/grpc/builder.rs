@@ -20,7 +20,7 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
 use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
-use otel_arrow_rust::opentelemetry::ArrowMetricsServiceServer;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;

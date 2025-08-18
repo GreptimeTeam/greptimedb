@@ -9,7 +9,10 @@ INSERT INTO emojis VALUES (1, '🦆', 1), (2, '🦆🍞🦆', 2);
 SELECT * FROM emojis ORDER BY id;
 
 -- substr on unicode
-SELECT substr(s, 1, 1), substr(s, 2, 1) FROM emojis ORDER BY id;
+-- Because "substr" always use "Utf8View" as its return type, this query will return error
+-- "column types must match schema types, expected Utf8View but found Utf8" if the "CAST" is not used.
+-- TODO(LFC): support "Utf8View" Arrow array so that this "CAST" walkaround can be removed.
+SELECT CAST(substr(s, 1, 1) AS STRING), CAST(substr(s, 2, 1) AS STRING) FROM emojis ORDER BY id;
 
 SELECT substr('u🦆', 1, 1);
 

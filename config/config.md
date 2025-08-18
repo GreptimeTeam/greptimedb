@@ -596,6 +596,11 @@
 | `flow.batching_mode.experimental_max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
+| `flow.batching_mode.frontend_tls` | -- | -- | -- |
+| `flow.batching_mode.frontend_tls.enabled` | Bool | `false` | Whether to enable TLS for client. |
+| `flow.batching_mode.frontend_tls.server_ca_cert_path` | String | Unset | Server Certificate file path. |
+| `flow.batching_mode.frontend_tls.client_cert_path` | String | Unset | Client Certificate file path. |
+| `flow.batching_mode.frontend_tls.client_key_path` | String | Unset | Client Private key file path. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:6800` | The address advertised to the metasrv,<br/>and used for connections from outside the host |

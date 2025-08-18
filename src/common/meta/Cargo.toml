@@ -17,7 +17,7 @@ pg_kvbackend = [
     "dep:rustls",
 ]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
-enterprise = []
+enterprise = ["prost-types"]
 
 [lints]
 workspace = true
@@ -64,6 +64,7 @@ moka.workspace = true
 object-store.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+prost-types = { workspace = true, optional = true }
 rand.workspace = true
 regex.workspace = true
 rskafka.workspace = true

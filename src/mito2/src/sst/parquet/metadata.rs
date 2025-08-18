@@ -95,13 +95,14 @@ impl<'a> MetadataLoader<'a> {
         let mut footer = [0; 8];
         footer.copy_from_slice(&buffer[buffer_len - FOOTER_SIZE..]);
 
-        let metadata_len = ParquetMetaDataReader::decode_footer(&footer).map_err(|e| {
+        let footer_tail = ParquetMetaDataReader::decode_footer_tail(&footer).map_err(|e| {
             error::InvalidParquetSnafu {
                 file: path,
                 reason: format!("failed to decode footer, {e}"),
             }
             .build()
-        })? as u64;
+        })?;
+        let metadata_len = footer_tail.metadata_length() as u64;
 
         if file_size - (FOOTER_SIZE as u64) < metadata_len {
             return error::InvalidParquetSnafu {

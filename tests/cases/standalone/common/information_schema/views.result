@@ -29,12 +29,12 @@ Affected Rows: 0
 
 select table_catalog, table_schema, table_name, view_definition from information_schema.views order by table_name;
 
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
-| table_catalog | table_schema                  | table_name | view_definition                                                      |
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
-| greptime      | test_information_schema_views | myview     | CREATE VIEW myview AS SELECT * FROM t1 WHERE val1 > 5                |
-| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 JOIN t1 ON t1.val1 = t2.val2 |
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
+| table_catalog | table_schema                  | table_name | view_definition                                                            |
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
+| greptime      | test_information_schema_views | myview     | CREATE VIEW myview AS SELECT * FROM t1 WHERE val1 > 5                      |
+| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 INNER JOIN t1 ON t1.val1 = t2.val2 |
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
 
 drop view myview;
 
@@ -42,11 +42,11 @@ Affected Rows: 0
 
 select table_catalog, table_schema, table_name, view_definition from information_schema.views order by table_name;
 
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
-| table_catalog | table_schema                  | table_name | view_definition                                                      |
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
-| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 JOIN t1 ON t1.val1 = t2.val2 |
-+---------------+-------------------------------+------------+----------------------------------------------------------------------+
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
+| table_catalog | table_schema                  | table_name | view_definition                                                            |
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
+| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 INNER JOIN t1 ON t1.val1 = t2.val2 |
++---------------+-------------------------------+------------+----------------------------------------------------------------------------+
 
 drop view myview2;
 

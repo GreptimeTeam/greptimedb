@@ -97,7 +97,7 @@ impl Round {
                             (a / nearest).round() * nearest
                         }
                     })
-                    .map_err(|err: ArrowError| DataFusionError::ArrowError(err, None))?;
+                    .map_err(|err: ArrowError| DataFusionError::ArrowError(Box::new(err), None))?;
 
                 Ok(ColumnarValue::Array(Arc::new(result) as _))
             }
@@ -107,8 +107,10 @@ impl Round {
 
 #[cfg(test)]
 mod tests {
+    use datafusion_common::config::ConfigOptions;
     use datafusion_expr::ScalarFunctionArgs;
     use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::datatypes::Field;
 
     use super::*;
 
@@ -118,10 +120,17 @@ mod tests {
             ColumnarValue::Array(Arc::new(Float64Array::from(value))),
             ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))),
         ];
+        let arg_fields = vec![
+            Arc::new(Field::new("a", input[0].data_type(), false)),
+            Arc::new(Field::new("b", input[1].data_type(), false)),
+        ];
+        let return_field = Arc::new(Field::new("c", DataType::Float64, false));
         let args = ScalarFunctionArgs {
             args: input,
+            arg_fields,
             number_rows: 1,
-            return_type: &DataType::Float64,
+            return_field,
+            config_options: Arc::new(ConfigOptions::default()),
         };
         let result = round_udf.invoke_with_args(args).unwrap();
         let result_array = extract_array(&result).unwrap();

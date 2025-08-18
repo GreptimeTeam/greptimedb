@@ -19,7 +19,8 @@ use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
-use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
+use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::ToDFSchema;
 use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::{Between, BinaryExpr, Operator};
@@ -260,8 +261,8 @@ fn extract_from_binary_expr(
 
 fn get_timestamp_filter(ts_col_name: &str, left: &Expr, right: &Expr) -> Option<(Timestamp, bool)> {
     let (col, lit, reverse) = match (left, right) {
-        (Expr::Column(column), Expr::Literal(scalar)) => (column, scalar, false),
-        (Expr::Literal(scalar), Expr::Column(column)) => (column, scalar, true),
+        (Expr::Column(column), Expr::Literal(scalar, _)) => (column, scalar, false),
+        (Expr::Literal(scalar, _), Expr::Column(column)) => (column, scalar, true),
         _ => {
             return None;
         }
@@ -294,7 +295,7 @@ fn extract_from_between_expr(
     }
 
     match (low, high) {
-        (Expr::Literal(low), Expr::Literal(high)) => {
+        (Expr::Literal(low, _), Expr::Literal(high, _)) => {
             return_none_if_utf8!(low);
             return_none_if_utf8!(high);
 
@@ -330,7 +331,7 @@ fn extract_from_in_list_expr(
     }
     let mut init_range = TimestampRange::empty();
     for expr in list {
-        if let Expr::Literal(scalar) = expr {
+        if let Expr::Literal(scalar, _) = expr {
             return_none_if_utf8!(scalar);
             if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
                 init_range = init_range.or(&TimestampRange::single(timestamp))
@@ -590,9 +591,7 @@ mod tests {
         vec![datafusion_expr::Expr::BinaryExpr(BinaryExpr {
             left: Box::new(datafusion_expr::Expr::Column(Column::from_name("cnt"))),
             op,
-            right: Box::new(datafusion_expr::Expr::Literal(ScalarValue::Int32(Some(
-                max_val,
-            )))),
+            right: Box::new(max_val.lit()),
         })]
     }
 

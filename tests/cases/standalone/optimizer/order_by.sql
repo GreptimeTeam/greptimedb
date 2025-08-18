@@ -1,11 +1,16 @@
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers;
 
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number desc;
 
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number asc;
 
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number desc limit 10;
 
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number asc limit 10;
 
 CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs');

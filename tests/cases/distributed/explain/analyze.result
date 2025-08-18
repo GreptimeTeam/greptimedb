@@ -38,12 +38,14 @@ explain analyze SELECT count(*) FROM system_metrics;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[count(system_REDACTED
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(system_REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(system_REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|

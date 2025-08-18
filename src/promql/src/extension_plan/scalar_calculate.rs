@@ -123,10 +123,10 @@ impl ScalarCalculate {
         let input_schema = exec_input.schema();
         let ts_index = input_schema
             .index_of(&self.time_index)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         let val_index = input_schema
             .index_of(&self.field_column)
-            .map_err(|e| DataFusionError::ArrowError(e, None))?;
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         let schema = Arc::new(Schema::new(fields));
         let properties = exec_input.properties();
         let properties = PlanProperties::new(
@@ -366,8 +366,8 @@ impl ExecutionPlan for ScalarCalculateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.statistics()?;
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -395,7 +395,9 @@ impl ExecutionPlan for ScalarCalculateExec {
 impl DisplayAs for ScalarCalculateExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "ScalarCalculateExec: tags={:?}", self.tag_columns)
             }
         }
@@ -535,22 +537,25 @@ impl Stream for ScalarCalculateStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-    use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::TimeUnit;
 
     use super::*;
 
-    fn prepare_test_data(series: Vec<RecordBatch>) -> MemoryExec {
+    fn prepare_test_data(series: Vec<RecordBatch>) -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("tag1", DataType::Utf8, true),
             Field::new("tag2", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
-        MemoryExec::try_new(&[series], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[series], schema, None).unwrap(),
+        ))
     }
 
     async fn run_test(series: Vec<RecordBatch>, expected: &str) {

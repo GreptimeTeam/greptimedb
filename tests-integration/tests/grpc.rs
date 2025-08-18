@@ -882,9 +882,10 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let mut client_tls = ClientTlsOption {
-        server_ca_cert_path: ca_path,
-        client_cert_path,
-        client_key_path,
+        enabled: true,
+        server_ca_cert_path: Some(ca_path),
+        client_cert_path: Some(client_cert_path),
+        client_key_path: Some(client_key_path),
     };
     {
         let grpc_client =
@@ -897,7 +898,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
     }
     // test corrupted client key
     {
-        client_tls.client_key_path = client_corrupted;
+        client_tls.client_key_path = Some(client_corrupted);
         let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls.clone()).unwrap();
         let db = Database::new_with_dbname(
             format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
