@@ -5,7 +5,7 @@ use api::v1::{
 };
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
-use sql::ast::ObjectName;
+use sql::ast::{ObjectName, ObjectNamePartExt};
 use sql::statements::create::trigger::{ChannelType, CreateTrigger, TriggerOn};
 
 use crate::error;
