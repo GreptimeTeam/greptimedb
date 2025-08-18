@@ -16,6 +16,7 @@
 
 use common_meta::key::TableMetadataManagerRef;
 
+#[allow(unused)]
 pub struct GcTrigger {
     table_metadata_manager: TableMetadataManagerRef,
 }
