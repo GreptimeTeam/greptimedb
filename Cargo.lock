@@ -2401,6 +2401,7 @@ dependencies = [
  "object-store",
  "prometheus",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "rand 0.9.1",
  "regex",
  "rskafka",
@@ -5318,15 +5319,16 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=03007c30a2d2bf1acb4374cf5e92df9b0bd8844e#03007c30a2d2bf1acb4374cf5e92df9b0bd8844e"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4ce7e9a3ff627147458bd382fbb40f0601f31013#4ce7e9a3ff627147458bd382fbb40f0601f31013"
 dependencies = [
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "serde",
  "serde_json",
  "strum 0.25.0",
  "strum_macros 0.25.3",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic 0.12.3",
+ "tonic-build 0.12.3",
 ]
 
 [[package]]
@@ -8730,6 +8732,7 @@ dependencies = [
  "path-slash",
  "prometheus",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "query",
  "regex",
  "serde_json",
@@ -12101,6 +12104,7 @@ name = "sql"
 version = "0.17.0"
 dependencies = [
  "api",
+ "arrow-buffer",
  "chrono",
  "common-base",
  "common-catalog",

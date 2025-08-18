@@ -4,10 +4,11 @@ use api::v1::{
     WebhookOptions as PbWebhookOptions,
 };
 use session::context::QueryContextRef;
-use snafu::ensure;
-use sql::ast::{ObjectName, ObjectNamePartExt};
-use sql::statements::create::trigger::{ChannelType, CreateTrigger};
+use snafu::{ensure, ResultExt};
+use sql::ast::ObjectName;
+use sql::statements::create::trigger::{ChannelType, CreateTrigger, TriggerOn};
 
+use crate::error;
 use crate::error::Result;
 
 pub fn to_create_trigger_task_expr(
@@ -17,12 +18,17 @@ pub fn to_create_trigger_task_expr(
     let CreateTrigger {
         trigger_name,
         if_not_exists,
-        query,
-        interval,
+        trigger_on,
         labels,
         annotations,
         channels,
     } = create_trigger;
+
+    let TriggerOn {
+        query,
+        interval,
+        raw_interval_expr,
+    } = trigger_on;
 
     let catalog_name = query_ctx.current_catalog().to_string();
     let trigger_name = sanitize_trigger_name(trigger_name)?;
@@ -47,6 +53,8 @@ pub fn to_create_trigger_task_expr(
     let labels = labels.into_map();
     let annotations = annotations.into_map();
 
+    let interval = interval.try_into().context(error::TooLargeDurationSnafu)?;
+
     Ok(PbCreateTriggerExpr {
         catalog_name,
         trigger_name,
@@ -55,7 +63,8 @@ pub fn to_create_trigger_task_expr(
         channels,
         labels,
         annotations,
-        interval,
+        interval: Some(interval),
+        raw_interval_expr,
     })
 }
 
@@ -72,6 +81,8 @@ fn sanitize_trigger_name(mut trigger_name: ObjectName) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -123,7 +134,8 @@ NOTIFY
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2)",
             expr.sql
         );
-        assert_eq!(300, expr.interval);
+        let expected: prost_types::Duration = Duration::from_secs(300).try_into().unwrap();
+        assert_eq!(Some(expected), expr.interval);
         assert_eq!(1, expr.labels.len());
         assert_eq!("label_val", expr.labels.get("label_name").unwrap());
         assert_eq!(1, expr.annotations.len());

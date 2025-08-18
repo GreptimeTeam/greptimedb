@@ -851,6 +851,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -897,6 +906,8 @@ impl ErrorExt for Error {
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
             #[cfg(feature = "enterprise")]
             Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
