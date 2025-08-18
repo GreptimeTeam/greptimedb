@@ -170,7 +170,7 @@ impl LocalGcWorker {
 
         let region_manifest_options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
-                &table_dir, region_id, path_type,
+                table_dir, region_id, path_type,
             )),
             object_store: self.access_layer.object_store().clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
@@ -188,8 +188,8 @@ impl LocalGcWorker {
         )
         .await?
         .context(EmptyRegionDirSnafu {
-            region_id: region_id,
-            region_dir: &region_dir_from_table_dir(&table_dir, region_id, path_type),
+            region_id,
+            region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
         })
     }
 
