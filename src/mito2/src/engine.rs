@@ -223,6 +223,10 @@ impl MitoEngine {
         builder.try_build().await
     }
 
+    pub fn mito_config(&self) -> &MitoConfig {
+        &self.inner.config
+    }
+
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
@@ -319,7 +323,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 

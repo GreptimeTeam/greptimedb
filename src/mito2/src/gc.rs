@@ -30,7 +30,6 @@ use object_store::Entry;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _};
 use store_api::storage::RegionId;
-use store_api::{MAX_VERSION, MIN_VERSION};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
@@ -39,13 +38,9 @@ use crate::error::{
     DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
     Result,
 };
-use crate::manifest::action::{
-    RegionManifest, RegionManifestBuilder, RegionMetaAction, RegionMetaActionList,
-};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::region::opener::new_manifest_dir;
-use crate::region::ManifestContextRef;
 use crate::sst::file::FileId;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
@@ -111,6 +106,16 @@ impl LocalGcWorker {
 
         Ok(zelf)
     }
+
+    /// Run the GC worker in serial mode
+    ///
+    /// TODO(discord9): consider instead running in parallel mode
+    pub async fn run(self) -> Result<()> {
+        for region_id in self.manifest_mgrs.keys() {
+            self.do_region_gc(*region_id).await?;
+        }
+        Ok(())
+    }
 }
 
 impl LocalGcWorker {
@@ -152,7 +157,7 @@ impl LocalGcWorker {
 
         self.access_layer
             .object_store()
-            .delete_iter(unused_files.iter().map(|e| e.path()))
+            .delete_iter(unused_files.into_iter().map(|e| e.path().to_string()))
             .await
             .context(OpenDalSnafu)
     }
