@@ -42,7 +42,7 @@ use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 pub const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
 
 /// The default endpoint when use HTTP exporter protocol.
-pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
+pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 
 /// The default logs directory.
 pub const DEFAULT_LOGGING_DIR: &str = "logs";
@@ -74,7 +74,7 @@ pub struct LoggingOptions {
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
 
-    /// The endpoint of OTLP. Default is "http://localhost:4318".
+    /// The endpoint of OTLP.
     pub otlp_endpoint: Option<String>,
 
     /// The tracing sample ratio.
