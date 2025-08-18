@@ -41,13 +41,13 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, FIXED_POS_COLUMN_NUM};
 
 /// An iterator to dedup sorted batches from an iterator based on the dedup strategy.
-pub struct DedupIterator<I, S> {
+pub struct FlatDedupIterator<I, S> {
     iter: I,
     strategy: S,
     metrics: DedupMetrics,
 }
 
-impl<I, S> DedupIterator<I, S> {
+impl<I, S> FlatDedupIterator<I, S> {
     /// Creates a new dedup iterator.
     pub fn new(iter: I, strategy: S) -> Self {
         Self {
@@ -58,7 +58,7 @@ impl<I, S> DedupIterator<I, S> {
     }
 }
 
-impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> DedupIterator<I, S> {
+impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> FlatDedupIterator<I, S> {
     /// Returns the next deduplicated batch.
     fn fetch_next_batch(&mut self) -> Result<Option<RecordBatch>> {
         while let Some(batch) = self.iter.next().transpose()? {
@@ -72,7 +72,7 @@ impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> Dedup
 }
 
 impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> Iterator
-    for DedupIterator<I, S>
+    for FlatDedupIterator<I, S>
 {
     type Item = Result<RecordBatch>;
 
@@ -826,7 +826,7 @@ mod tests {
 
         // Test with filter_deleted = true
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastRow::new(true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastRow::new(true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&input, &result);
         assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
@@ -834,7 +834,7 @@ mod tests {
 
         // Test with filter_deleted = false
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastRow::new(false));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastRow::new(false));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&input, &result);
         assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
@@ -890,7 +890,7 @@ mod tests {
         ];
 
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastRow::new(true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastRow::new(true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected_filter_deleted, &result);
         assert_eq!(5, dedup_iter.metrics.num_unselected_rows);
@@ -923,7 +923,7 @@ mod tests {
         ];
 
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastRow::new(false));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastRow::new(false));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected_no_filter, &result);
         assert_eq!(3, dedup_iter.metrics.num_unselected_rows);
@@ -952,7 +952,7 @@ mod tests {
 
         // Test with filter_deleted = true
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&input, &result);
         assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
@@ -960,7 +960,7 @@ mod tests {
 
         // Test with filter_deleted = false
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, false));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, false));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&input, &result);
         assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
@@ -1059,7 +1059,7 @@ mod tests {
         ];
 
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected_filter_deleted, &result);
         assert_eq!(6, dedup_iter.metrics.num_unselected_rows);
@@ -1105,7 +1105,7 @@ mod tests {
         ];
 
         let iter = input.clone().into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, false));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, false));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected_no_filter, &result);
         assert_eq!(4, dedup_iter.metrics.num_unselected_rows);
@@ -1156,7 +1156,7 @@ mod tests {
         ];
 
         let iter = input.into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected, &result);
         assert_eq!(2, dedup_iter.metrics.num_unselected_rows);
@@ -1214,7 +1214,7 @@ mod tests {
         ];
 
         let iter = input.into_iter().map(Ok);
-        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let mut dedup_iter = FlatDedupIterator::new(iter, FlatLastNonNull::new(1, true));
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected, &result);
         assert_eq!(1, dedup_iter.metrics.num_unselected_rows);

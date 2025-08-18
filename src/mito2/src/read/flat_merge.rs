@@ -422,7 +422,7 @@ impl Ord for RowCursor {
 /// Iterator to merge multiple sorted iterators into a single sorted iterator.
 ///
 /// All iterators must be sorted by primary key, time index, sequence desc.
-pub struct MergeIterator {
+pub struct FlatMergeIterator {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<IterNode>,
     /// Current buffered rows to output.
@@ -435,7 +435,7 @@ pub struct MergeIterator {
     batch_size: usize,
 }
 
-impl MergeIterator {
+impl FlatMergeIterator {
     /// Creates a new iterator to merge sorted `iters`.
     pub fn new(
         schema: SchemaRef,
@@ -711,9 +711,9 @@ mod tests {
         }
     }
 
-    /// Helper function to collect all batches from a MergeIterator.
+    /// Helper function to collect all batches from a FlatMergeIterator.
     fn collect_merge_iterator_batches(
-        mut iter: MergeIterator,
+        mut iter: FlatMergeIterator,
     ) -> crate::error::Result<Vec<RecordBatch>> {
         let mut batches = Vec::new();
         while let Some(batch) = iter.next_batch()? {
@@ -740,7 +740,7 @@ mod tests {
             Field::new("__op_type", DataType::UInt8, false),
         ]));
 
-        let mut merge_iter = MergeIterator::new(schema, vec![], 1024).unwrap();
+        let mut merge_iter = FlatMergeIterator::new(schema, vec![], 1024).unwrap();
         assert!(merge_iter.next_batch().unwrap().is_none());
     }
 
@@ -757,7 +757,7 @@ mod tests {
         let schema = batch.schema();
         let iter = Box::new(new_test_iter(vec![batch.clone()]));
 
-        let merge_iter = MergeIterator::new(schema, vec![iter], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter], 1024).unwrap();
         let result = collect_merge_iterator_batches(merge_iter).unwrap();
 
         assert_eq!(result.len(), 1);
@@ -792,7 +792,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1.clone(), batch3.clone()]));
         let iter2 = Box::new(new_test_iter(vec![batch2.clone()]));
 
-        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
         let result = collect_merge_iterator_batches(merge_iter).unwrap();
 
         // Results should be sorted by primary key, timestamp, sequence desc
@@ -822,7 +822,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1]));
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
-        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
         let result = collect_merge_iterator_batches(merge_iter).unwrap();
 
         let expected = vec![
@@ -861,7 +861,7 @@ mod tests {
         let iter1 = Box::new(new_test_iter(vec![batch1]));
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
-        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
         let result = collect_merge_iterator_batches(merge_iter).unwrap();
 
         // Should be sorted by sequence descending for same key/timestamp
