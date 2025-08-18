@@ -16,13 +16,14 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use datatypes::arrow::array::{Int64Array, UInt64Array};
 use datatypes::arrow::compute::interleave;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::timestamp::timestamp_array_to_primitive;
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
@@ -617,6 +618,15 @@ impl MergeReader {
         }
     }
 
+    /// Converts the reader into a stream.
+    pub fn into_stream(mut self) -> impl Stream<Item = Result<RecordBatch>> {
+        try_stream! {
+            while let Some(batch) = self.next_batch().await? {
+                yield batch;
+            }
+        }
+    }
+
     /// Fetches a batch from the hottest node.
     async fn fetch_batch_from_hottest(&mut self) -> Result<()> {
         debug_assert!(self.in_progress.is_empty());
@@ -881,14 +891,8 @@ mod tests {
     }
 
     /// Helper function to collect all batches from a FlatMergeIterator.
-    fn collect_merge_iterator_batches(
-        mut iter: FlatMergeIterator,
-    ) -> crate::error::Result<Vec<RecordBatch>> {
-        let mut batches = Vec::new();
-        while let Some(batch) = iter.next_batch()? {
-            batches.push(batch);
-        }
-        Ok(batches)
+    fn collect_merge_iterator_batches(iter: FlatMergeIterator) -> Vec<RecordBatch> {
+        iter.map(|result| result.unwrap()).collect()
     }
 
     #[test]
@@ -927,7 +931,7 @@ mod tests {
         let iter = Box::new(new_test_iter(vec![batch.clone()]));
 
         let merge_iter = FlatMergeIterator::new(schema, vec![iter], 1024).unwrap();
-        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
 
         assert_eq!(result.len(), 1);
         assert_record_batches_eq(&[batch], &result);
@@ -962,7 +966,7 @@ mod tests {
         let iter2 = Box::new(new_test_iter(vec![batch2.clone()]));
 
         let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
-        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
 
         // Results should be sorted by primary key, timestamp, sequence desc
         let expected = vec![batch1, batch2, batch3];
@@ -992,7 +996,7 @@ mod tests {
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
         let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
-        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
 
         let expected = vec![
             create_test_record_batch(
@@ -1031,7 +1035,7 @@ mod tests {
         let iter2 = Box::new(new_test_iter(vec![batch2]));
 
         let merge_iter = FlatMergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
-        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter);
 
         // Should be sorted by sequence descending for same key/timestamp
         let expected = vec![
