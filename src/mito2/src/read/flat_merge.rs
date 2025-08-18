@@ -771,6 +771,7 @@ impl GenericNode<BoxedRecordBatchIterator> {
 }
 
 type StreamNode = GenericNode<BoxedRecordBatchStream>;
+type IterNode = GenericNode<BoxedRecordBatchIterator>;
 
 impl GenericNode<BoxedRecordBatchStream> {
     /// Fetches a new batch from the iter and updates the cursor.
@@ -805,109 +806,6 @@ impl GenericNode<BoxedRecordBatchStream> {
             }
         }
         Ok(None)
-    }
-}
-
-/// A sync node in the merge iterator.
-struct IterNode {
-    /// Index of the node.
-    node_index: usize,
-    /// Iterator of this `Node`.
-    iter: BoxedRecordBatchIterator,
-    /// Current batch to be read. The node should ensure the batch is not empty (The
-    /// cursor is not finished).
-    ///
-    /// `None` means the `iter` has reached EOF.
-    cursor: Option<RowCursor>,
-}
-
-impl IterNode {
-    /// Returns current cursor.
-    ///
-    /// # Panics
-    /// Panics if the node has reached EOF.
-    fn current_cursor(&self) -> &RowCursor {
-        self.cursor.as_ref().unwrap()
-    }
-
-    /// Fetches a new batch from the iter and updates the cursor.
-    /// It advances the current batch.
-    /// Returns the fetched new batch.
-    fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
-        let batch = self.advance_inner_iter()?;
-        let columns = batch.as_ref().map(SortColumns::new);
-        self.cursor = columns.map(RowCursor::new);
-
-        Ok(batch)
-    }
-
-    /// Skips one row.
-    /// Returns the next batch if the current batch is finished.
-    fn advance_row(&mut self) -> Result<Option<RecordBatch>> {
-        let cursor = self.cursor.as_mut().unwrap();
-        cursor.advance();
-        if !cursor.is_finished() {
-            return Ok(None);
-        }
-
-        // Finished current batch, need to fetch a new batch.
-        self.advance_batch()
-    }
-
-    /// Fetches a non-empty batch from the iter.
-    fn advance_inner_iter(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(batch) = self.iter.next().transpose()? {
-            if batch.num_rows() > 0 {
-                return Ok(Some(batch));
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl NodeCmp for IterNode {
-    fn is_eof(&self) -> bool {
-        self.cursor.is_none()
-    }
-
-    fn is_behind(&self, other: &Self) -> bool {
-        debug_assert!(!self.current_cursor().is_finished());
-        debug_assert!(!other.current_cursor().is_finished());
-
-        // We only compare pk and timestamp so nodes in the cold
-        // heap don't have overlapping timestamps with the hottest node
-        // in the hot heap.
-        self.current_cursor()
-            .first_primary_key()
-            .cmp(other.current_cursor().last_primary_key())
-            .then_with(|| {
-                self.current_cursor()
-                    .first_timestamp()
-                    .cmp(&other.current_cursor().last_timestamp())
-            })
-            == Ordering::Greater
-    }
-}
-
-impl PartialEq for IterNode {
-    fn eq(&self, other: &IterNode) -> bool {
-        self.cursor == other.cursor
-    }
-}
-
-impl Eq for IterNode {}
-
-impl PartialOrd for IterNode {
-    fn partial_cmp(&self, other: &IterNode) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for IterNode {
-    fn cmp(&self, other: &IterNode) -> Ordering {
-        // The std binary heap is a max heap, but we want the nodes are ordered in
-        // ascend order, so we compare the nodes in reverse order.
-        other.cursor.cmp(&self.cursor)
     }
 }
 
