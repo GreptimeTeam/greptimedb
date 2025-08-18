@@ -39,6 +39,7 @@ impl ConstraintPruner {
         partitions: &[PartitionInfo],
         column_datatypes: HashMap<String, ConcreteDataType>,
     ) -> Result<Vec<RegionId>> {
+        let start = std::time::Instant::now();
         if query_expressions.is_empty() || partitions.is_empty() {
             // No constraints, return all regions
             return Ok(partitions.iter().map(|p| p.id).collect());
@@ -99,7 +100,8 @@ impl ConstraintPruner {
         }
 
         debug!(
-            "Constraint pruning: {} -> {} regions",
+            "Constraint pruning (cost {}ms): {} -> {} regions",
+            start.elapsed().as_millis(),
             partitions.len(),
             candidate_regions.len()
         );
