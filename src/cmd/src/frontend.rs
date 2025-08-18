@@ -293,7 +293,7 @@ impl StartCommand {
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_frontend_plugins(&mut plugins, plugin_opts.as_ref(), &opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -526,7 +526,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, None, &fe_opts)
             .await
             .unwrap();
 
