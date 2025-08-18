@@ -25,7 +25,7 @@ opentelemetry = { version = "0.30.0", default-features = false, features = [
     "trace",
 ] }
 opentelemetry-otlp = { version = "0.30.0", features = ["trace", "grpc-tonic", "http-proto"] }
-opentelemetry-semantic-conventions = { version = "0.30.0", features = ["semconv_experimental"]}
+opentelemetry-semantic-conventions = { version = "0.30.0", features = ["semconv_experimental"] }
 opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio", "trace"] }
 parking_lot.workspace = true
 prometheus.workspace = true
