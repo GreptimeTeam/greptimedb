@@ -5319,7 +5319,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4ce7e9a3ff627147458bd382fbb40f0601f31013#4ce7e9a3ff627147458bd382fbb40f0601f31013"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=df2bb74b5990c159dfd5b7a344eecf8f4307af64#df2bb74b5990c159dfd5b7a344eecf8f4307af64"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -5327,8 +5327,8 @@ dependencies = [
  "serde_json",
  "strum 0.25.0",
  "strum_macros 0.25.3",
- "tonic 0.12.3",
- "tonic-build 0.12.3",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
 ]
 
 [[package]]
