@@ -655,7 +655,7 @@ where
             version_control,
             provider.clone(),
             // For WAL replay, we don't need to track the write bytes rate.
-            Default::default(),
+            None,
         );
         for mutation in entry.mutations {
             rows_replayed += mutation

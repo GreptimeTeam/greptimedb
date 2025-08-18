@@ -36,7 +36,7 @@ use std::time::Duration;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_runtime::JoinHandle;
+use common_runtime::{JoinHandle, RepeatedTask, TaskFunction};
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
@@ -55,8 +55,9 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error;
-use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{
+    self, CreateDirSnafu, Error, JoinSnafu, Result, StartRepeatedTaskSnafu, WorkerStoppedSnafu,
+};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -210,7 +211,7 @@ impl WorkerGroup {
                 }
                 .start()
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(WorkerGroup {
             workers,
@@ -350,7 +351,7 @@ impl WorkerGroup {
                 }
                 .start()
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(WorkerGroup {
             workers,
@@ -429,7 +430,7 @@ struct WorkerStarter<S> {
 
 impl<S: LogStore> WorkerStarter<S> {
     /// Starts a region worker and its background thread.
-    fn start(self) -> RegionWorker {
+    fn start(self) -> Result<RegionWorker> {
         let regions = Arc::new(RegionMap::default());
         let opening_regions = Arc::new(OpeningRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
@@ -482,23 +483,28 @@ impl<S: LogStore> WorkerStarter<S> {
             worker_thread.run().await;
         });
 
-        let mut rate_updater = RateUpdater {
-            regions: regions.clone(),
-            running: running.clone(),
-            interval: RATE_UPDATE_INTERVAL,
-        };
-        common_runtime::spawn_global(async move {
-            rate_updater.run().await;
-        });
+        let rate_update_task = RepeatedTask::new(
+            RATE_UPDATE_INTERVAL,
+            Box::new(RateUpdater {
+                regions: regions.clone(),
+                interval: RATE_UPDATE_INTERVAL,
+            }),
+        );
+        rate_update_task
+            .start(common_runtime::global_runtime())
+            .context(StartRepeatedTaskSnafu {
+                name: RateUpdater::NAME,
+            })?;
 
-        RegionWorker {
+        Ok(RegionWorker {
             id: self.id,
             regions,
             opening_regions,
             sender,
             handle: Mutex::new(Some(handle)),
+            rate_update_task,
             running,
-        }
+        })
     }
 }
 
@@ -514,6 +520,8 @@ pub(crate) struct RegionWorker {
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
+    /// rate update task.
+    rate_update_task: RepeatedTask<Error>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,
 }
@@ -555,6 +563,9 @@ impl RegionWorker {
             }
 
             handle.await.context(JoinSnafu)?;
+        }
+        if let Err(err) = self.rate_update_task.stop().await {
+            error!(err; "Failed to stop rate update task");
         }
 
         Ok(())
@@ -675,24 +686,26 @@ impl StalledRequests {
     }
 }
 
-/// [`RateUpdater`] manages background tasks to periodically update [`RateMeter`](crate::meter::rate_meter::RateMeter) components of all regions.
 struct RateUpdater {
     regions: RegionMapRef,
-    running: Arc<AtomicBool>,
     interval: Duration,
 }
 
 impl RateUpdater {
-    /// Starts the rate updater.
-    async fn run(&mut self) {
-        info!("Rate updater started, interval: {:?}", self.interval);
-        while self.running.load(Ordering::Relaxed) {
-            tokio::time::sleep(self.interval).await;
-            self.regions.for_each_region(|region| {
-                region.write_bytes_per_sec.update_rate(self.interval);
-            });
-        }
-        info!("Rate updater stopped, interval: {:?}", self.interval);
+    const NAME: &str = "RateUpdater";
+}
+
+#[async_trait::async_trait]
+impl TaskFunction<Error> for RateUpdater {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    async fn call(&mut self) -> Result<()> {
+        self.regions.for_each_region(|region| {
+            region.write_bytes_per_sec.update_rate(self.interval);
+        });
+        Ok(())
     }
 }
 
