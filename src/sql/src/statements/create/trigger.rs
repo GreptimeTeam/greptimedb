@@ -1,8 +1,10 @@
 use std::fmt::{Display, Formatter};
+use std::ops::ControlFlow;
+use std::time::Duration;
 
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::Query;
+use sqlparser::ast::{Query, Visit, VisitMut, Visitor, VisitorMut};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
@@ -13,10 +15,7 @@ use crate::statements::OptionMap;
 pub struct CreateTrigger {
     pub trigger_name: ObjectName,
     pub if_not_exists: bool,
-    /// SQL statement executed periodically.
-    pub query: Box<Query>,
-    /// The interval of exec query. Unit is second.
-    pub interval: u64,
+    pub trigger_on: TriggerOn,
     pub labels: OptionMap,
     pub annotations: OptionMap,
     pub channels: Vec<NotifyChannel>,
@@ -29,8 +28,7 @@ impl Display for CreateTrigger {
             write!(f, "IF NOT EXISTS ")?;
         }
         writeln!(f, "{}", self.trigger_name)?;
-        write!(f, "ON {} ", self.query)?;
-        writeln!(f, "EVERY {} SECONDS", self.interval)?;
+        writeln!(f, "{}", self.trigger_on)?;
 
         if !self.labels.is_empty() {
             let labels = self.labels.kv_pairs();
@@ -73,6 +71,33 @@ impl Display for NotifyChannel {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Serialize)]
+pub struct TriggerOn {
+    pub query: Box<Query>,
+    pub interval: Duration,
+    pub raw_interval_expr: String,
+}
+
+impl Display for TriggerOn {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ON {} EVERY {}", self.query, self.raw_interval_expr)
+    }
+}
+
+impl Visit for TriggerOn {
+    fn visit<V: Visitor>(&self, visitor: &mut V) -> ControlFlow<V::Break> {
+        Visit::visit(&self.query, visitor)?;
+        ControlFlow::Continue(())
+    }
+}
+
+impl VisitMut for TriggerOn {
+    fn visit<V: VisitorMut>(&mut self, visitor: &mut V) -> ControlFlow<V::Break> {
+        VisitMut::visit(&mut self.query, visitor)?;
+        ControlFlow::Continue(())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub enum ChannelType {
     /// Alert manager webhook options.
@@ -94,7 +119,7 @@ mod tests {
     #[test]
     fn test_display_create_trigger() {
         let sql = r#"CREATE TRIGGER IF NOT EXISTS cpu_monitor
-ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '5 minute'::INTERVAL
+ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
 LABELS (label_name=label_val)
 ANNOTATIONS (annotation_name=annotation_val)
 NOTIFY
@@ -110,7 +135,7 @@ NOTIFY
         };
         let formatted = format!("{}", trigger);
         let expected = r#"CREATE TRIGGER IF NOT EXISTS cpu_monitor
-ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY 300 SECONDS
+ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
 LABELS (label_name = 'label_val')
 ANNOTATIONS (annotation_name = 'annotation_val')
 NOTIFY(

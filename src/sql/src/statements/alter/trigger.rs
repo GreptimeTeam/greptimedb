@@ -1,10 +1,10 @@
 use std::fmt::{Display, Formatter};
 
 use serde::Serialize;
-use sqlparser::ast::{ObjectName, Query};
+use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::create::trigger::NotifyChannel;
+use crate::statements::create::trigger::{NotifyChannel, TriggerOn};
 use crate::statements::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -16,9 +16,7 @@ pub struct AlterTrigger {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTriggerOperation {
     pub rename: Option<String>,
-    pub new_query: Option<Box<Query>>,
-    /// The new interval of exec query. Unit is second.
-    pub new_interval: Option<u64>,
+    pub trigger_on: Option<TriggerOn>,
     pub label_operations: Option<LabelOperations>,
     pub annotation_operations: Option<AnnotationOperations>,
     pub notify_channel_operations: Option<NotifyChannelOperations>,
@@ -35,12 +33,9 @@ impl Display for AlterTrigger {
             write!(f, "RENAME TO {}", new_name)?;
         }
 
-        if let Some((new_query, new_interval)) =
-            operation.new_query.as_ref().zip(operation.new_interval)
-        {
+        if let Some(trigger_on) = &operation.trigger_on {
             writeln!(f)?;
-            write!(f, "ON {}", new_query)?;
-            write!(f, " EVERY {} SECONDS", new_interval)?;
+            write!(f, "{}", trigger_on)?;
         }
 
         if let Some(label_ops) = &operation.label_operations {
@@ -319,7 +314,7 @@ ADD NOTIFY
         let formatted = format!("{}", trigger);
         let expected = r#"ALTER TRIGGER my_trigger
 RENAME TO new_trigger
-ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY 300 SECONDS
+ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '5 minute'::INTERVAL
 ADD LABELS (k1 = 'v1', k2 = 'v2')
 DROP LABELS (k3, k4)
 SET ANNOTATIONS (a1 = 'v1', a2 = 'v2')

@@ -315,15 +315,6 @@ pub enum Error {
     },
 
     #[cfg(feature = "enterprise")]
-    #[snafu(display("The execution interval cannot be negative"))]
-    NegativeInterval {
-        #[snafu(source)]
-        error: std::num::TryFromIntError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "enterprise")]
     #[snafu(display("Must specify at least one notify channel"))]
     MissingNotifyChannel {
         #[snafu(implicit)]
@@ -387,9 +378,7 @@ impl ErrorExt for Error {
             InvalidTriggerName { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
-            InvalidTriggerWebhookOption { .. } | NegativeInterval { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
