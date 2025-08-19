@@ -54,6 +54,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use api::v1::Rows;
+    use futures_util::TryStreamExt;
     use itertools::Itertools as _;
     use store_api::region_request::RegionPutRequest;
 
@@ -107,10 +108,10 @@ mod tests {
         }
 
         // list from manifest
-        let mut manifest_entries = env.mito().all_ssts_from_manifest();
-        let debug_format = manifest_entries
-            .iter_mut()
-            .map(|e| {
+        let mito = env.mito();
+        let debug_format = mito
+            .all_ssts_from_manifest()
+            .map(|mut e| {
                 e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
                 e.file_id = "<file_id>".to_string();
                 format!("\n{:?}", e)
@@ -130,10 +131,14 @@ ManifestSstEntry { table_dir: "test_metric_region/", region_id: 94506057770(22, 
         );
 
         // list from storage
-        let mut storage_entries = env.mito().all_ssts_from_storage().await.unwrap();
+        let storage_entries = mito
+            .all_ssts_from_storage()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
         let debug_format = storage_entries
-            .iter_mut()
-            .map(|e| {
+            .into_iter()
+            .map(|mut e| {
                 let i = e.file_path.rfind('/').unwrap();
                 e.file_path.replace_range(i.., "/<file_id>.parquet");
                 format!("\n{:?}", e)

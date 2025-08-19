@@ -277,11 +277,10 @@ impl WorkerGroup {
         &self.workers[index]
     }
 
-    pub(crate) fn all_regions(&self) -> Vec<MitoRegionRef> {
+    pub(crate) fn all_regions(&self) -> impl Iterator<Item = MitoRegionRef> + use<'_> {
         self.workers
             .iter()
             .flat_map(|worker| worker.regions.list_regions())
-            .collect()
     }
 }
 

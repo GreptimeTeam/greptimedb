@@ -15,8 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_stream::try_stream;
 use common_time::Timestamp;
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
@@ -305,47 +306,43 @@ impl AccessLayer {
     }
 
     /// Lists the SST entries from the storage layer in the table directory.
-    pub async fn storage_sst_entries(&self) -> Result<Vec<StorageSstEntry>> {
-        let mut lister = self
-            .object_store
-            .lister_with(self.table_dir.as_str())
-            .recursive(true)
-            .await
-            .context(OpenDalSnafu)?;
+    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
+        let object_store = self.object_store.clone();
+        let table_dir = self.table_dir.clone();
 
-        let mut entries = Vec::new();
-        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
-            let metadata = entry.metadata();
-            if metadata.is_dir() {
-                continue;
+        try_stream! {
+            let mut lister = object_store
+                .lister_with(table_dir.as_str())
+                .recursive(true)
+                .await
+                .context(OpenDalSnafu)?;
+
+            while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+                let metadata = entry.metadata();
+                if metadata.is_dir() {
+                    continue;
+                }
+
+                let path = entry.path();
+                if !path.ends_with(".parquet") {
+                    continue;
+                }
+
+                let file_size = metadata.content_length();
+                let file_size = if file_size == 0 { None } else { Some(file_size) };
+                let last_modified_ms = metadata
+                    .last_modified()
+                    .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
+
+                let entry = StorageSstEntry {
+                    file_path: path.to_string(),
+                    file_size,
+                    last_modified_ms,
+                };
+
+                yield entry;
             }
-
-            let file_path = entry.path();
-            if !file_path.ends_with(".parquet") {
-                continue;
-            }
-
-            let file_size = metadata.content_length();
-            let file_size = if file_size == 0 {
-                None
-            } else {
-                Some(file_size)
-            };
-
-            let last_modified_ms = metadata
-                .last_modified()
-                .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
-
-            let entry = StorageSstEntry {
-                file_path: file_path.to_string(),
-                file_size,
-                last_modified_ms,
-            };
-
-            entries.push(entry);
         }
-
-        Ok(entries)
     }
 }
 

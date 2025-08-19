@@ -77,6 +77,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{info, tracing};
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use futures::future::{join_all, try_join_all};
+use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
@@ -385,30 +386,29 @@ impl MitoEngine {
     }
 
     /// Lists all SSTs from the manifest of all regions in the engine.
-    pub fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
+    pub fn all_ssts_from_manifest(&self) -> impl Iterator<Item = ManifestSstEntry> + use<'_> {
         self.inner
             .workers
             .all_regions()
-            .iter()
             .flat_map(|region| region.manifest_sst_entries())
-            .collect()
     }
 
     /// Lists all SSTs from the storage layer of all regions in the engine.
-    pub async fn all_ssts_from_storage(&self) -> Result<Vec<StorageSstEntry>> {
+    pub fn all_ssts_from_storage(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
         let regions = self.inner.workers.all_regions();
-        let access_layers_distinct_table_dirs = regions
-            .iter()
-            .map(|region| (region.access_layer.table_dir(), &region.access_layer))
-            .collect::<HashMap<_, _>>();
 
-        let mut entries = Vec::new();
-        for (_, access_layer) in access_layers_distinct_table_dirs {
-            let ssts = access_layer.storage_sst_entries().await?;
-            entries.extend(ssts);
+        let mut layers_distinct_table_dirs = HashMap::new();
+        for region in regions {
+            let table_dir = region.access_layer.table_dir();
+            if !layers_distinct_table_dirs.contains_key(table_dir) {
+                layers_distinct_table_dirs
+                    .insert(table_dir.to_string(), region.access_layer.clone());
+            }
         }
 
-        Ok(entries)
+        stream::iter(layers_distinct_table_dirs)
+            .map(|(_, access_layer)| access_layer.storage_sst_entries())
+            .flatten()
     }
 }
 

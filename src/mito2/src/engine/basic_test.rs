@@ -27,6 +27,7 @@ use common_recordbatch::RecordBatches;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use futures::TryStreamExt;
 use itertools::Itertools;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
@@ -768,10 +769,9 @@ async fn test_list_ssts() {
     }
 
     // list from manifest
-    let mut manifest_entries = engine.all_ssts_from_manifest();
-    let debug_format = manifest_entries
-        .iter_mut()
-        .map(|e| {
+    let debug_format = engine
+        .all_ssts_from_manifest()
+        .map(|mut e| {
             e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
             e.file_id = "<file_id>".to_string();
             format!("\n{:?}", e)
@@ -788,10 +788,14 @@ ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id:
     );
 
     // list from storage
-    let mut storage_entries = engine.all_ssts_from_storage().await.unwrap();
+    let storage_entries = engine
+        .all_ssts_from_storage()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
     let debug_format = storage_entries
-        .iter_mut()
-        .map(|e| {
+        .into_iter()
+        .map(|mut e| {
             let i = e.file_path.rfind('/').unwrap();
             e.file_path.replace_range(i.., "/<file_id>.parquet");
             format!("\n{:?}", e)
