@@ -112,10 +112,7 @@ mod test {
         let factory: ScalarFunctionFactory = FlushFlowFunction::factory().into();
         let f = factory.provide(FunctionContext::mock());
         assert_eq!("flush_flow", f.name());
-        assert_eq!(
-            arrow::datatypes::DataType::UInt64,
-            f.return_type(&[]).unwrap()
-        );
+        assert_eq!(ArrowDataType::UInt64, f.return_type(&[]).unwrap());
         let expected_signature = datafusion_expr::Signature::uniform(
             1,
             vec![ArrowDataType::Utf8],
@@ -138,12 +135,12 @@ mod test {
             args: columnar_args,
             arg_fields: vec![Arc::new(arrow::datatypes::Field::new(
                 "arg_0",
-                arrow::datatypes::DataType::Utf8,
+                ArrowDataType::Utf8,
                 false,
             ))],
             return_field: Arc::new(arrow::datatypes::Field::new(
                 "result",
-                arrow::datatypes::DataType::UInt64,
+                ArrowDataType::UInt64,
                 true,
             )),
             number_rows: 1,

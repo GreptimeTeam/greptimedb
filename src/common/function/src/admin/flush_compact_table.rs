@@ -224,7 +224,7 @@ mod tests {
                                      datafusion_expr::Signature {
                                          type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
                                          volatility: datafusion_expr::Volatility::Immutable
-                                     } if valid_types == &vec![{ use datatypes::data_type::DataType; ConcreteDataType::string_datatype().as_arrow_type() }]));
+                                     } if valid_types == &vec![ArrowDataType::Utf8]));
                 }
 
                 #[tokio::test]

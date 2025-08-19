@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::ProcedureStatus;
+use arrow::datatypes::DataType as ArrowDataType;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::ProcedureStateResponse;
 use common_query::error::{
@@ -20,7 +21,6 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use serde::Serialize;
 use session::context::QueryContextRef;
@@ -82,11 +82,7 @@ pub(crate) async fn procedure_state(
 }
 
 fn signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype().as_arrow_type()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 #[cfg(test)]
@@ -111,8 +107,7 @@ mod tests {
                          datafusion_expr::Signature {
                              type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
                              volatility: datafusion_expr::Volatility::Immutable
-                         } if valid_types == &vec![{ use datatypes::data_type::DataType; ConcreteDataType::string_datatype().as_arrow_type() }]
-        ));
+                         } if valid_types == &vec![ArrowDataType::Utf8]));
     }
 
     #[tokio::test]
