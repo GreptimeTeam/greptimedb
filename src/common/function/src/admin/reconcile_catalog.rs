@@ -14,6 +14,7 @@
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{ReconcileCatalog, ReconcileRequest};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_macro::admin_fn;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
@@ -107,12 +108,12 @@ fn signature() -> Signature {
         // reconcile_catalog()
         TypeSignature::Nullary,
         // reconcile_catalog(resolve_strategy)
-        TypeSignature::Exact(vec![ConcreteDataType::string_datatype().as_arrow_type()]),
+        TypeSignature::Exact(vec![ArrowDataType::Utf8]),
     ]);
     for sign in nums {
         // reconcile_catalog(resolve_strategy, parallelism)
         signs.push(TypeSignature::Exact(vec![
-            ConcreteDataType::string_datatype().as_arrow_type(),
+            ArrowDataType::Utf8,
             sign.as_arrow_type(),
         ]));
     }

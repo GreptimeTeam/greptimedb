@@ -14,6 +14,7 @@
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{ReconcileRequest, ReconcileTable, ResolveStrategy};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
@@ -93,12 +94,9 @@ fn signature() -> Signature {
     Signature::one_of(
         vec![
             // reconcile_table(table_name)
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype().as_arrow_type()]),
+            TypeSignature::Exact(vec![ArrowDataType::Utf8]),
             // reconcile_table(table_name, resolve_strategy)
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype().as_arrow_type(),
-                ConcreteDataType::string_datatype().as_arrow_type(),
-            ]),
+            TypeSignature::Exact(vec![ArrowDataType::Utf8, ArrowDataType::Utf8]),
         ],
         Volatility::Immutable,
     )

@@ -14,6 +14,7 @@
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{ReconcileDatabase, ReconcileRequest};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_macro::admin_fn;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
@@ -114,18 +115,15 @@ fn signature() -> Signature {
     let mut signs = Vec::with_capacity(2 + nums.len());
     signs.extend([
         // reconcile_database(datanode_name)
-        TypeSignature::Exact(vec![ConcreteDataType::string_datatype().as_arrow_type()]),
+        TypeSignature::Exact(vec![ArrowDataType::Utf8]),
         // reconcile_database(database_name, resolve_strategy)
-        TypeSignature::Exact(vec![
-            ConcreteDataType::string_datatype().as_arrow_type(),
-            ConcreteDataType::string_datatype().as_arrow_type(),
-        ]),
+        TypeSignature::Exact(vec![ArrowDataType::Utf8, ArrowDataType::Utf8]),
     ]);
     for sign in nums {
         // reconcile_database(database_name, resolve_strategy, parallelism)
         signs.push(TypeSignature::Exact(vec![
-            ConcreteDataType::string_datatype().as_arrow_type(),
-            ConcreteDataType::string_datatype().as_arrow_type(),
+            ArrowDataType::Utf8,
+            ArrowDataType::Utf8,
             sign.as_arrow_type(),
         ]));
     }

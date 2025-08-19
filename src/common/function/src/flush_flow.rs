@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
@@ -19,22 +20,16 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::DataType;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::ObjectNamePartExt;
 use sql::parser::ParserContext;
-use store_api::storage::ConcreteDataType;
 
 use crate::handlers::FlowServiceHandlerRef;
 
 fn flush_signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype().as_arrow_type()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 #[admin_fn(
@@ -123,7 +118,7 @@ mod test {
         );
         let expected_signature = datafusion_expr::Signature::uniform(
             1,
-            vec![ConcreteDataType::string_datatype().as_arrow_type()],
+            vec![ArrowDataType::Utf8],
             datafusion_expr::Volatility::Immutable,
         );
         assert_eq!(*f.signature(), expected_signature);

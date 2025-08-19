@@ -15,6 +15,7 @@
 use std::str::FromStr;
 
 use api::v1::region::{compact_request, StrictWindow};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
@@ -23,7 +24,6 @@ use common_query::error::{
 };
 use common_telemetry::info;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
@@ -106,18 +106,11 @@ pub(crate) async fn compact_table(
 }
 
 fn flush_signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype().as_arrow_type()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 fn compact_signature() -> Signature {
-    Signature::variadic(
-        vec![ConcreteDataType::string_datatype().as_arrow_type()],
-        Volatility::Immutable,
-    )
+    Signature::variadic(vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 /// Parses `compact_table` UDF parameters. This function accepts following combinations:
