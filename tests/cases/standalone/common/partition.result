@@ -259,6 +259,7 @@ EXPLAIN ANALYZE SELECT * FROM valid_rule;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a < 10;
 
@@ -267,7 +268,7 @@ WHERE a < 10;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SeqScan: region=4428111282176(1031, 0), "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -278,6 +279,7 @@ WHERE a < 10;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 AND b= 'z';
 
@@ -286,7 +288,7 @@ WHERE a = 10 AND b= 'z';
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SeqScan: region=4428111282179(1031, 3), "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

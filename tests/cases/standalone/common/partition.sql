@@ -136,6 +136,7 @@ EXPLAIN ANALYZE SELECT * FROM valid_rule;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a < 10;
 
@@ -145,6 +146,7 @@ WHERE a < 10;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 AND b= 'z';
 
