@@ -371,10 +371,11 @@ impl ValueRange {
                     self.upper = new_upper;
                 } else if new == cur {
                     // prefer Excluded over Included for the same value (more restrictive)
-                    self.upper = new_upper;
                     if matches!(new_upper, Bound::Excluded(_))
                         && matches!(self.upper, Bound::Included(_))
-                    {}
+                    {
+                        self.upper = new_upper;
+                    }
                 }
             }
         }

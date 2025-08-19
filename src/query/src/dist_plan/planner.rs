@@ -245,7 +245,7 @@ impl DistExtensionPlanner {
             Ok(expressions) => expressions,
             Err(err) => {
                 common_telemetry::debug!(
-                    "Failed to extract partition expressions for table {} (id: {}), using all regions: {}",
+                    "Failed to extract partition expressions for table {} (id: {}), using all regions: {:?}",
                     table_name,
                     table.table_info().table_id(),
                     err
@@ -267,7 +267,7 @@ impl DistExtensionPlanner {
             Ok(partitions) => partitions,
             Err(err) => {
                 common_telemetry::debug!(
-                    "Failed to get partition information for table {}: {:?}, using all regions",
+                    "Failed to get partition information for table {}, using all regions: {:?}",
                     table_name,
                     err
                 );
@@ -287,7 +287,7 @@ impl DistExtensionPlanner {
             Ok(regions) => regions,
             Err(err) => {
                 common_telemetry::debug!(
-                    "Failed to prune regions for table {}: {:?}, using all regions",
+                    "Failed to prune regions for table {}, using all regions: {:?}",
                     table_name,
                     err
                 );
