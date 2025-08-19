@@ -21,7 +21,6 @@ use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
-use common_error::ext::BoxedError;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -46,7 +45,6 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-use servers::tls::TlsOption;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use snafu::OptionExt;
 use snafu::ResultExt;
