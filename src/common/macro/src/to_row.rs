@@ -78,24 +78,18 @@ pub(crate) fn derive_to_row_impl(input: DeriveInput) -> Result<TokenStream2> {
             }
         })
         .collect::<Result<Vec<ColumnAttribute>>>()?;
-
-    // Implement `to_value` methods for each field.
-    let impl_to_value_methods = fields
+    let field_types = fields
         .clone()
-        .zip(infer_column_data_types.iter())
-        .zip(column_attributes.iter())
-        .map(|(((ident, ty), column_data_type), column_attribute)| {
-            impl_to_value_method(
-                ident,
-                field_type(ty).is_optional(),
-                column_data_type,
-                column_attribute,
-            )
-        })
-        .collect::<Result<Vec<TokenStream2>>>()?;
+        .map(|(_, ty)| field_type(ty))
+        .collect::<Vec<_>>();
 
     // Implement `to_row` method.
-    let impl_to_row_method = impl_to_row_method(&idents);
+    let impl_to_row_method = impl_to_row_method_combined(
+        &idents,
+        &field_types,
+        &infer_column_data_types,
+        &column_attributes,
+    )?;
 
     // Implement `schema` method.
     let impl_schema_method =
@@ -103,8 +97,6 @@ pub(crate) fn derive_to_row_impl(input: DeriveInput) -> Result<TokenStream2> {
 
     Ok(quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
-            #( #impl_to_value_methods )*
-
             #impl_to_row_method
 
             #impl_schema_method
@@ -166,62 +158,55 @@ fn impl_schema_method(
     })
 }
 
-fn impl_to_value_method(
-    ident: &Ident,
-    is_optional: bool,
-    infer_column_data_type: &Option<ColumnDataType>,
-    column_attribute: &ColumnAttribute,
+fn impl_to_row_method_combined(
+    idents: &[&Ident],
+    field_types: &[FieldType<'_>],
+    infer_column_data_types: &[Option<ColumnDataType>],
+    column_attributes: &[ColumnAttribute],
 ) -> Result<TokenStream2> {
-    let Some(column_data_type) = get_column_data_type(infer_column_data_type, column_attribute)
-    else {
-        return Err(syn::Error::new(
-            ident.span(),
-            format!(
-                "expected to set data type explicitly via [({META_KEY_COL}({META_KEY_DATATYPE} = \"...\"))]"
-            ),
-        ));
-    };
-
-    let method_name = format_ident!("{}_to_value", ident);
-    let value_data = convert_column_data_type_to_value_data_ident(&column_data_type);
-    let body = if is_optional {
-        quote! {
-            match &self.#ident {
-                Some(v) => greptime_proto::v1::Value {
-                    value_data: Some(greptime_proto::v1::value::ValueData::#value_data(v.clone().into())),
-                },
-                None => greptime_proto::v1::Value { value_data: None },
-            }
-        }
-    } else {
-        quote! {
-            greptime_proto::v1::Value {
-                value_data: Some(greptime_proto::v1::value::ValueData::#value_data(self.#ident.clone().into())),
-            }
-        }
-    };
-    Ok(quote! {
-        fn #method_name(&self) -> greptime_proto::v1::Value {
-            #body
-        }
-    })
-}
-
-fn impl_to_row_method(idents: &[&Ident]) -> TokenStream2 {
-    let methods: Vec<syn::Ident> = idents
+    let value_exprs = idents
         .iter()
-        .map(|ident| format_ident!("{}_to_value", ident))
-        .collect();
+        .zip(field_types.iter())
+        .zip(infer_column_data_types.iter())
+        .zip(column_attributes.iter())
+        .map(|(((ident, field_type), column_data_type), column_attribute)| {
+            let Some(column_data_type) = get_column_data_type(column_data_type, column_attribute)
+            else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "expected to set data type explicitly via [({META_KEY_COL}({META_KEY_DATATYPE} = \"...\"))]"
+                    ),
+                ));
+            };
+            let value_data = convert_column_data_type_to_value_data_ident(&column_data_type);
+            let expr = if field_type.is_optional() {
+                quote! {
+                    match &self.#ident {
+                        Some(v) => greptime_proto::v1::Value {
+                            value_data: Some(greptime_proto::v1::value::ValueData::#value_data(v.clone().into())),
+                        },
+                        None => greptime_proto::v1::Value { value_data: None },
+                    }
+                }
+            } else {
+                quote! {
+                    greptime_proto::v1::Value {
+                        value_data: Some(greptime_proto::v1::value::ValueData::#value_data(self.#ident.clone().into())),
+                    }
+                }
+            };
+            Ok(expr)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    quote! {
+    Ok(quote! {
         pub fn to_row(&self) -> greptime_proto::v1::Row {
             greptime_proto::v1::Row {
-                values: vec![
-                    #( self.#methods() ),*
-                ]
+                values: vec![ #( #value_exprs ),* ]
             }
         }
-    }
+    })
 }
 
 fn get_column_data_type(
