@@ -193,40 +193,55 @@ fn pg_generate_in_placeholders(from: usize, to: usize) -> Vec<String> {
 /// Factory for building sql templates.
 struct PgSqlTemplateFactory<'a> {
     table_name: &'a str,
+    schema: Option<&'a str>,
 }
 
 impl<'a> PgSqlTemplateFactory<'a> {
     /// Creates a new [`SqlTemplateFactory`] with the given table name.
     fn new(table_name: &'a str) -> Self {
-        Self { table_name }
+        Self {
+            table_name,
+            schema: None,
+        }
+    }
+
+    /// Creates a new factory with optional schema.
+    fn with_schema(table_name: &'a str, schema: Option<&'a str>) -> Self {
+        Self { table_name, schema }
     }
 
     /// Builds the template set for the given table name.
     fn build(&self) -> PgSqlTemplateSet {
-        let table_name = self.table_name;
+        let table_ident = self.table_name;
+        let table_ref = match self.schema {
+            Some(schema) if !schema.is_empty() => format!("\"{}\".\"{}\"", schema, table_ident),
+            _ => format!("\"{}\"", table_ident),
+        };
         // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
-            table_name: table_name.to_string(),
+            table_ref: table_ref.clone(),
+            // Do not attempt to create schema implicitly to avoid extra privileges requirement.
+            create_schema_statement: None,
             create_table_statement: format!(
-                "CREATE TABLE IF NOT EXISTS \"{table_name}\"(k bytea PRIMARY KEY, v bytea)",
+                "CREATE TABLE IF NOT EXISTS {table_ref}(k bytea PRIMARY KEY, v bytea)",
             ),
             range_template: RangeTemplate {
-                point: format!("SELECT k, v FROM \"{table_name}\" WHERE k = $1"),
+                point: format!("SELECT k, v FROM {table_ref} WHERE k = $1"),
                 range: format!(
-                    "SELECT k, v FROM \"{table_name}\" WHERE k >= $1 AND k < $2 ORDER BY k"
+                    "SELECT k, v FROM {table_ref} WHERE k >= $1 AND k < $2 ORDER BY k"
                 ),
-                full: format!("SELECT k, v FROM \"{table_name}\" ORDER BY k"),
-                left_bounded: format!("SELECT k, v FROM \"{table_name}\" WHERE k >= $1 ORDER BY k"),
-                prefix: format!("SELECT k, v FROM \"{table_name}\" WHERE k LIKE $1 ORDER BY k"),
+                full: format!("SELECT k, v FROM {table_ref} ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM {table_ref} WHERE k >= $1 ORDER BY k"),
+                prefix: format!("SELECT k, v FROM {table_ref} WHERE k LIKE $1 ORDER BY k"),
             },
             delete_template: RangeTemplate {
-                point: format!("DELETE FROM \"{table_name}\" WHERE k = $1 RETURNING k,v;"),
+                point: format!("DELETE FROM {table_ref} WHERE k = $1 RETURNING k,v;"),
                 range: format!(
-                    "DELETE FROM \"{table_name}\" WHERE k >= $1 AND k < $2 RETURNING k,v;"
+                    "DELETE FROM {table_ref} WHERE k >= $1 AND k < $2 RETURNING k,v;"
                 ),
-                full: format!("DELETE FROM \"{table_name}\" RETURNING k,v"),
-                left_bounded: format!("DELETE FROM \"{table_name}\" WHERE k >= $1 RETURNING k,v;"),
-                prefix: format!("DELETE FROM \"{table_name}\" WHERE k LIKE $1 RETURNING k,v;"),
+                full: format!("DELETE FROM {table_ref} RETURNING k,v"),
+                left_bounded: format!("DELETE FROM {table_ref} WHERE k >= $1 RETURNING k,v;"),
+                prefix: format!("DELETE FROM {table_ref} WHERE k LIKE $1 RETURNING k,v;"),
             },
         }
     }
@@ -235,7 +250,8 @@ impl<'a> PgSqlTemplateFactory<'a> {
 /// Templates for the given table name.
 #[derive(Debug, Clone)]
 pub struct PgSqlTemplateSet {
-    table_name: String,
+    table_ref: String,
+    pub(crate) create_schema_statement: Option<String>,
     create_table_statement: String,
     range_template: RangeTemplate,
     delete_template: RangeTemplate,
@@ -244,27 +260,24 @@ pub struct PgSqlTemplateSet {
 impl PgSqlTemplateSet {
     /// Generates the sql for batch get.
     fn generate_batch_get_query(&self, key_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
         format!(
-            "SELECT k, v FROM \"{table_name}\" WHERE k in ({});",
-            in_clause
+            "SELECT k, v FROM {} WHERE k in ({});",
+            self.table_ref, in_clause
         )
     }
 
     /// Generates the sql for batch delete.
     fn generate_batch_delete_query(&self, key_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
         format!(
-            "DELETE FROM \"{table_name}\" WHERE k in ({}) RETURNING k,v;",
-            in_clause
+            "DELETE FROM {} WHERE k in ({}) RETURNING k,v;",
+            self.table_ref, in_clause
         )
     }
 
     /// Generates the sql for batch upsert.
     fn generate_batch_upsert_query(&self, kv_len: usize) -> String {
-        let table_name = &self.table_name;
         let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
         let in_clause = in_placeholders.join(", ");
         let mut param_index = kv_len + 1;
@@ -278,9 +291,9 @@ impl PgSqlTemplateSet {
         format!(
             r#"
     WITH prev AS (
-        SELECT k,v FROM "{table_name}" WHERE k IN ({in_clause})
+        SELECT k,v FROM {table} WHERE k IN ({in_clause})
     ), update AS (
-    INSERT INTO "{table_name}" (k, v) VALUES
+    INSERT INTO {table} (k, v) VALUES
         {values_clause}
     ON CONFLICT (
         k
@@ -289,7 +302,10 @@ impl PgSqlTemplateSet {
     )
 
     SELECT k, v FROM prev;
-    "#
+    "#,
+            table = self.table_ref,
+            in_clause = in_clause,
+            values_clause = values_clause
         )
     }
 }
@@ -835,7 +851,7 @@ impl PgStore {
                 .context(CreatePostgresPoolSnafu)?,
         };
 
-        Self::with_pg_pool(pool, table_name, max_txn_ops).await
+        Self::with_pg_pool_with_schema(pool, None, table_name, max_txn_ops).await
     }
 
     /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
@@ -843,15 +859,14 @@ impl PgStore {
         Self::with_url_and_tls(url, table_name, max_txn_ops, None).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool].
-    pub async fn with_pg_pool(
+    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool] with optional schema.
+    pub async fn with_pg_pool_with_schema(
         pool: Pool,
+        schema: Option<&str>,
         table_name: &str,
         max_txn_ops: usize,
     ) -> Result<KvBackendRef> {
-        // This step ensures the postgres metadata backend is ready to use.
-        // We check if greptime_metakv table exists, and we will create a new table
-        // if it does not exist.
+        // Ensure the postgres metadata backend is ready to use.
         let client = match pool.get().await {
             Ok(client) => client,
             Err(e) => {
@@ -861,8 +876,9 @@ impl PgStore {
                 .fail();
             }
         };
-        let template_factory = PgSqlTemplateFactory::new(table_name);
+        let template_factory = PgSqlTemplateFactory::with_schema(table_name, schema);
         let sql_template_set = template_factory.build();
+        // Do not attempt to create schema implicitly.
         client
             .execute(&sql_template_set.create_table_statement, &[])
             .await
@@ -876,6 +892,11 @@ impl PgStore {
             executor_factory: PgExecutorFactory { pool },
             _phantom: PhantomData,
         }))
+    }
+
+    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool].
+    pub async fn with_pg_pool(pool: Pool, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+        Self::with_pg_pool_with_schema(pool, None, table_name, max_txn_ops).await
     }
 }
 
@@ -905,8 +926,9 @@ mod tests {
             .context(CreatePostgresPoolSnafu)
             .unwrap();
         let client = pool.get().await.unwrap();
-        let template_factory = PgSqlTemplateFactory::new(table_name);
+        let template_factory = PgSqlTemplateFactory::with_schema(table_name, None);
         let sql_templates = template_factory.build();
+        // Do not attempt to create schema implicitly.
         client
             .execute(&sql_templates.create_table_statement, &[])
             .await
@@ -1023,5 +1045,20 @@ mod tests {
         test_txn_compare_greater(&kv_backend).await;
         test_txn_compare_less(&kv_backend).await;
         test_txn_compare_not_equal(&kv_backend).await;
+    }
+
+    #[test]
+    fn test_pg_template_with_schema() {
+        let factory = PgSqlTemplateFactory::with_schema("greptime_metakv", Some("greptime_schema"));
+        let t = factory.build();
+        assert!(t
+            .create_table_statement
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
+        let upsert = t.generate_batch_upsert_query(1);
+        assert!(upsert.contains("\"greptime_schema\".\"greptime_metakv\""));
+        let get = t.generate_batch_get_query(1);
+        assert!(get.contains("\"greptime_schema\".\"greptime_metakv\""));
+        let del = t.generate_batch_delete_query(1);
+        assert!(del.contains("\"greptime_schema\".\"greptime_metakv\""));
     }
 }

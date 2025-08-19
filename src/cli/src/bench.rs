@@ -66,6 +66,9 @@ pub struct BenchTableMetadataCommand {
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
     postgres_addr: Option<String>,
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long)]
+    postgres_schema: Option<String>,
     #[cfg(feature = "mysql_kvbackend")]
     #[clap(long)]
     mysql_addr: Option<String>,

@@ -324,21 +324,27 @@ pub async fn metasrv_builder(
                 idle_session_timeout,
                 statement_timeout,
             )?;
-            let election = PgElection::with_pg_client(
+            let election = PgElection::with_pg_client_with_schema(
                 opts.grpc.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
                 &opts.meta_table_name,
+                opts.schema.as_deref(),
                 opts.meta_election_lock_id,
             )
             .await?;
 
             let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
-            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
-                .await
-                .context(error::KvBackendSnafu)?;
+            let kv_backend = PgStore::with_pg_pool_with_schema(
+                pool,
+                opts.schema.as_deref(),
+                &opts.meta_table_name,
+                opts.max_txn_ops,
+            )
+            .await
+            .context(error::KvBackendSnafu)?;
 
             (kv_backend, Some(election))
         }
