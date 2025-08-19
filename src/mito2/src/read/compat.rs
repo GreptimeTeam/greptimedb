@@ -41,9 +41,7 @@ use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{
-    FormatProjection, PrimaryKeyArray, ReadFormat, FIXED_POS_COLUMN_NUM,
-};
+use crate::sst::parquet::format::{FormatProjection, PrimaryKeyArray};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -88,6 +86,7 @@ pub(crate) enum CompatBatch {
     /// Adapter for primary key format.
     PrimaryKey(PrimaryKeyCompatBatch),
     /// Adapter for flat format.
+    #[allow(dead_code)]
     Flat(FlatCompatBatch),
 }
 
@@ -101,6 +100,7 @@ impl CompatBatch {
     }
 
     /// Returns the inner flat batch adapter if this is a Flat format.
+    #[allow(dead_code)]
     pub(crate) fn as_flat(&self) -> Option<&FlatCompatBatch> {
         match self {
             CompatBatch::Flat(batch) => Some(batch),
@@ -181,57 +181,9 @@ pub(crate) fn has_same_columns_and_pk_encoding(
     true
 }
 
-/// Checks whether the batch from the parquet file needs to be converted to match the flat format.
-///
-/// * `num_columns` is the number of columns in the parquet file.
-/// * `read_format` is the `ReadFormat` of the parquet file.
-pub(crate) fn need_convert_to_flat(num_columns: usize, read_format: &ReadFormat) -> Result<bool> {
-    if let Some(flat_format) = read_format.as_flat() {
-        // For flat format, compute expected column number:
-        // all columns + internal columns (pk, sequence, op_type) - 1 (time index already counted)
-        let metadata = flat_format.metadata();
-        let expected_columns = metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM - 1;
-
-        if expected_columns == num_columns {
-            // Same number of columns, no conversion needed
-            Ok(false)
-        } else {
-            ensure!(
-                expected_columns >= num_columns,
-                UnexpectedSnafu {
-                    reason: format!(
-                        "Expected columns {} should be >= actual columns {}",
-                        expected_columns, num_columns
-                    )
-                }
-            );
-
-            // Different number of columns, check if the difference matches primary key count
-            let column_diff = expected_columns - num_columns;
-
-            ensure!(
-                column_diff == metadata.primary_key.len(),
-                UnexpectedSnafu {
-                    reason: format!(
-                        "Column number difference {} does not match primary key count {}",
-                        column_diff,
-                        metadata.primary_key.len()
-                    )
-                }
-            );
-
-            Ok(true)
-        }
-    } else {
-        // For primary key format, we don't need this check
-        Ok(false)
-    }
-}
-
 /// A helper struct to adapt schema of the batch to an expected schema.
+#[allow(dead_code)]
 pub(crate) struct FlatCompatBatch {
-    // /// Column Ids and DataTypes the reader actually returns.
-    // actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     /// Indices to convert actual fields to expect fields.
     index_or_defaults: Vec<IndexOrDefault>,
     /// Expected arrow schema.
@@ -245,16 +197,15 @@ impl FlatCompatBatch {
     /// - `mapper` is built from the metadata users expect to see.
     /// - `actual` is the [RegionMetadata] of the input reader.
     /// - `format_projection` is the projection of the read format.
-    pub(crate) fn may_new(
+    pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
     ) -> Result<Option<Self>> {
         let actual_schema = flat_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
-        if expect_schema == actual_schema {
-            return Ok(None);
-        }
+        // has_same_columns_and_pk_encoding() already checks columns and encodings.
+        debug_assert_ne!(expect_schema, actual_schema);
 
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
@@ -317,6 +268,7 @@ impl FlatCompatBatch {
     }
 
     /// Make columns of the `batch` compatible.
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
         let len = batch.num_rows();
@@ -1494,7 +1446,7 @@ mod tests {
         let read_format = FlatReadFormat::new(metadata.clone(), [0, 1, 2, 3].into_iter());
         let format_projection = read_format.format_projection();
 
-        let result = FlatCompatBatch::may_new(&mapper, &metadata, &format_projection).unwrap();
+        let result = FlatCompatBatch::try_new(&mapper, &metadata, &format_projection).unwrap();
         assert!(result.is_none());
     }
 
@@ -1531,7 +1483,7 @@ mod tests {
         let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::may_new(&mapper, &actual_metadata, format_projection)
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
             .unwrap()
             .unwrap();
 
@@ -1599,7 +1551,7 @@ mod tests {
         let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::may_new(&mapper, &actual_metadata, &format_projection)
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, &format_projection)
             .unwrap()
             .unwrap();
 
