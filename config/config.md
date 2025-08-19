@@ -187,7 +187,7 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
@@ -295,7 +295,7 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
@@ -391,7 +391,7 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
@@ -559,7 +559,7 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
@@ -628,7 +628,7 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
