@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! logging stuffs, inspired by databend
+use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
@@ -22,7 +23,7 @@ use common_base::serde::empty_string_as_default;
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::Sampler;
 use opentelemetry_semantic_conventions::resource;
@@ -82,6 +83,9 @@ pub struct LoggingOptions {
 
     /// The protocol of OTLP export.
     pub otlp_export_protocol: Option<OtlpExportProtocol>,
+
+    /// Additional HTTP headers for OTLP exporter.
+    pub otlp_headers: Option<HashMap<String, String>>,
 }
 
 /// The protocol of OTLP export.
@@ -176,6 +180,7 @@ impl Default for LoggingOptions {
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
             otlp_export_protocol: None,
+            otlp_headers: None,
         }
     }
 }
@@ -469,6 +474,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
             .with_http()
             .with_endpoint(endpoint)
             .with_protocol(Protocol::HttpBinary)
+            .with_headers(opts.otlp_headers.clone().unwrap_or_default())
             .build()
             .expect("Failed to create OTLP HTTP exporter "),
     }
