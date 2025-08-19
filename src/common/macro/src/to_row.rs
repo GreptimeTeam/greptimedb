@@ -329,9 +329,10 @@ static PRIMITIVE_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnData
         ])
     });
 
-static TIMESTAMP_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+static DATATYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
     Lazy::new(|| {
         HashMap::from([
+            // Timestamp
             ("timestampsecond", ColumnDataType::TimestampSecond),
             ("timestampmillisecond", ColumnDataType::TimestampMillisecond),
             (
@@ -342,30 +343,15 @@ static TIMESTAMP_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnData
                 "timestamptimenanosecond",
                 ColumnDataType::TimestampNanosecond,
             ),
-        ])
-    });
-
-static DATE_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
-    Lazy::new(|| {
-        HashMap::from([
+            // Date
             ("date", ColumnDataType::Date),
             ("datetime", ColumnDataType::Datetime),
-        ])
-    });
-
-static TIME_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
-    Lazy::new(|| {
-        HashMap::from([
+            // Time
             ("timesecond", ColumnDataType::TimeSecond),
             ("timemillisecond", ColumnDataType::TimeMillisecond),
             ("timemicrosecond", ColumnDataType::TimeMicrosecond),
             ("timenanosecond", ColumnDataType::TimeNanosecond),
-        ])
-    });
-
-static COMPLEX_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
-    Lazy::new(|| {
-        HashMap::from([
+            // Others
             ("string", ColumnDataType::String),
             ("json", ColumnDataType::Json),
             ("decimal128", ColumnDataType::Decimal128),
@@ -398,22 +384,7 @@ fn convert_field_type_to_column_data_type(ident: &str) -> Option<ColumnDataType>
     // Ignores the case of the identifier.
     let lowercase = ident.to_lowercase();
     let lowercase_str = lowercase.as_str();
-    if let Some(value) = TIMESTAMP_TYPE_TO_COLUMN_DATA_TYPE
-        .get(lowercase_str)
-        .cloned()
-    {
-        return Some(value);
-    }
-    if let Some(value) = DATE_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
-        return Some(value);
-    }
-    if let Some(value) = TIME_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
-        return Some(value);
-    }
-    if let Some(value) = COMPLEX_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
-        return Some(value);
-    }
-    None
+    DATATYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned()
 }
 
 #[derive(Default, Clone, Copy)]
