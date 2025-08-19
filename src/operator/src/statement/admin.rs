@@ -48,11 +48,9 @@ impl StatementExecutor {
         let Admin::Func(func) = &stmt;
         // the function name should be in lower case.
         let func_name = func.name.to_string().to_lowercase();
-        let factory = FUNCTION_REGISTRY.get_function(&func_name).context(
-            error::AdminFunctionNotFoundSnafu {
-                name: func_name.clone(),
-            },
-        )?;
+        let factory = FUNCTION_REGISTRY
+            .get_function(&func_name)
+            .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
         let func_ctx = FunctionContext {
             query_ctx: query_ctx.clone(),
             state: self.query_engine.engine_state().function_state(),
@@ -126,12 +124,12 @@ impl StatementExecutor {
         // Execute the async UDF
         let result_columnar = admin_udf
             .as_async()
-            .context(error::BuildAdminFunctionArgsSnafu {
+            .with_context(|| error::BuildAdminFunctionArgsSnafu {
                 msg: format!("Function {} is not async", fn_name),
             })?
             .invoke_async_with_args(func_args)
             .await
-            .context(ExecuteAdminFunctionSnafu {
+            .with_context(|_| ExecuteAdminFunctionSnafu {
                 msg: format!("Failed to execute admin function {}", fn_name),
             })?;
 
@@ -141,11 +139,12 @@ impl StatementExecutor {
                 datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
             }
             datafusion_expr::ColumnarValue::Scalar(scalar) => {
-                let array = scalar
-                    .to_array_of_size(1)
-                    .context(ExecuteAdminFunctionSnafu {
-                        msg: format!("Failed to convert scalar to array for {}", fn_name),
-                    })?;
+                let array =
+                    scalar
+                        .to_array_of_size(1)
+                        .with_context(|_| ExecuteAdminFunctionSnafu {
+                            msg: format!("Failed to convert scalar to array for {}", fn_name),
+                        })?;
                 datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
             }
         };
