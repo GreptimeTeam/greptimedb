@@ -83,4 +83,7 @@ lazy_static! {
     /// The triggered region flush total counter.
     pub static ref METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL: IntCounterVec =
         register_int_counter_vec!("meta_triggered_region_flushes_total", "meta triggered region flush total", &["topic_name", "region_type"]).unwrap();
+    /// The triggered gc total counter.
+    pub static ref METRIC_META_TRIGGERED_GC_TOTAL: IntCounter =
+        register_int_counter!("meta_triggered_gc_total", "meta triggered gc total").unwrap();
 }

@@ -107,7 +107,9 @@ impl LocalGcWorker {
         Ok(zelf)
     }
 
-    /// Run the GC worker in serial mode
+    /// Run the GC worker in serial mode,
+    /// considering list files could be slow and run multiple regions in parallel
+    /// may cause too many concurrent listing operations.
     ///
     /// TODO(discord9): consider instead running in parallel mode
     pub async fn run(self) -> Result<()> {
@@ -142,6 +144,11 @@ impl LocalGcWorker {
         let current_files = &manifest.files;
 
         let recently_removed_files = self.get_removed_files_expel_times(region_id).await?;
+
+        if recently_removed_files.is_empty() {
+            // no files to remove, skip
+            return Ok(());
+        }
 
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
@@ -290,7 +297,7 @@ impl LocalGcWorker {
         for (lister, end) in listers {
             let tx = tx.clone();
             let handle = tokio::spawn(async move {
-                let stream = lister.take_while(|e| match e {
+                let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
                     Ok(e) => {
                         if let Some(end) = &end {
                             // reach end, stop listing
