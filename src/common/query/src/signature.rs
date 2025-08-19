@@ -189,9 +189,7 @@ impl From<&DfTypeSignature> for TypeSignature {
                 }
                 TypeSignature::Any(*n)
             }
-            DfTypeSignature::OneOf(ts) => {
-                TypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
-            }
+            DfTypeSignature::OneOf(ts) => TypeSignature::OneOf(ts.iter().map(Into::into).collect()),
             DfTypeSignature::VariadicAny => TypeSignature::VariadicAny,
             DfTypeSignature::Nullary => TypeSignature::NullAry,
             // Other type signatures are currently mapped to VariadicAny as a fallback.
