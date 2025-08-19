@@ -31,7 +31,6 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::engine::MITO_ENGINE_NAME;
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
@@ -338,7 +337,6 @@ impl AccessLayer {
                 .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
 
             let entry = StorageSstEntry {
-                engine: MITO_ENGINE_NAME.to_string(),
                 file_path: file_path.to_string(),
                 file_size,
                 last_modified_ms,

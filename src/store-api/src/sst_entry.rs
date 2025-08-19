@@ -20,8 +20,6 @@ use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, TableId};
 /// An entry describing a SST file known by the engine's manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestSstEntry {
-    /// Engine label, e.g., "mito", "metric".
-    pub engine: String,
     /// The table directory this file belongs to.
     pub table_dir: String,
     /// The region id this file belongs to.
@@ -57,8 +55,6 @@ pub struct ManifestSstEntry {
 /// An entry describing a SST file listed from storage layer directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageSstEntry {
-    /// Engine label, e.g., "mito", "metric".
-    pub engine: String,
     /// Full path of the SST file in object store.
     pub file_path: String,
     /// File size in bytes.

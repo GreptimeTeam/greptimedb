@@ -768,7 +768,7 @@ async fn test_list_ssts() {
     }
 
     // list from manifest
-    let mut manifest_entries = engine.all_ssts_from_manifest().await.unwrap();
+    let mut manifest_entries = engine.all_ssts_from_manifest();
     let debug_format = manifest_entries
         .iter_mut()
         .map(|e| {
@@ -782,9 +782,9 @@ async fn test_list_ssts() {
     assert_eq!(
         debug_format,
         r#"
-ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
-ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
-ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
     );
 
     // list from storage
@@ -802,8 +802,8 @@ ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 94489280554(22
     assert_eq!(
         debug_format,
         r#"
-StorageSstEntry { engine: "mito", file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None }
-StorageSstEntry { engine: "mito", file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None }
-StorageSstEntry { engine: "mito", file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }"#
+StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }"#
     );
 }

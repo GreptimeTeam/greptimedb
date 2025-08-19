@@ -37,7 +37,6 @@ use store_api::storage::{RegionId, SequenceNumber};
 use store_api::ManifestVersion;
 
 use crate::access_layer::AccessLayerRef;
-use crate::engine::MITO_ENGINE_NAME;
 use crate::error::{
     FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
     UpdateManifestSnafu,
@@ -514,7 +513,6 @@ impl MitoRegion {
                     let meta = file.meta_ref();
                     let region_id = meta.region_id;
                     ManifestSstEntry {
-                        engine: MITO_ENGINE_NAME.to_string(),
                         table_dir: table_dir.to_string(),
                         region_id,
                         table_id: region_id.table_id(),

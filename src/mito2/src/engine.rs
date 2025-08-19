@@ -383,6 +383,33 @@ impl MitoEngine {
             .collect::<Vec<_>>();
         Ok((memtable_stats, sst_stats))
     }
+
+    /// Lists all SSTs from the manifest of all regions in the engine.
+    pub fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
+        self.inner
+            .workers
+            .all_regions()
+            .iter()
+            .flat_map(|region| region.manifest_sst_entries())
+            .collect()
+    }
+
+    /// Lists all SSTs from the storage layer of all regions in the engine.
+    pub async fn all_ssts_from_storage(&self) -> Result<Vec<StorageSstEntry>> {
+        let regions = self.inner.workers.all_regions();
+        let access_layers_distinct_table_dirs = regions
+            .iter()
+            .map(|region| (region.access_layer.table_dir(), &region.access_layer))
+            .collect::<HashMap<_, _>>();
+
+        let mut entries = Vec::new();
+        for (_, access_layer) in access_layers_distinct_table_dirs {
+            let ssts = access_layer.storage_sst_entries().await?;
+            entries.extend(ssts);
+        }
+
+        Ok(entries)
+    }
 }
 
 /// Check whether the region edit is valid. Only adding files to region is considered valid now.
@@ -830,35 +857,6 @@ impl RegionEngine for MitoEngine {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    async fn all_ssts_from_manifest(&self) -> Result<Vec<ManifestSstEntry>, BoxedError> {
-        Ok(self
-            .inner
-            .workers
-            .all_regions()
-            .iter()
-            .flat_map(|region| region.manifest_sst_entries())
-            .collect())
-    }
-
-    async fn all_ssts_from_storage(&self) -> Result<Vec<StorageSstEntry>, BoxedError> {
-        let regions = self.inner.workers.all_regions();
-        let access_layers_distinct_table_dirs = regions
-            .iter()
-            .map(|region| (region.access_layer.table_dir(), &region.access_layer))
-            .collect::<HashMap<_, _>>();
-
-        let mut entries = Vec::new();
-        for (_, access_layer) in access_layers_distinct_table_dirs {
-            let ssts = access_layer
-                .storage_sst_entries()
-                .await
-                .map_err(BoxedError::new)?;
-            entries.extend(ssts);
-        }
-
-        Ok(entries)
     }
 }
 
