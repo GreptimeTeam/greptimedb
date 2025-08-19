@@ -127,12 +127,7 @@ pub fn to_flat_sst_arrow_schema(
                     .is_string()
             {
                 let field = &schema.fields[pk_index];
-                let field = Arc::new(Field::new_dictionary(
-                    field.name(),
-                    datatypes::arrow::datatypes::DataType::UInt32,
-                    field.data_type().clone(),
-                    field.is_nullable(),
-                ));
+                let field = Arc::new(to_dictionary_field(field));
                 fields.push(field);
             } else {
                 fields.push(schema.fields[pk_index].clone());
@@ -157,6 +152,16 @@ pub fn to_flat_sst_arrow_schema(
     }
 
     Arc::new(Schema::new(fields))
+}
+
+/// Helper function to create a dictionary field from a field.
+pub(crate) fn to_dictionary_field(field: &Field) -> Field {
+    Field::new_dictionary(
+        field.name(),
+        datatypes::arrow::datatypes::DataType::UInt32,
+        field.data_type().clone(),
+        field.is_nullable(),
+    )
 }
 
 /// Fields for internal columns.

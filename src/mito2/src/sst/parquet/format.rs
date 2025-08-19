@@ -64,6 +64,8 @@ pub(crate) type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
 ///
 /// Contains: time index and internal columns.
 pub(crate) const FIXED_POS_COLUMN_NUM: usize = 4;
+/// Number of internal columns.
+pub(crate) const INTERNAL_COLUMN_NUM: usize = 3;
 
 /// Helper for writing the SST format with primary key.
 pub(crate) struct PrimaryKeyWriteFormat {

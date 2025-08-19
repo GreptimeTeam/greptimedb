@@ -917,12 +917,11 @@ impl ScanInput {
             // mapper can convert it.
             let compat = if let Some(flat_format) = file_range_ctx.read_format().as_flat() {
                 let mapper = self.mapper.as_flat().unwrap();
-                FlatCompatBatch::try_new(
+                Some(CompatBatch::Flat(FlatCompatBatch::try_new(
                     mapper,
                     flat_format.metadata(),
                     flat_format.format_projection(),
-                )?
-                .map(CompatBatch::Flat)
+                )?))
             } else {
                 let compact_batch = PrimaryKeyCompatBatch::new(
                     &self.mapper,

@@ -17,7 +17,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray, BinaryBuilder};
+use api::v1::SemanticType;
+use datatypes::arrow::array::{
+    Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
+};
+use datatypes::arrow::compute::{take, TakeOptions};
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
@@ -39,9 +43,9 @@ use crate::error::{
 use crate::read::flat_projection::{flat_projected_columns, FlatProjectionMapper};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{FormatProjection, PrimaryKeyArray};
+use crate::sst::parquet::format::{FormatProjection, PrimaryKeyArray, INTERNAL_COLUMN_NUM};
+use crate::sst::{internal_fields, to_dictionary_field};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -188,20 +192,21 @@ pub(crate) struct FlatCompatBatch {
     index_or_defaults: Vec<IndexOrDefault>,
     /// Expected arrow schema.
     arrow_schema: SchemaRef,
-    /// Optional primary key adapter.
+    /// Primary key adapter.
     compat_pk: FlatCompatPrimaryKey,
 }
 
 impl FlatCompatBatch {
-    /// Creates a [FlatCompatBatch] if needed.
+    /// Creates a [FlatCompatBatch].
+    ///
     /// - `mapper` is built from the metadata users expect to see.
-    /// - `actual` is the [RegionMetadata] of the input reader.
-    /// - `format_projection` is the projection of the read format.
+    /// - `actual` is the [RegionMetadata] of the input parquet.
+    /// - `format_projection` is the projection of the read format for the input parquet.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Self> {
         let actual_schema = flat_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
         // has_same_columns_and_pk_encoding() already checks columns and encodings.
@@ -217,14 +222,21 @@ impl FlatCompatBatch {
         let mut index_or_defaults = Vec::with_capacity(expect_schema.len());
         let mut fields = Vec::with_capacity(expect_schema.len());
         for (column_id, expect_data_type) in expect_schema {
-            // Safety: mapper must have this column.
+            // Safety: expect_schema comes from the same mapper.
             let column_index = mapper.metadata().column_index_by_id(*column_id).unwrap();
             let expect_column = &mapper.metadata().column_metadatas[column_index];
-            fields.push(mapper.metadata().schema.arrow_schema().fields()[column_index].clone());
+            let column_field = &mapper.metadata().schema.arrow_schema().fields()[column_index];
+            // For tag columns, we need to create a dictionary field.
+            if expect_column.semantic_type == SemanticType::Tag {
+                fields.push(Arc::new(to_dictionary_field(column_field)));
+            } else {
+                fields.push(column_field.clone());
+            };
 
             if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
                 let mut cast_type = None;
 
+                // Same column different type.
                 if expect_data_type != *actual_data_type {
                     cast_type = Some(expect_data_type.clone())
                 }
@@ -252,6 +264,7 @@ impl FlatCompatBatch {
                 index_or_defaults.push(IndexOrDefault::DefaultValue {
                     column_id: expect_column.column_id,
                     default_vector,
+                    semantic_type: expect_column.semantic_type,
                 });
             };
         }
@@ -259,12 +272,11 @@ impl FlatCompatBatch {
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
-        Ok(Some(Self {
-            // actual_schema,
+        Ok(Self {
             index_or_defaults,
             arrow_schema: Arc::new(Schema::new(fields)),
             compat_pk,
-        }))
+        })
     }
 
     /// Make columns of the `batch` compatible.
@@ -293,14 +305,12 @@ impl FlatCompatBatch {
                 IndexOrDefault::DefaultValue {
                     column_id: _,
                     default_vector,
-                } => {
-                    let data = default_vector.replicate(&[len]);
-                    Ok(data.to_arrow_array())
-                }
+                    semantic_type,
+                } => repeat_vector(default_vector, len, *semantic_type == SemanticType::Tag),
             })
             .chain(
                 // Adds internal columns.
-                batch.columns()[batch.num_columns() - 3..]
+                batch.columns()[batch.num_columns() - INTERNAL_COLUMN_NUM..]
                     .iter()
                     .map(|col| Ok(col.clone())),
             )
@@ -311,6 +321,32 @@ impl FlatCompatBatch {
 
         // Handles primary keys.
         self.compat_pk.compat(compat_batch)
+    }
+}
+
+/// Repeats the vector value `to_len` times.
+fn repeat_vector(vector: &VectorRef, to_len: usize, is_tag: bool) -> Result<ArrayRef> {
+    assert_eq!(1, vector.len());
+    if is_tag {
+        let values = vector.to_arrow_array();
+        if values.is_null(0) {
+            // Creates a dictionary array with `to_len` null keys.
+            let keys = UInt32Array::new_null(to_len);
+            Ok(Arc::new(DictionaryArray::new(keys, values.slice(0, 0))))
+        } else {
+            let keys = UInt32Array::from_value(0, to_len);
+            Ok(Arc::new(DictionaryArray::new(keys, values)))
+        }
+    } else {
+        let keys = UInt32Array::from_value(0, to_len);
+        take(
+            &vector.to_arrow_array(),
+            &keys,
+            Some(TakeOptions {
+                check_bounds: false,
+            }),
+        )
+        .context(ComputeArrowSnafu)
     }
 }
 
@@ -388,6 +424,7 @@ impl CompatFields {
                 IndexOrDefault::DefaultValue {
                     column_id,
                     default_vector,
+                    semantic_type: _,
                 } => {
                     let data = default_vector.replicate(&[len]);
                     BatchColumn {
@@ -544,6 +581,7 @@ fn may_compat_fields(
                 Ok(IndexOrDefault::DefaultValue {
                     column_id: column.column_id,
                     default_vector,
+                    semantic_type: SemanticType::Field,
                 })
             }
         })
@@ -569,6 +607,8 @@ enum IndexOrDefault {
         column_id: ColumnId,
         /// Default value. The vector has only 1 element.
         default_vector: VectorRef,
+        /// Semantic type of the column.
+        semantic_type: SemanticType,
     },
 }
 
@@ -852,6 +892,7 @@ impl FlatCompatPrimaryKey {
         let new_pk_dict_array =
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
 
+        // Overrides the primary key column.
         let mut columns = batch.columns().to_vec();
         columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
 
@@ -865,10 +906,10 @@ mod tests {
 
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
-        ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, Int64Array, StringArray,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
         TimestampMillisecondArray, UInt64Array, UInt8Array,
     };
-    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -884,6 +925,7 @@ mod tests {
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::sst::parquet::flat_format::FlatReadFormat;
+    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].
@@ -1359,44 +1401,6 @@ mod tests {
         .await;
     }
 
-    /// Creates a flat format RecordBatch for testing.
-    fn new_flat_record_batch(
-        primary_keys: &[&[u8]],
-        timestamps: &[i64],
-        sequences: &[u64],
-        op_types: &[OpType],
-        tag_values: &[Option<&str>],
-        field_values: &[Option<i64>],
-    ) -> RecordBatch {
-        let num_rows = timestamps.len();
-        debug_assert_eq!(sequences.len(), num_rows);
-        debug_assert_eq!(op_types.len(), num_rows);
-        debug_assert_eq!(primary_keys.len(), num_rows);
-        debug_assert_eq!(tag_values.len(), num_rows);
-        debug_assert_eq!(field_values.len(), num_rows);
-
-        let columns: Vec<ArrayRef> = vec![
-            // tag_1 column (string)
-            Arc::new(StringArray::from_iter(tag_values.iter().map(|v| *v))),
-            // field_2 column (int64)
-            Arc::new(Int64Array::from_iter(field_values.iter().map(|v| *v))),
-            // ts column (time index)
-            Arc::new(TimestampMillisecondArray::from_iter_values(
-                timestamps.iter().copied(),
-            )),
-            // __primary_key column
-            build_flat_test_pk_array(primary_keys),
-            // __sequence column
-            Arc::new(UInt64Array::from_iter_values(sequences.iter().copied())),
-            // __op_type column
-            Arc::new(UInt8Array::from_iter_values(
-                op_types.iter().map(|v| *v as u8),
-            )),
-        ];
-
-        RecordBatch::try_new(build_flat_test_schema(), columns).unwrap()
-    }
-
     /// Creates a primary key array for flat format testing.
     fn build_flat_test_pk_array(primary_keys: &[&[u8]]) -> ArrayRef {
         let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
@@ -1404,50 +1408,6 @@ mod tests {
             builder.append(pk).unwrap();
         }
         Arc::new(builder.finish())
-    }
-
-    /// Builds the arrow schema for flat format testing.
-    fn build_flat_test_schema() -> Arc<Schema> {
-        let fields = vec![
-            Field::new("tag_1", DataType::Utf8, true),
-            Field::new("field_2", DataType::Int64, true),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "__primary_key",
-                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
-                false,
-            ),
-            Field::new("__sequence", DataType::UInt64, false),
-            Field::new("__op_type", DataType::UInt8, false),
-        ];
-        Arc::new(Schema::new(fields))
-    }
-
-    #[test]
-    fn test_flat_compat_batch_may_new_same_schema() {
-        let metadata = Arc::new(new_metadata(
-            &[
-                (
-                    0,
-                    SemanticType::Timestamp,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                ),
-                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
-                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
-            ],
-            &[1],
-        ));
-
-        let mapper = FlatProjectionMapper::all(&metadata).unwrap();
-        let read_format = FlatReadFormat::new(metadata.clone(), [0, 1, 2, 3].into_iter());
-        let format_projection = read_format.format_projection();
-
-        let result = FlatCompatBatch::try_new(&mapper, &metadata, &format_projection).unwrap();
-        assert!(result.is_none());
     }
 
     #[test]
@@ -1474,6 +1434,7 @@ mod tests {
                 ),
                 (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
                 (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                // Adds a new field.
                 (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
             ],
             &[1],
@@ -1483,35 +1444,50 @@ mod tests {
         let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
-            .unwrap()
-            .unwrap();
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection).unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
 
         let k1 = encode_key(&[Some("tag1")]);
-        let input_batch = new_flat_record_batch(
-            &[&k1, &k1],
-            &[1000, 2000],
-            &[1, 2],
-            &[OpType::Put, OpType::Put],
-            &[Some("tag1"), Some("tag1")],
-            &[Some(100), Some(200)],
-        );
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
         let result = compat_batch.compat(input_batch).unwrap();
 
-        assert_eq!(result.num_rows(), 2);
-        assert_eq!(result.num_columns(), 7);
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
 
-        let tag_column = result.column(0);
-        let field_column = result.column(2);
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
 
-        let tag_array = tag_column.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(tag_array.value(0), "tag1");
-        assert_eq!(tag_array.value(1), "tag1");
-
-        let field_array = field_column.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert!(field_array.is_null(0));
-        assert!(field_array.is_null(1));
+        assert_eq!(expected_batch, result);
     }
 
     #[test]
@@ -1551,41 +1527,53 @@ mod tests {
         let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, &format_projection)
-            .unwrap()
-            .unwrap();
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, &format_projection).unwrap();
+
+        // Tag array.
+        let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag1_builder.append_value("tag1");
+        tag1_builder.append_value("tag1");
+        let tag1_dict_array = Arc::new(tag1_builder.finish());
 
         let k1 = encode_key(&[Some("tag1")]);
-        let input_batch = new_flat_record_batch(
-            &[&k1, &k1],
-            &[1000, 2000],
-            &[1, 2],
-            &[OpType::Put, OpType::Put],
-            &[Some("tag1"), Some("tag1")],
-            &[Some(100), Some(200)],
-        );
+        let input_columns: Vec<ArrayRef> = vec![
+            tag1_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
         let result = compat_batch.compat(input_batch).unwrap();
 
-        assert_eq!(result.num_rows(), 2);
-        assert_eq!(result.num_columns(), 7);
-
-        let pk_column = result.column(4);
-        let pk_dict_array = pk_column
-            .as_any()
-            .downcast_ref::<DictionaryArray<UInt32Type>>()
-            .unwrap();
-
-        let pk_values_array = pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-
-        assert_eq!(pk_values_array.len(), 1);
-
-        let pk_value = pk_values_array.value(0);
         let sparse_k1 = encode_sparse_key(&[(1, Some("tag1")), (3, None)]);
-        assert_eq!(pk_value, sparse_k1);
+        let mut null_tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        null_tag_builder.append_nulls(2);
+        let null_tag_dict_array = Arc::new(null_tag_builder.finish());
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag1_dict_array.clone(),
+            null_tag_dict_array,
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let output_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
     }
 }
