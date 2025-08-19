@@ -193,14 +193,6 @@ pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
     matcher
 }
 
-/// Returns the current Unix timestamp as seconds since epoch (f64)
-fn current_timestamp() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
-}
-
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -1643,24 +1635,9 @@ impl PromPlanner {
             }
             "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
-                // time() function should return evaluation time
-                // For instant queries with start=end=0, use current timestamp
-                // For range queries, use build_special_time_expr to get time from time column
-                if self.ctx.start == 0 && self.ctx.end == 0 && self.ctx.interval == 300000 {
-                    // default value as time instant
-                    // Instant query without specified time - use current timestamp
-                    let now = current_timestamp();
-                    exprs.push(DfExpr::Literal(ScalarValue::Float64(Some(now))));
-                } else {
-                    // Range query or instant query with specified time - use time column
-                    if let Some(time_col) = self.ctx.time_index_column.as_ref() {
-                        exprs.push(build_special_time_expr(time_col));
-                    } else {
-                        // Fallback to current timestamp if no time column is available
-                        let now = current_timestamp();
-                        exprs.push(DfExpr::Literal(ScalarValue::Float64(Some(now))));
-                    }
-                }
+                exprs.push(build_special_time_expr(
+                    self.ctx.time_index_column.as_ref().unwrap(),
+                ));
                 ScalarFunc::GeneratedExpr
             }
             "minute" => {
@@ -2714,24 +2691,10 @@ impl PromPlanner {
     fn try_build_special_time_expr_with_context(&self, expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
-                if func.name == SPECIAL_TIME_FUNCTION {
-                    // time() function should return evaluation time
-                    // For instant queries with start=end=0, use current timestamp
-                    // For range queries, use build_special_time_expr to get time from time column
-                    if self.ctx.start == 0 && self.ctx.end == 0 {
-                        // Instant query without specified time - use current timestamp
-                        let now = current_timestamp();
-                        Some(DfExpr::Literal(ScalarValue::Float64(Some(now))))
-                    } else {
-                        // Range query or instant query with specified time - use time column
-                        if let Some(time_col) = self.ctx.time_index_column.as_ref() {
-                            Some(build_special_time_expr(time_col))
-                        } else {
-                            // Fallback to current timestamp if no time column is available
-                            let now = current_timestamp();
-                            Some(DfExpr::Literal(ScalarValue::Float64(Some(now))))
-                        }
-                    }
+                if func.name == SPECIAL_TIME_FUNCTION
+                    && let Some(time_index_col) = self.ctx.time_index_column.as_ref()
+                {
+                    Some(build_special_time_expr(time_index_col))
                 } else {
                     None
                 }
