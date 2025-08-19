@@ -2332,6 +2332,7 @@ dependencies = [
  "common-query",
  "datatypes",
  "greptime-proto",
+ "once_cell",
  "proc-macro2",
  "quote",
  "snafu 0.8.6",

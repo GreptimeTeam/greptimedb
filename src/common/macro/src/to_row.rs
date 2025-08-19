@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use greptime_proto::v1::ColumnDataType;
+use once_cell::sync::Lazy;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::meta::ParseNestedMeta;
@@ -82,10 +85,9 @@ pub(crate) fn derive_to_row_impl(input: DeriveInput) -> Result<TokenStream2> {
         .zip(infer_column_data_types.iter())
         .zip(column_attributes.iter())
         .map(|(((ident, ty), column_data_type), column_attribute)| {
-            let field_type = field_type(ty);
             impl_to_value_method(
                 ident,
-                field_type.is_optional(),
+                field_type(ty).is_optional(),
                 column_data_type,
                 column_attribute,
             )
@@ -310,91 +312,111 @@ fn extract_ident_from_type(ty: &Type) -> Option<&Ident> {
     }
 }
 
+static PRIMITIVE_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+    Lazy::new(|| {
+        HashMap::from([
+            ("i8", ColumnDataType::Int8),
+            ("i16", ColumnDataType::Int16),
+            ("i32", ColumnDataType::Int32),
+            ("i64", ColumnDataType::Int64),
+            ("u8", ColumnDataType::Uint8),
+            ("u16", ColumnDataType::Uint16),
+            ("u32", ColumnDataType::Uint32),
+            ("u64", ColumnDataType::Uint64),
+            ("f32", ColumnDataType::Float32),
+            ("f64", ColumnDataType::Float64),
+            ("bool", ColumnDataType::Boolean),
+        ])
+    });
+
+static TIMESTAMP_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+    Lazy::new(|| {
+        HashMap::from([
+            ("timestampsecond", ColumnDataType::TimestampSecond),
+            ("timestampmillisecond", ColumnDataType::TimestampMillisecond),
+            (
+                "timestamptimemicrosecond",
+                ColumnDataType::TimestampMicrosecond,
+            ),
+            (
+                "timestamptimenanosecond",
+                ColumnDataType::TimestampNanosecond,
+            ),
+        ])
+    });
+
+static DATE_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+    Lazy::new(|| {
+        HashMap::from([
+            ("date", ColumnDataType::Date),
+            ("datetime", ColumnDataType::Datetime),
+        ])
+    });
+
+static TIME_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+    Lazy::new(|| {
+        HashMap::from([
+            ("timesecond", ColumnDataType::TimeSecond),
+            ("timemillisecond", ColumnDataType::TimeMillisecond),
+            ("timemicrosecond", ColumnDataType::TimeMicrosecond),
+            ("timenanosecond", ColumnDataType::TimeNanosecond),
+        ])
+    });
+
+static COMPLEX_TYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+    Lazy::new(|| {
+        HashMap::from([
+            ("string", ColumnDataType::String),
+            ("json", ColumnDataType::Json),
+            ("decimal128", ColumnDataType::Decimal128),
+            ("vector", ColumnDataType::Vector),
+        ])
+    });
+
+static SEMANTIC_TYPES: Lazy<HashMap<&'static str, SemanticType>> = Lazy::new(|| {
+    HashMap::from([
+        ("field", SemanticType::Field),
+        ("tag", SemanticType::Tag),
+        ("timestamp", SemanticType::Timestamp),
+    ])
+});
+
 fn convert_primitive_type_to_column_data_type(ident: &Ident) -> Option<ColumnDataType> {
-    match ident.to_string().as_str() {
-        "i8" => Some(ColumnDataType::Int8),
-        "i16" => Some(ColumnDataType::Int16),
-        "i32" => Some(ColumnDataType::Int32),
-        "i64" => Some(ColumnDataType::Int64),
-        "u8" => Some(ColumnDataType::Uint8),
-        "u16" => Some(ColumnDataType::Uint16),
-        "u32" => Some(ColumnDataType::Uint32),
-        "u64" => Some(ColumnDataType::Uint64),
-        "f32" => Some(ColumnDataType::Float32),
-        "f64" => Some(ColumnDataType::Float64),
-        "bool" => Some(ColumnDataType::Boolean),
-        _ => None,
-    }
-}
-
-fn convert_timestamp_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
-    match ident {
-        "timestampsecond" => Some(ColumnDataType::TimestampSecond),
-        "timestampmillisecond" => Some(ColumnDataType::TimestampMillisecond),
-        "timestamptimemicrosecond" => Some(ColumnDataType::TimestampMicrosecond),
-        "timestamptimenanosecond" => Some(ColumnDataType::TimestampNanosecond),
-        _ => None,
-    }
-}
-
-fn convert_date_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
-    match ident {
-        "date" => Some(ColumnDataType::Date),
-        "datetime" => Some(ColumnDataType::Datetime),
-        _ => None,
-    }
-}
-
-fn convert_time_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
-    match ident {
-        "timesecond" => Some(ColumnDataType::TimeSecond),
-        "timemillisecond" => Some(ColumnDataType::TimeMillisecond),
-        "timemicrosecond" => Some(ColumnDataType::TimeMicrosecond),
-        "timenanosecond" => Some(ColumnDataType::TimeNanosecond),
-        _ => None,
-    }
-}
-
-fn convert_complex_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
-    match ident {
-        "string" => Some(ColumnDataType::String),
-        "json" => Some(ColumnDataType::Json),
-        "decimal128" => Some(ColumnDataType::Decimal128),
-        "vector" => Some(ColumnDataType::Vector),
-        _ => None,
-    }
+    PRIMITIVE_TYPE_TO_COLUMN_DATA_TYPE
+        .get(ident.to_string().as_str())
+        .cloned()
 }
 
 fn semantic_type_from_ident(ident: &str) -> Option<SemanticType> {
     // Ignores the case of the identifier.
     let lowercase = ident.to_lowercase();
-    match lowercase.as_str() {
-        "field" => Some(SemanticType::Field),
-        "tag" => Some(SemanticType::Tag),
-        "timestamp" => Some(SemanticType::Timestamp),
-        _ => None,
-    }
+    let lowercase_str = lowercase.as_str();
+    SEMANTIC_TYPES.get(lowercase_str).cloned()
 }
 
 fn convert_field_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
     // Ignores the case of the identifier.
     let lowercase = ident.to_lowercase();
-    if let Some(value) = convert_timestamp_type_to_column_data_type(&lowercase) {
+    let lowercase_str = lowercase.as_str();
+    if let Some(value) = TIMESTAMP_TYPE_TO_COLUMN_DATA_TYPE
+        .get(lowercase_str)
+        .cloned()
+    {
         return Some(value);
     }
-    if let Some(value) = convert_date_type_to_column_data_type(&lowercase) {
+    if let Some(value) = DATE_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
         return Some(value);
     }
-    if let Some(value) = convert_time_type_to_column_data_type(&lowercase) {
+    if let Some(value) = TIME_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
         return Some(value);
     }
-    if let Some(value) = convert_complex_type_to_column_data_type(&lowercase) {
+    if let Some(value) = COMPLEX_TYPE_TO_COLUMN_DATA_TYPE.get(lowercase_str).cloned() {
         return Some(value);
     }
     None
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 enum SemanticType {
     #[default]
     Field,
