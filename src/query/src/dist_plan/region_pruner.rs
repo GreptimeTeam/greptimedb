@@ -46,14 +46,12 @@ impl ConstraintPruner {
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
-        debug!("query expressions: {query_expressions:?}");
-
         // Collect all partition expressions for unified normalization
-        let mut expression_to_partition = HashMap::default();
+        let mut expression_to_partition = Vec::with_capacity(partitions.len());
         let mut all_partition_expressions = Vec::with_capacity(partitions.len());
         for partition in partitions {
             if let Some(expr) = &partition.partition_expr {
-                expression_to_partition.insert(all_partition_expressions.len(), partition.id);
+                expression_to_partition.push(partition.id);
                 all_partition_expressions.push(expr.clone());
             }
         }
@@ -96,7 +94,7 @@ impl ConstraintPruner {
             if Self::atomic_sets_overlap(&query_atomics, region_atomics) {
                 let partition_expr_index =
                     region_atomics.source_expr_index - query_expressions.len();
-                candidate_regions.insert(expression_to_partition[&partition_expr_index]);
+                candidate_regions.insert(expression_to_partition[partition_expr_index]);
             }
         }
 
