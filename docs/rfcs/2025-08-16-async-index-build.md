@@ -6,7 +6,7 @@ Author: "SNC123 <sinhco@outlook.com>"
 ---
 
 # Summary
-This RFC proposes an asynchronous index build mechanism in the database, aiming to improve the efficiency and availability of index creation, and to avoid write blocking and performance degradation caused by synchronous index building.
+This RFC proposes an asynchronous index build mechanism in the database, with a configuration option to choose between synchronous and asynchronous modes, aiming to improve flexibility and adapt to different workload requirements.
 
 # Motivation
 Currently, index creation is performed synchronously, which may lead to prolonged write suspension and impact business continuity. As data volume grows, the time required for index building increases significantly. An asynchronous solution is urgently needed to enhance user experience and system throughput.
@@ -15,12 +15,14 @@ Currently, index creation is performed synchronously, which may lead to prolonge
 
 ## Overview
 
-The following table highlights the improvements of the async index approach:
+The following table highlights the difference between async and sync index approach:
 
 | Approach | Trigger | Data Source | Index Metadata Update | Fine-grained `FileMeta` Index |
 | :--- | :--- | :--- | :--- | :--- |
 | Sync Index | On `write_sst` | Memory (on flush) / Disk (on compact) | Not required | Not required |
 | Async Index | 4 trigger types | Disk | Required | Required |
+
+The index build mode (synchronous or asynchronous) can be selected via configuration file. 
 
 ### Four Trigger Types
 
