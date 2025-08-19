@@ -32,7 +32,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
 
-use crate::error::{self, Result};
+use crate::error::{self, ExecuteAdminFunctionSnafu, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DUMMY_COLUMN: &str = "<dummy>";
@@ -131,30 +131,22 @@ impl StatementExecutor {
             })?
             .invoke_async_with_args(func_args)
             .await
-            .map_err(|e| error::Error::BuildAdminFunctionArgs {
-                msg: format!("Failed to execute admin function {}: {}", fn_name, e),
+            .context(ExecuteAdminFunctionSnafu {
+                msg: format!("Failed to execute admin function {}", fn_name),
             })?;
 
-        // Convert result back to VectorRef following the same pattern as udf.rs
+        // Convert result back to VectorRef
         let result = match result_columnar {
             datafusion_expr::ColumnarValue::Array(array) => {
-                datatypes::vectors::Helper::try_into_vector(array).map_err(|e| {
-                    error::Error::BuildAdminFunctionArgs {
-                        msg: format!("Failed to convert result array for {}: {}", fn_name, e),
-                    }
-                })?
+                datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
             }
             datafusion_expr::ColumnarValue::Scalar(scalar) => {
-                let array = scalar.to_array_of_size(1).map_err(|e| {
-                    error::Error::BuildAdminFunctionArgs {
-                        msg: format!("Failed to convert scalar to array for {}: {}", fn_name, e),
-                    }
-                })?;
-                datatypes::vectors::Helper::try_into_vector(array).map_err(|e| {
-                    error::Error::BuildAdminFunctionArgs {
-                        msg: format!("Failed to convert result scalar for {}: {}", fn_name, e),
-                    }
-                })?
+                let array = scalar
+                    .to_array_of_size(1)
+                    .context(ExecuteAdminFunctionSnafu {
+                        msg: format!("Failed to convert scalar to array for {}", fn_name),
+                    })?;
+                datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
             }
         };
 

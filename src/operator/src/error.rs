@@ -20,6 +20,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
+use datafusion_common::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
@@ -44,6 +45,15 @@ pub enum Error {
 
     #[snafu(display("Failed to build admin function args: {msg}"))]
     BuildAdminFunctionArgs { msg: String },
+
+    #[snafu(display("Failed to execute admin function: {msg}, error: {error}"))]
+    ExecuteAdminFunction {
+        msg: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Expected {expected} args, but actual {actual}"))]
     FunctionArityMismatch { expected: usize, actual: usize },
@@ -930,7 +940,7 @@ impl ErrorExt for Error {
             Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
-            Error::EncodeJson { .. } => StatusCode::Unexpected,
+            Error::ExecuteAdminFunction { .. } | Error::EncodeJson { .. } => StatusCode::Unexpected,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,

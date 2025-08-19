@@ -194,16 +194,17 @@ fn build_struct(
 
         impl #name {
             /// Creates a new instance of the function with function context.
-            fn create(func_ctx: #user_path::function::FunctionContext) -> Self {
+            fn create(signature: datafusion_expr::Signature, func_ctx: #user_path::function::FunctionContext) -> Self {
                 Self {
-                    signature: #sig_fn().into(),
+                    signature,
                     func_ctx,
                 }
             }
 
+            /// Returns the [`ScalarFunctionFactory`] of the function.
             pub fn factory() -> impl Into< #user_path::function_factory::ScalarFunctionFactory>  {
                 Self {
-                    signature:  #sig_fn().into(),
+                    signature: #sig_fn().into(),
                     func_ctx: #user_path::function::FunctionContext::default(),
                 }
             }
@@ -258,8 +259,10 @@ fn build_struct(
                  use datafusion_expr::async_udf::AsyncScalarUDF;
 
                 let name = func.name().to_string();
+
                 let func = Arc::new(move |ctx: #user_path::function::FunctionContext| {
-                    let udf_impl = #name::create(ctx);
+                    // create the UDF dynamically with function context
+                    let udf_impl = #name::create(func.signature.clone(), ctx);
                     let async_udf = AsyncScalarUDF::new(Arc::new(udf_impl));
                     async_udf.into_scalar_udf()
                 });
@@ -292,7 +295,7 @@ fn build_struct(
                     .collect::<common_query::error::Result<Vec<_>>>()
                     .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Column conversion error: {}", e)))?;
 
-                // Ensure under the `greptime` catalog for security
+                // Safety check: Ensure under the `greptime` catalog for security
                 #user_path::ensure_greptime!(self.func_ctx);
 
                 let columns_num = columns.len();
@@ -324,13 +327,10 @@ fn build_struct(
                 } else {
                     for i in 0..rows_num {
                         let args: Vec<_> = columns.iter()
-                            .map(|vector| vector.get(i))
-                            .collect();
-                        let args_refs: Vec<_> = args.iter()
-                            .map(|val| val.as_value_ref())
+                            .map(|vector| vector.get_ref(i))
                             .collect();
 
-                        let result = #fn_name(handler, query_ctx, &args_refs).await
+                        let result = #fn_name(handler, query_ctx, &args).await
                             .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e)))?;
 
                         builder.push_value_ref(result.as_value_ref());
