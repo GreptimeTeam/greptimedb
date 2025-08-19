@@ -351,6 +351,7 @@ fn convert_date_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> 
 
 fn convert_time_type_to_column_data_type(ident: &str) -> Option<ColumnDataType> {
     match ident {
+        "timesecond" => Some(ColumnDataType::TimeSecond),
         "timemillisecond" => Some(ColumnDataType::TimeMillisecond),
         "timemicrosecond" => Some(ColumnDataType::TimeMicrosecond),
         "timenanosecond" => Some(ColumnDataType::TimeNanosecond),
