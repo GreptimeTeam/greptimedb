@@ -197,14 +197,6 @@ struct PgSqlTemplateFactory<'a> {
 }
 
 impl<'a> PgSqlTemplateFactory<'a> {
-    /// Creates a new [`SqlTemplateFactory`] with the given table name.
-    fn new(table_name: &'a str) -> Self {
-        Self {
-            table_name,
-            schema: None,
-        }
-    }
-
     /// Creates a new factory with optional schema.
     fn with_schema(table_name: &'a str, schema: Option<&'a str>) -> Self {
         Self { table_name, schema }
@@ -221,24 +213,19 @@ impl<'a> PgSqlTemplateFactory<'a> {
         PgSqlTemplateSet {
             table_ref: table_ref.clone(),
             // Do not attempt to create schema implicitly to avoid extra privileges requirement.
-            create_schema_statement: None,
             create_table_statement: format!(
                 "CREATE TABLE IF NOT EXISTS {table_ref}(k bytea PRIMARY KEY, v bytea)",
             ),
             range_template: RangeTemplate {
                 point: format!("SELECT k, v FROM {table_ref} WHERE k = $1"),
-                range: format!(
-                    "SELECT k, v FROM {table_ref} WHERE k >= $1 AND k < $2 ORDER BY k"
-                ),
+                range: format!("SELECT k, v FROM {table_ref} WHERE k >= $1 AND k < $2 ORDER BY k"),
                 full: format!("SELECT k, v FROM {table_ref} ORDER BY k"),
                 left_bounded: format!("SELECT k, v FROM {table_ref} WHERE k >= $1 ORDER BY k"),
                 prefix: format!("SELECT k, v FROM {table_ref} WHERE k LIKE $1 ORDER BY k"),
             },
             delete_template: RangeTemplate {
                 point: format!("DELETE FROM {table_ref} WHERE k = $1 RETURNING k,v;"),
-                range: format!(
-                    "DELETE FROM {table_ref} WHERE k >= $1 AND k < $2 RETURNING k,v;"
-                ),
+                range: format!("DELETE FROM {table_ref} WHERE k >= $1 AND k < $2 RETURNING k,v;"),
                 full: format!("DELETE FROM {table_ref} RETURNING k,v"),
                 left_bounded: format!("DELETE FROM {table_ref} WHERE k >= $1 RETURNING k,v;"),
                 prefix: format!("DELETE FROM {table_ref} WHERE k LIKE $1 RETURNING k,v;"),
@@ -251,7 +238,6 @@ impl<'a> PgSqlTemplateFactory<'a> {
 #[derive(Debug, Clone)]
 pub struct PgSqlTemplateSet {
     table_ref: String,
-    pub(crate) create_schema_statement: Option<String>,
     create_table_statement: String,
     range_template: RangeTemplate,
     delete_template: RangeTemplate,
@@ -895,7 +881,11 @@ impl PgStore {
     }
 
     /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool].
-    pub async fn with_pg_pool(pool: Pool, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    pub async fn with_pg_pool(
+        pool: Pool,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<KvBackendRef> {
         Self::with_pg_pool_with_schema(pool, None, table_name, max_txn_ops).await
     }
 }

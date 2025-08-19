@@ -178,7 +178,10 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn delete_value_sql(&self) -> String {
         let table = self.table_ref();
-        format!("DELETE FROM {table} WHERE k = $1 RETURNING k,v;", table = table)
+        format!(
+            "DELETE FROM {table} WHERE k = $1 RETURNING k,v;",
+            table = table
+        )
     }
 }
 
@@ -1628,10 +1631,20 @@ mod tests {
         let f = ElectionSqlFactory::with_schema(42, "greptime_metakv", Some("greptime_schema"));
         let s = f.build();
         assert!(s.campaign.contains("pg_try_advisory_lock"));
-        assert!(s.put_value_with_lease.contains("\"greptime_schema\".\"greptime_metakv\""));
-        assert!(s.update_value_with_lease.contains("\"greptime_schema\".\"greptime_metakv\""));
-        assert!(s.get_value_with_lease.contains("\"greptime_schema\".\"greptime_metakv\""));
-        assert!(s.get_value_with_lease_by_prefix.contains("\"greptime_schema\".\"greptime_metakv\""));
-        assert!(s.delete_value.contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(s
+            .put_value_with_lease
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(s
+            .update_value_with_lease
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(s
+            .get_value_with_lease
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(s
+            .get_value_with_lease_by_prefix
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(s
+            .delete_value
+            .contains("\"greptime_schema\".\"greptime_metakv\""));
     }
 }
