@@ -281,7 +281,6 @@ impl FlatCompatBatch {
 
     /// Make columns of the `batch` compatible.
     #[allow(dead_code)]
-    #[must_use]
     pub(crate) fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
         let len = batch.num_rows();
         let columns = self
@@ -1528,7 +1527,7 @@ mod tests {
         let format_projection = read_format.format_projection();
 
         let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, &format_projection).unwrap();
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection).unwrap();
 
         // Tag array.
         let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();
