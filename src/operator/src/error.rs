@@ -42,13 +42,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute admin function"))]
-    ExecuteAdminFunction {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_query::error::Error,
-    },
-
     #[snafu(display("Failed to build admin function args: {msg}"))]
     BuildAdminFunctionArgs { msg: String },
 
@@ -980,7 +973,6 @@ impl ErrorExt for Error {
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
-            Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
             Error::ColumnOptions { source, .. } => source.status_code(),
