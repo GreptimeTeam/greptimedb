@@ -48,14 +48,24 @@ impl StatementExecutor {
         let Admin::Func(func) = &stmt;
         // the function name should be in lower case.
         let func_name = func.name.to_string().to_lowercase();
-        let admin_func = FUNCTION_REGISTRY
-            .get_async_function(&func_name)
-            .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
+        let factory = FUNCTION_REGISTRY.get_function(&func_name).context(
+            error::AdminFunctionNotFoundSnafu {
+                name: func_name.clone(),
+            },
+        )?;
+        let func_ctx = FunctionContext {
+            query_ctx: query_ctx.clone(),
+            state: self.query_engine.engine_state().function_state(),
+        };
 
-        let signature = admin_func.signature();
+        let admin_udf = factory.provide(func_ctx);
+        let fn_name = admin_udf.name();
+        let signature = admin_udf.signature();
+
+        // Parse function arguments
         let FunctionArguments::List(args) = &func.args else {
             return error::BuildAdminFunctionArgsSnafu {
-                msg: format!("unsupported function args {}", func.args),
+                msg: format!("unsupported function args {} for {}", func.args, fn_name),
             }
             .fail();
         };
@@ -65,7 +75,7 @@ impl StatementExecutor {
             .map(|arg| {
                 let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
                     return error::BuildAdminFunctionArgsSnafu {
-                        msg: format!("unsupported function arg {arg}"),
+                        msg: format!("unsupported function arg {arg} for {}", fn_name),
                     }
                     .fail();
                 };
@@ -73,30 +83,91 @@ impl StatementExecutor {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let args = args_to_vector(&signature.type_signature, &arg_values, &query_ctx)?;
-        let arg_types = args.iter().map(|arg| arg.data_type()).collect::<Vec<_>>();
+        let type_sig = signature.type_signature.clone().into();
+        let args = args_to_vector(&type_sig, &arg_values, &query_ctx)?;
+        let arg_types = args
+            .iter()
+            .map(|arg| arg.data_type().as_arrow_type())
+            .collect::<Vec<_>>();
+        let ret_type = admin_udf.return_type(&arg_types).map_err(|e| {
+            error::Error::BuildAdminFunctionArgs {
+                msg: format!(
+                    "Failed to get return type of admin function {}: {}",
+                    fn_name, e
+                ),
+            }
+        })?;
 
-        let func_ctx = FunctionContext {
-            query_ctx,
-            state: self.query_engine.engine_state().function_state(),
+        // Convert arguments to DataFusion ColumnarValue format
+        let columnar_args: Vec<datafusion_expr::ColumnarValue> = args
+            .iter()
+            .map(|vector| datafusion_expr::ColumnarValue::Array(vector.to_arrow_array()))
+            .collect();
+
+        // Create ScalarFunctionArgs following the same pattern as udf.rs
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: columnar_args,
+            arg_fields: args
+                .iter()
+                .enumerate()
+                .map(|(i, vector)| {
+                    Arc::new(arrow::datatypes::Field::new(
+                        format!("arg_{}", i),
+                        arg_types[i].clone(),
+                        vector.null_count() > 0,
+                    ))
+                })
+                .collect(),
+            return_field: Arc::new(arrow::datatypes::Field::new("result", ret_type, true)),
+            number_rows: if args.is_empty() { 1 } else { args[0].len() },
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
         };
 
-        let result = admin_func
-            .eval(func_ctx, &args)
+        // Execute the async UDF
+        let result_columnar = admin_udf
+            .as_async()
+            .context(error::BuildAdminFunctionArgsSnafu {
+                msg: format!("Function {} is not async", fn_name),
+            })?
+            .invoke_async_with_args(func_args)
             .await
-            .context(error::ExecuteAdminFunctionSnafu)?;
+            .map_err(|e| error::Error::BuildAdminFunctionArgs {
+                msg: format!("Failed to execute admin function {}: {}", fn_name, e),
+            })?;
 
+        // Convert result back to VectorRef following the same pattern as udf.rs
+        let result = match result_columnar {
+            datafusion_expr::ColumnarValue::Array(array) => {
+                datatypes::vectors::Helper::try_into_vector(array).map_err(|e| {
+                    error::Error::BuildAdminFunctionArgs {
+                        msg: format!("Failed to convert result array for {}: {}", fn_name, e),
+                    }
+                })?
+            }
+            datafusion_expr::ColumnarValue::Scalar(scalar) => {
+                let array = scalar.to_array_of_size(1).map_err(|e| {
+                    error::Error::BuildAdminFunctionArgs {
+                        msg: format!("Failed to convert scalar to array for {}: {}", fn_name, e),
+                    }
+                })?;
+                datatypes::vectors::Helper::try_into_vector(array).map_err(|e| {
+                    error::Error::BuildAdminFunctionArgs {
+                        msg: format!("Failed to convert result scalar for {}: {}", fn_name, e),
+                    }
+                })?
+            }
+        };
+
+        let result_vector: VectorRef = result;
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
             stmt.to_string(),
-            admin_func
-                .return_type(&arg_types)
-                .context(error::ExecuteAdminFunctionSnafu)?,
+            result_vector.data_type(),
             false,
         )];
         let schema = Arc::new(Schema::new(column_schemas));
-        let batch =
-            RecordBatch::new(schema.clone(), vec![result]).context(error::BuildRecordBatchSnafu)?;
+        let batch = RecordBatch::new(schema.clone(), vec![result_vector])
+            .context(error::BuildRecordBatchSnafu)?;
         let batches =
             RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
 

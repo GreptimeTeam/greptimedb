@@ -187,8 +187,27 @@ fn build_struct(
 
     quote! {
         #(#attrs)*
-        #[derive(Debug)]
-        #vis struct #name;
+        #vis struct #name {
+            signature: datafusion_expr::Signature,
+            func_ctx: #user_path::function::FunctionContext,
+        }
+
+        impl #name {
+            /// Creates a new instance of the function with function context.
+            fn create(func_ctx: #user_path::function::FunctionContext) -> Self {
+                Self {
+                    signature: #sig_fn().into(),
+                    func_ctx,
+                }
+            }
+
+            pub fn factory() -> impl Into< #user_path::function_factory::ScalarFunctionFactory>  {
+                Self {
+                    signature:  #sig_fn().into(),
+                    func_ctx: #user_path::function::FunctionContext::default(),
+                }
+            }
+        }
 
         impl std::fmt::Display for #name {
             fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -196,24 +215,85 @@ fn build_struct(
             }
         }
 
+        impl std::fmt::Debug for #name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "{}({})", #uppcase_display_name, self.func_ctx)
+            }
+        }
 
-        #[async_trait::async_trait]
-        impl #user_path::function::AsyncFunction for #name {
-            fn name(&self) -> &'static str {
+        // Implement DataFusion's ScalarUDFImpl trait
+        impl datafusion::logical_expr::ScalarUDFImpl for #name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn name(&self) -> &str {
                 #display_name
             }
 
-            fn return_type(&self, _input_types: &[store_api::storage::ConcreteDataType]) -> common_query::error::Result<store_api::storage::ConcreteDataType> {
-                Ok(store_api::storage::ConcreteDataType::#ret())
+            fn signature(&self) -> &datafusion_expr::Signature {
+                &self.signature
             }
 
-            fn signature(&self) -> Signature {
-                #sig_fn()
+            fn return_type(&self, _arg_types: &[datafusion::arrow::datatypes::DataType]) -> datafusion_common::Result<datafusion::arrow::datatypes::DataType> {
+                use datatypes::data_type::DataType;
+                Ok(store_api::storage::ConcreteDataType::#ret().as_arrow_type())
             }
 
-            async fn eval(&self, func_ctx: #user_path::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
+            fn invoke_with_args(
+                &self,
+                _args: datafusion::logical_expr::ScalarFunctionArgs,
+            ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+                Err(datafusion_common::DataFusionError::NotImplemented(
+                    format!("{} can only be called from async contexts", #display_name)
+                ))
+            }
+        }
+
+        /// Implement From trait for ScalarFunctionFactory
+        impl From<#name> for  #user_path::function_factory::ScalarFunctionFactory {
+            fn from(func: #name) -> Self {
+                 use std::sync::Arc;
+                 use datafusion_expr::ScalarUDFImpl;
+                 use datafusion_expr::async_udf::AsyncScalarUDF;
+
+                let name = func.name().to_string();
+                let func = Arc::new(move |ctx: #user_path::function::FunctionContext| {
+                    let udf_impl = #name::create(ctx);
+                    let async_udf = AsyncScalarUDF::new(Arc::new(udf_impl));
+                    async_udf.into_scalar_udf()
+                });
+                Self {
+                    name,
+                    factory: func,
+                }
+            }
+        }
+
+        // Implement DataFusion's AsyncScalarUDFImpl trait
+        #[async_trait::async_trait]
+        impl datafusion_expr::async_udf::AsyncScalarUDFImpl for #name {
+            async fn invoke_async_with_args(
+                &self,
+                args: datafusion::logical_expr::ScalarFunctionArgs,
+            ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+                let columns = args.args
+                    .iter()
+                    .map(|arg| {
+                        common_query::prelude::ColumnarValue::try_from(arg)
+                            .and_then(|cv| match cv {
+                                common_query::prelude::ColumnarValue::Vector(v) => Ok(v),
+                                common_query::prelude::ColumnarValue::Scalar(s) => {
+                                    datatypes::vectors::Helper::try_from_scalar_value(s, args.number_rows)
+                                        .context(common_query::error::FromScalarValueSnafu)
+                                }
+                            })
+                    })
+                    .collect::<common_query::error::Result<Vec<_>>>()
+                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Column conversion error: {}", e)))?;
+
                 // Ensure under the `greptime` catalog for security
-                #user_path::ensure_greptime!(func_ctx);
+                #user_path::ensure_greptime!(self.func_ctx);
 
                 let columns_num = columns.len();
                 let rows_num = if columns.is_empty() {
@@ -221,40 +301,47 @@ fn build_struct(
                 } else {
                     columns[0].len()
                 };
-                let columns = Vec::from(columns);
 
-                use snafu::OptionExt;
+                use snafu::{OptionExt, ResultExt};
                 use datatypes::data_type::DataType;
 
-                let query_ctx = &func_ctx.query_ctx;
-                let handler = func_ctx
+                let query_ctx = &self.func_ctx.query_ctx;
+                let handler = self.func_ctx
                     .state
                     .#handler
                     .as_ref()
-                    .context(#snafu_type)?;
+                    .context(#snafu_type)
+                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Handler error: {}", e)))?;
 
                 let mut builder = store_api::storage::ConcreteDataType::#ret()
                     .create_mutable_vector(rows_num);
 
                 if columns_num == 0 {
-                    let result = #fn_name(handler, query_ctx, &[]).await?;
+                    let result = #fn_name(handler, query_ctx, &[]).await
+                        .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e)))?;
 
                     builder.push_value_ref(result.as_value_ref());
                 } else {
                     for i in 0..rows_num {
                         let args: Vec<_> = columns.iter()
-                            .map(|vector| vector.get_ref(i))
+                            .map(|vector| vector.get(i))
+                            .collect();
+                        let args_refs: Vec<_> = args.iter()
+                            .map(|val| val.as_value_ref())
                             .collect();
 
-                        let result = #fn_name(handler, query_ctx, &args).await?;
+                        let result = #fn_name(handler, query_ctx, &args_refs).await
+                            .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e)))?;
 
                         builder.push_value_ref(result.as_value_ref());
                     }
                 }
 
-                Ok(builder.to_vector())
-            }
+                let result_vector = builder.to_vector();
 
+                // Convert result back to DataFusion ColumnarValue
+                Ok(datafusion_expr::ColumnarValue::Array(result_vector.to_arrow_array()))
+            }
         }
     }
     .into()

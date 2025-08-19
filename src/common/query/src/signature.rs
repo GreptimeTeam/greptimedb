@@ -156,6 +156,51 @@ impl From<TypeSignature> for DfTypeSignature {
     }
 }
 
+impl From<DfTypeSignature> for TypeSignature {
+    fn from(type_signature: DfTypeSignature) -> TypeSignature {
+        match type_signature {
+            DfTypeSignature::Variadic(types) => TypeSignature::Variadic(
+                types
+                    .iter()
+                    .map(ConcreteDataType::from_arrow_type)
+                    .collect(),
+            ),
+            DfTypeSignature::Uniform(n, types) => {
+                if n == 0 {
+                    return TypeSignature::NullAry;
+                }
+                TypeSignature::Uniform(
+                    n,
+                    types
+                        .iter()
+                        .map(ConcreteDataType::from_arrow_type)
+                        .collect(),
+                )
+            }
+            DfTypeSignature::Exact(types) => TypeSignature::Exact(
+                types
+                    .iter()
+                    .map(ConcreteDataType::from_arrow_type)
+                    .collect(),
+            ),
+            DfTypeSignature::Any(n) => {
+                if n == 0 {
+                    return TypeSignature::NullAry;
+                }
+                TypeSignature::Any(n)
+            }
+            DfTypeSignature::OneOf(ts) => {
+                TypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
+            }
+            DfTypeSignature::VariadicAny => TypeSignature::VariadicAny,
+            DfTypeSignature::Nullary => TypeSignature::NullAry,
+            // Other type signatures are currently mapped to VariadicAny as a fallback.
+            // These cases are not used in the current UDF implementation.
+            _ => TypeSignature::VariadicAny,
+        }
+    }
+}
+
 impl From<Signature> for DfSignature {
     fn from(sig: Signature) -> DfSignature {
         DfSignature::new(sig.type_signature.into(), sig.volatility)

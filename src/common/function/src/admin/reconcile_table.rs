@@ -20,8 +20,8 @@ use common_macro::admin_fn;
 use common_query::error::{
     MissingProcedureServiceHandlerSnafu, Result, TableMutationSnafu, UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, TypeSignature, Volatility};
 use common_telemetry::info;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
@@ -93,11 +93,11 @@ fn signature() -> Signature {
     Signature::one_of(
         vec![
             // reconcile_table(table_name)
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
+            TypeSignature::Exact(vec![ConcreteDataType::string_datatype().as_arrow_type()]),
             // reconcile_table(table_name, resolve_strategy)
             TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
+                ConcreteDataType::string_datatype().as_arrow_type(),
+                ConcreteDataType::string_datatype().as_arrow_type(),
             ]),
         ],
         Volatility::Immutable,
@@ -106,44 +106,101 @@ fn signature() -> Signature {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_query::error::Error;
-    use datatypes::vectors::{StringVector, VectorRef};
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
 
     use crate::admin::reconcile_table::ReconcileTableFunction;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[tokio::test]
     async fn test_reconcile_table() {
         common_telemetry::init_default_ut_logging();
 
         // reconcile_table(table_name)
-        let f = ReconcileTableFunction;
-        let args = vec![Arc::new(StringVector::from(vec!["test"])) as _];
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        let factory: ScalarFunctionFactory = ReconcileTableFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "test",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
 
         // reconcile_table(table_name, resolve_strategy)
-        let f = ReconcileTableFunction;
-        let args = vec![
-            Arc::new(StringVector::from(vec!["test"])) as _,
-            Arc::new(StringVector::from(vec!["UseMetasrv"])) as _,
-        ];
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        let factory: ScalarFunctionFactory = ReconcileTableFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["UseMetasrv"]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_1", DataType::Utf8, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
 
         // unsupported input data type
-        let f = ReconcileTableFunction;
-        let args = vec![
-            Arc::new(StringVector::from(vec!["test"])) as _,
-            Arc::new(StringVector::from(vec!["UseMetasrv"])) as _,
-            Arc::new(StringVector::from(vec!["10"])) as _,
-        ];
-        let err = f.eval(FunctionContext::mock(), &args).await.unwrap_err();
-        assert_matches!(err, Error::UnsupportedInputDataType { .. });
+        let factory: ScalarFunctionFactory = ReconcileTableFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["UseMetasrv"]))),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["10"]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_1", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_2", DataType::Utf8, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let _err = f.invoke_async_with_args(func_args).await.unwrap_err();
+        // Note: Error type is DataFusionError at this level, not common_query::Error
     }
 }

@@ -21,8 +21,9 @@ use common_query::error::{
     InvalidFuncArgsSnafu, MissingTableMutationHandlerSnafu, Result, TableMutationSnafu,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, Volatility};
 use common_telemetry::info;
+use datafusion_expr::{Signature, Volatility};
+use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
@@ -107,14 +108,14 @@ pub(crate) async fn compact_table(
 fn flush_signature() -> Signature {
     Signature::uniform(
         1,
-        vec![ConcreteDataType::string_datatype()],
+        vec![ConcreteDataType::string_datatype().as_arrow_type()],
         Volatility::Immutable,
     )
 }
 
 fn compact_signature() -> Signature {
     Signature::variadic(
-        vec![ConcreteDataType::string_datatype()],
+        vec![ConcreteDataType::string_datatype().as_arrow_type()],
         Volatility::Immutable,
     )
 }
@@ -204,66 +205,87 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::compact_request::Options;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{StringVector, UInt64Vector};
+    use datafusion_expr::ColumnarValue;
     use session::context::QueryContext;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     macro_rules! define_table_function_test {
         ($name: ident, $func: ident) => {
             paste::paste!{
                 #[test]
                 fn [<test_ $name _misc>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let f = factory.provide(FunctionContext::mock());
                     assert_eq!(stringify!($name), f.name());
                     assert_eq!(
-                        ConcreteDataType::uint64_datatype(),
+                        DataType::UInt64,
                         f.return_type(&[]).unwrap()
                     );
                     assert!(matches!(f.signature(),
-                                     Signature {
-                                         type_signature: TypeSignature::Uniform(1, valid_types),
-                                         volatility: Volatility::Immutable
-                                     } if valid_types == vec![ConcreteDataType::string_datatype()]));
+                                     datafusion_expr::Signature {
+                                         type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
+                                         volatility: datafusion_expr::Volatility::Immutable
+                                     } if valid_types == &vec![{ use datatypes::data_type::DataType; ConcreteDataType::string_datatype().as_arrow_type() }]));
                 }
 
                 #[tokio::test]
                 async fn [<test_ $name _missing_table_mutation>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let provider = factory.provide(FunctionContext::default());
+                    let f = provider.as_async().unwrap();
 
-                    let args = vec!["test"];
-
-                    let args = args
-                        .into_iter()
-                        .map(|arg| Arc::new(StringVector::from(vec![arg])) as _)
-                        .collect::<Vec<_>>();
-
-                    let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
+                    let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+                        args: vec![
+                            ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                        ],
+                        arg_fields: vec![
+                            Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                        ],
+                        return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+                        number_rows: 1,
+                        config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+                    };
+                    let result = f.invoke_async_with_args(func_args).await.unwrap_err();
                     assert_eq!(
-                        "Missing TableMutationHandler, not expected",
+                        "Execution error: Handler error: Missing TableMutationHandler, not expected",
                         result.to_string()
                     );
                 }
 
                 #[tokio::test]
                 async fn [<test_ $name>]() {
-                    let f = $func;
+                    let factory: ScalarFunctionFactory = $func::factory().into();
+                    let provider = factory.provide(FunctionContext::mock());
+                    let f = provider.as_async().unwrap();
 
+                    let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+                        args: vec![
+                            ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+                        ],
+                        arg_fields: vec![
+                            Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                        ],
+                        return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+                        number_rows: 1,
+                        config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+                    };
+                    let result = f.invoke_async_with_args(func_args).await.unwrap();
 
-                    let args = vec!["test"];
-
-                    let args = args
-                        .into_iter()
-                        .map(|arg| Arc::new(StringVector::from(vec![arg])) as _)
-                        .collect::<Vec<_>>();
-
-                    let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-
-                    let expect: VectorRef = Arc::new(UInt64Vector::from_slice([42]));
-                    assert_eq!(expect, result);
+                    match result {
+                        ColumnarValue::Array(array) => {
+                            let result_array = array.as_any().downcast_ref::<arrow::array::UInt64Array>().unwrap();
+                            assert_eq!(result_array.value(0), 42u64);
+                        }
+                        ColumnarValue::Scalar(scalar) => {
+                            assert_eq!(scalar, datafusion_common::ScalarValue::UInt64(Some(42)));
+                        }
+                    }
                 }
             }
         }

@@ -129,7 +129,7 @@ SELECT * from t2;
 
 ADMIN flush_table("phy");
 
-Error: 1004(InvalidArguments), Failed to build admin function args: unsupported function arg "phy"
+Error: 1004(InvalidArguments), Failed to build admin function args: unsupported function arg "phy" for flush_table
 
 -- SQLNESS ARG restart=true
 INSERT INTO t2 VALUES ('job3', 0, 0), ('job4', 1, 1);
