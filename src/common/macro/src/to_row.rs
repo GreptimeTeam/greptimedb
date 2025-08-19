@@ -226,50 +226,46 @@ fn get_column_data_type(
     infer_column_data_type: &Option<ColumnDataType>,
     attribute: &ColumnAttribute,
 ) -> Option<ColumnDataType> {
-    if let Some(column_data_type) = attribute.column_data_type {
-        return Some(column_data_type);
-    }
-    *infer_column_data_type
+    attribute.column_data_type.or(*infer_column_data_type)
 }
 
 fn convert_column_data_type_to_value_data_ident(column_data_type: &ColumnDataType) -> Ident {
-    let suffix = "Value";
     match column_data_type {
-        ColumnDataType::Boolean => format_ident!("{}{}", "Bool", suffix),
-        ColumnDataType::Int8 => format_ident!("{}{}", "I8", suffix),
-        ColumnDataType::Int16 => format_ident!("{}{}", "I16", suffix),
-        ColumnDataType::Int32 => format_ident!("{}{}", "I32", suffix),
-        ColumnDataType::Int64 => format_ident!("{}{}", "I64", suffix),
-        ColumnDataType::Uint8 => format_ident!("{}{}", "U8", suffix),
-        ColumnDataType::Uint16 => format_ident!("{}{}", "U16", suffix),
-        ColumnDataType::Uint32 => format_ident!("{}{}", "U32", suffix),
-        ColumnDataType::Uint64 => format_ident!("{}{}", "U64", suffix),
-        ColumnDataType::Float32 => format_ident!("{}{}", "F32", suffix),
-        ColumnDataType::Float64 => format_ident!("{}{}", "F64", suffix),
-        ColumnDataType::Binary => format_ident!("{}{}", "Binary", suffix),
-        ColumnDataType::String => format_ident!("{}{}", "String", suffix),
-        ColumnDataType::Date => format_ident!("{}{}", "Date", suffix),
-        ColumnDataType::Datetime => format_ident!("{}{}", "Datetime", suffix),
-        ColumnDataType::TimestampSecond => format_ident!("{}{}", "TimestampSecond", suffix),
+        ColumnDataType::Boolean => format_ident!("BoolValue"),
+        ColumnDataType::Int8 => format_ident!("I8Value"),
+        ColumnDataType::Int16 => format_ident!("I16Value"),
+        ColumnDataType::Int32 => format_ident!("I32Value"),
+        ColumnDataType::Int64 => format_ident!("I64Value"),
+        ColumnDataType::Uint8 => format_ident!("U8Value"),
+        ColumnDataType::Uint16 => format_ident!("U16Value"),
+        ColumnDataType::Uint32 => format_ident!("U32Value"),
+        ColumnDataType::Uint64 => format_ident!("U64Value"),
+        ColumnDataType::Float32 => format_ident!("F32Value"),
+        ColumnDataType::Float64 => format_ident!("F64Value"),
+        ColumnDataType::Binary => format_ident!("BinaryValue"),
+        ColumnDataType::String => format_ident!("StringValue"),
+        ColumnDataType::Date => format_ident!("DateValue"),
+        ColumnDataType::Datetime => format_ident!("DatetimeValue"),
+        ColumnDataType::TimestampSecond => format_ident!("TimestampSecondValue"),
         ColumnDataType::TimestampMillisecond => {
-            format_ident!("{}{}", "TimestampMillisecond", suffix)
+            format_ident!("TimestampMillisecondValue")
         }
         ColumnDataType::TimestampMicrosecond => {
-            format_ident!("{}{}", "TimestampMicrosecond", suffix)
+            format_ident!("TimestampMicrosecondValue")
         }
-        ColumnDataType::TimestampNanosecond => format_ident!("{}{}", "TimestampNanosecond", suffix),
-        ColumnDataType::TimeSecond => format_ident!("{}{}", "TimeSecond", suffix),
-        ColumnDataType::TimeMillisecond => format_ident!("{}{}", "TimeMillisecond", suffix),
-        ColumnDataType::TimeMicrosecond => format_ident!("{}{}", "TimeMicrosecond", suffix),
-        ColumnDataType::TimeNanosecond => format_ident!("{}{}", "TimeNanosecond", suffix),
-        ColumnDataType::IntervalYearMonth => format_ident!("{}{}", "IntervalYearMonth", suffix),
-        ColumnDataType::IntervalDayTime => format_ident!("{}{}", "IntervalDayTime", suffix),
+        ColumnDataType::TimestampNanosecond => format_ident!("TimestampNanosecondValue"),
+        ColumnDataType::TimeSecond => format_ident!("TimeSecondValue"),
+        ColumnDataType::TimeMillisecond => format_ident!("TimeMillisecondValue"),
+        ColumnDataType::TimeMicrosecond => format_ident!("TimeMicrosecondValue"),
+        ColumnDataType::TimeNanosecond => format_ident!("TimeNanosecondValue"),
+        ColumnDataType::IntervalYearMonth => format_ident!("IntervalYearMonthValue"),
+        ColumnDataType::IntervalDayTime => format_ident!("IntervalDayTimeValue"),
         ColumnDataType::IntervalMonthDayNano => {
-            format_ident!("{}{}", "IntervalMonthDayNano", suffix)
+            format_ident!("IntervalMonthDayNanoValue")
         }
-        ColumnDataType::Decimal128 => format_ident!("{}{}", "Decimal128", suffix),
-        ColumnDataType::Json => format_ident!("{}{}", "Json", suffix),
-        ColumnDataType::Vector => format_ident!("{}{}", "Vector", suffix),
+        ColumnDataType::Decimal128 => format_ident!("Decimal128Value"),
+        ColumnDataType::Json => format_ident!("JsonValue"),
+        ColumnDataType::Vector => format_ident!("VectorValue"),
     }
 }
 
