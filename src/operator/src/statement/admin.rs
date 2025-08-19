@@ -83,7 +83,7 @@ impl StatementExecutor {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let type_sig = signature.type_signature.clone().into();
+        let type_sig = (&signature.type_signature).into();
         let args = args_to_vector(&type_sig, &arg_values, &query_ctx)?;
         let arg_types = args
             .iter()

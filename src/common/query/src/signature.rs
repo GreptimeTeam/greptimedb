@@ -156,8 +156,8 @@ impl From<TypeSignature> for DfTypeSignature {
     }
 }
 
-impl From<DfTypeSignature> for TypeSignature {
-    fn from(type_signature: DfTypeSignature) -> TypeSignature {
+impl From<&DfTypeSignature> for TypeSignature {
+    fn from(type_signature: &DfTypeSignature) -> TypeSignature {
         match type_signature {
             DfTypeSignature::Variadic(types) => TypeSignature::Variadic(
                 types
@@ -166,11 +166,11 @@ impl From<DfTypeSignature> for TypeSignature {
                     .collect(),
             ),
             DfTypeSignature::Uniform(n, types) => {
-                if n == 0 {
+                if *n == 0 {
                     return TypeSignature::NullAry;
                 }
                 TypeSignature::Uniform(
-                    n,
+                    *n,
                     types
                         .iter()
                         .map(ConcreteDataType::from_arrow_type)
@@ -184,10 +184,10 @@ impl From<DfTypeSignature> for TypeSignature {
                     .collect(),
             ),
             DfTypeSignature::Any(n) => {
-                if n == 0 {
+                if *n == 0 {
                     return TypeSignature::NullAry;
                 }
-                TypeSignature::Any(n)
+                TypeSignature::Any(*n)
             }
             DfTypeSignature::OneOf(ts) => {
                 TypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
