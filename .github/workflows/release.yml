@@ -111,7 +111,8 @@ jobs:
       # The 'version' use as the global tag name of the release workflow.
       version: ${{ steps.create-version.outputs.version }}
 
-      should-push-latest-tag: ${{ steps.check-version.outputs.should-push-latest-tag }}
+      # The 'is-current-version-latest' determines whether to update 'latest' Docker tags and downstream repositories.
+      is-current-version-latest: ${{ steps.check-version.outputs.is-current-version-latest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -321,7 +322,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: ${{ needs.allocate-runners.outputs.should-push-latest-tag == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -368,7 +369,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: ${{ needs.allocate-runners.outputs.should-push-latest-tag == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
@@ -476,7 +477,7 @@ jobs:
 
   bump-helm-charts-version:
     name: Bump helm charts version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:
@@ -497,7 +498,7 @@ jobs:
 
   bump-homebrew-greptime-version:
     name: Bump homebrew greptime version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:

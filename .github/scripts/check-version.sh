@@ -35,8 +35,8 @@ HIGHER_VERSION=$(printf "%s\n%s" "$CLEAN_CURRENT" "$CLEAN_LATEST" | sort -V | ta
 
 if [ "$HIGHER_VERSION" = "$CLEAN_CURRENT" ]; then
   echo "Current version ($CLEAN_CURRENT) is NEWER than or EQUAL to latest ($CLEAN_LATEST)"
-  echo "should-push-latest-tag=true" >> $GITHUB_OUTPUT
+  echo "is-current-version-latest=true" >> $GITHUB_OUTPUT
 else
   echo "Current version ($CLEAN_CURRENT) is OLDER than latest ($CLEAN_LATEST)"
-  echo "should-push-latest-tag=false" >> $GITHUB_OUTPUT
+  echo "is-current-version-latest=false" >> $GITHUB_OUTPUT
 fi
