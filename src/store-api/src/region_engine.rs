@@ -37,6 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
 };
+use crate::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
@@ -806,6 +807,16 @@ pub trait RegionEngine: Send + Sync {
     ///
     /// Returns the `None` if the region is not found.
     fn role(&self, region_id: RegionId) -> Option<RegionRole>;
+
+    /// Lists all SSTs from the manifest of all regions in the engine.
+    async fn all_ssts_from_manifest(&self) -> Result<Vec<ManifestSstEntry>, BoxedError> {
+        Ok(vec![])
+    }
+
+    /// Lists all SSTs from the storage layer of all regions in the engine.
+    async fn all_ssts_from_storage(&self) -> Result<Vec<StorageSstEntry>, BoxedError> {
+        Ok(vec![])
+    }
 
     fn as_any(&self) -> &dyn Any;
 }

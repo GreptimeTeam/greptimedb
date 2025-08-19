@@ -276,6 +276,13 @@ impl WorkerGroup {
 
         &self.workers[index]
     }
+
+    pub(crate) fn all_regions(&self) -> Vec<MitoRegionRef> {
+        self.workers
+            .iter()
+            .flat_map(|worker| worker.regions.list_regions())
+            .collect()
+    }
 }
 
 // Tests methods.

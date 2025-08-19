@@ -15,6 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_time::Timestamp;
+use futures::TryStreamExt;
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
@@ -22,12 +24,14 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
+use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::engine::MITO_ENGINE_NAME;
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
@@ -299,6 +303,51 @@ impl AccessLayer {
         }
 
         Ok((sst_info, metrics))
+    }
+
+    /// Lists the SST entries from the storage layer in the table directory.
+    pub async fn storage_sst_entries(&self) -> Result<Vec<StorageSstEntry>> {
+        let mut lister = self
+            .object_store
+            .lister_with(self.table_dir.as_str())
+            .recursive(true)
+            .await
+            .context(OpenDalSnafu)?;
+
+        let mut entries = Vec::new();
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let metadata = entry.metadata();
+            if metadata.is_dir() {
+                continue;
+            }
+
+            let file_path = entry.path();
+            if !file_path.ends_with(".parquet") {
+                continue;
+            }
+
+            let file_size = metadata.content_length();
+            let file_size = if file_size == 0 {
+                None
+            } else {
+                Some(file_size)
+            };
+
+            let last_modified_ms = metadata
+                .last_modified()
+                .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
+
+            let entry = StorageSstEntry {
+                engine: MITO_ENGINE_NAME.to_string(),
+                file_path: file_path.to_string(),
+                file_size,
+                last_modified_ms,
+            };
+
+            entries.push(entry);
+        }
+
+        Ok(entries)
     }
 }
 

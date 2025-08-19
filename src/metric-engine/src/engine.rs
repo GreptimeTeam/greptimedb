@@ -378,6 +378,26 @@ impl RegionEngine for MetricEngine {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    async fn all_ssts_from_manifest(
+        &self,
+    ) -> Result<Vec<store_api::sst_entry::ManifestSstEntry>, BoxedError> {
+        let mut entries = self.inner.mito.all_ssts_from_manifest().await?;
+        for entry in &mut entries {
+            entry.engine = METRIC_ENGINE_NAME.to_string();
+        }
+        Ok(entries)
+    }
+
+    async fn all_ssts_from_storage(
+        &self,
+    ) -> Result<Vec<store_api::sst_entry::StorageSstEntry>, BoxedError> {
+        let mut entries = self.inner.mito.all_ssts_from_storage().await?;
+        for entry in &mut entries {
+            entry.engine = METRIC_ENGINE_NAME.to_string();
+        }
+        Ok(entries)
+    }
 }
 
 impl MetricEngine {
@@ -487,7 +507,7 @@ mod test {
     use mito2::sst::location::region_dir_from_table_dir;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::region_request::{
-        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest,
+        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     };
 
     use super::*;

@@ -50,3 +50,111 @@ impl MetricEngineInner {
             .map(|response| response.affected_rows)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::v1::Rows;
+    use itertools::Itertools as _;
+    use store_api::region_request::RegionPutRequest;
+
+    use super::*;
+    use crate::test_util::{build_rows, row_schema_with_tags, TestEnv};
+
+    #[tokio::test]
+    async fn test_list_ssts_after_write_and_flush_metric() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+
+        let phy_to_logi = vec![
+            (
+                RegionId::new(11, 1),
+                vec![RegionId::new(1111, 11), RegionId::new(1111, 12)],
+            ),
+            (RegionId::new(11, 2), vec![RegionId::new(1111, 2)]),
+            (RegionId::new(22, 42), vec![RegionId::new(2222, 42)]),
+        ];
+
+        for (phy_region_id, logi_region_ids) in &phy_to_logi {
+            env.create_physical_region(*phy_region_id, &TestEnv::default_table_dir())
+                .await;
+            for logi_region_id in logi_region_ids {
+                env.create_logical_region(*phy_region_id, *logi_region_id)
+                    .await;
+            }
+        }
+
+        // write to logical regions
+        for (_, logi_region_ids) in &phy_to_logi {
+            for logi_region_id in logi_region_ids {
+                let schema = row_schema_with_tags(&["job"]);
+                let rows = build_rows(1, 10);
+                let request = RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    hint: None,
+                });
+                engine
+                    .handle_request(*logi_region_id, request)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        for (phy_region_id, _) in &phy_to_logi {
+            engine
+                .handle_request(
+                    *phy_region_id,
+                    RegionRequest::Flush(RegionFlushRequest {
+                        row_group_size: None,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        // list from manifest
+        let mut manifest_entries = engine.all_ssts_from_manifest().await.unwrap();
+        let debug_format = manifest_entries
+            .iter_mut()
+            .map(|e| {
+                e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
+                e.file_id = "<file_id>".to_string();
+                format!("\n{:?}", e)
+            })
+            .sorted()
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(
+            debug_format,
+            r#"
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test_metric_region/11_0000000001/data/<file_id>.parquet", file_size: 3157, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9::Millisecond, sequence: Some(20) }
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test_metric_region/11_0000000002/data/<file_id>.parquet", file_size: 3157, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9::Millisecond, sequence: Some(10) }
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 47261417473(11, 16777217), table_id: 11, region_number: 16777217, region_group: 1, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test_metric_region/11_0000000001/metadata/<file_id>.parquet", file_size: 3201, num_rows: 8, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 0::Millisecond, sequence: Some(8) }
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 47261417474(11, 16777218), table_id: 11, region_number: 16777218, region_group: 1, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test_metric_region/11_0000000002/metadata/<file_id>.parquet", file_size: 3185, num_rows: 4, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 0::Millisecond, sequence: Some(4) }
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test_metric_region/22_0000000042/data/<file_id>.parquet", file_size: 3157, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9::Millisecond, sequence: Some(10) }
+ManifestSstEntry { engine: "metric", table_dir: "test_metric_region/", region_id: 94506057770(22, 16777258), table_id: 22, region_number: 16777258, region_group: 1, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test_metric_region/22_0000000042/metadata/<file_id>.parquet", file_size: 3185, num_rows: 4, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 0::Millisecond, sequence: Some(4) }"#
+        );
+
+        // list from storage
+        let mut storage_entries = engine.all_ssts_from_storage().await.unwrap();
+        let debug_format = storage_entries
+            .iter_mut()
+            .map(|e| {
+                let i = e.file_path.rfind('/').unwrap();
+                e.file_path.replace_range(i.., "/<file_id>.parquet");
+                format!("\n{:?}", e)
+            })
+            .sorted()
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(
+            debug_format,
+            r#"
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/11_0000000001/data/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/11_0000000001/metadata/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/11_0000000002/data/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/11_0000000002/metadata/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/22_0000000042/data/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "metric", file_path: "test_metric_region/22_0000000042/metadata/<file_id>.parquet", file_size: None, last_modified_ms: None }"#
+        );
+    }
+}

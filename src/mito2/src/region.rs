@@ -32,10 +32,12 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
+use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
 use store_api::ManifestVersion;
 
 use crate::access_layer::AccessLayerRef;
+use crate::engine::MITO_ENGINE_NAME;
 use crate::error::{
     FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
     UpdateManifestSnafu,
@@ -47,6 +49,7 @@ use crate::meter::rate_meter::RateMeter;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::location::sst_file_path;
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -496,6 +499,41 @@ impl MitoRegion {
                 .build()
             })?;
         Ok(())
+    }
+
+    /// Returns the SST entries of the region.
+    pub fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
+        let table_dir = self.table_dir();
+        let path_type = self.access_layer.path_type();
+        self.version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| {
+                level.files().map(|file| {
+                    let meta = file.meta_ref();
+                    let region_id = meta.region_id;
+                    ManifestSstEntry {
+                        engine: MITO_ENGINE_NAME.to_string(),
+                        table_dir: table_dir.to_string(),
+                        region_id,
+                        table_id: region_id.table_id(),
+                        region_number: region_id.region_number(),
+                        region_group: region_id.region_group(),
+                        region_sequence: region_id.region_sequence(),
+                        file_id: meta.file_id.to_string(),
+                        level: meta.level,
+                        file_path: sst_file_path(table_dir, meta.file_id(), path_type),
+                        file_size: meta.file_size,
+                        num_rows: meta.num_rows,
+                        num_row_groups: meta.num_row_groups,
+                        min_ts: meta.time_range.0,
+                        max_ts: meta.time_range.1,
+                        sequence: meta.sequence.map(|s| s.get()),
+                    }
+                })
+            })
+            .collect()
     }
 }
 

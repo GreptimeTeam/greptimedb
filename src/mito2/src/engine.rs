@@ -91,6 +91,7 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
+use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use store_api::ManifestVersion;
 use tokio::sync::{oneshot, Semaphore};
@@ -829,6 +830,35 @@ impl RegionEngine for MitoEngine {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    async fn all_ssts_from_manifest(&self) -> Result<Vec<ManifestSstEntry>, BoxedError> {
+        Ok(self
+            .inner
+            .workers
+            .all_regions()
+            .iter()
+            .flat_map(|region| region.manifest_sst_entries())
+            .collect())
+    }
+
+    async fn all_ssts_from_storage(&self) -> Result<Vec<StorageSstEntry>, BoxedError> {
+        let regions = self.inner.workers.all_regions();
+        let access_layers_distinct_table_dirs = regions
+            .iter()
+            .map(|region| (region.access_layer.table_dir(), &region.access_layer))
+            .collect::<HashMap<_, _>>();
+
+        let mut entries = Vec::new();
+        for (_, access_layer) in access_layers_distinct_table_dirs {
+            let ssts = access_layer
+                .storage_sst_entries()
+                .await
+                .map_err(BoxedError::new)?;
+            entries.extend(ssts);
+        }
+
+        Ok(entries)
     }
 }
 

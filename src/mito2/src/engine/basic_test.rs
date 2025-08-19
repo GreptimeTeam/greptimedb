@@ -27,11 +27,12 @@ use common_recordbatch::RecordBatches;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use itertools::Itertools;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    PathType, RegionCreateRequest, RegionOpenRequest, RegionPutRequest,
+    PathType, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
 };
 use store_api::storage::RegionId;
 
@@ -723,4 +724,86 @@ async fn test_cache_null_primary_key() {
 | 1     |       | 10.0    | 1970-01-01T00:00:01 |
 +-------+-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_list_ssts() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Create 3 regions and write some rows to each of them
+    let region_ids = vec![
+        RegionId::new(11, 1),
+        RegionId::new(11, 2),
+        RegionId::new(22, 42),
+    ];
+
+    for region_id in &region_ids {
+        let request = CreateRequestBuilder::new().build();
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(*region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // write some rows
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("x", 0, 10, 0),
+        };
+        put_rows(&engine, *region_id, rows).await;
+    }
+
+    // flush to generate sst
+    for region_id in &region_ids {
+        engine
+            .handle_request(
+                *region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    // list from manifest
+    let mut manifest_entries = engine.all_ssts_from_manifest().await.unwrap();
+    let debug_format = manifest_entries
+        .iter_mut()
+        .map(|e| {
+            e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
+            e.file_id = "<file_id>".to_string();
+            format!("\n{:?}", e)
+        })
+        .sorted()
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        debug_format,
+        r#"
+ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { engine: "mito", table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
+    );
+
+    // list from storage
+    let mut storage_entries = engine.all_ssts_from_storage().await.unwrap();
+    let debug_format = storage_entries
+        .iter_mut()
+        .map(|e| {
+            let i = e.file_path.rfind('/').unwrap();
+            e.file_path.replace_range(i.., "/<file_id>.parquet");
+            format!("\n{:?}", e)
+        })
+        .sorted()
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        debug_format,
+        r#"
+StorageSstEntry { engine: "mito", file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "mito", file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { engine: "mito", file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }"#
+    );
 }
