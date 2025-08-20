@@ -41,6 +41,12 @@ impl FunctionContext {
     }
 }
 
+impl std::fmt::Display for FunctionContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FunctionContext {{ query_ctx: {} }}", self.query_ctx)
+    }
+}
+
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
@@ -67,22 +73,3 @@ pub trait Function: fmt::Display + Sync + Send {
 }
 
 pub type FunctionRef = Arc<dyn Function>;
-
-/// Async Scalar function trait
-#[async_trait::async_trait]
-pub trait AsyncFunction: fmt::Display + Sync + Send {
-    /// Returns the name of the function, should be unique.
-    fn name(&self) -> &str;
-
-    /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
-
-    /// The signature of function.
-    fn signature(&self) -> Signature;
-
-    /// Evaluate the function, e.g. run/execute the function.
-    /// TODO(dennis): simplify the signature and refactor all the admin functions.
-    async fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
-}
-
-pub type AsyncFunctionRef = Arc<dyn AsyncFunction>;

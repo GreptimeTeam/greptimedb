@@ -21,8 +21,6 @@ mod reconcile_database;
 mod reconcile_table;
 mod remove_region_follower;
 
-use std::sync::Arc;
-
 use add_region_follower::AddRegionFollowerFunction;
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
@@ -35,22 +33,22 @@ use remove_region_follower::RemoveRegionFollowerFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
-/// Table functions
+/// Administration functions
 pub(crate) struct AdminFunction;
 
 impl AdminFunction {
-    /// Register all table functions to [`FunctionRegistry`].
+    /// Register all admin functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_async(Arc::new(MigrateRegionFunction));
-        registry.register_async(Arc::new(AddRegionFollowerFunction));
-        registry.register_async(Arc::new(RemoveRegionFollowerFunction));
-        registry.register_async(Arc::new(FlushRegionFunction));
-        registry.register_async(Arc::new(CompactRegionFunction));
-        registry.register_async(Arc::new(FlushTableFunction));
-        registry.register_async(Arc::new(CompactTableFunction));
-        registry.register_async(Arc::new(FlushFlowFunction));
-        registry.register_async(Arc::new(ReconcileCatalogFunction));
-        registry.register_async(Arc::new(ReconcileDatabaseFunction));
-        registry.register_async(Arc::new(ReconcileTableFunction));
+        registry.register(MigrateRegionFunction::factory());
+        registry.register(AddRegionFollowerFunction::factory());
+        registry.register(RemoveRegionFollowerFunction::factory());
+        registry.register(FlushRegionFunction::factory());
+        registry.register(CompactRegionFunction::factory());
+        registry.register(FlushTableFunction::factory());
+        registry.register(CompactTableFunction::factory());
+        registry.register(FlushFlowFunction::factory());
+        registry.register(ReconcileCatalogFunction::factory());
+        registry.register(ReconcileDatabaseFunction::factory());
+        registry.register(ReconcileTableFunction::factory());
     }
 }

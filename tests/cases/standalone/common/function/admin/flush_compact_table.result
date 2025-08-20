@@ -35,6 +35,22 @@ ADMIN COMPACT_TABLE('test');
 | 0                           |
 +-----------------------------+
 
+SELECT FLUSH_TABLE('test');
+
++---------------------------+
+| flush_table(Utf8("test")) |
++---------------------------+
+| 0                         |
++---------------------------+
+
+SELECT COMPACT_TABLE('test');
+
++-----------------------------+
+| compact_table(Utf8("test")) |
++-----------------------------+
+| 0                           |
++-----------------------------+
+
 --- doesn't change anything ---
 SELECT * FROM test;
 
