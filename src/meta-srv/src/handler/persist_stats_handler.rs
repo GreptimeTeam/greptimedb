@@ -27,6 +27,7 @@ use common_telemetry::warn;
 use common_time::util::current_time_millis;
 use dashmap::DashMap;
 use store_api::region_engine::RegionRole;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
@@ -35,6 +36,7 @@ use crate::metasrv::Context;
 /// The handler to persist stats.
 pub struct PersistStatsHandler {
     inserter: Box<dyn Inserter>,
+    last_persisted_region_stats: DashMap<RegionId, PersistedRegionStat>,
     last_persisted_time: DashMap<DatanodeId, Instant>,
     persist_interval: Duration,
 }
@@ -46,6 +48,21 @@ const DEFAULT_CONTEXT: InserterContext = InserterContext {
     catalog: DEFAULT_CATALOG_NAME,
     schema: DEFAULT_PRIVATE_SCHEMA_NAME,
 };
+
+#[derive(Debug, Clone, Copy)]
+struct PersistedRegionStat {
+    region_id: RegionId,
+    write_bytess: u64,
+}
+
+impl From<&RegionStat> for PersistedRegionStat {
+    fn from(stat: &RegionStat) -> Self {
+        Self {
+            region_id: stat.id,
+            write_bytess: stat.write_bytes,
+        }
+    }
+}
 
 #[derive(ToRow)]
 struct PersistRegionStat<'a> {
@@ -59,7 +76,7 @@ struct PersistRegionStat<'a> {
     num_rows: u64,
     sst_num: u64,
     sst_size: u64,
-    write_bytess: u64,
+    write_bytes_delta: u64,
     #[col(
         name = "greptime_timestamp",
         semantic = "Timestamp",
@@ -68,8 +85,37 @@ struct PersistRegionStat<'a> {
     timestamp_millis: i64,
 }
 
+fn persist_region_stats(
+    region_stat: &RegionStat,
+    datanode_id: DatanodeId,
+    aligned_ts: i64,
+    persisted_region_stat: Option<PersistedRegionStat>,
+) -> PersistRegionStat {
+    let write_bytes_delta = persisted_region_stat
+        .and_then(|persisted_region_stat| {
+            region_stat
+                .write_bytes
+                .checked_sub(persisted_region_stat.write_bytess)
+        })
+        .unwrap_or_default();
+
+    PersistRegionStat {
+        table_id: region_stat.id.table_id(),
+        region_id: region_stat.id.as_u64(),
+        region_number: region_stat.id.region_number(),
+        manifest_size: region_stat.manifest_size,
+        datanode_id,
+        engine: region_stat.engine.as_str(),
+        num_rows: region_stat.num_rows,
+        sst_num: region_stat.sst_num,
+        sst_size: region_stat.sst_size,
+        write_bytes_delta,
+        timestamp_millis: aligned_ts,
+    }
+}
+
 impl PersistStatsHandler {
-    /// Creates a new [`PersistRegionStatsHandler`].
+    /// Creates a new [`PersistStatsHandler`].
     ///
     /// # Panics
     ///
@@ -86,6 +132,7 @@ impl PersistStatsHandler {
 
         Self {
             inserter,
+            last_persisted_region_stats: DashMap::new(),
             last_persisted_time: DashMap::new(),
             persist_interval,
         }
@@ -104,32 +151,29 @@ impl PersistStatsHandler {
         let persist_interval_millis = self.persist_interval.as_millis() as i64;
         // Safety: `persist_interval_millis` is guaranteed to be greater than zero.
         let aligned_ts = timestamp / persist_interval_millis * persist_interval_millis;
-        let rows = region_stats
+        let (rows, incoming_region_stats): (Vec<_>, Vec<_>) = region_stats
             .iter()
-            .flat_map(|s| {
-                if matches!(s.role, RegionRole::Leader) {
-                    Some({
-                        PersistRegionStat {
-                            table_id: s.id.table_id(),
-                            region_id: s.id.as_u64(),
-                            region_number: s.id.region_number(),
-                            manifest_size: s.manifest_size,
+            .flat_map(|region_stat| {
+                if matches!(region_stat.role, RegionRole::Leader) {
+                    let persisted_region_stat = self
+                        .last_persisted_region_stats
+                        .get(&region_stat.id)
+                        .map(|s| *s);
+                    Some((
+                        persist_region_stats(
+                            region_stat,
                             datanode_id,
-                            engine: s.engine.as_str(),
-                            num_rows: s.num_rows,
-                            sst_num: s.sst_num,
-                            sst_size: s.sst_size,
-                            write_bytess: s.write_bytes,
-                            timestamp_millis: aligned_ts,
-                        }
-                        .to_row()
-                    })
+                            aligned_ts,
+                            persisted_region_stat,
+                        )
+                        .to_row(),
+                        PersistedRegionStat::from(region_stat),
+                    ))
                 } else {
                     None
                 }
             })
-            .collect::<Vec<_>>();
-
+            .unzip();
         if rows.is_empty() {
             return;
         }
@@ -158,6 +202,9 @@ impl PersistStatsHandler {
         }
 
         self.last_persisted_time.insert(datanode_id, Instant::now());
+        for s in incoming_region_stats {
+            self.last_persisted_region_stats.insert(s.region_id, s);
+        }
     }
 }
 
