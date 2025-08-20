@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use greptime_proto::v1::ColumnDataType;
+use greptime_proto::v1::{ColumnDataType, SemanticType as ProtoSemanticType};
 use once_cell::sync::Lazy;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
@@ -133,14 +133,14 @@ fn impl_schema_method(
             let column_data_type =
                 syn::LitInt::new(&(column_data_type as i32).to_string(), ident.span());
             let semantic_type_val = match column_attribute.semantic_type {
-                SemanticType::Field => greptime_proto::v1::SemanticType::Field,
-                SemanticType::Tag => greptime_proto::v1::SemanticType::Tag,
-                SemanticType::Timestamp => greptime_proto::v1::SemanticType::Timestamp,
+                SemanticType::Field => ProtoSemanticType::Field,
+                SemanticType::Tag => ProtoSemanticType::Tag,
+                SemanticType::Timestamp => ProtoSemanticType::Timestamp,
             } as i32;
             let semantic_type = syn::LitInt::new(&semantic_type_val.to_string(), ident.span());
 
             Ok(quote! {
-                greptime_proto::v1::ColumnSchema {
+                ColumnSchema {
                     column_name: #name.to_string(),
                     datatype: #column_data_type,
                     datatype_extension: None,
@@ -152,7 +152,7 @@ fn impl_schema_method(
         .collect::<Result<_>>()?;
 
     Ok(quote! {
-        pub fn schema(&self) -> Vec<greptime_proto::v1::ColumnSchema> {
+        pub fn schema(&self) -> Vec<ColumnSchema> {
             vec![ #(#schemas),* ]
         }
     })
@@ -183,16 +183,16 @@ fn impl_to_row_method_combined(
             let expr = if field_type.is_optional() {
                 quote! {
                     match &self.#ident {
-                        Some(v) => greptime_proto::v1::Value {
-                            value_data: Some(greptime_proto::v1::value::ValueData::#value_data(v.clone().into())),
+                        Some(v) => Value {
+                            value_data: Some(ValueData::#value_data(v.clone().into())),
                         },
-                        None => greptime_proto::v1::Value { value_data: None },
+                        None => Value { value_data: None },
                     }
                 }
             } else {
                 quote! {
-                    greptime_proto::v1::Value {
-                        value_data: Some(greptime_proto::v1::value::ValueData::#value_data(self.#ident.clone().into())),
+                    Value {
+                        value_data: Some(ValueData::#value_data(self.#ident.clone().into())),
                     }
                 }
             };
@@ -201,8 +201,8 @@ fn impl_to_row_method_combined(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(quote! {
-        pub fn to_row(&self) -> greptime_proto::v1::Row {
-            greptime_proto::v1::Row {
+        pub fn to_row(&self) -> Row {
+            Row {
                 values: vec![ #( #value_exprs ),* ]
             }
         }

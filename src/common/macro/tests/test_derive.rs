@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore, ToRow};
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use greptime_proto::v1::value::ValueData;
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
 use static_assertions::{assert_fields, assert_impl_all};
 
 #[as_aggr_func_creator]
