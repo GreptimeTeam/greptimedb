@@ -282,6 +282,9 @@ pub struct RemovedFiles {
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
     pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
+        if file_ids.is_empty() {
+            return;
+        }
         self.removed_files.push(RemovedFiles { at, file_ids });
     }
 
