@@ -68,7 +68,7 @@ impl Default for FileGcOption {
     fn default() -> Self {
         Self {
             // 30 minutes, because expect long running queries to be finished within 30 minutes
-            lingering_time: Duration::from_secs(60 * 30),
+            lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
             max_concurrent_per_gc_job: 32,
@@ -347,6 +347,7 @@ impl LocalGcWorker {
 
         // Collect all entries from the channel
         let mut all_unused_files_ready_for_delete = vec![];
+        let mut all_in_exist_linger_files = HashSet::new();
         while let Some(stream) = rx.recv().await {
             all_unused_files_ready_for_delete.extend(
                 stream.into_iter().filter_map(Result::ok).filter(|e| {
@@ -359,6 +360,10 @@ impl LocalGcWorker {
                             return false;
                         }
                     };
+                    if may_linger_filenames.contains(&file_id) {
+                        all_in_exist_linger_files.insert(file_id);
+                    }
+
                     let should_delete = !in_use_filenames.contains(&file_id)
                         && !may_linger_filenames.contains(&file_id)
                         && {
@@ -379,6 +384,8 @@ impl LocalGcWorker {
                 }),
             );
         }
+
+        info!("All in exist linger files: {:?}", all_in_exist_linger_files);
 
         Ok(all_unused_files_ready_for_delete)
     }

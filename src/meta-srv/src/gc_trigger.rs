@@ -39,7 +39,7 @@ use crate::service::mailbox::{Channel, MailboxRef};
 use crate::{define_ticker, metrics};
 
 /// The interval of the gc ticker.
-const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 30);
+const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
 ///
