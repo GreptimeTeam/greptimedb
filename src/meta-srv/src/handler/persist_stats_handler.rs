@@ -107,7 +107,7 @@ impl PersistStatsHandler {
         let persist_interval_millis = self.persist_interval.as_millis() as i64;
         // Safety: `persist_interval_millis` is guaranteed to be greater than zero.
         let aligned_ts = timestamp / persist_interval_millis * persist_interval_millis;
-        let stats = region_stats
+        let rows = region_stats
             .iter()
             .flat_map(|s| {
                 if matches!(s.role, RegionRole::Leader) {
@@ -125,6 +125,7 @@ impl PersistStatsHandler {
                             write_bytes_per_secs: s.write_bytes_per_sec,
                             timestamp_millis: aligned_ts,
                         }
+                        .to_row()
                     })
                 } else {
                     None
@@ -132,12 +133,10 @@ impl PersistStatsHandler {
             })
             .collect::<Vec<_>>();
 
-        if stats.is_empty() {
+        if rows.is_empty() {
             return;
         }
 
-        let rows = stats.iter().map(|s| s.to_row()).collect::<Vec<_>>();
-        let schema = stats[0].schema();
         if let Err(err) = self
             .inserter
             .insert_rows(
@@ -145,7 +144,10 @@ impl PersistStatsHandler {
                 RowInsertRequests {
                     inserts: vec![RowInsertRequest {
                         table_name: META_REGION_STATS_TABLE_NAME.to_string(),
-                        rows: Some(Rows { schema, rows }),
+                        rows: Some(Rows {
+                            schema: PersistRegionStat::schema(),
+                            rows,
+                        }),
                     }],
                 },
                 Some(&InsertOptions {

@@ -152,7 +152,7 @@ fn impl_schema_method(
         .collect::<Result<_>>()?;
 
     Ok(quote! {
-        pub fn schema(&self) -> Vec<ColumnSchema> {
+        pub fn schema() -> Vec<ColumnSchema> {
             vec![ #(#schemas),* ]
         }
     })

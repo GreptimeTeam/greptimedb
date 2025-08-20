@@ -42,7 +42,7 @@ fn test_to_row() {
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowOwned::schema();
     assert_schema(&schema);
 }
 
@@ -73,7 +73,7 @@ fn test_to_row_ref() {
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowRef::schema();
     assert_schema(&schema);
 }
 
