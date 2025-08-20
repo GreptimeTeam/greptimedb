@@ -14,12 +14,14 @@
 
 use crate::function_registry::FunctionRegistry;
 
+mod encoding;
 mod geo_path;
 
 pub(crate) struct GeoFunction;
 
 impl GeoFunction {
     pub fn register(registry: &FunctionRegistry) {
+        registry.register_aggr(encoding::JsonEncodePathAccumulator::uadf_impl());
         registry.register_aggr(geo_path::GeoPathAccumulator::uadf_impl());
     }
 }
