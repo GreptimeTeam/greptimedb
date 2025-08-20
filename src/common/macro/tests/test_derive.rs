@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_macro::ToRow;
+use common_macro::{IntoRow, Schema, ToRow};
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
 
-#[derive(ToRow)]
+#[derive(ToRow, Schema, IntoRow)]
 struct ToRowOwned {
     my_value: i32,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -29,6 +29,9 @@ struct ToRowOwned {
         datatype = "TimestampMillisecond"
     )]
     my_timestamp: i64,
+    #[allow(dead_code)]
+    #[col(skip)]
+    my_skip: i32,
 }
 
 #[test]
@@ -39,14 +42,17 @@ fn test_to_row() {
         my_bool: true,
         my_float: 1.0,
         my_timestamp: 1718563200000,
+        my_skip: 1,
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowOwned::schema();
     assert_schema(&schema);
+    let row2 = test.into_row();
+    assert_row(&row2);
 }
 
-#[derive(ToRow)]
+#[derive(ToRow, Schema)]
 struct ToRowRef<'a> {
     my_value: &'a i32,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -73,11 +79,11 @@ fn test_to_row_ref() {
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowRef::schema();
     assert_schema(&schema);
 }
 
-#[derive(ToRow)]
+#[derive(ToRow, IntoRow)]
 struct ToRowOptional {
     my_value: Option<i32>,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -92,6 +98,18 @@ struct ToRowOptional {
     my_timestamp: i64,
 }
 
+fn assert_row_optional(row: &Row) {
+    assert_eq!(row.values.len(), 5);
+    assert_eq!(row.values[0].value_data, None);
+    assert_eq!(row.values[1].value_data, None);
+    assert_eq!(row.values[2].value_data, None);
+    assert_eq!(row.values[3].value_data, None);
+    assert_eq!(
+        row.values[4].value_data,
+        Some(greptime_proto::v1::value::ValueData::TimestampMillisecondValue(1718563200000))
+    );
+}
+
 #[test]
 fn test_to_row_optional() {
     let test = ToRowOptional {
@@ -103,15 +121,9 @@ fn test_to_row_optional() {
     };
 
     let row = test.to_row();
-    assert_eq!(row.values.len(), 5);
-    assert_eq!(row.values[0].value_data, None);
-    assert_eq!(row.values[1].value_data, None);
-    assert_eq!(row.values[2].value_data, None);
-    assert_eq!(row.values[3].value_data, None);
-    assert_eq!(
-        row.values[4].value_data,
-        Some(greptime_proto::v1::value::ValueData::TimestampMillisecondValue(1718563200000))
-    );
+    assert_row_optional(&row);
+    let row2 = test.into_row();
+    assert_row_optional(&row2);
 }
 
 fn assert_row(row: &Row) {
