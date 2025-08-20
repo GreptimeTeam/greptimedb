@@ -62,6 +62,7 @@ pub fn get_region_statistic(mito: &MitoEngine, region_id: RegionId) -> Option<Re
                 metadata_flushed_entry_id: metadata_stat.manifest.data_flushed_entry_id(),
                 metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
             },
+            write_bytes_per_sec: metadata_stat.write_bytes_per_sec + data_stat.write_bytes_per_sec,
             data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: metadata_stat.metadata_topic_latest_entry_id,
         }),

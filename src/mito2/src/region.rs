@@ -453,6 +453,7 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
+        let write_bytes_per_sec = self.write_bytes_per_sec.get_rate();
 
         RegionStatistic {
             num_rows,
@@ -468,6 +469,7 @@ impl MitoRegion {
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
+            write_bytes_per_sec,
         }
     }
 

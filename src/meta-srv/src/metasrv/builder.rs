@@ -55,6 +55,7 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
+use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
@@ -201,7 +202,7 @@ impl MetasrvBuilder {
         let insert_forwarder = Arc::new(InsertForwarder::new(peer_lookup_service.clone()));
         // Builds the event recorder to record important events and persist them as the system table.
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            insert_forwarder,
+            insert_forwarder.clone(),
             options.event_recorder.ttl,
         ))));
 
@@ -453,6 +454,15 @@ impl MetasrvBuilder {
             .as_ref()
             .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
 
+        let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
+            Some(PersistStatsHandler::new(
+                insert_forwarder.clone(),
+                options.stats_persistence.ttl,
+            ))
+        } else {
+            None
+        };
+
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
@@ -469,6 +479,7 @@ impl MetasrvBuilder {
                     .with_region_lease_handler(Some(region_lease_handler))
                     .with_flush_stats_factor(Some(options.flush_stats_factor))
                     .with_flow_state_handler(Some(flow_state_handler))
+                    .with_persist_stats_handler(persist_region_stats_handler)
                     .add_default_handlers()
             }
         };
