@@ -100,6 +100,8 @@ impl GcTrigger {
     }
 
     async fn run(&mut self) {
+        // trigger a gc immediately after started
+        let _ = self.trigger_gc().await;
         while let Some(event) = self.receiver.recv().await {
             match event {
                 Event::Tick => {
