@@ -145,7 +145,7 @@ impl FrontendBuilder {
         ));
         let requester = Arc::new(Requester::new(
             self.catalog_manager.clone(),
-            partition_manager,
+            partition_manager.clone(),
             node_manager.clone(),
         ));
         let table_mutation_handler = Arc::new(TableMutationOperator::new(
@@ -165,6 +165,7 @@ impl FrontendBuilder {
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),
+            Some(partition_manager.clone()),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
             Some(procedure_service_handler),
