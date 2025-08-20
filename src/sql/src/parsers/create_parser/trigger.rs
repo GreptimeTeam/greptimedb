@@ -558,7 +558,6 @@ IF NOT EXISTS cpu_monitor
         assert!(ctx.parse_trigger_on(false).is_err());
 
         // Valid, but the interval is less than 1 second, it will be adjusted to 1 second.
-        // let sql = "ON (SELECT * cpu_usage) EVERY '1 ms'::INTERVAL";
         let sql = "ON (SELECT * FROM cpu_usage) EVERY '1ms'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let trigger_on = ctx.parse_trigger_on(false).unwrap();
