@@ -719,6 +719,7 @@ impl FlatRewritePrimaryKey {
         // Binary buffer for the primary key.
         let mut buffer =
             Vec::with_capacity(old_pk_values_array.value_data().len() / old_pk_values_array.len());
+        let mut column_id_values = Vec::new();
         // Iterates the binary array and rewrites the primary key.
         for value in old_pk_values_array.iter() {
             let Some(old_pk) = value else {
@@ -730,6 +731,7 @@ impl FlatRewritePrimaryKey {
             pk_values.extend(append_values);
 
             buffer.clear();
+            column_id_values.clear();
             // Encodes the new primary key.
             match pk_values {
                 CompositeValues::Dense(dense_values) => {
@@ -738,18 +740,12 @@ impl FlatRewritePrimaryKey {
                         .context(EncodeSnafu)?;
                 }
                 CompositeValues::Sparse(sparse_values) => {
-                    let column_id_values = self
-                        .metadata
-                        .primary_key
-                        .iter()
-                        .map(|id| {
-                            let value = sparse_values.get_or_null(*id);
-                            (*id, value.as_value_ref())
-                        })
-                        .collect::<Vec<_>>();
-
+                    for id in &self.metadata.primary_key {
+                        let value = sparse_values.get_or_null(*id);
+                        column_id_values.push((*id, value.clone()));
+                    }
                     self.codec
-                        .encode_value_refs(&column_id_values, &mut buffer)
+                        .encode_values(&column_id_values, &mut buffer)
                         .context(EncodeSnafu)?;
                 }
             }
