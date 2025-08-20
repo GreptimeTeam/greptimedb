@@ -541,6 +541,28 @@ IF NOT EXISTS cpu_monitor
         let sql = "ON (SELECT * cpu_usage) EVERY '5 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since year is not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 year'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since month is not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since the year and month are not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 year 1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Valid, but the interval is less than 1 second, it will be adjusted to 1 second.
+        // let sql = "ON (SELECT * cpu_usage) EVERY '1 ms'::INTERVAL";
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1ms'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let trigger_on = ctx.parse_trigger_on(false).unwrap();
+        assert_eq!(trigger_on.interval, Duration::from_secs(1));
     }
 
     #[test]
