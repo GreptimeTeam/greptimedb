@@ -1,6 +1,6 @@
 ---
 Feature Name: Async Index Build
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/6756
 Date: 2025-08-16
 Author: "SNC123 <sinhco@outlook.com>"
 ---
@@ -17,9 +17,9 @@ Currently, index creation is performed synchronously, which may lead to prolonge
 
 The following table highlights the difference between async and sync index approach:
 
-| Approach | Trigger | Data Source | Index Metadata Update | Fine-grained `FileMeta` Index |
+| Approach | Trigger | Data Source | Additional Index Metadata Installation | Fine-grained `FileMeta` Index |
 | :--- | :--- | :--- | :--- | :--- |
-| Sync Index | On `write_sst` | Memory (on flush) / Disk (on compact) | Not required | Not required |
+| Sync Index | On `write_sst` | Memory (on flush) / Disk (on compact) | Not required(already installed synchronously) | Not required |
 | Async Index | 4 trigger types | Disk | Required | Required |
 
 The index build mode (synchronous or asynchronous) can be selected via configuration file. 
@@ -28,12 +28,12 @@ The index build mode (synchronous or asynchronous) can be selected via configura
 
 This RFC introduces four `IndexBuildType`s to trigger index building:
 
-- **Manual Rebuild**: Triggered by the user for scenarios like recovering from failed builds or migrating data files.
+- **Manual Rebuild**: Triggered by the user via `ADMIN build_index("table_name")`, for scenarios like recovering from failed builds or migrating data
 - **Schema Change**: Automatically triggered when the schema of an indexed column is altered.
 - **Flush**: Automatically builds indexes for new SST files created by a flush.
 - **Compact**: Automatically builds indexes for new SST files created by a compaction.
 
-### Additional Metadata Installation
+### Additional Index Metadata Installation
 
 Previously, index information in the in-memory `FileMeta` was updated synchronously. The async approach requires an explicit installation step.
 
@@ -87,11 +87,13 @@ sequenceDiagram
 
 The process starts with one of the four `IndexBuildType` triggers. In `handle_rebuild_index`, the `RegionWorkerLoop` identifies target SSTs from the request or the current region version. It then creates an `IndexBuildTask` for each file and submits it to the `index_build_scheduler`.
 
+Similar to Flush and Compact operations, index build tasks are ultimately dispatched to the LocalScheduler. Resource usage can be adjusted via configuration files. Since asynchronous index tasks are both memory-intensive and IO-intensive but have lower priority, it is recommended to allocate fewer resources to them compared to compaction and flush tasks—for example, limiting them to 1/8 of the CPU cores. 
+
 ### Index Building and Notification
 
 The scheduled `IndexBuildTask` executes its `index_build` method. It uses an `indexer_builder` to create an `Indexer` that reads SST data and builds the index. If a new index file is created (`IndexOutput.file_size > 0`), the task sends an `IndexBuildFinished` notification back to the `RegionWorkerLoop`.
 
-### Metadata Installation
+### Index Metadata Installation
 
 Upon receiving the `IndexBuildFinished` notification in `handle_index_build_finished`, the `RegionWorkerLoop` verifies that the file still exists in the current `version` and is not being compacted. If the check passes, it calls `manifest_ctx.update_manifest` to apply a `RegionEdit` with the new index information, completing the installation.
 
@@ -103,7 +105,7 @@ There may be a delay before the new index becomes available for queries, which c
 
 # Unresolved Questions and Future Work
 
-**Resource Management and Throttling**: How can the resource consumption (CPU, I/O) of background index building be managed and limited to avoid impacting foreground operations? A throttling mechanism may be necessary.
+**Resource Management and Throttling**: The resource consumption (CPU, I/O) of background index building can be managed and limited to some extent by configuring a dedicated background thread pool. However, this approach cannot fully eliminate resource contention, especially under heavy workloads or when I/O is highly competitive. Additional throttling mechanisms or dynamic prioritization may still be necessary to avoid impacting foreground operations.
 
 # Alternatives
 
