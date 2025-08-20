@@ -12,22 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_macro::{as_aggr_func_creator, AggrFuncTypeStore, ToRow};
+use common_macro::ToRow;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
-use static_assertions::{assert_fields, assert_impl_all};
-
-#[as_aggr_func_creator]
-#[derive(Debug, Default, AggrFuncTypeStore)]
-struct Foo {}
-
-#[test]
-#[allow(clippy::extra_unused_type_parameters)]
-fn test_derive() {
-    let _ = Foo::default();
-    assert_fields!(Foo: input_types);
-    assert_impl_all!(Foo: std::fmt::Debug, Default, common_query::logical_plan::accumulator::AggrFuncTypeStore);
-}
 
 #[derive(ToRow)]
 struct ToRowOwned {

@@ -14,223 +14,332 @@
 
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use common_query::error::{self, InvalidInputStateSnafu, Result};
-use common_query::logical_plan::accumulator::AggrFuncTypeStore;
-use common_query::logical_plan::{
-    create_aggregate_function, Accumulator, AggregateFunctionCreator,
+use arrow::array::AsArray;
+use datafusion::arrow::array::{Array, ArrayRef};
+use datafusion::common::cast::as_primitive_array;
+use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
+use datafusion::prelude::create_udaf;
+use datafusion_common::cast::{as_list_array, as_struct_array};
+use datafusion_common::ScalarValue;
+use datatypes::arrow::array::{Float64Array, Int64Array, ListArray, StructArray};
+use datatypes::arrow::datatypes::{
+    DataType, Field, Float64Type, Int64Type, TimeUnit, TimestampNanosecondType,
 };
-use common_query::prelude::AccumulatorCreatorFunction;
-use common_time::Timestamp;
-use datafusion_expr::AggregateUDF;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::value::{ListValue, Value};
-use datatypes::vectors::VectorRef;
-use snafu::{ensure, ResultExt};
+use datatypes::compute::{self, sort_to_indices};
 
-use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
+pub const JSON_ENCODE_PATH_NAME: &str = "json_encode_path";
 
-/// Accumulator of lat, lng, timestamp tuples
-#[derive(Debug)]
-pub struct JsonPathAccumulator {
-    timestamp_type: ConcreteDataType,
+const LATITUDE_FIELD: &str = "lat";
+const LONGITUDE_FIELD: &str = "lng";
+const TIMESTAMP_FIELD: &str = "timestamp";
+const DEFAULT_LIST_FIELD_NAME: &str = "item";
+
+#[derive(Debug, Default)]
+pub struct JsonEncodePathAccumulator {
     lat: Vec<Option<f64>>,
     lng: Vec<Option<f64>>,
-    timestamp: Vec<Option<Timestamp>>,
+    timestamp: Vec<Option<i64>>,
 }
 
-impl JsonPathAccumulator {
-    fn new(timestamp_type: ConcreteDataType) -> Self {
-        Self {
-            lat: Vec::default(),
-            lng: Vec::default(),
-            timestamp: Vec::default(),
-            timestamp_type,
-        }
+impl JsonEncodePathAccumulator {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Create a new `AggregateUDF` for the `json_encode_path` aggregate function.
     pub fn uadf_impl() -> AggregateUDF {
-        create_aggregate_function(
-            "json_encode_path".to_string(),
-            3,
-            Arc::new(JsonPathEncodeFunctionCreator::default()),
+        create_udaf(
+            JSON_ENCODE_PATH_NAME,
+            // Input types: lat, lng, timestamp
+            vec![
+                DataType::Float64,
+                DataType::Float64,
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+            ],
+            // Output type: geojson compatible linestring
+            Arc::new(DataType::Utf8),
+            Volatility::Immutable,
+            // Create the accumulator
+            Arc::new(|_| Ok(Box::new(Self::new()))),
+            // Intermediate state types
+            Arc::new(vec![DataType::Struct(
+                vec![
+                    Field::new(
+                        LATITUDE_FIELD,
+                        DataType::List(Arc::new(Field::new(
+                            DEFAULT_LIST_FIELD_NAME,
+                            DataType::Float64,
+                            true,
+                        ))),
+                        false,
+                    ),
+                    Field::new(
+                        LONGITUDE_FIELD,
+                        DataType::List(Arc::new(Field::new(
+                            DEFAULT_LIST_FIELD_NAME,
+                            DataType::Float64,
+                            true,
+                        ))),
+                        false,
+                    ),
+                    Field::new(
+                        TIMESTAMP_FIELD,
+                        DataType::List(Arc::new(Field::new(
+                            DEFAULT_LIST_FIELD_NAME,
+                            DataType::Int64,
+                            true,
+                        ))),
+                        false,
+                    ),
+                ]
+                .into(),
+            )]),
         )
-        .into()
     }
 }
 
-impl Accumulator for JsonPathAccumulator {
-    fn state(&self) -> Result<Vec<Value>> {
-        Ok(vec![
-            Value::List(ListValue::new(
-                self.lat.iter().map(|i| Value::from(*i)).collect(),
-                ConcreteDataType::float64_datatype(),
-            )),
-            Value::List(ListValue::new(
-                self.lng.iter().map(|i| Value::from(*i)).collect(),
-                ConcreteDataType::float64_datatype(),
-            )),
-            Value::List(ListValue::new(
-                self.timestamp.iter().map(|i| Value::from(*i)).collect(),
-                self.timestamp_type.clone(),
-            )),
-        ])
-    }
+impl DfAccumulator for JsonEncodePathAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion::error::Result<()> {
+        if values.len() != 3 {
+            return Err(DataFusionError::Internal(format!(
+                "Expected 3 columns for json_encode_path, got {}",
+                values.len()
+            )));
+        }
 
-    fn update_batch(&mut self, columns: &[VectorRef]) -> Result<()> {
-        // update batch as in datafusion just provides the accumulator original
-        //  input.
-        //
-        // columns is vec of [`lat`, `lng`, `timestamp`]
-        // where
-        // - `lat` is a vector of `Value::Float64` or similar type. Each item in
-        //  the vector is a row in given dataset.
-        // - so on so forth for `lng` and `timestamp`
-        ensure_columns_n!(columns, 3);
+        let lat_array = as_primitive_array::<Float64Type>(&values[0])?;
+        let lng_array = as_primitive_array::<Float64Type>(&values[1])?;
+        let ts_array = as_primitive_array::<TimestampNanosecondType>(&values[2])?;
 
-        let lat = &columns[0];
-        let lng = &columns[1];
-        let ts = &columns[2];
-
-        let size = lat.len();
+        let size = lat_array.len();
+        self.lat.reserve(size);
+        self.lng.reserve(size);
 
         for idx in 0..size {
-            self.lat.push(lat.get(idx).as_f64_lossy());
-            self.lng.push(lng.get(idx).as_f64_lossy());
-            self.timestamp.push(ts.get(idx).as_timestamp());
+            self.lat.push(if lat_array.is_null(idx) {
+                None
+            } else {
+                Some(lat_array.value(idx))
+            });
+
+            self.lng.push(if lng_array.is_null(idx) {
+                None
+            } else {
+                Some(lng_array.value(idx))
+            });
+
+            self.timestamp.push(if ts_array.is_null(idx) {
+                None
+            } else {
+                Some(ts_array.value(idx))
+            });
         }
 
         Ok(())
     }
 
-    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<()> {
-        // merge batch as in datafusion gives state accumulated from the data
-        //  returned from child accumulators' state() call
-        // In our particular implementation, the data structure is like
-        //
-        // states is vec of [`lat`, `lng`, `timestamp`]
-        // where
-        // - `lat` is a vector of `Value::List`. Each item in the list is all
-        //  coordinates from a child accumulator.
-        // - so on so forth for `lng` and `timestamp`
+    fn evaluate(&mut self) -> DfResult<ScalarValue> {
+        let unordered_lng_array = Float64Array::from(self.lng.clone());
+        let unordered_lat_array = Float64Array::from(self.lat.clone());
+        let ts_array = Int64Array::from(self.timestamp.clone());
 
-        ensure_columns_n!(states, 3);
+        let ordered_indices = sort_to_indices(&ts_array, None, None)?;
+        let lat_array = compute::take(&unordered_lat_array, &ordered_indices, None)?;
+        let lng_array = compute::take(&unordered_lng_array, &ordered_indices, None)?;
 
-        let lat_lists = &states[0];
-        let lng_lists = &states[1];
-        let ts_lists = &states[2];
+        let len = ts_array.len();
+        let lat_array = lat_array.as_primitive::<Float64Type>();
+        let lng_array = lng_array.as_primitive::<Float64Type>();
 
-        let len = lat_lists.len();
+        let mut coords = Vec::with_capacity(len);
+        for i in 0..len {
+            let lng = lng_array.value(i);
+            let lat = lat_array.value(i);
+            coords.push(vec![lng, lat]);
+        }
 
-        for idx in 0..len {
-            if let Some(lat_list) = lat_lists
-                .get(idx)
-                .as_list()
-                .map_err(BoxedError::new)
-                .context(error::ExecuteSnafu)?
-            {
-                for v in lat_list.items() {
-                    self.lat.push(v.as_f64_lossy());
-                }
-            }
+        let result = serde_json::to_string(&coords)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to encode json, {}", e)))?;
 
-            if let Some(lng_list) = lng_lists
-                .get(idx)
-                .as_list()
-                .map_err(BoxedError::new)
-                .context(error::ExecuteSnafu)?
-            {
-                for v in lng_list.items() {
-                    self.lng.push(v.as_f64_lossy());
-                }
-            }
+        Ok(ScalarValue::Utf8(Some(result)))
+    }
 
-            if let Some(ts_list) = ts_lists
-                .get(idx)
-                .as_list()
-                .map_err(BoxedError::new)
-                .context(error::ExecuteSnafu)?
-            {
-                for v in ts_list.items() {
-                    self.timestamp.push(v.as_timestamp());
-                }
-            }
+    fn size(&self) -> usize {
+        // Base size of JsonEncodePathAccumulator struct fields
+        let mut total_size = std::mem::size_of::<Self>();
+
+        // Size of vectors (approximation)
+        total_size += self.lat.capacity() * std::mem::size_of::<Option<f64>>();
+        total_size += self.lng.capacity() * std::mem::size_of::<Option<f64>>();
+        total_size += self.timestamp.capacity() * std::mem::size_of::<Option<i64>>();
+
+        total_size
+    }
+
+    fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
+        let lat_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+            Some(self.lat.clone()),
+        ]));
+        let lng_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+            Some(self.lng.clone()),
+        ]));
+        let ts_array = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+            Some(self.timestamp.clone()),
+        ]));
+
+        let state_struct = StructArray::new(
+            vec![
+                Field::new(
+                    LATITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
+                Field::new(
+                    LONGITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
+                Field::new(
+                    TIMESTAMP_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                    false,
+                ),
+            ]
+            .into(),
+            vec![lat_array, lng_array, ts_array],
+            None,
+        );
+
+        Ok(vec![ScalarValue::Struct(Arc::new(state_struct))])
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> datafusion::error::Result<()> {
+        if states.len() != 1 {
+            return Err(DataFusionError::Internal(format!(
+                "Expected 1 states for json_encode_path, got {}",
+                states.len()
+            )));
+        }
+
+        for state in states {
+            let state = as_struct_array(state)?;
+            let lat_list = as_list_array(state.column(0))?.value(0);
+            let lat_array = as_primitive_array::<Float64Type>(&lat_list)?;
+            let lng_list = as_list_array(state.column(1))?.value(0);
+            let lng_array = as_primitive_array::<Float64Type>(&lng_list)?;
+            let ts_list = as_list_array(state.column(2))?.value(0);
+            let ts_array = as_primitive_array::<Int64Type>(&ts_list)?;
+
+            self.lat.extend(lat_array);
+            self.lng.extend(lng_array);
+            self.timestamp.extend(ts_array);
         }
 
         Ok(())
-    }
-
-    fn evaluate(&self) -> Result<Value> {
-        let mut work_vec: Vec<(&Option<f64>, &Option<f64>, &Option<Timestamp>)> = self
-            .lat
-            .iter()
-            .zip(self.lng.iter())
-            .zip(self.timestamp.iter())
-            .map(|((a, b), c)| (a, b, c))
-            .collect();
-
-        // sort by timestamp, we treat null timestamp as 0
-        work_vec.sort_unstable_by_key(|tuple| tuple.2.unwrap_or_else(|| Timestamp::new_second(0)));
-
-        let result = serde_json::to_string(
-            &work_vec
-                .into_iter()
-                // note that we transform to lng,lat for geojson compatibility
-                .map(|(lat, lng, _)| vec![lng, lat])
-                .collect::<Vec<Vec<&Option<f64>>>>(),
-        )
-        .map_err(|e| {
-            BoxedError::new(PlainError::new(
-                format!("Serialization failure: {}", e),
-                StatusCode::EngineExecuteQuery,
-            ))
-        })
-        .context(error::ExecuteSnafu)?;
-
-        Ok(Value::String(result.into()))
     }
 }
 
-/// This function accept rows of lat, lng and timestamp, sort with timestamp and
-/// encoding them into a geojson-like path.
-///
-/// Example:
-///
-/// ```sql
-/// SELECT json_encode_path(lat, lon, timestamp) FROM table [group by ...];
-/// ```
-///
-#[as_aggr_func_creator]
-#[derive(Debug, Default, AggrFuncTypeStore)]
-pub struct JsonPathEncodeFunctionCreator {}
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::array::{Float64Array, TimestampNanosecondArray};
+    use datafusion::scalar::ScalarValue;
 
-impl AggregateFunctionCreator for JsonPathEncodeFunctionCreator {
-    fn creator(&self) -> AccumulatorCreatorFunction {
-        let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
-            let ts_type = types[2].clone();
-            Ok(Box::new(JsonPathAccumulator::new(ts_type)))
-        });
+    use super::*;
 
-        creator
+    #[test]
+    fn test_json_encode_path_basic() {
+        let mut accumulator = JsonEncodePathAccumulator::new();
+
+        // Create test data
+        let lat_array = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
+        let lng_array = Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0]));
+        let ts_array = Arc::new(TimestampNanosecondArray::from(vec![100, 200, 300]));
+
+        // Update batch
+        accumulator
+            .update_batch(&[lat_array, lng_array, ts_array])
+            .unwrap();
+
+        // Evaluate
+        let result = accumulator.evaluate().unwrap();
+        assert_eq!(
+            result,
+            ScalarValue::Utf8(Some("[[4.0,1.0],[5.0,2.0],[6.0,3.0]]".to_string()))
+        );
     }
 
-    fn output_type(&self) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    #[test]
+    fn test_json_encode_path_sort_by_timestamp() {
+        let mut accumulator = JsonEncodePathAccumulator::new();
+
+        // Create test data with unordered timestamps
+        let lat_array = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
+        let lng_array = Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0]));
+        let ts_array = Arc::new(TimestampNanosecondArray::from(vec![300, 100, 200]));
+
+        // Update batch
+        accumulator
+            .update_batch(&[lat_array, lng_array, ts_array])
+            .unwrap();
+
+        // Evaluate
+        let result = accumulator.evaluate().unwrap();
+        assert_eq!(
+            result,
+            ScalarValue::Utf8(Some("[[5.0,2.0],[6.0,3.0],[4.0,1.0]]".to_string()))
+        );
     }
 
-    fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-        let input_types = self.input_types()?;
-        ensure!(input_types.len() == 3, InvalidInputStateSnafu);
+    #[test]
+    fn test_json_encode_path_merge() {
+        let mut accumulator1 = JsonEncodePathAccumulator::new();
+        let mut accumulator2 = JsonEncodePathAccumulator::new();
 
-        let timestamp_type = input_types[2].clone();
+        // Create test data for first accumulator
+        let lat_array1 = Arc::new(Float64Array::from(vec![1.0]));
+        let lng_array1 = Arc::new(Float64Array::from(vec![4.0]));
+        let ts_array1 = Arc::new(TimestampNanosecondArray::from(vec![100]));
 
-        Ok(vec![
-            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
-            ConcreteDataType::list_datatype(timestamp_type),
-        ])
+        // Create test data for second accumulator
+        let lat_array2 = Arc::new(Float64Array::from(vec![2.0]));
+        let lng_array2 = Arc::new(Float64Array::from(vec![5.0]));
+        let ts_array2 = Arc::new(TimestampNanosecondArray::from(vec![200]));
+
+        // Update batches
+        accumulator1
+            .update_batch(&[lat_array1, lng_array1, ts_array1])
+            .unwrap();
+        accumulator2
+            .update_batch(&[lat_array2, lng_array2, ts_array2])
+            .unwrap();
+
+        // Get states
+        let state1 = accumulator1.state().unwrap();
+        let state2 = accumulator2.state().unwrap();
+
+        // Create a merged accumulator
+        let mut merged = JsonEncodePathAccumulator::new();
+
+        // Extract the struct arrays from the states
+        let state_array1 = match &state1[0] {
+            ScalarValue::Struct(array) => array.clone(),
+            _ => panic!("Expected Struct scalar value"),
+        };
+
+        let state_array2 = match &state2[0] {
+            ScalarValue::Struct(array) => array.clone(),
+            _ => panic!("Expected Struct scalar value"),
+        };
+
+        // Merge state arrays
+        merged.merge_batch(&[state_array1]).unwrap();
+        merged.merge_batch(&[state_array2]).unwrap();
+
+        // Evaluate merged result
+        let result = merged.evaluate().unwrap();
+        assert_eq!(
+            result,
+            ScalarValue::Utf8(Some("[[4.0,1.0],[5.0,2.0]]".to_string()))
+        );
     }
 }

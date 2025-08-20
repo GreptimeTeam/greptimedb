@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::keywords::Keyword;
@@ -8,6 +9,7 @@ use sqlparser::tokenizer::Token;
 use crate::error;
 use crate::error::Result;
 use crate::parser::ParserContext;
+use crate::parsers::utils::convert_month_day_nano_to_duration;
 use crate::statements::create::trigger::{
     AlertManagerWebhook, ChannelType, CreateTrigger, NotifyChannel, TriggerOn,
 };
@@ -120,6 +122,12 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword `ON`
     ///     has been matched.
+    ///
+    /// ## Notes
+    ///
+    /// - The months in the interval expression is prohibited.
+    /// - The interval must be at least 1 second. If the parsed interval is less
+    ///     than 1 second, **it will be adjusted to 1 second**.
     pub(crate) fn parse_trigger_on(&mut self, is_first_keyword_matched: bool) -> Result<TriggerOn> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
@@ -141,7 +149,25 @@ impl<'a> ParserContext<'a> {
             return self.expected("`EVERY` keyword", self.parser.peek_token());
         }
 
-        let (interval, raw_interval_expr) = self.parse_interval_to_duration()?;
+        let (month_day_nano, raw_interval_expr) = self.parse_interval_month_day_nano()?;
+
+        // Trigger Interval (month_day_nano): the months field is prohibited,
+        // as the length of a month is ambiguous.
+        ensure!(
+            month_day_nano.months == 0,
+            error::InvalidIntervalSnafu {
+                reason: "year and month is not supported in trigger interval".to_string()
+            }
+        );
+
+        let interval = convert_month_day_nano_to_duration(month_day_nano)?;
+
+        // Ensure the interval is at least 1 second.
+        let interval = if interval < Duration::from_secs(1) {
+            Duration::from_secs(1)
+        } else {
+            interval
+        };
 
         Ok(TriggerOn {
             query,
@@ -515,6 +541,27 @@ IF NOT EXISTS cpu_monitor
         let sql = "ON (SELECT * cpu_usage) EVERY '5 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since year is not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 year'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since month is not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since the year and month are not allowed in trigger interval.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1 year 1 month'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Valid, but the interval is less than 1 second, it will be adjusted to 1 second.
+        let sql = "ON (SELECT * FROM cpu_usage) EVERY '1ms'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let trigger_on = ctx.parse_trigger_on(false).unwrap();
+        assert_eq!(trigger_on.interval, Duration::from_secs(1));
     }
 
     #[test]

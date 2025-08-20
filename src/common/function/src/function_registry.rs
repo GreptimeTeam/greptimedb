@@ -24,7 +24,7 @@ use crate::aggrs::aggr_wrapper::StateMergeHelper;
 use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
-use crate::function::{AsyncFunctionRef, Function, FunctionRef};
+use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
@@ -42,11 +42,18 @@ use crate::system::SystemFunction;
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
-    async_functions: RwLock<HashMap<String, AsyncFunctionRef>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
 }
 
 impl FunctionRegistry {
+    /// Register a function in the registry by converting it into a `ScalarFunctionFactory`.
+    ///
+    /// # Arguments
+    ///
+    /// * `func` - An object that can be converted into a `ScalarFunctionFactory`.
+    ///
+    /// The function is inserted into the internal function map, keyed by its name.
+    /// If a function with the same name already exists, it will be replaced.
     pub fn register(&self, func: impl Into<ScalarFunctionFactory>) {
         let func = func.into();
         let _ = self
@@ -56,18 +63,12 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
+    /// Register a scalar function in the registry.
     pub fn register_scalar(&self, func: impl Function + 'static) {
         self.register(Arc::new(func) as FunctionRef);
     }
 
-    pub fn register_async(&self, func: AsyncFunctionRef) {
-        let _ = self
-            .async_functions
-            .write()
-            .unwrap()
-            .insert(func.name().to_string(), func);
-    }
-
+    /// Register an aggregate function in the registry.
     pub fn register_aggr(&self, func: AggregateUDF) {
         let _ = self
             .aggregate_functions
@@ -76,28 +77,16 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
-    pub fn get_async_function(&self, name: &str) -> Option<AsyncFunctionRef> {
-        self.async_functions.read().unwrap().get(name).cloned()
-    }
-
-    pub fn async_functions(&self) -> Vec<AsyncFunctionRef> {
-        self.async_functions
-            .read()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect()
-    }
-
-    #[cfg(test)]
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
 
+    /// Returns a list of all scalar functions registered in the registry.
     pub fn scalar_functions(&self) -> Vec<ScalarFunctionFactory> {
         self.functions.read().unwrap().values().cloned().collect()
     }
 
+    /// Returns a list of all aggregate functions registered in the registry.
     pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
         self.aggregate_functions
             .read()
@@ -107,6 +96,7 @@ impl FunctionRegistry {
             .collect()
     }
 
+    /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
     }

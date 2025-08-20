@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use api::v1::meta::ProcedureStatus;
+use arrow::datatypes::DataType as ArrowDataType;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::ProcedureStateResponse;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::*;
 use serde::Serialize;
 use session::context::QueryContextRef;
@@ -81,73 +82,86 @@ pub(crate) async fn procedure_state(
 }
 
 fn signature() -> Signature {
-    Signature::uniform(
-        1,
-        vec![ConcreteDataType::string_datatype()],
-        Volatility::Immutable,
-    )
+    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::StringVector;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[test]
     fn test_procedure_state_misc() {
-        let f = ProcedureStateFunction;
+        let factory: ScalarFunctionFactory = ProcedureStateFunction::factory().into();
+        let f = factory.provide(FunctionContext::mock());
         assert_eq!("procedure_state", f.name());
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, f.return_type(&[]).unwrap());
         assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(1, valid_types),
-                             volatility: Volatility::Immutable
-                         } if valid_types == vec![ConcreteDataType::string_datatype()]
-        ));
+                         datafusion_expr::Signature {
+                             type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
+                             volatility: datafusion_expr::Volatility::Immutable
+                         } if valid_types == &vec![ArrowDataType::Utf8]));
     }
 
     #[tokio::test]
     async fn test_missing_procedure_service() {
-        let f = ProcedureStateFunction;
+        let factory: ScalarFunctionFactory = ProcedureStateFunction::factory().into();
+        let binding = factory.provide(FunctionContext::default());
+        let f = binding.as_async().unwrap();
 
-        let args = vec!["pid"];
-
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
-            .collect::<Vec<_>>();
-
-        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
-        assert_eq!(
-            "Missing ProcedureServiceHandler, not expected",
-            result.to_string()
-        );
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "pid",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_procedure_state() {
-        let f = ProcedureStateFunction;
+        let factory: ScalarFunctionFactory = ProcedureStateFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
 
-        let args = vec!["pid"];
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "pid",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
 
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(StringVector::from_slice(&[arg])) as _)
-            .collect::<Vec<_>>();
-
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-
-        let expect: VectorRef = Arc::new(StringVector::from(vec![
-            "{\"status\":\"Done\",\"error\":\"OK\"}",
-        ]));
-        assert_eq!(expect, result);
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(
+                    result_array.value(0),
+                    "{\"status\":\"Done\",\"error\":\"OK\"}"
+                );
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some(
+                        "{\"status\":\"Done\",\"error\":\"OK\"}".to_string()
+                    ))
+                );
+            }
+        }
     }
 }

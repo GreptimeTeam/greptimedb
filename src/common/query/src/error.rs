@@ -59,18 +59,8 @@ pub enum Error {
         data_type: ArrowDatatype,
     },
 
-    #[snafu(display("Failed to create accumulator: {}", err_msg))]
-    CreateAccumulator { err_msg: String },
-
     #[snafu(display("Failed to downcast vector: {}", err_msg))]
     DowncastVector { err_msg: String },
-
-    #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
@@ -223,10 +213,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::CreateAccumulator { .. }
-            | Error::DowncastVector { .. }
+            Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
-            | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. }
