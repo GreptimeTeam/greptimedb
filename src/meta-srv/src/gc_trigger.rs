@@ -102,12 +102,16 @@ impl GcTrigger {
     async fn run(&mut self) {
         while let Some(event) = self.receiver.recv().await {
             match event {
-                Event::Tick => self.handle_tick().await,
+                Event::Tick => {
+                    info!("Received gc tick");
+                    self.handle_tick().await
+                }
             }
         }
     }
 
     async fn handle_tick(&self) {
+        info!("Start to trigger gc");
         if let Err(e) = self.trigger_gc().await {
             error!(e; "Failed to trigger gc");
         }
@@ -116,6 +120,7 @@ impl GcTrigger {
     /// Iterate through all physical tables and trigger gc for each table.
     /// TODO(discord9): Poc impl, will parallelize later.
     async fn trigger_gc(&self) -> Result<()> {
+        info!("Triggering gc");
         // TODO: trigger gc based on statistics, e.g. number of deleted files per table.
         let mut tables: BoxStream<
             'static,
@@ -131,6 +136,7 @@ impl GcTrigger {
             .await
             .context(TableMetadataManagerSnafu)?
         {
+            info!("Triggering gc for table {}", table_id);
             let phy_table_val: PhysicalTableRouteValue = phy_table_val;
             let mut region_ids: Vec<RegionId> = phy_table_val
                 .region_routes
@@ -165,13 +171,22 @@ impl GcTrigger {
                     .build()
                 })?;
 
-            self.send_gc_instruction(peer, region_ids).await?;
+            self.send_gc_instruction(peer.clone(), region_ids.clone())
+                .await?;
+            info!(
+                "Sent gc instruction to datanode {} for table {} with regions {:?}",
+                peer, table_id, region_ids
+            );
         }
 
         Ok(())
     }
 
     async fn send_gc_instruction(&self, peer: Peer, region_ids: Vec<RegionId>) -> Result<()> {
+        info!(
+            "Sending gc instruction to datanode {} with regions {:?}",
+            peer, region_ids
+        );
         let instruction = Instruction::GcRegions(region_ids);
         let msg = MailboxMessage::json_message(
             &format!("GC regions: {}", instruction),
@@ -190,6 +205,8 @@ impl GcTrigger {
             .await
         {
             error!(e; "Failed to send gc instruction to datanode {}", peer);
+        } else {
+            info!("Successfully sent gc instruction to datanode {}", peer);
         }
 
         metrics::METRIC_META_TRIGGERED_GC_TOTAL.inc();

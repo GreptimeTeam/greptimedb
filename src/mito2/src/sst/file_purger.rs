@@ -80,6 +80,14 @@ impl LocalFilePurger {
 
 impl FilePurger for LocalFilePurger {
     fn send_request(&self, request: PurgeRequest) {
+        // TODO(discord9): replace with something more informative later
+        // also later in phase 2 all datanode should have centralized mgr that keep track of
+        // all the in-use file handlers, and write tmp files for them periodically
+        info!(
+            "Should delete with request, but use gc instead: {:?}",
+            request
+        );
+        return;
         let file_meta = request.file_meta;
         let sst_layer = self.sst_layer.clone();
 

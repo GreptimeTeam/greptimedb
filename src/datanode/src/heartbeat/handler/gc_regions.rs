@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{InstructionReply, SimpleReply};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use futures::future::BoxFuture;
 use mito2::engine::MitoEngine;
 use mito2::gc::LocalGcWorker;
@@ -29,6 +29,7 @@ impl HandlerContext {
         region_ids: Vec<RegionId>,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
+            info!("Received gc regions instruction: {:?}", region_ids);
             let mut table_id = None;
             let is_same_table = region_ids.windows(2).all(|w| {
                 let t1 = w[0].table_id();
@@ -63,10 +64,12 @@ impl HandlerContext {
                 .try_register(
                     region_id,
                     Box::pin(async move {
+                        info!("Starting gc worker for region {}", region_id);
                         gc_worker
                             .run()
                             .await
                             .context(GcMitoEngineSnafu { region_id })?;
+                        info!("Gc worker for region {} finished", region_id);
                         Ok(())
                     }),
                 )

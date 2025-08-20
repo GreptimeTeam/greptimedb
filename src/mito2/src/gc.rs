@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use object_store::Entry;
 use serde::{Deserialize, Serialize};
@@ -113,9 +113,13 @@ impl LocalGcWorker {
     ///
     /// TODO(discord9): consider instead running in parallel mode
     pub async fn run(self) -> Result<()> {
+        info!("LocalGcWorker started");
         for region_id in self.manifest_mgrs.keys() {
+            info!("Doing gc for region {}", region_id);
             self.do_region_gc(*region_id).await?;
+            info!("Gc for region {} finished", region_id);
         }
+        info!("LocalGcWorker finished");
         Ok(())
     }
 }
@@ -134,6 +138,7 @@ impl LocalGcWorker {
     /// Note that the files that are still in use or may still be kept for a while are not deleted
     /// to avoid deleting files that are still needed.
     pub async fn do_region_gc(&self, region_id: RegionId) -> Result<()> {
+        info!("Doing gc for region {}", region_id);
         // TODO(discord9): impl gc worker
         let manifest = self
             .manifest_mgrs
@@ -147,8 +152,15 @@ impl LocalGcWorker {
 
         if recently_removed_files.is_empty() {
             // no files to remove, skip
+            info!("No recently removed files to gc for region {}", region_id);
             return Ok(());
         }
+
+        info!(
+            "Found {} recently removed files sets for region {}",
+            recently_removed_files.len(),
+            region_id
+        );
 
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
@@ -161,6 +173,12 @@ impl LocalGcWorker {
                 concurrency,
             )
             .await?;
+
+        info!(
+            "Found {} unused files to delete for region {}",
+            unused_files.len(),
+            region_id
+        );
 
         self.access_layer
             .object_store()

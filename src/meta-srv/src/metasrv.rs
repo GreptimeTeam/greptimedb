@@ -66,6 +66,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::gc_trigger::GcTickerRef;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -489,6 +490,7 @@ pub struct Metasrv {
     topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     region_flush_ticker: Option<RegionFlushTickerRef>,
+    gc_ticker: Option<GcTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
 
@@ -550,6 +552,9 @@ impl Metasrv {
             }
             if let Some(region_flush_trigger) = &self.region_flush_ticker {
                 leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
+            }
+            if let Some(gc_ticker) = &self.gc_ticker {
+                leadership_change_notifier.add_listener(gc_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
