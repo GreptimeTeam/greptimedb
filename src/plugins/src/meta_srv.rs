@@ -21,7 +21,7 @@ use crate::options::PluginOptions;
 #[allow(unused_variables)]
 pub async fn setup_metasrv_plugins(
     _plugins: &mut Plugins,
-    plugin_options: &[PluginOptions],
+    _plugin_options: Option<&PluginOptions>,
     metasrv_opts: &MetasrvOptions,
 ) -> Result<()> {
     Ok(())
