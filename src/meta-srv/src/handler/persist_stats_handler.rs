@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use api::v1::meta::{HeartbeatRequest, Role};
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, Value};
-use client::inserter::{Context as InserterContext, InsertOptions, InserterRef};
+use client::inserter::{Context as InserterContext, Inserter};
 use client::DEFAULT_CATALOG_NAME;
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_macro::ToRow;
@@ -34,10 +34,9 @@ use crate::metasrv::Context;
 
 /// The handler to persist stats.
 pub struct PersistStatsHandler {
-    inserter: InserterRef,
+    inserter: Box<dyn Inserter>,
     last_persisted_time: DashMap<DatanodeId, Instant>,
     persist_interval: Duration,
-    ttl: Duration,
 }
 
 /// The name of the table to persist region stats.
@@ -75,8 +74,7 @@ impl PersistStatsHandler {
     /// # Panics
     ///
     /// Panics if `ttl` is zero.
-    pub fn new(inserter: InserterRef, mut persist_interval: Duration, ttl: Duration) -> Self {
-        assert!(!ttl.is_zero(), "ttl must be greater than zero");
+    pub fn new(inserter: Box<dyn Inserter>, mut persist_interval: Duration) -> Self {
         if persist_interval < Duration::from_secs(60) {
             warn!("persist_interval is less than 60 seconds, set to 60 seconds");
             persist_interval = Duration::from_secs(60);
@@ -90,7 +88,6 @@ impl PersistStatsHandler {
             inserter,
             last_persisted_time: DashMap::new(),
             persist_interval,
-            ttl,
         }
     }
 
@@ -150,10 +147,6 @@ impl PersistStatsHandler {
                         }),
                     }],
                 },
-                Some(&InsertOptions {
-                    ttl: self.ttl,
-                    append_mode: true,
-                }),
             )
             .await
         {

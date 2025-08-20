@@ -33,14 +33,16 @@ pub type InsertForwarderRef = Arc<InsertForwarder>;
 pub struct InsertForwarder {
     peer_lookup_service: PeerLookupServiceRef,
     client: RwLock<Option<Client>>,
+    options: Option<InsertOptions>,
 }
 
 impl InsertForwarder {
     /// Creates a new InsertForwarder with the given peer lookup service.
-    pub fn new(peer_lookup_service: PeerLookupServiceRef) -> Self {
+    pub fn new(peer_lookup_service: PeerLookupServiceRef, options: Option<InsertOptions>) -> Self {
         Self {
             peer_lookup_service,
             client: RwLock::new(None),
+            options,
         }
     }
 
@@ -90,11 +92,10 @@ impl Inserter for InsertForwarder {
         &self,
         context: &Context<'_>,
         requests: RowInsertRequests,
-        options: Option<&InsertOptions>,
     ) -> ClientResult<()> {
         let client = self.maybe_init_client().await.context(ExternalSnafu)?;
         let database = Database::new(context.catalog, context.schema, client);
-        let hints = options.map_or(vec![], |o| o.to_hints());
+        let hints = self.options.as_ref().map_or(vec![], |o| o.to_hints());
 
         if let Err(e) = database
             .row_inserts_with_hints(
@@ -114,5 +115,9 @@ impl Inserter for InsertForwarder {
         };
 
         Ok(())
+    }
+
+    fn set_options(&mut self, options: &InsertOptions) {
+        self.options = Some(*options);
     }
 }

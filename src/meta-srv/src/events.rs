@@ -12,16 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
-use client::inserter::{Context, InsertOptions, InserterRef};
+use client::inserter::{Context, Inserter};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
-use common_event_recorder::{
-    build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
-};
+use common_event_recorder::{build_row_inserts_request, group_events_by_type, Event, EventHandler};
 use snafu::ResultExt;
 
 pub mod region_migration_event;
@@ -29,13 +25,12 @@ pub mod region_migration_event;
 /// EventHandlerImpl is the default event handler implementation in metasrv.
 /// It sends the received events to the frontend instances.
 pub struct EventHandlerImpl {
-    inserter: InserterRef,
-    ttl: Duration,
+    inserter: Box<dyn Inserter>,
 }
 
 impl EventHandlerImpl {
-    pub fn new(inserter: InserterRef, ttl: Duration) -> Self {
-        Self { inserter, ttl }
+    pub fn new(inserter: Box<dyn Inserter>) -> Self {
+        Self { inserter }
     }
 }
 
@@ -44,9 +39,8 @@ impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         let event_groups = group_events_by_type(events);
 
-        for (event_type, events) in event_groups {
+        for (_, events) in event_groups {
             let requests = build_row_inserts_request(&events)?;
-            let EventHandlerOptions { ttl, append_mode } = self.options(event_type);
             self.inserter
                 .insert_rows(
                     &Context {
@@ -54,7 +48,6 @@ impl EventHandler for EventHandlerImpl {
                         schema: DEFAULT_PRIVATE_SCHEMA_NAME,
                     },
                     requests,
-                    Some(&InsertOptions { ttl, append_mode }),
                 )
                 .await
                 .map_err(BoxedError::new)
@@ -62,12 +55,5 @@ impl EventHandler for EventHandlerImpl {
         }
 
         Ok(())
-    }
-
-    fn options(&self, _event_type: &str) -> EventHandlerOptions {
-        EventHandlerOptions {
-            ttl: self.ttl,
-            append_mode: true,
-        }
     }
 }

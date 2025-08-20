@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::RowInsertRequests;
@@ -40,15 +39,13 @@ pub struct InsertOptions {
 
 impl InsertOptions {
     /// Converts the insert options to a list of key-value string hints.
-    pub fn to_hints(&self) -> Vec<(&str, String)> {
+    pub fn to_hints(&self) -> Vec<(&'static str, String)> {
         vec![
             (TTL_KEY, format_duration(self.ttl).to_string()),
             (APPEND_MODE_KEY, self.append_mode.to_string()),
         ]
     }
 }
-
-pub type InserterRef = Arc<dyn Inserter>;
 
 /// [`Inserter`] allows different components to share a unified mechanism for inserting data.
 ///
@@ -57,10 +54,7 @@ pub type InserterRef = Arc<dyn Inserter>;
 /// available Frontend).
 #[async_trait::async_trait]
 pub trait Inserter: Send + Sync {
-    async fn insert_rows(
-        &self,
-        context: &Context<'_>,
-        requests: RowInsertRequests,
-        options: Option<&InsertOptions>,
-    ) -> Result<()>;
+    async fn insert_rows(&self, context: &Context<'_>, requests: RowInsertRequests) -> Result<()>;
+
+    fn set_options(&mut self, options: &InsertOptions);
 }

@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use client::client_manager::NodeClients;
+use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
@@ -199,11 +200,16 @@ impl MetasrvBuilder {
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
-        let insert_forwarder = Arc::new(InsertForwarder::new(peer_lookup_service.clone()));
+        let event_inserter = Box::new(InsertForwarder::new(
+            peer_lookup_service.clone(),
+            Some(InsertOptions {
+                ttl: options.event_recorder.ttl,
+                append_mode: true,
+            }),
+        ));
         // Builds the event recorder to record important events and persist them as the system table.
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            insert_forwarder.clone(),
-            options.event_recorder.ttl,
+            event_inserter,
         ))));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
@@ -455,10 +461,17 @@ impl MetasrvBuilder {
             .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
 
         let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
+            let inserter = Box::new(InsertForwarder::new(
+                peer_lookup_service.clone(),
+                Some(InsertOptions {
+                    ttl: options.stats_persistence.ttl,
+                    append_mode: true,
+                }),
+            ));
+
             Some(PersistStatsHandler::new(
-                insert_forwarder.clone(),
+                inserter,
                 options.stats_persistence.interval,
-                options.stats_persistence.ttl,
             ))
         } else {
             None

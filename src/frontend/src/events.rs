@@ -15,33 +15,64 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::inserter::{Context, InsertOptions, InserterRef};
+use client::inserter::{Context, InsertOptions, Inserter};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
-use common_event_recorder::{
-    build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
-};
+use common_event_recorder::{build_row_inserts_request, group_events_by_type, Event, EventHandler};
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
+use datafusion::common::HashMap;
+use operator::statement::{InserterImpl, StatementExecutorRef};
 use snafu::ResultExt;
 
 /// EventHandlerImpl is the default event handler implementation in frontend.
 pub struct EventHandlerImpl {
-    inserter: InserterRef,
-    slow_query_ttl: Duration,
-    global_ttl: Duration,
+    default_inserter: Box<dyn Inserter>,
+    /// The inserters for the event types.
+    inserters: HashMap<String, Box<dyn Inserter>>,
 }
 
 impl EventHandlerImpl {
     /// Create a new EventHandlerImpl.
-    pub fn new(inserter: InserterRef, slow_query_ttl: Duration, global_ttl: Duration) -> Self {
+    pub fn new(
+        statement_executor: StatementExecutorRef,
+        slow_query_ttl: Duration,
+        global_ttl: Duration,
+    ) -> Self {
         Self {
-            inserter,
-            slow_query_ttl,
-            global_ttl,
+            inserters: HashMap::from([(
+                SLOW_QUERY_EVENT_TYPE.to_string(),
+                Box::new(InserterImpl::new(
+                    statement_executor.clone(),
+                    Some(InsertOptions {
+                        ttl: slow_query_ttl,
+                        append_mode: true,
+                    }),
+                )) as _,
+            )]),
+            default_inserter: Box::new(InserterImpl::new(
+                statement_executor.clone(),
+                Some(InsertOptions {
+                    ttl: global_ttl,
+                    append_mode: true,
+                }),
+            )),
         }
     }
+
+    fn inserter(&self, event_type: &str) -> &dyn Inserter {
+        let Some(inserter) = self.inserters.get(event_type) else {
+            return self.default_inserter.as_ref();
+        };
+
+        inserter.as_ref()
+    }
 }
+
+const DEFAULT_CONTEXT: Context = Context {
+    catalog: DEFAULT_CATALOG_NAME,
+    schema: DEFAULT_PRIVATE_SCHEMA_NAME,
+};
 
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
@@ -49,38 +80,16 @@ impl EventHandler for EventHandlerImpl {
         let event_groups = group_events_by_type(events);
 
         for (event_type, events) in event_groups {
-            let opts = self.options(event_type);
             let requests = build_row_inserts_request(&events)?;
+            let inserter = self.inserter(event_type);
 
-            let context = Context {
-                catalog: DEFAULT_CATALOG_NAME,
-                schema: DEFAULT_PRIVATE_SCHEMA_NAME,
-            };
-            let options = InsertOptions {
-                ttl: opts.ttl,
-                append_mode: opts.append_mode,
-            };
-
-            self.inserter
-                .insert_rows(&context, requests, Some(&options))
+            inserter
+                .insert_rows(&DEFAULT_CONTEXT, requests)
                 .await
                 .map_err(BoxedError::new)
                 .context(InsertEventsSnafu)?;
         }
 
         Ok(())
-    }
-
-    fn options(&self, event_type: &str) -> EventHandlerOptions {
-        match event_type {
-            SLOW_QUERY_EVENT_TYPE => EventHandlerOptions {
-                ttl: self.slow_query_ttl,
-                append_mode: true,
-            },
-            _ => EventHandlerOptions {
-                ttl: self.global_ttl,
-                append_mode: true,
-            },
-        }
     }
 }

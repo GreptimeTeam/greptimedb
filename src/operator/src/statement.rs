@@ -34,7 +34,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
-use client::inserter::Inserter;
+use client::inserter::{InsertOptions, Inserter};
 use client::RecordBatches;
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
@@ -619,6 +619,11 @@ impl StatementExecutor {
         }
         Ok(time_ranges)
     }
+
+    /// Returns the inserter for the statement executor.
+    pub(crate) fn inserter(&self) -> &InserterRef {
+        &self.inserter
+    }
 }
 
 fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {
@@ -754,18 +759,32 @@ fn idents_to_full_database_name(
     }
 }
 
+/// The [`Inserter`] implementation for the statement executor.
+pub struct InserterImpl {
+    statement_executor: StatementExecutorRef,
+    options: Option<InsertOptions>,
+}
+
+impl InserterImpl {
+    pub fn new(statement_executor: StatementExecutorRef, options: Option<InsertOptions>) -> Self {
+        Self {
+            statement_executor,
+            options,
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl Inserter for StatementExecutor {
+impl Inserter for InserterImpl {
     async fn insert_rows(
         &self,
         context: &client::inserter::Context<'_>,
         requests: RowInsertRequests,
-        options: Option<&client::inserter::InsertOptions>,
     ) -> ClientResult<()> {
         let mut ctx_builder = QueryContextBuilder::default()
             .current_catalog(context.catalog.to_string())
             .current_schema(context.schema.to_string());
-        if let Some(options) = options {
+        if let Some(options) = self.options.as_ref() {
             ctx_builder = ctx_builder
                 .set_extension(
                     TTL_KEY.to_string(),
@@ -775,12 +794,23 @@ impl Inserter for StatementExecutor {
         }
         let query_ctx = ctx_builder.build().into();
 
-        self.inserter
-            .handle_row_inserts(requests, query_ctx, self, false, false)
+        self.statement_executor
+            .inserter()
+            .handle_row_inserts(
+                requests,
+                query_ctx,
+                self.statement_executor.as_ref(),
+                false,
+                false,
+            )
             .await
             .map_err(BoxedError::new)
             .context(ClientExternalSnafu)
             .map(|_| ())
+    }
+
+    fn set_options(&mut self, options: &InsertOptions) {
+        self.options = Some(*options);
     }
 }
 
