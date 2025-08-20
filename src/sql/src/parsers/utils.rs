@@ -175,5 +175,5 @@ pub fn convert_month_day_nano_to_duration(
     // is checked above.
     let nanos_remainder = nanos_remainder as u32;
 
-    Ok(Duration::new(adjusted_seconds, nanos_remainder))
+    Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
 }
