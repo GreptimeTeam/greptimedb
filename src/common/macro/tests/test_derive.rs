@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use common_macro::ToRow;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use greptime_proto::v1::value::ValueData;
+use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
 
 #[derive(ToRow)]
 struct ToRowOwned {
