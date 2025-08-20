@@ -156,7 +156,7 @@ impl<'a> ParserContext<'a> {
         ensure!(
             month_day_nano.months == 0,
             error::InvalidIntervalSnafu {
-                reason: "month is not supported in trigger interval".to_string()
+                reason: "year and month is not supported in trigger interval".to_string()
             }
         );
 

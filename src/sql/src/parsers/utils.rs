@@ -33,11 +33,10 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
 };
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{
-    ConvertToLogicalExpressionSnafu, InvalidIntervalSnafu, ParseSqlValueSnafu, Result,
-    SimplificationSnafu,
+    ConvertToLogicalExpressionSnafu, ParseSqlValueSnafu, Result, SimplificationSnafu,
 };
 
 /// Convert a parser expression to a scalar value. This function will try the
@@ -163,9 +162,9 @@ pub fn convert_month_day_nano_to_duration(
         adjusted_seconds -= 1;
     }
 
-    ensure!(
+    snafu::ensure!(
         adjusted_seconds >= 0,
-        InvalidIntervalSnafu {
+        crate::error::InvalidIntervalSnafu {
             reason: "must be a positive interval",
         }
     );
