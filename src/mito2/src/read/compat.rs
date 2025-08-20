@@ -717,8 +717,9 @@ impl FlatRewritePrimaryKey {
         );
 
         // Binary buffer for the primary key.
-        let mut buffer =
-            Vec::with_capacity(old_pk_values_array.value_data().len() / old_pk_values_array.len());
+        let mut buffer = Vec::with_capacity(
+            old_pk_values_array.value_data().len() / old_pk_values_array.len().max(1),
+        );
         let mut column_id_values = Vec::new();
         // Iterates the binary array and rewrites the primary key.
         for value in old_pk_values_array.iter() {
@@ -863,7 +864,7 @@ impl FlatCompatPrimaryKey {
 
         // Binary buffer for the primary key.
         let mut buffer = Vec::with_capacity(
-            old_pk_values_array.value_data().len() / old_pk_values_array.len()
+            old_pk_values_array.value_data().len() / old_pk_values_array.len().max(1)
                 + converter.estimated_size().unwrap_or_default(),
         );
 
