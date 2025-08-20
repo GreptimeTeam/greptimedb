@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod accumulator;
 mod expr;
-mod udaf;
 
 use std::sync::Arc;
 
@@ -28,29 +26,7 @@ use datafusion_expr::{col, DmlStatement, TableSource, WriteOp};
 pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
 use snafu::ResultExt;
 
-pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
-pub use self::udaf::AggregateFunction;
 use crate::error::{GeneralDataFusionSnafu, Result};
-use crate::logical_plan::accumulator::*;
-use crate::signature::{Signature, Volatility};
-
-pub fn create_aggregate_function(
-    name: String,
-    args_count: u8,
-    creator: Arc<dyn AggregateFunctionCreator>,
-) -> AggregateFunction {
-    let return_type = make_return_function(creator.clone());
-    let accumulator = make_accumulator_function(creator.clone());
-    let state_type = make_state_function(creator.clone());
-    AggregateFunction::new(
-        name,
-        Signature::any(args_count as usize, Volatility::Immutable),
-        return_type,
-        accumulator,
-        state_type,
-        creator,
-    )
-}
 
 /// Rename columns by applying a new projection. Returns an error if the column to be
 /// renamed does not exist. The `renames` parameter is a `Vector` with elements
@@ -176,64 +152,8 @@ mod tests {
     use datafusion_expr::builder::LogicalTableSource;
     use datafusion_expr::lit;
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-    use datatypes::prelude::*;
-    use datatypes::vectors::VectorRef;
 
     use super::*;
-    use crate::error::Result;
-    use crate::function::AccumulatorCreatorFunction;
-    use crate::signature::TypeSignature;
-
-    #[derive(Debug)]
-    struct DummyAccumulator;
-
-    impl Accumulator for DummyAccumulator {
-        fn state(&self) -> Result<Vec<Value>> {
-            Ok(vec![])
-        }
-
-        fn update_batch(&mut self, _values: &[VectorRef]) -> Result<()> {
-            Ok(())
-        }
-
-        fn merge_batch(&mut self, _states: &[VectorRef]) -> Result<()> {
-            Ok(())
-        }
-
-        fn evaluate(&self) -> Result<Value> {
-            Ok(Value::Int32(0))
-        }
-    }
-
-    #[derive(Debug)]
-    struct DummyAccumulatorCreator;
-
-    impl AggrFuncTypeStore for DummyAccumulatorCreator {
-        fn input_types(&self) -> Result<Vec<ConcreteDataType>> {
-            Ok(vec![ConcreteDataType::float64_datatype()])
-        }
-
-        fn set_input_types(&self, _: Vec<ConcreteDataType>) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl AggregateFunctionCreator for DummyAccumulatorCreator {
-        fn creator(&self) -> AccumulatorCreatorFunction {
-            Arc::new(|_| Ok(Box::new(DummyAccumulator)))
-        }
-
-        fn output_type(&self) -> Result<ConcreteDataType> {
-            Ok(self.input_types()?.into_iter().next().unwrap())
-        }
-
-        fn state_types(&self) -> Result<Vec<ConcreteDataType>> {
-            Ok(vec![
-                ConcreteDataType::float64_datatype(),
-                ConcreteDataType::uint32_datatype(),
-            ])
-        }
-    }
 
     fn mock_plan() -> LogicalPlan {
         let schema = Schema::new(vec![
@@ -266,29 +186,6 @@ Projection: person.id AS a, person.name AS b
   Filter: person.id > Int32(500)
     TableScan: person"#,
             format!("\n{}", new_plan)
-        );
-    }
-
-    #[test]
-    fn test_create_udaf() {
-        let creator = DummyAccumulatorCreator;
-        let udaf = create_aggregate_function("dummy".to_string(), 1, Arc::new(creator));
-        assert_eq!("dummy", udaf.name);
-
-        let signature = udaf.signature;
-        assert_eq!(TypeSignature::Any(1), signature.type_signature);
-        assert_eq!(Volatility::Immutable, signature.volatility);
-
-        assert_eq!(
-            Arc::new(ConcreteDataType::float64_datatype()),
-            (udaf.return_type)(&[ConcreteDataType::float64_datatype()]).unwrap()
-        );
-        assert_eq!(
-            Arc::new(vec![
-                ConcreteDataType::float64_datatype(),
-                ConcreteDataType::uint32_datatype(),
-            ]),
-            (udaf.state_type)(&ConcreteDataType::float64_datatype()).unwrap()
         );
     }
 }
