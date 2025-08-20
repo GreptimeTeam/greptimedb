@@ -139,7 +139,7 @@ impl Accumulator for VectorSum {
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
         match &self.sum {
-            None => Ok(ScalarValue::Null),
+            None => Ok(ScalarValue::Binary(None)),
             Some(vector) => Ok(ScalarValue::Binary(Some(veclit_to_binlit(
                 vector.as_slice(),
             )))),
@@ -168,7 +168,7 @@ mod tests {
         vec_sum.update_batch(&[]).unwrap();
         assert!(vec_sum.sum.is_none());
         assert!(!vec_sum.has_null);
-        assert_eq!(ScalarValue::Null, vec_sum.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_sum.evaluate().unwrap());
 
         // test update one not-null value
         let mut vec_sum = VectorSum::default();
@@ -185,7 +185,7 @@ mod tests {
         let mut vec_sum = VectorSum::default();
         let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Option::<String>::None]))];
         vec_sum.update_batch(&v).unwrap();
-        assert_eq!(ScalarValue::Null, vec_sum.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_sum.evaluate().unwrap());
 
         // test update no null-value batch
         let mut vec_sum = VectorSum::default();
@@ -208,7 +208,7 @@ mod tests {
             Some("[7.0,8.0,9.0]".to_string()),
         ]))];
         vec_sum.update_batch(&v).unwrap();
-        assert_eq!(ScalarValue::Null, vec_sum.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_sum.evaluate().unwrap());
 
         // test update with constant vector
         let mut vec_sum = VectorSum::default();

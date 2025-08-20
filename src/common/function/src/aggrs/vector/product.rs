@@ -136,7 +136,7 @@ impl Accumulator for VectorProduct {
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
         match &self.product {
-            None => Ok(ScalarValue::Null),
+            None => Ok(ScalarValue::Binary(None)),
             Some(vector) => Ok(ScalarValue::Binary(Some(veclit_to_binlit(
                 vector.as_slice(),
             )))),
@@ -164,7 +164,7 @@ mod tests {
         vec_product.update_batch(&[]).unwrap();
         assert!(vec_product.product.is_none());
         assert!(!vec_product.has_null);
-        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_product.evaluate().unwrap());
 
         // test update one not-null value
         let mut vec_product = VectorProduct::default();
@@ -181,7 +181,7 @@ mod tests {
         let mut vec_product = VectorProduct::default();
         let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Option::<String>::None]))];
         vec_product.update_batch(&v).unwrap();
-        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_product.evaluate().unwrap());
 
         // test update no null-value batch
         let mut vec_product = VectorProduct::default();
@@ -204,7 +204,7 @@ mod tests {
             Some("[7.0,8.0,9.0]".to_string()),
         ]))];
         vec_product.update_batch(&v).unwrap();
-        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Binary(None), vec_product.evaluate().unwrap());
 
         // test update with constant vector
         let mut vec_product = VectorProduct::default();
