@@ -35,7 +35,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
 };
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion_physical_expr::PhysicalSortExpr;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use snafu::location;
@@ -243,11 +243,13 @@ impl PartSortStream {
                 TopK::try_new(
                     partition,
                     sort.schema().clone(),
-                    LexOrdering::new(vec![sort.expression.clone()]),
+                    vec![],
+                    [sort.expression.clone()].into(),
                     limit,
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
+                    None,
                 )?,
                 0,
             )
@@ -429,14 +431,14 @@ impl PartSortStream {
         let sort_column =
             concat(&sort_columns.iter().map(|a| a.as_ref()).collect_vec()).map_err(|e| {
                 DataFusionError::ArrowError(
-                    e,
+                    Box::new(e),
                     Some(format!("Fail to concat sort columns at {}", location!())),
                 )
             })?;
 
         let indices = sort_to_indices(&sort_column, opt, self.limit).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!("Fail to sort to indices at {}", location!())),
             )
         })?;
@@ -468,7 +470,7 @@ impl PartSortStream {
 
         let full_input = concat_batches(&self.schema, &buffer).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to concat input batches when sorting at {}",
                     location!()
@@ -478,7 +480,7 @@ impl PartSortStream {
 
         let sorted = take_record_batch(&full_input, &indices).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to take result record batch when sorting at {}",
                     location!()
@@ -498,11 +500,13 @@ impl PartSortStream {
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
-            LexOrdering::new(vec![self.expression.clone()]),
+            vec![],
+            [self.expression.clone()].into(),
             self.limit.unwrap(),
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
+            None,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
@@ -532,7 +536,7 @@ impl PartSortStream {
 
         let concat_batch = concat_batches(&self.schema, &results).map_err(|e| {
             DataFusionError::ArrowError(
-                e,
+                Box::new(e),
                 Some(format!(
                     "Fail to concat top k result record batch when sorting at {}",
                     location!()

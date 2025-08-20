@@ -49,11 +49,10 @@ SELECT i FROM (SELECT * FROM integers i1 UNION SELECT * FROM integers i2) a WHER
 
 SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
 
--- TODO(ruihang): Invalid argument error: must either specify a row count or at least one column
--- SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
+-- Align the result to PostgreSQL: empty.
+SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
 
--- This should be a bug in DataFusion, it use UserDefinedLogicalNode::prevent_predicate_push_down_columns()
--- to prevent pushdown, but this filter is Literal(Boolean(false)). It doesn't reference any column.
+-- Align the result to PostgreSQL: empty.
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
 DROP TABLE integers;

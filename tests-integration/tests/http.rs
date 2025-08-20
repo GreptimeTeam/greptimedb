@@ -507,7 +507,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
         res.text().await,
-        r#"[{"DescribeTable":{"name":[{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}]}}]"#,
+        r#"[{"DescribeTable":{"name":[{"Identifier":{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}}]}}]"#,
     );
 
     // test timezone header
@@ -579,7 +579,7 @@ async fn test_sql_format_api() {
     assert_eq!(formatted, "SELECT 1 AS x;");
 
     // complex query
-    let complex_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let complex_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
     let encoded_complex_query = encode(complex_query);
 
     let query_params = format!("/v1/sql/format?sql={encoded_complex_query}");
@@ -591,7 +591,7 @@ async fn test_sql_format_api() {
         .get("formatted")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    assert_eq!(formatted, "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;");
+    assert_eq!(formatted, "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;");
 
     guard.remove_all().await;
 }
@@ -600,7 +600,7 @@ pub async fn test_http_sql_slow_query(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;
 
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
     let encoded_slow_query = encode(slow_query);
 
     let query_params = format!("/v1/sql?sql={encoded_slow_query}");

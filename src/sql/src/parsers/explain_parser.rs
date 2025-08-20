@@ -41,7 +41,8 @@ impl ParserContext<'_> {
 mod tests {
     use sqlparser::ast::helpers::attached_token::AttachedToken;
     use sqlparser::ast::{
-        GroupByExpr, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
+        GroupByExpr, Query as SpQuery, SelectFlavor, Statement as SpStatement,
+        WildcardAdditionalOptions,
     };
 
     use super::*;
@@ -65,7 +66,7 @@ mod tests {
             into: None,
             from: vec![sqlparser::ast::TableWithJoins {
                 relation: sqlparser::ast::TableFactor::Table {
-                    name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new("foo")]),
+                    name: sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new("foo")]),
                     alias: None,
                     args: None,
                     with_hints: vec![],
@@ -74,6 +75,7 @@ mod tests {
                     with_ordinality: false,
                     json_path: None,
                     sample: None,
+                    index_hints: vec![],
                 },
                 joins: vec![],
             }],
@@ -92,6 +94,7 @@ mod tests {
             window_before_qualify: false,
             connect_by: None,
             select_token: AttachedToken::empty(),
+            flavor: SelectFlavor::Standard,
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {

@@ -15,8 +15,6 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         buildInputs = with pkgs; [
-          libgit2
-          libz
         ];
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {

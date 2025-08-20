@@ -383,8 +383,8 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_time::Timestamp;
-    use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{BinaryExpr, Expr, Operator};
+    use datafusion_common::Column;
+    use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::Vector;
     use datatypes::scalars::ScalarVector;
@@ -631,7 +631,7 @@ mod tests {
             let expr = Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(Expr::Column(Column::from_name("k1"))),
                 op: Operator::Eq,
-                right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
+                right: Box::new((i as u32).lit()),
             });
             let iter = memtable
                 .iter(None, Some(Predicate::new(vec![expr])), None)

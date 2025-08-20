@@ -1546,7 +1546,7 @@ mod tests {
             .unwrap();
 
         // Verify the nested structure is properly created
-        let expected_expr_debug = "BinaryExpr(BinaryExpr { left: BinaryExpr(BinaryExpr { left: Column(Column { relation: None, name: \"age\" }), op: Plus, right: Literal(Int32(5)) }), op: Gt, right: Literal(Int32(30)) })";
+        let expected_expr_debug = r#"BinaryExpr(BinaryExpr { left: BinaryExpr(BinaryExpr { left: Column(Column { relation: None, name: "age" }), op: Plus, right: Literal(Int32(5), None) }), op: Gt, right: Literal(Int32(30), None) })"#;
         assert_eq!(format!("{:?}", expr), expected_expr_debug);
     }
 }

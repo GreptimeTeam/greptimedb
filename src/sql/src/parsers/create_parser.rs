@@ -16,7 +16,9 @@
 pub mod trigger;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use arrow_buffer::IntervalMonthDayNano;
 use common_catalog::consts::default_engine;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
@@ -31,7 +33,7 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
 use table::requests::{validate_database_option, validate_table_option};
 
-use crate::ast::{ColumnDef, Ident};
+use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
     InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
@@ -57,6 +59,8 @@ pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
+
+pub type RawIntervalExpr = String;
 
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
@@ -348,7 +352,59 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the interval expr to duration in seconds.
     fn parse_interval(&mut self) -> Result<i64> {
+        let interval = self.parse_interval_month_day_nano()?.0;
+        Ok(
+            interval.nanoseconds / 1_000_000_000
+                + interval.days as i64 * 60 * 60 * 24
+                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
+                                                                       // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                       // which we use in database to parse i.e. ttl interval and many other intervals
+        )
+    }
+
+    /// Parses an interval expression and converts it to a standard Rust [`Duration`]
+    /// and a raw interval expression string.
+    pub fn parse_interval_to_duration(&mut self) -> Result<(Duration, RawIntervalExpr)> {
+        let (interval, raw_interval_expr) = self.parse_interval_month_day_nano()?;
+
+        let months: i64 = interval.months.into();
+        let days: i64 = interval.days.into();
+        let months_in_seconds: i64 = months * 60 * 60 * 24 * 3044 / 1000;
+        let days_in_seconds: i64 = days * 60 * 60 * 24;
+        let seconds_from_nanos = interval.nanoseconds / 1_000_000_000;
+        let total_seconds = months_in_seconds + days_in_seconds + seconds_from_nanos;
+
+        let mut nanos_remainder = interval.nanoseconds % 1_000_000_000;
+        let mut adjusted_seconds = total_seconds;
+
+        if nanos_remainder < 0 {
+            nanos_remainder += 1_000_000_000;
+            adjusted_seconds -= 1;
+        }
+
+        ensure!(
+            adjusted_seconds >= 0,
+            InvalidIntervalSnafu {
+                reason: "must be a positive interval",
+            }
+        );
+
+        // Cast safety: `adjusted_seconds` is guaranteed to be non-negative before.
+        let adjusted_seconds = adjusted_seconds as u64;
+        // Cast safety: `nanos_remainder` is smaller than 1_000_000_000 which
+        // is checked above.
+        let nanos_remainder = nanos_remainder as u32;
+
+        Ok((
+            Duration::new(adjusted_seconds, nanos_remainder),
+            raw_interval_expr,
+        ))
+    }
+
+    /// Parse interval expr to [`IntervalMonthDayNano`].
+    fn parse_interval_month_day_nano(&mut self) -> Result<(IntervalMonthDayNano, RawIntervalExpr)> {
         let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+        let raw_interval_expr = interval_expr.to_string();
         let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
             .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
             .ok()
@@ -356,13 +412,7 @@ impl<'a> ParserContext<'a> {
                 reason: format!("cannot cast {} to interval type", interval_expr),
             })?;
         if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
-            Ok(
-                interval.nanoseconds / 1_000_000_000
-                    + interval.days as i64 * 60 * 60 * 24
-                    + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                           // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                           // which we use in database to parse i.e. ttl interval and many other intervals
-            )
+            Ok((interval, raw_interval_expr))
         } else {
             unreachable!()
         }
@@ -612,11 +662,6 @@ impl<'a> ParserContext<'a> {
         );
 
         let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-        let collation = if parser.parse_keyword(Keyword::COLLATE) {
-            Some(parser.parse_object_name(false).context(SyntaxSnafu)?)
-        } else {
-            None
-        };
         let mut options = vec![];
         let mut extensions = ColumnExtensions::default();
         loop {
@@ -643,7 +688,6 @@ impl<'a> ParserContext<'a> {
             column_def: ColumnDef {
                 name: Self::canonicalize_identifier(name),
                 data_type,
-                collation,
                 options,
             },
             extensions,
@@ -713,7 +757,7 @@ impl<'a> ParserContext<'a> {
     ) -> Result<bool> {
         if let DataType::Custom(name, tokens) = column_type
             && name.0.len() == 1
-            && &name.0[0].value.to_uppercase() == "VECTOR"
+            && &name.0[0].to_string_unquoted().to_uppercase() == "VECTOR"
         {
             ensure!(
                 tokens.len() == 1,
@@ -1007,7 +1051,9 @@ fn validate_time_index(columns: &[Column], constraints: &[TableConstraint]) -> R
 fn get_unalias_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
-            if let Some(real_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
+            if let Some(real_type) =
+                get_data_type_by_alias_name(name.0[0].to_string_unquoted().as_str())
+            {
                 real_type
             } else {
                 data_type.clone()
@@ -1308,7 +1354,7 @@ mod tests {
         let stmts = result.unwrap();
         match &stmts.last().unwrap() {
             Statement::CreateDatabase(c) => {
-                assert_eq!(c.name, ObjectName(vec![Ident::with_quote('`', "fOo")]));
+                assert_eq!(c.name, vec![Ident::with_quote('`', "fOo")].into());
                 assert!(!c.if_not_exists);
             }
             _ => unreachable!(),
@@ -1369,8 +1415,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1389,8 +1435,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1409,8 +1455,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1429,8 +1475,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1448,8 +1494,8 @@ EXPIRE AFTER '1 month 2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::with_quote('`', "task_2")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::with_quote('`', "task_2")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1501,8 +1547,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
 
         let expected = CreateFlow {
-            flow_name: ObjectName(vec![Ident::new("task_1")]),
-            sink_table_name: ObjectName(vec![Ident::new("schema_1"), Ident::new("table_1")]),
+            flow_name: vec![Ident::new("task_1")].into(),
+            sink_table_name: vec![Ident::new("schema_1"), Ident::new("table_1")].into(),
             or_replace: true,
             if_not_exists: true,
             expire_after: Some(300),
@@ -1607,15 +1653,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::LtEq,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "hz".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("hz".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("1000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("1000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1626,24 +1674,26 @@ ENGINE=mito";
                             left: Box::new(Expr::BinaryOp {
                                 left: Box::new(Expr::Identifier("idc".into())),
                                 op: BinaryOperator::Gt,
-                                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                    "hz".to_string()
-                                )))
+                                right: Box::new(Expr::Value(
+                                    Value::SingleQuotedString("hz".to_string()).into()
+                                ))
                             }),
                             op: BinaryOperator::And,
                             right: Box::new(Expr::BinaryOp {
                                 left: Box::new(Expr::Identifier("idc".into())),
                                 op: BinaryOperator::LtEq,
-                                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                    "sh".to_string()
-                                )))
+                                right: Box::new(Expr::Value(
+                                    Value::SingleQuotedString("sh".to_string()).into()
+                                ))
                             })
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("2000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("2000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1653,15 +1703,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::Gt,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "sh".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("sh".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("3000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("3000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1671,15 +1723,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::Gt,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "sh".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("sh".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::GtEq,
-                            right: Box::new(Expr::Value(Value::Number("3000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("3000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -2467,10 +2521,8 @@ CREATE TABLE log (
         let tokens = tokenizer.tokenize().unwrap();
         let mut parser = Parser::new(&dialect).with_tokens(tokens);
         let name = Ident::new("vec_col");
-        let data_type = DataType::Custom(
-            ObjectName(vec![Ident::new("VECTOR")]),
-            vec!["128".to_string()],
-        );
+        let data_type =
+            DataType::Custom(vec![Ident::new("VECTOR")].into(), vec!["128".to_string()]);
         let mut extensions = ColumnExtensions::default();
 
         let result =
@@ -2489,7 +2541,7 @@ CREATE TABLE log (
         let tokens = tokenizer.tokenize().unwrap();
         let mut parser = Parser::new(&dialect).with_tokens(tokens);
         let name = Ident::new("vec_col");
-        let data_type = DataType::Custom(ObjectName(vec![Ident::new("VECTOR")]), vec![]);
+        let data_type = DataType::Custom(vec![Ident::new("VECTOR")].into(), vec![]);
         let mut extensions = ColumnExtensions::default();
 
         let result =

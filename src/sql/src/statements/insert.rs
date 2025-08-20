@@ -14,7 +14,8 @@
 
 use serde::Serialize;
 use sqlparser::ast::{
-    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, TableObject, UnaryOperator, Values,
+    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, TableObject, UnaryOperator,
+    ValueWithSpan, Values,
 };
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
@@ -99,7 +100,13 @@ impl Insert {
                     }
                     Expr::UnaryOp { op, expr } => {
                         matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
-                            && matches!(&**expr, Expr::Value(Value::Number(_, _)))
+                            && matches!(
+                                &**expr,
+                                Expr::Value(ValueWithSpan {
+                                    value: Value::Number(_, _),
+                                    ..
+                                })
+                            )
                     }
                     _ => false,
                 })
@@ -125,7 +132,7 @@ fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
         let mut vs = Vec::with_capacity(es.len());
         for expr in es.iter() {
             vs.push(match expr {
-                Expr::Value(v) => v.clone(),
+                Expr::Value(v) => v.value.clone(),
                 Expr::Identifier(ident) => {
                     if ident.quote_style.is_none() {
                         // Special processing for `default` value
@@ -146,7 +153,11 @@ fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
                 Expr::UnaryOp { op, expr }
                     if matches!(op, UnaryOperator::Minus | UnaryOperator::Plus) =>
                 {
-                    if let Expr::Value(Value::Number(s, b)) = &**expr {
+                    if let Expr::Value(ValueWithSpan {
+                        value: Value::Number(s, b),
+                        ..
+                    }) = &**expr
+                    {
                         match op {
                             UnaryOperator::Minus => Value::Number(format!("-{s}"), *b),
                             UnaryOperator::Plus => Value::Number(s.to_string(), *b),

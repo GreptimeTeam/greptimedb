@@ -3,7 +3,7 @@ CREATE TABLE metrics (
     ts TIMESTAMP TIME INDEX,
     val DOUBLE,
     host STRING,
-    service STRING,
+    `service` STRING,
     PRIMARY KEY (host, service)
 );
 

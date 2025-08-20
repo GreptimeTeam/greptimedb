@@ -64,6 +64,7 @@ impl ParserContext<'_> {
             let start = self
                 .parser
                 .parse_value()
+                .map(|x| x.value)
                 .with_context(|e| error::UnexpectedSnafu {
                     expected: "a timestamp value",
                     actual: e.to_string(),
@@ -80,6 +81,7 @@ impl ParserContext<'_> {
             let end = self
                 .parser
                 .parse_value()
+                .map(|x| x.value)
                 .with_context(|_| error::UnexpectedSnafu {
                     expected: "a timestamp",
                     actual: self.peek_token_as_string(),
@@ -148,7 +150,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("foo")]),
                 vec![(
                     sqlparser::ast::Value::Number("0".to_string(), false),
                     sqlparser::ast::Value::Number("20".to_string(), false)
@@ -163,7 +165,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("foo")]),
                 vec![
                     (
                         sqlparser::ast::Value::DoubleQuotedString(
@@ -188,7 +190,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("my_schema"), Ident::new("foo")]),
                 vec![
                     (
                         sqlparser::ast::Value::Number("1".to_string(), false),
@@ -209,7 +211,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("my_schema"), Ident::new("foo")]),
                 vec![(
                     sqlparser::ast::Value::Number("1".to_string(), false),
                     sqlparser::ast::Value::Number("2".to_string(), false)
@@ -224,7 +226,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![
+                ObjectName::from(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
@@ -243,7 +245,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::new("drop")]),
+                ObjectName::from(vec![Ident::new("drop")]),
                 vec![(
                     sqlparser::ast::Value::Number("1".to_string(), false),
                     sqlparser::ast::Value::Number("2".to_string(), false)
@@ -257,9 +259,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
-                '`', "drop"
-            ),])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
+                Ident::with_quote('`', "drop"),
+            ])))
         );
 
         let sql = "TRUNCATE \"drop\" FILE RANGE (\"1\", \"2\")";
@@ -269,7 +271,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::TruncateTable(TruncateTable::new_with_ranges(
-                ObjectName(vec![Ident::with_quote('"', "drop")]),
+                ObjectName::from(vec![Ident::with_quote('"', "drop")]),
                 vec![(
                     sqlparser::ast::Value::DoubleQuotedString("1".to_string()),
                     sqlparser::ast::Value::DoubleQuotedString("2".to_string())
@@ -286,7 +288,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::new("foo")])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![Ident::new(
+                "foo"
+            )])))
         );
 
         let sql = "TRUNCATE TABLE foo";
@@ -295,7 +299,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::new("foo")])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![Ident::new(
+                "foo"
+            )])))
         );
 
         let sql = "TRUNCATE TABLE my_schema.foo";
@@ -304,7 +310,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
                 Ident::new("my_schema"),
                 Ident::new("foo")
             ])))
@@ -316,7 +322,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
                 Ident::new("my_schema"),
                 Ident::new("foo")
             ])))
@@ -328,7 +334,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
                 Ident::new("my_catalog"),
                 Ident::new("my_schema"),
                 Ident::new("foo")
@@ -341,7 +347,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::new("drop")])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![Ident::new(
+                "drop"
+            )])))
         );
 
         let sql = "TRUNCATE `drop`";
@@ -350,9 +358,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
-                '`', "drop"
-            ),])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
+                Ident::with_quote('`', "drop"),
+            ])))
         );
 
         let sql = "TRUNCATE \"drop\"";
@@ -361,9 +369,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
-                '"', "drop"
-            ),])))
+            Statement::TruncateTable(TruncateTable::new(ObjectName::from(vec![
+                Ident::with_quote('"', "drop"),
+            ])))
         );
     }
 

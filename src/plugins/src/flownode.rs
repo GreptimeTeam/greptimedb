@@ -21,7 +21,7 @@ use crate::options::PluginOptions;
 #[allow(unused_mut)]
 pub async fn setup_flownode_plugins(
     _plugins: &mut Plugins,
-    _plugin_options: &[PluginOptions],
+    _plugin_options: Option<&PluginOptions>,
     _fn_opts: &FlownodeOptions,
 ) -> Result<()> {
     Ok(())

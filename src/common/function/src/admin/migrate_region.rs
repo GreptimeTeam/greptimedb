@@ -17,7 +17,8 @@ use std::time::Duration;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::MigrateRegionRequest;
 use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
@@ -103,9 +104,21 @@ fn signature() -> Signature {
     Signature::one_of(
         vec![
             // migrate_region(region_id, from_peer, to_peer)
-            TypeSignature::Uniform(3, ConcreteDataType::numerics()),
+            TypeSignature::Uniform(
+                3,
+                ConcreteDataType::numerics()
+                    .into_iter()
+                    .map(|dt| dt.as_arrow_type())
+                    .collect(),
+            ),
             // migrate_region(region_id, from_peer, to_peer, timeout(secs))
-            TypeSignature::Uniform(4, ConcreteDataType::numerics()),
+            TypeSignature::Uniform(
+                4,
+                ConcreteDataType::numerics()
+                    .into_iter()
+                    .map(|dt| dt.as_arrow_type())
+                    .collect(),
+            ),
         ],
         Volatility::Immutable,
     )
@@ -115,59 +128,89 @@ fn signature() -> Signature {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
+    use arrow::array::{StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[test]
     fn test_migrate_region_misc() {
-        let f = MigrateRegionFunction;
+        let factory: ScalarFunctionFactory = MigrateRegionFunction::factory().into();
+        let f = factory.provide(FunctionContext::mock());
         assert_eq!("migrate_region", f.name());
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, f.return_type(&[]).unwrap());
         assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::OneOf(sigs),
-                             volatility: Volatility::Immutable
+                         datafusion_expr::Signature {
+                             type_signature: datafusion_expr::TypeSignature::OneOf(sigs),
+                             volatility: datafusion_expr::Volatility::Immutable
                          } if sigs.len() == 2));
     }
 
     #[tokio::test]
     async fn test_missing_procedure_service() {
-        let f = MigrateRegionFunction;
+        let factory: ScalarFunctionFactory = MigrateRegionFunction::factory().into();
+        let provider = factory.provide(FunctionContext::default());
+        let f = provider.as_async().unwrap();
 
-        let args = vec![1, 1, 1];
-
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
-            .collect::<Vec<_>>();
-
-        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_1", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_2", DataType::UInt64, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap_err();
         assert_eq!(
-            "Missing ProcedureServiceHandler, not expected",
+            "Execution error: Handler error: Missing ProcedureServiceHandler, not expected",
             result.to_string()
         );
     }
 
     #[tokio::test]
     async fn test_migrate_region() {
-        let f = MigrateRegionFunction;
+        let factory: ScalarFunctionFactory = MigrateRegionFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
 
-        let args = vec![1, 1, 1];
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_1", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_2", DataType::UInt64, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
 
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
-            .collect::<Vec<_>>();
-
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
     }
 }

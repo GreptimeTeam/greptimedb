@@ -18,7 +18,7 @@ use std::task::{Context, Poll};
 
 use auth::UserProviderRef;
 use session::context::{Channel, QueryContext};
-use tonic::body::BoxBody;
+use tonic::body::Body;
 use tonic::server::NamedService;
 use tower::{Layer, Service};
 
@@ -60,9 +60,9 @@ where
 
 type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-impl<S> Service<http::Request<BoxBody>> for AuthMiddleware<S>
+impl<S> Service<http::Request<Body>> for AuthMiddleware<S>
 where
-    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -73,7 +73,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, mut req: http::Request<BoxBody>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<Body>) -> Self::Future {
         // This is necessary because tonic internally uses `tower::buffer::Buffer`.
         // See https://github.com/tower-rs/tower/issues/547#issuecomment-767629149
         // for details on why this is necessary.

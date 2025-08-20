@@ -16,7 +16,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::status_to_tonic_code;
 use common_telemetry::error;
 use futures::SinkExt;
-use otel_arrow_rust::opentelemetry::{ArrowMetricsService, BatchArrowRecords, BatchStatus};
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsService;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::{BatchArrowRecords, BatchStatus};
 use otel_arrow_rust::Consumer;
 use session::context::QueryContext;
 use tonic::metadata::{Entry, MetadataValue};
@@ -65,7 +66,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     status_code: 0,
                     status_message: Default::default(),
                 };
-                let request = match consumer.consume_batches(&mut batch).map_err(|e| {
+                let request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
                     error::HandleOtelArrowRequestSnafu {
                         err_msg: e.to_string(),
                     }

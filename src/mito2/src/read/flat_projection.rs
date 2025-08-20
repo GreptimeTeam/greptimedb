@@ -126,7 +126,7 @@ impl FlatProjectionMapper {
             })
             .collect();
 
-        let batch_schema = plain_projected_columns(metadata, &format_projection);
+        let batch_schema = flat_projected_columns(metadata, &format_projection);
 
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
@@ -162,7 +162,7 @@ impl FlatProjectionMapper {
 
     /// Returns the schema of converted [RecordBatch].
     /// This is the schema that the stream will output. This schema may contain
-    /// less columns than [ProjectionMapper::column_ids()].
+    /// less columns than [FlatProjectionMapper::column_ids()].
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
@@ -198,7 +198,7 @@ impl FlatProjectionMapper {
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
-pub(crate) fn plain_projected_columns(
+pub(crate) fn flat_projected_columns(
     metadata: &RegionMetadata,
     format_projection: &FormatProjection,
 ) -> Vec<(ColumnId, ConcreteDataType)> {

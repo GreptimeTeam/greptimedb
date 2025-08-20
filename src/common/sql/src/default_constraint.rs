@@ -16,6 +16,7 @@ use common_time::timezone::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::ColumnDefaultConstraint;
+use sqlparser::ast::ValueWithSpan;
 pub use sqlparser::ast::{
     visit_expressions_mut, visit_statements_mut, BinaryOperator, ColumnDef, ColumnOption,
     ColumnOptionDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
@@ -38,7 +39,7 @@ pub fn parse_column_default_constraint(
     {
         let default_constraint = match &opt.option {
             ColumnOption::Default(Expr::Value(v)) => ColumnDefaultConstraint::Value(
-                sql_value_to_value(column_name, data_type, v, timezone, None, false)?,
+                sql_value_to_value(column_name, data_type, &v.value, timezone, None, false)?,
             ),
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
@@ -54,8 +55,13 @@ pub fn parse_column_default_constraint(
                 // Specialized process for handling numerical inputs to prevent
                 // overflow errors during the parsing of negative numbers,
                 // See https://github.com/GreptimeTeam/greptimedb/issues/4351
-                if let (UnaryOperator::Minus, Expr::Value(SqlValue::Number(n, _))) =
-                    (op, expr.as_ref())
+                if let (
+                    UnaryOperator::Minus,
+                    Expr::Value(ValueWithSpan {
+                        value: SqlValue::Number(n, _),
+                        span: _,
+                    }),
+                ) = (op, expr.as_ref())
                 {
                     return Ok(Some(ColumnDefaultConstraint::Value(sql_number_to_value(
                         data_type,
@@ -64,8 +70,14 @@ pub fn parse_column_default_constraint(
                 }
 
                 if let Expr::Value(v) = &**expr {
-                    let value =
-                        sql_value_to_value(column_name, data_type, v, timezone, Some(*op), false)?;
+                    let value = sql_value_to_value(
+                        column_name,
+                        data_type,
+                        &v.value,
+                        timezone,
+                        Some(*op),
+                        false,
+                    )?;
                     ColumnDefaultConstraint::Value(value)
                 } else {
                     return UnsupportedDefaultValueSnafu {
@@ -85,7 +97,7 @@ pub fn parse_column_default_constraint(
             _ => {
                 return UnsupportedDefaultValueSnafu {
                     column_name,
-                    expr: Expr::Value(SqlValue::Null),
+                    expr: Expr::Value(SqlValue::Null.into()),
                 }
                 .fail();
             }
@@ -113,7 +125,7 @@ mod test {
         let opts = vec![
             ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Default(Expr::Value(bool_value)),
+                option: ColumnOption::Default(Expr::Value(bool_value.into())),
             },
             ColumnOptionDef {
                 name: None,
@@ -139,7 +151,9 @@ mod test {
             name: None,
             option: ColumnOption::Default(Expr::UnaryOp {
                 op: UnaryOperator::Minus,
-                expr: Box::new(Expr::Value(SqlValue::Number("32768".to_string(), false))),
+                expr: Box::new(Expr::Value(
+                    SqlValue::Number("32768".to_string(), false).into(),
+                )),
             }),
         }];
 
@@ -161,10 +175,9 @@ mod test {
     fn test_incorrect_default_value_issue_3479() {
         let opts = vec![ColumnOptionDef {
             name: None,
-            option: ColumnOption::Default(Expr::Value(SqlValue::Number(
-                "0.047318541668048164".into(),
-                false,
-            ))),
+            option: ColumnOption::Default(Expr::Value(
+                SqlValue::Number("0.047318541668048164".into(), false).into(),
+            )),
         }];
         let constraint = parse_column_default_constraint(
             "coll",

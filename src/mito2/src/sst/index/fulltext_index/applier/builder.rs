@@ -207,7 +207,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let Expr::Literal(ScalarValue::Utf8(Some(query))) = &f.args[1] else {
+        let Expr::Literal(ScalarValue::Utf8(Some(query)), _) = &f.args[1] else {
             return None;
         };
 
@@ -248,7 +248,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let Expr::Literal(ScalarValue::Utf8(Some(term))) = &f.args[1] else {
+        let Expr::Literal(ScalarValue::Utf8(Some(term)), _) = &f.args[1] else {
             return None;
         };
 
@@ -290,7 +290,7 @@ mod tests {
     use datafusion::functions::string::lower;
     use datafusion_common::Column;
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::ScalarUDF;
+    use datafusion_expr::{Literal, ScalarUDF};
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
@@ -337,10 +337,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
             func: matches_func(),
         };
 
@@ -367,10 +364,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("not_found")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("not_found")), "foo".lit()],
             func: matches_func(),
         };
 
@@ -382,10 +376,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("ts")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("ts")), "foo".lit()],
             func: matches_func(),
         };
 
@@ -397,10 +388,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Int64(Some(42))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), 42.lit()],
             func: matches_func(),
         };
 
@@ -412,10 +400,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
             func: matches_term_func(),
         };
 
@@ -441,10 +426,7 @@ mod tests {
         };
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::ScalarFunction(lower_func_expr),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::ScalarFunction(lower_func_expr), "foo".lit()],
             func: matches_term_func(),
         };
 
@@ -477,10 +459,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
             func: matches_func(), // Using 'matches' instead of 'matches_term'
         };
 
@@ -519,10 +498,7 @@ mod tests {
 
         // Create a matches expression
         let matches_expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
             func: matches_func(),
         });
 
@@ -542,19 +518,13 @@ mod tests {
 
         // Create a matches expression
         let matches_expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "foo".lit()],
             func: matches_func(),
         });
 
         // Create a matches_term expression
         let matches_term_expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column::from_name("text")),
-                Expr::Literal(ScalarValue::Utf8(Some("bar".to_string()))),
-            ],
+            args: vec![Expr::Column(Column::from_name("text")), "bar".lit()],
             func: matches_term_func(),
         });
 

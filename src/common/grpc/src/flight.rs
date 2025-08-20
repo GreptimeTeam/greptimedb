@@ -25,7 +25,7 @@ use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::ipc::{convert, reader, root_as_message, writer, MessageHeader};
 use flatbuffers::FlatBufferBuilder;
@@ -91,7 +91,15 @@ impl FlightEncoder {
     /// be encoded to exactly one [FlightData].
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
-            FlightMessage::Schema(schema) => vec1![self.encode_schema(schema.as_ref())],
+            FlightMessage::Schema(schema) => {
+                schema.fields().iter().for_each(|x| {
+                    if matches!(x.data_type(), DataType::Dictionary(_, _)) {
+                        self.dictionary_tracker.next_dict_id();
+                    }
+                });
+
+                vec1![self.encode_schema(schema.as_ref())]
+            }
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen

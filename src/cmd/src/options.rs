@@ -42,7 +42,7 @@ pub struct GreptimeOptions<T> {
     /// The runtime options.
     pub runtime: RuntimeOptions,
     /// The plugin options.
-    pub plugins: Vec<PluginOptions>,
+    pub plugins: Option<PluginOptions>,
 
     /// The options of each component (like Datanode or Standalone) of GreptimeDB.
     #[serde(flatten)]

@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::TableReference;
-use datafusion_expr::{BinaryExpr, Expr, Join, LogicalPlan, Operator};
+use datafusion_expr::{Expr, LogicalPlan};
 use session::context::QueryContextRef;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -132,24 +132,7 @@ pub trait ExtractExpr {
 
 impl ExtractExpr for LogicalPlan {
     fn expressions_consider_join(&self) -> Vec<Expr> {
-        match self {
-            LogicalPlan::Join(Join { on, filter, .. }) => {
-                // The first part of expr is equi-exprs,
-                // and the struct of each equi-expr is like `left-expr = right-expr`.
-                // We only normalize the filter_expr (non equality predicate from ON clause).
-                on.iter()
-                    .map(|(left, right)| {
-                        Expr::BinaryExpr(BinaryExpr {
-                            left: Box::new(left.clone()),
-                            op: Operator::Eq,
-                            right: Box::new(right.clone()),
-                        })
-                    })
-                    .chain(filter.clone())
-                    .collect()
-            }
-            _ => self.expressions(),
-        }
+        self.expressions()
     }
 }
 

@@ -291,7 +291,7 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
 
         let mut plugins = Plugins::new();
-        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_flownode_plugins(&mut plugins, plugin_opts.as_ref(), &opts)
             .await
             .context(StartFlownodeSnafu)?;
 
@@ -376,7 +376,8 @@ impl StartCommand {
             flow_auth_header,
             opts.query.clone(),
             opts.flow.batching_mode.clone(),
-        );
+        )
+        .context(StartFlownodeSnafu)?;
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),

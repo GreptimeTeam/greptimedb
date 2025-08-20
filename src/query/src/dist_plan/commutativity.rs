@@ -78,7 +78,7 @@ pub fn step_aggr_to_upper_aggr(
 pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
     aggr_exprs.iter().all(|expr| {
         if let Some(aggr_func) = get_aggr_func(expr) {
-            if aggr_func.distinct {
+            if aggr_func.params.distinct {
                 // Distinct aggregate functions are not steppable(yet).
                 return false;
             }
@@ -259,10 +259,11 @@ impl Categorizer {
     }
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
+        #[allow(deprecated)]
         match expr {
             Expr::Column(_)
             | Expr::ScalarVariable(_, _)
-            | Expr::Literal(_)
+            | Expr::Literal(_, _)
             | Expr::BinaryExpr(_)
             | Expr::Not(_)
             | Expr::IsNotNull(_)

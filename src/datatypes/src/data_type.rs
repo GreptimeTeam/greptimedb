@@ -444,8 +444,12 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
-            ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
+            ArrowDataType::Binary | ArrowDataType::LargeBinary | ArrowDataType::BinaryView => {
+                Self::binary_datatype()
+            }
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                Self::string_datatype()
+            }
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
             )),
@@ -466,8 +470,6 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float16
             | ArrowDataType::Date64
             | ArrowDataType::FixedSizeBinary(_)
-            | ArrowDataType::BinaryView
-            | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::LargeList(_)
@@ -475,7 +477,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             | ArrowDataType::Union(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
-            | ArrowDataType::RunEndEncoded(_, _) => {
+            | ArrowDataType::RunEndEncoded(_, _)
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }

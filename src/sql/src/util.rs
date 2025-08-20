@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
-use sqlparser::ast::{Expr, ObjectName, SetExpr, SqlOption, TableFactor, Value};
+use sqlparser::ast::{Expr, ObjectName, SetExpr, SqlOption, TableFactor, Value, ValueWithSpan};
 
+use crate::ast::ObjectNamePartExt;
 use crate::error::{InvalidSqlSnafu, InvalidTableOptionValueSnafu, Result};
 use crate::statements::create::SqlOrTql;
 
@@ -32,7 +33,7 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
             for ident in self.name.0.iter() {
                 write!(f, "{delim}")?;
                 delim = ".";
-                write!(f, "{}", ident.value)?;
+                write!(f, "{}", ident.to_string_unquoted())?;
             }
             Ok(())
         }
@@ -49,9 +50,19 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
         .fail();
     };
     let v = match value {
-        Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(v),
+            ..
+        })
+        | Expr::Value(ValueWithSpan {
+            value: Value::DoubleQuotedString(v),
+            ..
+        }) => v,
         Expr::Identifier(v) => v.value,
-        Expr::Value(Value::Number(v, _)) => v.to_string(),
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(v, _),
+            ..
+        }) => v.to_string(),
         value => return InvalidTableOptionValueSnafu { key, value }.fail(),
     };
     let k = key.value.to_lowercase();

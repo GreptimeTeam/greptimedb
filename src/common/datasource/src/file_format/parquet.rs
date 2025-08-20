@@ -31,6 +31,7 @@ use datatypes::schema::SchemaRef;
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use object_store::{FuturesAsyncReader, ObjectStore};
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
@@ -65,7 +66,7 @@ impl FileFormat for ParquetFormat {
             .compat();
 
         let metadata = reader
-            .get_metadata()
+            .get_metadata(None)
             .await
             .context(error::ReadParquetSnafuSnafu)?;
 
@@ -146,7 +147,7 @@ impl LazyParquetFileReader {
 impl AsyncFileReader for LazyParquetFileReader {
     fn get_bytes(
         &mut self,
-        range: std::ops::Range<usize>,
+        range: std::ops::Range<u64>,
     ) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
         Box::pin(async move {
             self.maybe_initialize()
@@ -157,13 +158,16 @@ impl AsyncFileReader for LazyParquetFileReader {
         })
     }
 
-    fn get_metadata(&mut self) -> BoxFuture<'_, ParquetResult<Arc<ParquetMetaData>>> {
+    fn get_metadata<'a>(
+        &'a mut self,
+        options: Option<&'a ArrowReaderOptions>,
+    ) -> BoxFuture<'a, parquet::errors::Result<Arc<ParquetMetaData>>> {
         Box::pin(async move {
             self.maybe_initialize()
                 .await
                 .map_err(|e| ParquetError::External(Box::new(e)))?;
             // Safety: Must initialized
-            self.reader.as_mut().unwrap().get_metadata().await
+            self.reader.as_mut().unwrap().get_metadata(options).await
         })
     }
 }

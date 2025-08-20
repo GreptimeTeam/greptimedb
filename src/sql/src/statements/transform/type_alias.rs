@@ -20,6 +20,7 @@ use sqlparser::ast::{
     Ident, ObjectName, Value,
 };
 
+use crate::ast::ObjectNamePartExt;
 use crate::error::Result;
 use crate::statements::alter::AlterTableOperation;
 use crate::statements::create::{CreateExternalTable, CreateTable};
@@ -36,7 +37,7 @@ use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
 ///  - `INT16` for `smallint`
 ///  - `INT32` for `int`
 ///  - `INT64` for `bigint`
-///  -  And `UINT8`, `UINT16` etc. for `UnsignedTinyint` etc.
+///  -  And `UINT8`, `UINT16` etc. for `TinyIntUnsigned` etc.
 ///  -  TinyText, MediumText, LongText for `Text`.
 pub(crate) struct TypeAliasTransformRule;
 
@@ -75,12 +76,12 @@ impl TransformRule for TypeAliasTransformRule {
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
         fn cast_expr_to_arrow_cast_func(expr: Expr, cast_type: String) -> Function {
             Function {
-                name: ObjectName(vec![Ident::new("arrow_cast")]),
+                name: ObjectName::from(vec![Ident::new("arrow_cast")]),
                 args: sqlparser::ast::FunctionArguments::List(FunctionArgumentList {
                     args: vec![
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                            Value::SingleQuotedString(cast_type),
+                            Value::SingleQuotedString(cast_type).into(),
                         ))),
                     ],
                     duplicate_treatment: None,
@@ -156,16 +157,16 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         // Which means 8 bytes in postgres (not 8 bits).
         // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
-            get_data_type_by_alias_name(name.0[0].value.as_str())
+            get_data_type_by_alias_name(name.0[0].to_string_unquoted().as_str())
         }
         DataType::Int8(None) => Some(DataType::TinyInt(None)),
         DataType::Int16 => Some(DataType::SmallInt(None)),
         DataType::Int32 => Some(DataType::Int(None)),
         DataType::Int64 => Some(DataType::BigInt(None)),
-        DataType::UInt8 => Some(DataType::UnsignedTinyInt(None)),
-        DataType::UInt16 => Some(DataType::UnsignedSmallInt(None)),
-        DataType::UInt32 => Some(DataType::UnsignedInt(None)),
-        DataType::UInt64 => Some(DataType::UnsignedBigInt(None)),
+        DataType::UInt8 => Some(DataType::TinyIntUnsigned(None)),
+        DataType::UInt16 => Some(DataType::SmallIntUnsigned(None)),
+        DataType::UInt32 => Some(DataType::IntUnsigned(None)),
+        DataType::UInt64 => Some(DataType::BigIntUnsigned(None)),
         DataType::Float32 => Some(DataType::Float(None)),
         DataType::Float64 => Some(DataType::Double(ExactNumberInfo::None)),
         DataType::Bool => Some(DataType::Boolean),
@@ -203,10 +204,10 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "INT16" => Some(DataType::SmallInt(None)),
         "INT32" => Some(DataType::Int(None)),
         "INT64" => Some(DataType::BigInt(None)),
-        "UINT8" => Some(DataType::UnsignedTinyInt(None)),
-        "UINT16" => Some(DataType::UnsignedSmallInt(None)),
-        "UINT32" => Some(DataType::UnsignedInt(None)),
-        "UINT64" => Some(DataType::UnsignedBigInt(None)),
+        "UINT8" => Some(DataType::TinyIntUnsigned(None)),
+        "UINT16" => Some(DataType::SmallIntUnsigned(None)),
+        "UINT32" => Some(DataType::IntUnsigned(None)),
+        "UINT64" => Some(DataType::BigIntUnsigned(None)),
         "FLOAT32" => Some(DataType::Float(None)),
         "FLOAT64" => Some(DataType::Double(ExactNumberInfo::None)),
         // String type alias
@@ -260,19 +261,19 @@ mod tests {
         );
         assert_eq!(
             get_data_type_by_alias_name("Uint8"),
-            Some(DataType::UnsignedTinyInt(None))
+            Some(DataType::TinyIntUnsigned(None))
         );
         assert_eq!(
             get_data_type_by_alias_name("UINT16"),
-            Some(DataType::UnsignedSmallInt(None))
+            Some(DataType::SmallIntUnsigned(None))
         );
         assert_eq!(
             get_data_type_by_alias_name("UINT32"),
-            Some(DataType::UnsignedInt(None))
+            Some(DataType::IntUnsigned(None))
         );
         assert_eq!(
             get_data_type_by_alias_name("uint64"),
-            Some(DataType::UnsignedBigInt(None))
+            Some(DataType::BigIntUnsigned(None))
         );
 
         assert_eq!(

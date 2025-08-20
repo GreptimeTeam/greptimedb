@@ -30,6 +30,7 @@ use common_recordbatch::util;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
+use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr, SortExpr};
 use datatypes::value::ValueRef;
 use query::QueryEngineRef;
@@ -61,7 +62,7 @@ impl JaegerQueryHandler for Instance {
             ctx,
             self.catalog_manager(),
             self.query_engine(),
-            vec![col(SERVICE_NAME_COLUMN)],
+            vec![SelectExpr::from(col(SERVICE_NAME_COLUMN))],
             vec![],
             vec![],
             None,
@@ -118,10 +119,10 @@ impl JaegerQueryHandler for Instance {
             self.catalog_manager(),
             self.query_engine(),
             vec![
-                col(SPAN_NAME_COLUMN),
-                col(SPAN_KIND_COLUMN),
-                col(SERVICE_NAME_COLUMN),
-                col(TIMESTAMP_COLUMN),
+                SelectExpr::from(col(SPAN_NAME_COLUMN)),
+                SelectExpr::from(col(SPAN_KIND_COLUMN)),
+                SelectExpr::from(col(SERVICE_NAME_COLUMN)),
+                SelectExpr::from(col(TIMESTAMP_COLUMN)),
             ],
             filters,
             vec![col(SPAN_NAME_COLUMN).sort(true, false)], // Sort by span_name in ascending order.
@@ -287,7 +288,7 @@ async fn query_trace_table(
     ctx: QueryContextRef,
     catalog_manager: &CatalogManagerRef,
     query_engine: &QueryEngineRef,
-    selects: Vec<Expr>,
+    selects: Vec<SelectExpr>,
     filters: Vec<Expr>,
     sorts: Vec<SortExpr>,
     limit: Option<usize>,
@@ -300,7 +301,10 @@ async fn query_trace_table(
 
     // If only select services, use the trace services table.
     let table_name = {
-        if selects.len() == 1 && selects[0] == col(SERVICE_NAME_COLUMN) {
+        if match selects.as_slice() {
+            [SelectExpr::Expression(x)] => x == &col(SERVICE_NAME_COLUMN),
+            _ => false,
+        } {
             &trace_services_table_name(trace_table_name)
         } else {
             trace_table_name

@@ -98,11 +98,12 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.6"
-arrow = { version = "54.2", features = ["prettyprint"] }
-arrow-array = { version = "54.2", default-features = false, features = ["chrono-tz"] }
-arrow-flight = "54.2"
-arrow-ipc = { version = "54.2", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "54.2", features = ["serde"] }
+arrow = { version = "56.0", features = ["prettyprint"] }
+arrow-array = { version = "56.0", default-features = false, features = ["chrono-tz"] }
+arrow-buffer = "56.0"
+arrow-flight = "56.0"
+arrow-ipc = { version = "56.0", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "56.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -121,26 +122,27 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-functions-aggregate-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-orc = { git = "https://github.com/GreptimeTeam/datafusion-orc", rev = "a0a5f902158f153119316eaeec868cff3fc8a99d" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
 dotenv = "0.15"
 either = "1.15"
-etcd-client = "0.14"
+etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62df834f0cffda355eba96691fe1a9a332b75a7" }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9edc8c4d2a7e3c7d8e4982a6af94426da4057687" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "df2bb74b5990c159dfd5b7a344eecf8f4307af64" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -151,7 +153,7 @@ itertools = "0.14"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
 local-ip-address = "0.6"
-loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
+loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "3b7cd33234358b18ece977bf689dc6fb760f29ab" }
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
 mockall = "0.13"
 moka = "0.12"
@@ -159,9 +161,9 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.50"
+object_store_opendal = { git = "https://github.com/apache/opendal", rev = "0ba8574b6d08d209056704d28a9a114beb3c1022" }
 once_cell = "1.18"
-opentelemetry-proto = { version = "0.27", features = [
+opentelemetry-proto = { version = "0.30", features = [
     "gen-tonic",
     "metrics",
     "trace",
@@ -170,13 +172,14 @@ opentelemetry-proto = { version = "0.27", features = [
 ] }
 ordered-float = { version = "4.3", features = ["serde"] }
 parking_lot = "0.12"
-parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet = { version = "56.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
+prost-types = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
@@ -201,15 +204,14 @@ sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "1.1"
 simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "df6fcca80ce903f5beef7002cd2c1b062e7024f8", features = [
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "39e4fc94c3c741981f77e9d63b5ce8c02e0a27ea", features = [
     "visitor",
     "serde",
-] } # branch = "v0.54.x"
+] } # branch = "v0.55.x"
 sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "mysql",
@@ -219,20 +221,20 @@ sqlx = { version = "0.8", features = [
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
 tempfile = "3"
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.47", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
+tonic = { version = "0.13", features = ["tls-ring", "gzip", "zstd"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
-uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
+uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
 vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
@@ -291,7 +293,7 @@ mito-codec = { path = "src/mito-codec" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
-otel-arrow-rust = { git = "https://github.com/open-telemetry/otel-arrow", rev = "5d551412d2a12e689cde4d84c14ef29e36784e51", features = [
+otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
     "server",
 ] }
 partition = { path = "src/partition" }

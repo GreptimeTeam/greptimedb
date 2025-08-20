@@ -19,8 +19,6 @@ mod procedure_state;
 mod timezone;
 mod version;
 
-use std::sync::Arc;
-
 use build::BuildFunction;
 use database::{
     ConnectionIdFunction, CurrentSchemaFunction, DatabaseFunction, PgBackendPidFunction,
@@ -46,7 +44,7 @@ impl SystemFunction {
         registry.register_scalar(PgBackendPidFunction);
         registry.register_scalar(ConnectionIdFunction);
         registry.register_scalar(TimezoneFunction);
-        registry.register_async(Arc::new(ProcedureStateFunction));
+        registry.register(ProcedureStateFunction::factory());
         PGCatalogFunction::register(registry);
     }
 }

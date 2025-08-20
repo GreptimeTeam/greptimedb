@@ -19,7 +19,7 @@ use std::time::Duration as StdDuration;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use sqlparser::ast::{DataType, Expr, Interval, Value};
+use sqlparser::ast::{DataType, Expr, Interval, Value, ValueWithSpan};
 
 use crate::statements::transform::TransformRule;
 
@@ -71,8 +71,14 @@ impl TransformRule for ExpandIntervalTransformRule {
     fn visit_expr(&self, expr: &mut Expr) -> ControlFlow<()> {
         match expr {
             Expr::Interval(interval) => match &*interval.value {
-                Expr::Value(Value::SingleQuotedString(value))
-                | Expr::Value(Value::DoubleQuotedString(value)) => {
+                Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(value),
+                    ..
+                })
+                | Expr::Value(ValueWithSpan {
+                    value: Value::DoubleQuotedString(value),
+                    ..
+                }) => {
                     if let Some(normalized_name) = normalize_interval_name(value) {
                         *expr = update_existing_interval_with_value(
                             interval,
@@ -81,8 +87,14 @@ impl TransformRule for ExpandIntervalTransformRule {
                     }
                 }
                 Expr::BinaryOp { left, op, right } => match &**left {
-                    Expr::Value(Value::SingleQuotedString(value))
-                    | Expr::Value(Value::DoubleQuotedString(value)) => {
+                    Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(value),
+                        ..
+                    })
+                    | Expr::Value(ValueWithSpan {
+                        value: Value::DoubleQuotedString(value),
+                        ..
+                    }) => {
                         if let Some(normalized_name) = normalize_interval_name(value) {
                             let new_expr_value = Box::new(Expr::BinaryOp {
                                 left: single_quoted_string_expr(normalized_name),
@@ -104,8 +116,14 @@ impl TransformRule for ExpandIntervalTransformRule {
             } => {
                 if DataType::Interval == *data_type {
                     match &**cast_exp {
-                        Expr::Value(Value::SingleQuotedString(value))
-                        | Expr::Value(Value::DoubleQuotedString(value)) => {
+                        Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(value),
+                            ..
+                        })
+                        | Expr::Value(ValueWithSpan {
+                            value: Value::DoubleQuotedString(value),
+                            ..
+                        }) => {
                             let interval_value =
                                 normalize_interval_name(value).unwrap_or_else(|| value.to_string());
                             *expr = Expr::Cast {
@@ -126,7 +144,7 @@ impl TransformRule for ExpandIntervalTransformRule {
 }
 
 fn single_quoted_string_expr(string: String) -> Box<Expr> {
-    Box::new(Expr::Value(Value::SingleQuotedString(string)))
+    Box::new(Expr::Value(Value::SingleQuotedString(string).into()))
 }
 
 fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) -> Expr {
@@ -298,9 +316,9 @@ mod tests {
         assert_eq!(
             string_expr,
             Expr::Interval(Interval {
-                value: Box::new(Expr::Value(Value::SingleQuotedString(
-                    "5 years".to_string()
-                ))),
+                value: Box::new(Expr::Value(
+                    Value::SingleQuotedString("5 years".to_string()).into()
+                )),
                 leading_field: None,
                 leading_precision: None,
                 last_field: None,
@@ -322,9 +340,9 @@ mod tests {
         assert_eq!(
             string_expr,
             Expr::Interval(Interval {
-                value: Box::new(Expr::Value(Value::SingleQuotedString(
-                    "36993906000 milliseconds".to_string()
-                ))),
+                value: Box::new(Expr::Value(
+                    Value::SingleQuotedString("36993906000 milliseconds".to_string()).into()
+                )),
                 leading_field: None,
                 leading_precision: None,
                 last_field: None,
@@ -386,9 +404,9 @@ mod tests {
             cast_to_interval_expr,
             Expr::Cast {
                 kind: CastKind::Cast,
-                expr: Box::new(Expr::Value(Value::SingleQuotedString(
-                    "3 years 2 months".to_string()
-                ))),
+                expr: Box::new(Expr::Value(
+                    Value::SingleQuotedString("3 years 2 months".to_string()).into()
+                )),
                 data_type: DataType::Interval,
                 format: None,
             }

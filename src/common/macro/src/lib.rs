@@ -17,6 +17,7 @@ mod aggr_func;
 mod print_caller;
 mod range_fn;
 mod stack_trace_debug;
+mod to_row;
 mod utils;
 
 use aggr_func::{impl_aggr_func_type_store, impl_as_aggr_func_creator};
@@ -27,6 +28,7 @@ use range_fn::process_range_fn;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 use crate::admin_fn::process_admin_fn;
+use crate::to_row::derive_to_row_impl;
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
@@ -185,4 +187,29 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     };
 
     gen.into()
+}
+
+/// Derive macro to convert a struct to a row.
+///
+/// # Example
+/// ```rust, ignore
+/// #[derive(ToRow)]
+/// struct ToRowTest {
+///     my_value: i32,
+///     #[col(name = "string_value", datatype = "string", semantic = "tag")]
+///     my_string: String,  
+///     my_bool: bool,
+///     my_float: f32,
+///     #[col(
+///         name = "timestamp_value",
+///         semantic = "Timestamp",
+///         datatype = "TimestampMillisecond"
+///     )]
+///     my_timestamp: i64,
+/// }
+#[proc_macro_derive(ToRow, attributes(col))]
+pub fn derive_to_row(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let output = derive_to_row_impl(input);
+    output.unwrap_or_else(|e| e.to_compile_error()).into()
 }

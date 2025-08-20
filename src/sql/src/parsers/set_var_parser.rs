@@ -38,7 +38,7 @@ impl ParserContext<'_> {
             })),
 
             SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
+                variable: ObjectName::from(vec![Ident::new("TIMEZONE")]),
                 value: vec![value],
             })),
 
@@ -65,7 +65,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new(indent_str)]),
+                variable: ObjectName::from(vec![Ident::new(indent_str)]),
                 value: vec![expr]
             })
         );
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new(indent)]),
+                variable: ObjectName::from(vec![Ident::new(indent)]),
                 value: vec![expr],
             })
         );
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     pub fn test_set_timezone() {
-        let expected_utc_expr = Expr::Value(Value::SingleQuotedString("UTC".to_string()));
+        let expected_utc_expr = Expr::Value(Value::SingleQuotedString("UTC".to_string()).into());
         // mysql style
         let sql = "SET time_zone = 'UTC'";
         assert_mysql_parse_result(sql, "time_zone", expected_utc_expr.clone());
@@ -105,7 +105,8 @@ mod tests {
 
     #[test]
     pub fn test_set_query_timeout() {
-        let expected_query_timeout_expr = Expr::Value(Value::Number("5000".to_string(), false));
+        let expected_query_timeout_expr =
+            Expr::Value(Value::Number("5000".to_string(), false).into());
         // mysql style
         let sql = "SET MAX_EXECUTION_TIME = 5000";
         assert_mysql_parse_result(

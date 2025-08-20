@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_projection_mapper_all() {
+    fn test_flat_projection_mapper_all() {
         let metadata = Arc::new(
             TestRegionMetadataBuilder::default()
                 .num_tags(2)
@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_projection_mapper_with_projection() {
+    fn test_flat_projection_mapper_with_projection() {
         let metadata = Arc::new(
             TestRegionMetadataBuilder::default()
                 .num_tags(2)
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_projection_mapper_empty_projection() {
+    fn test_flat_projection_mapper_empty_projection() {
         let metadata = Arc::new(
             TestRegionMetadataBuilder::default()
                 .num_tags(2)
@@ -772,11 +772,11 @@ mod tests {
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
-        let plain_mapper = mapper.as_flat().unwrap();
-        assert!(plain_mapper.batch_schema().is_empty());
+        let flat_mapper = mapper.as_flat().unwrap();
+        assert!(flat_mapper.batch_schema().is_empty());
 
         let batch = new_flat_batch(Some(0), &[], &[], 3);
-        let record_batch = plain_mapper.convert(&batch).unwrap();
+        let record_batch = flat_mapper.convert(&batch).unwrap();
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(0, record_batch.num_columns());
         assert!(record_batch.schema.is_empty());

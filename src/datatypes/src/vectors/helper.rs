@@ -264,7 +264,9 @@ impl Helper {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::Binary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeBinary | ArrowDataType::FixedSizeBinary(_) => {
+            ArrowDataType::LargeBinary
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::BinaryView => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Binary)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
@@ -280,7 +282,7 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 => {
+            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -377,11 +379,11 @@ impl Helper {
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _)
-            | ArrowDataType::BinaryView
-            | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
             | ArrowDataType::LargeListView(_)
-            | ArrowDataType::Date64 => {
+            | ArrowDataType::Date64
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }

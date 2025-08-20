@@ -22,7 +22,8 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
 |               |         TableScan: test                                                                                      |
 |               | ]]                                                                                                           |
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec                                                                                              |
+|               |   MergeScanExec: REDACTED
 |               |                                                                                                              |
 +---------------+--------------------------------------------------------------------------------------------------------------+
 
@@ -42,7 +43,8 @@ TQL EXPLAIN (0, 10, '1s', '2s') test;
 |               |       Filter: test.j >= TimestampMillisecond(-2000, None) AND test.j <= TimestampMillisecond(2000, None) |
 |               |         TableScan: test                                                                                  |
 |               | ]]                                                                                                       |
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec                                                                                          |
+|               |   MergeScanExec: REDACTED
 |               |                                                                                                          |
 +---------------+----------------------------------------------------------------------------------------------------------+
 
@@ -61,7 +63,8 @@ TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 |               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
 |               |         TableScan: test                                                                                      |
 |               | ]]                                                                                                           |
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec                                                                                              |
+|               |   MergeScanExec: REDACTED
 |               |                                                                                                              |
 +---------------+--------------------------------------------------------------------------------------------------------------+
 
@@ -84,8 +87,6 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
-| logical_plan after inline_table_scan_| SAME TEXT AS ABOVE_|
-| logical_plan after expand_wildcard_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
@@ -99,16 +100,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
-| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
 | logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
 | logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
 | logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
-| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
 | logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_one_union_| SAME TEXT AS ABOVE_|
@@ -117,10 +117,8 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
-| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
-| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
-| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
@@ -131,16 +129,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
-| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
 | logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
 | logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
 | logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
-| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
 | logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_one_union_| SAME TEXT AS ABOVE_|
@@ -149,10 +146,8 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
-| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
-| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
-| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
@@ -171,33 +166,41 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after parallelize_scan_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
-| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
-| physical_plan after OutputRequirements_| OutputRequirementExec_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after coalesce_batches_| SAME TEXT AS ABOVE_|
+| physical_plan after coalesce_async_exec_input_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
-| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
-| physical_plan_| MergeScanExec: REDACTED
+| physical_plan_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_stats_| MergeScanExec: REDACTED
+| physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| MergeScanExec: REDACTED
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

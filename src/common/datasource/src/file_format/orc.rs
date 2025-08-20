@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use arrow_schema::{ArrowError, Schema, SchemaRef};
+use arrow_schema::Schema;
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
-use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
-use datafusion::error::{DataFusionError, Result as DfResult};
 use futures::future::BoxFuture;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::FutureExt;
 use object_store::ObjectStore;
 use orc_rust::arrow_reader::ArrowReaderBuilder;
 use orc_rust::async_arrow_reader::ArrowStreamReader;
@@ -94,67 +89,6 @@ impl FileFormat for OrcFormat {
             .context(error::ReadObjectSnafu { path })?;
         let schema = infer_orc_schema(ReaderAdapter::new(reader, meta.content_length())).await?;
         Ok(schema)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OrcOpener {
-    object_store: Arc<ObjectStore>,
-    output_schema: SchemaRef,
-    projection: Option<Vec<usize>>,
-}
-
-impl OrcOpener {
-    pub fn new(
-        object_store: ObjectStore,
-        output_schema: SchemaRef,
-        projection: Option<Vec<usize>>,
-    ) -> Self {
-        Self {
-            object_store: Arc::from(object_store),
-            output_schema,
-            projection,
-        }
-    }
-}
-
-impl FileOpener for OrcOpener {
-    fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
-        let object_store = self.object_store.clone();
-        let projected_schema = if let Some(projection) = &self.projection {
-            let projected_schema = self
-                .output_schema
-                .project(projection)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Arc::new(projected_schema)
-        } else {
-            self.output_schema.clone()
-        };
-        let projection = self.projection.clone();
-        Ok(Box::pin(async move {
-            let path = meta.location().to_string();
-
-            let meta = object_store
-                .stat(&path)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let reader = object_store
-                .reader(&path)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let stream_reader =
-                new_orc_stream_reader(ReaderAdapter::new(reader, meta.content_length()))
-                    .await
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            let stream =
-                RecordBatchStreamTypeAdapter::new(projected_schema, stream_reader, projection);
-
-            let adopted = stream.map_err(|e| ArrowError::ExternalError(Box::new(e)));
-            Ok(adopted.boxed())
-        }))
     }
 }
 

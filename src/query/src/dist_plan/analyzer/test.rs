@@ -646,7 +646,8 @@ fn expand_part_col_aggr_part_col_aggr() {
         .unwrap();
 
     let expected_original = [
-        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]", // notice here `max(t.number)` is added to groupBy due to aggr exprs depend on this column
+        // See DataFusion #14860 for change details.
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
     ]
@@ -657,9 +658,9 @@ fn expand_part_col_aggr_part_col_aggr() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: t.pk1, t.pk2, max(t.number), min(max(t.number))",
+        "Projection: t.pk1, t.pk2, min(max(t.number))",
         "  MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]",
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
         "]]",
