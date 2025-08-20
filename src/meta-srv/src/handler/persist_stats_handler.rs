@@ -23,7 +23,7 @@ use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_macro::ToRow;
 use common_meta::datanode::RegionStat;
 use common_meta::DatanodeId;
-use common_telemetry::error;
+use common_telemetry::warn;
 use common_time::util::current_time_millis;
 use dashmap::DashMap;
 use store_api::region_engine::RegionRole;
@@ -40,8 +40,6 @@ pub struct PersistStatsHandler {
     ttl: Duration,
 }
 
-/// The default interval to persist region stats.
-const DEFAULT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 /// The name of the table to persist region stats.
 const META_REGION_STATS_TABLE_NAME: &str = "region_statistics";
 /// The default context to persist region stats.
@@ -77,13 +75,21 @@ impl PersistStatsHandler {
     /// # Panics
     ///
     /// Panics if `ttl` is zero.
-    pub fn new(inserter: InserterRef, ttl: Duration) -> Self {
+    pub fn new(inserter: InserterRef, mut persist_interval: Duration, ttl: Duration) -> Self {
         assert!(!ttl.is_zero(), "ttl must be greater than zero");
+        if persist_interval < Duration::from_secs(60) {
+            warn!("persist_interval is less than 60 seconds, set to 60 seconds");
+            persist_interval = Duration::from_secs(60);
+        }
+        assert!(
+            persist_interval.as_millis() != 0,
+            "persist_interval must be greater than zero"
+        );
 
         Self {
             inserter,
             last_persisted_time: DashMap::new(),
-            persist_interval: DEFAULT_PERSIST_INTERVAL,
+            persist_interval,
             ttl,
         }
     }
@@ -99,6 +105,7 @@ impl PersistStatsHandler {
     async fn persist(&self, datanode_id: DatanodeId, region_stats: &[RegionStat]) {
         let timestamp = current_time_millis();
         let persist_interval_millis = self.persist_interval.as_millis() as i64;
+        // Safety: `persist_interval_millis` is guaranteed to be greater than zero.
         let aligned_ts = timestamp / persist_interval_millis * persist_interval_millis;
         let stats = region_stats
             .iter()
@@ -133,7 +140,7 @@ impl PersistStatsHandler {
         let schema = stats[0].schema();
         if let Err(err) = self
             .inserter
-            .row_inserts(
+            .insert_rows(
                 &DEFAULT_CONTEXT,
                 RowInsertRequests {
                     inserts: vec![RowInsertRequest {
@@ -148,8 +155,9 @@ impl PersistStatsHandler {
             )
             .await
         {
-            error!(
-                err; "Failed to persist region stats, datanode_id: {}", datanode_id
+            warn!(
+                "Failed to persist region stats, datanode_id: {}, error: {:?}",
+                datanode_id, err
             );
             return;
         }

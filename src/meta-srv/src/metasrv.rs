@@ -106,12 +106,16 @@ pub struct StatsPersistenceOptions {
     /// TTL for the stats table that will be used to store the stats.
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,
+    /// The interval to persist the stats.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
 }
 
 impl Default for StatsPersistenceOptions {
     fn default() -> Self {
         Self {
             ttl: Duration::from_days(30),
+            interval: Duration::from_secs(60),
         }
     }
 }

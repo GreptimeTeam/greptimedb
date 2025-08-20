@@ -17,6 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client::inserter::{Context, InsertOptions, InserterRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
+use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
 use common_event_recorder::{
     build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
@@ -47,7 +48,7 @@ impl EventHandler for EventHandlerImpl {
             let requests = build_row_inserts_request(&events)?;
             let EventHandlerOptions { ttl, append_mode } = self.options(event_type);
             self.inserter
-                .row_inserts(
+                .insert_rows(
                     &Context {
                         catalog: DEFAULT_CATALOG_NAME,
                         schema: DEFAULT_PRIVATE_SCHEMA_NAME,
@@ -56,6 +57,7 @@ impl EventHandler for EventHandlerImpl {
                     Some(&InsertOptions { ttl, append_mode }),
                 )
                 .await
+                .map_err(BoxedError::new)
                 .context(InsertEventsSnafu)?;
         }
 

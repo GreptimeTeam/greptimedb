@@ -84,7 +84,7 @@ pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
 /// Max delay to check region periodical tasks.
 pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
 /// Interval to update the rate meter for regions.
-const RATE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
+const RATE_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).

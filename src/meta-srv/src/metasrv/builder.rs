@@ -457,6 +457,7 @@ impl MetasrvBuilder {
         let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
             Some(PersistStatsHandler::new(
                 insert_forwarder.clone(),
+                options.stats_persistence.interval,
                 options.stats_persistence.ttl,
             ))
         } else {

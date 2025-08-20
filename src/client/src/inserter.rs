@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::RowInsertRequests;
-use common_error::ext::BoxedError;
 use humantime::format_duration;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+
+use crate::error::Result;
 
 /// Context holds the catalog and schema information.
 pub struct Context<'a> {
@@ -56,10 +57,10 @@ pub type InserterRef = Arc<dyn Inserter>;
 /// available Frontend).
 #[async_trait::async_trait]
 pub trait Inserter: Send + Sync {
-    async fn row_inserts(
+    async fn insert_rows(
         &self,
         context: &Context<'_>,
         requests: RowInsertRequests,
         options: Option<&InsertOptions>,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<()>;
 }

@@ -133,6 +133,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("External error"))]
+    External {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -154,6 +161,7 @@ impl ErrorExt for Error {
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
             Error::InvalidTonicMetadataValue { .. } => StatusCode::InvalidArguments,
             Error::ConvertSchema { source, .. } => source.status_code(),
+            Error::External { source, .. } => source.status_code(),
         }
     }
 

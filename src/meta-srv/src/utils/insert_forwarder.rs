@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use client::error::{ExternalSnafu, Result as ClientResult};
 use client::inserter::{Context, InsertOptions, Inserter};
 use client::{Client, Database};
 use common_error::ext::BoxedError;
@@ -85,13 +86,13 @@ impl InsertForwarder {
 
 #[async_trait::async_trait]
 impl Inserter for InsertForwarder {
-    async fn row_inserts(
+    async fn insert_rows(
         &self,
         context: &Context<'_>,
         requests: RowInsertRequests,
         options: Option<&InsertOptions>,
-    ) -> Result<(), BoxedError> {
-        let client = self.maybe_init_client().await?;
+    ) -> ClientResult<()> {
+        let client = self.maybe_init_client().await.context(ExternalSnafu)?;
         let database = Database::new(context.catalog, context.schema, client);
         let hints = options.map_or(vec![], |o| o.to_hints());
 
@@ -104,10 +105,12 @@ impl Inserter for InsertForwarder {
                     .collect::<Vec<_>>(),
             )
             .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
         {
             // Resets the client so it will be rebuilt next time.
             self.reset_client().await;
-            return Err(BoxedError::new(e));
+            return Err(e);
         };
 
         Ok(())

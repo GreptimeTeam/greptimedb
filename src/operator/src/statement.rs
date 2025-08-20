@@ -27,13 +27,13 @@ mod show;
 mod tql;
 
 use std::collections::HashMap;
-use std::result;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
+use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::Inserter;
 use client::RecordBatches;
 use common_error::ext::BoxedError;
@@ -756,12 +756,12 @@ fn idents_to_full_database_name(
 
 #[async_trait::async_trait]
 impl Inserter for StatementExecutor {
-    async fn row_inserts(
+    async fn insert_rows(
         &self,
         context: &client::inserter::Context<'_>,
         requests: RowInsertRequests,
         options: Option<&client::inserter::InsertOptions>,
-    ) -> result::Result<(), BoxedError> {
+    ) -> ClientResult<()> {
         let mut ctx_builder = QueryContextBuilder::default()
             .current_catalog(context.catalog.to_string())
             .current_schema(context.schema.to_string());
@@ -779,6 +779,7 @@ impl Inserter for StatementExecutor {
             .handle_row_inserts(requests, query_ctx, self, false, false)
             .await
             .map_err(BoxedError::new)
+            .context(ClientExternalSnafu)
             .map(|_| ())
     }
 }
