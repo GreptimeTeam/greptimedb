@@ -529,10 +529,7 @@ impl PromPlanner {
             (Some(mut expr), None) => {
                 let input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    lhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(lhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -558,10 +555,7 @@ impl PromPlanner {
             (None, Some(mut expr)) => {
                 let input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    rhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(rhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -2666,7 +2660,9 @@ impl PromPlanner {
             | PromExpr::Subquery(_) => None,
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    Some(build_special_time_expr(SPECIAL_TIME_FUNCTION))
+                    // For time() function, don't treat it as a literal
+                    // Let it be handled as a regular function call
+                    None
                 } else {
                     None
                 }
@@ -2703,10 +2699,12 @@ impl PromPlanner {
         }
     }
 
-    fn try_build_special_time_expr(expr: &PromExpr, time_index_col: &str) -> Option<DfExpr> {
+    fn try_build_special_time_expr_with_context(&self, expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
-                if func.name == SPECIAL_TIME_FUNCTION {
+                if func.name == SPECIAL_TIME_FUNCTION
+                    && let Some(time_index_col) = self.ctx.time_index_column.as_ref()
+                {
                     Some(build_special_time_expr(time_index_col))
                 } else {
                     None
