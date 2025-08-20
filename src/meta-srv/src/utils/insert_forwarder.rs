@@ -18,9 +18,8 @@ use api::v1::RowInsertRequests;
 use client::inserter::{Context, InsertOptions, Inserter};
 use client::{Client, Database};
 use common_error::ext::BoxedError;
-use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 
@@ -33,7 +32,6 @@ pub type InsertForwarderRef = Arc<InsertForwarder>;
 pub struct InsertForwarder {
     peer_lookup_service: PeerLookupServiceRef,
     client: RwLock<Option<Client>>,
-    channel_manager: ChannelManager,
 }
 
 impl InsertForwarder {
@@ -42,7 +40,6 @@ impl InsertForwarder {
         Self {
             peer_lookup_service,
             client: RwLock::new(None),
-            channel_manager: ChannelManager::new(),
         }
     }
 
@@ -63,10 +60,7 @@ impl InsertForwarder {
 
         debug!("Available frontend addresses: {:?}", urls);
 
-        Ok(Client::with_manager_and_urls(
-            self.channel_manager.clone(),
-            urls,
-        ))
+        Ok(Client::with_urls(urls))
     }
 
     /// Initializes the client if it hasn't been initialized yet, or returns the cached client.
@@ -83,6 +77,7 @@ impl InsertForwarder {
 
     /// Resets the cached client, forcing a rebuild on the next use.
     async fn reset_client(&self) {
+        warn!("Resetting the client");
         let mut guard = self.client.write().await;
         guard.take();
     }

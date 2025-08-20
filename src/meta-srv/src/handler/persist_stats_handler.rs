@@ -98,6 +98,8 @@ impl PersistStatsHandler {
 
     async fn persist(&self, datanode_id: DatanodeId, region_stats: &[RegionStat]) {
         let timestamp = current_time_millis();
+        let persist_interval_millis = self.persist_interval.as_millis() as i64;
+        let aligned_ts = timestamp / persist_interval_millis * persist_interval_millis;
         let stats = region_stats
             .iter()
             .flat_map(|s| {
@@ -114,7 +116,7 @@ impl PersistStatsHandler {
                             sst_num: s.sst_num,
                             sst_size: s.sst_size,
                             write_bytes_per_secs: s.write_bytes_per_sec,
-                            timestamp_millis: timestamp,
+                            timestamp_millis: aligned_ts,
                         }
                     })
                 } else {
@@ -149,6 +151,7 @@ impl PersistStatsHandler {
             error!(
                 err; "Failed to persist region stats, datanode_id: {}", datanode_id
             );
+            return;
         }
 
         self.last_persisted_time.insert(datanode_id, Instant::now());
