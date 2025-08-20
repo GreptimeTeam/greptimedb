@@ -36,7 +36,7 @@ use std::time::Duration;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_runtime::{JoinHandle, RepeatedTask, TaskFunction};
+use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
@@ -55,9 +55,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{
-    self, CreateDirSnafu, Error, JoinSnafu, Result, StartRepeatedTaskSnafu, WorkerStoppedSnafu,
-};
+use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -83,8 +81,6 @@ pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
 /// Max delay to check region periodical tasks.
 pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
-/// Interval to update the rate meter for regions.
-const RATE_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -483,26 +479,12 @@ impl<S: LogStore> WorkerStarter<S> {
             worker_thread.run().await;
         });
 
-        let rate_update_task = RepeatedTask::new(
-            RATE_UPDATE_INTERVAL,
-            Box::new(RateUpdater {
-                regions: regions.clone(),
-                interval: RATE_UPDATE_INTERVAL,
-            }),
-        );
-        rate_update_task
-            .start(common_runtime::global_runtime())
-            .context(StartRepeatedTaskSnafu {
-                name: RateUpdater::NAME,
-            })?;
-
         Ok(RegionWorker {
             id: self.id,
             regions,
             opening_regions,
             sender,
             handle: Mutex::new(Some(handle)),
-            rate_update_task,
             running,
         })
     }
@@ -520,8 +502,6 @@ pub(crate) struct RegionWorker {
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
-    /// rate update task.
-    rate_update_task: RepeatedTask<Error>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,
 }
@@ -563,9 +543,6 @@ impl RegionWorker {
             }
 
             handle.await.context(JoinSnafu)?;
-        }
-        if let Err(err) = self.rate_update_task.stop().await {
-            error!(err; "Failed to stop rate update task");
         }
 
         Ok(())
@@ -683,29 +660,6 @@ impl StalledRequests {
             .values()
             .map(|(_, reqs, bulk_reqs)| reqs.len() + bulk_reqs.len())
             .sum()
-    }
-}
-
-struct RateUpdater {
-    regions: RegionMapRef,
-    interval: Duration,
-}
-
-impl RateUpdater {
-    const NAME: &str = "RateUpdater";
-}
-
-#[async_trait::async_trait]
-impl TaskFunction<Error> for RateUpdater {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    async fn call(&mut self) -> Result<()> {
-        self.regions.for_each_region(|region| {
-            region.write_bytes_per_sec.update_rate(self.interval);
-        });
-        Ok(())
     }
 }
 

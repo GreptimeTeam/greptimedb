@@ -59,7 +59,7 @@ struct PersistRegionStat<'a> {
     num_rows: u64,
     sst_num: u64,
     sst_size: u64,
-    write_bytes_per_secs: u64,
+    write_bytess: u64,
     #[col(
         name = "greptime_timestamp",
         semantic = "Timestamp",
@@ -119,7 +119,7 @@ impl PersistStatsHandler {
                             num_rows: s.num_rows,
                             sst_num: s.sst_num,
                             sst_size: s.sst_size,
-                            write_bytes_per_secs: s.write_bytes_per_sec,
+                            write_bytess: s.write_bytes,
                             timestamp_millis: aligned_ts,
                         }
                         .to_row()

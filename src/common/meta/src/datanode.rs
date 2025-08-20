@@ -103,7 +103,7 @@ pub struct RegionStat {
     /// The manifest infoof the region.
     pub region_manifest: RegionManifestInfo,
     /// The write bytes per second.
-    pub write_bytes_per_sec: u64,
+    pub write_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
     pub data_topic_latest_entry_id: u64,
@@ -306,7 +306,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             sst_num: region_stat.sst_num,
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
-            write_bytes_per_sec: region_stat.write_bytes_per_sec,
+            write_bytes: region_stat.write_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
         }

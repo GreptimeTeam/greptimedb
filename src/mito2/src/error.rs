@@ -1041,14 +1041,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to start repeated task: {}", name))]
-    StartRepeatedTask {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: common_runtime::error::Error,
-    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1211,8 +1203,6 @@ impl ErrorExt for Error {
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
 
             TooManyFilesToRead { .. } => StatusCode::RateLimited,
-
-            StartRepeatedTask { .. } => StatusCode::Internal,
         }
     }
 
