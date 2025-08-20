@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use greptime_proto::v1::ColumnDataType;
+use once_cell::sync::Lazy;
 use syn::meta::ParseNestedMeta;
 use syn::spanned::Spanned;
 use syn::{Attribute, LitStr, Meta, Result};
@@ -43,12 +46,12 @@ pub(crate) fn find_column_attribute(attrs: &[Attribute]) -> Option<&Attribute> {
 }
 
 /// Parse the column attribute.
-pub(crate) fn parse_attribute(attr: &Attribute) -> Result<ColumnAttribute> {
+pub(crate) fn parse_column_attribute(attr: &Attribute) -> Result<ColumnAttribute> {
     match &attr.meta {
         Meta::List(list) if list.path.is_ident(META_KEY_COL) => {
             let mut attribute = ColumnAttribute::default();
             list.parse_nested_meta(|meta| {
-                parse_column_attribute(&meta, &mut attribute)
+                parse_column_attribute_field(&meta, &mut attribute)
             })?;
             Ok(attribute)
         }
@@ -61,42 +64,64 @@ pub(crate) fn parse_attribute(attr: &Attribute) -> Result<ColumnAttribute> {
     }
 }
 
-fn parse_column_attribute(
+type ParseColumnAttributeField = fn(&ParseNestedMeta, &mut ColumnAttribute) -> Result<()>;
+
+static PARSE_COLUMN_ATTRIBUTE_FIELDS: Lazy<HashMap<&str, ParseColumnAttributeField>> =
+    Lazy::new(|| {
+        HashMap::from([
+            (META_KEY_NAME, parse_name_field as _),
+            (META_KEY_DATATYPE, parse_datatype_field as _),
+            (META_KEY_SEMANTIC, parse_semantic_field as _),
+            (META_KEY_SKIP, parse_skip_field as _),
+        ])
+    });
+
+fn parse_name_field(meta: &ParseNestedMeta<'_>, attribute: &mut ColumnAttribute) -> Result<()> {
+    let value = meta.value()?;
+    let s: LitStr = value.parse()?;
+    attribute.name = Some(s.value());
+    Ok(())
+}
+
+fn parse_datatype_field(meta: &ParseNestedMeta<'_>, attribute: &mut ColumnAttribute) -> Result<()> {
+    let value = meta.value()?;
+    let s: LitStr = value.parse()?;
+    let ident = s.value();
+    let Some(value) = column_data_type_from_str(&ident) else {
+        return Err(meta.error(format!("unexpected {META_KEY_DATATYPE}: {ident}")));
+    };
+    attribute.column_data_type = Some(value);
+    Ok(())
+}
+
+fn parse_semantic_field(meta: &ParseNestedMeta<'_>, attribute: &mut ColumnAttribute) -> Result<()> {
+    let value = meta.value()?;
+    let s: LitStr = value.parse()?;
+    let ident = s.value();
+    let Some(value) = semantic_type_from_str(&ident) else {
+        return Err(meta.error(format!("unexpected {META_KEY_SEMANTIC}: {ident}")));
+    };
+    attribute.semantic_type = value;
+    Ok(())
+}
+
+fn parse_skip_field(_: &ParseNestedMeta<'_>, attribute: &mut ColumnAttribute) -> Result<()> {
+    attribute.skip = true;
+    Ok(())
+}
+
+fn parse_column_attribute_field(
     meta: &ParseNestedMeta<'_>,
     attribute: &mut ColumnAttribute,
 ) -> Result<()> {
     let Some(ident) = meta.path.get_ident() else {
         return Err(meta.error(format!("expected `{META_KEY_COL}({META_KEY_NAME} = \"...\", {META_KEY_DATATYPE} = \"...\", {META_KEY_SEMANTIC} = \"...\")`")));
     };
+    let Some(parse_column_attribute) =
+        PARSE_COLUMN_ATTRIBUTE_FIELDS.get(ident.to_string().as_str())
+    else {
+        return Err(meta.error(format!("unexpected attribute: {ident}")));
+    };
 
-    match ident.to_string().as_str() {
-        META_KEY_NAME => {
-            let value = meta.value()?;
-            let s: LitStr = value.parse()?;
-            attribute.name = Some(s.value());
-        }
-        META_KEY_DATATYPE => {
-            let value = meta.value()?;
-            let s: LitStr = value.parse()?;
-            let ident = s.value();
-            let Some(value) = column_data_type_from_str(&ident) else {
-                return Err(meta.error(format!("unexpected {META_KEY_DATATYPE}: {ident}")));
-            };
-            attribute.column_data_type = Some(value);
-        }
-        META_KEY_SEMANTIC => {
-            let value = meta.value()?;
-            let s: LitStr = value.parse()?;
-
-            let ident = s.value();
-            let Some(value) = semantic_type_from_str(&ident) else {
-                return Err(meta.error(format!("unexpected {META_KEY_SEMANTIC}: {ident}")));
-            };
-            attribute.semantic_type = value;
-        }
-        META_KEY_SKIP => attribute.skip = true,
-        attr => return Err(meta.error(format!("unexpected attribute: {attr}"))),
-    }
-
-    Ok(())
+    parse_column_attribute(meta, attribute)
 }

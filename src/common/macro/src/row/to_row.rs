@@ -32,7 +32,6 @@ pub(crate) fn derive_to_row_impl(input: DeriveInput) -> Result<TokenStream2> {
     };
     let ident = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
     let fields = parse_fields_from_fields_named(fields)?;
 
     // Implement `to_row` method.

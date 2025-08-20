@@ -27,12 +27,11 @@ pub(crate) fn derive_into_row_impl(input: DeriveInput) -> Result<TokenStream2> {
     let Some(fields) = extract_struct_fields(&input.data) else {
         return Err(syn::Error::new(
             input.span(),
-            "ToRow can only be derived for structs",
+            "IntoRow can only be derived for structs",
         ));
     };
     let ident = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
     let fields = parse_fields_from_fields_named(fields)?;
 
     // Implement `to_row` method.

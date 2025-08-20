@@ -22,7 +22,7 @@ use syn::{
     Path, PathArguments, PathSegment, Result, Type, TypePath, TypeReference,
 };
 
-use crate::row::attribute::{find_column_attribute, parse_attribute, ColumnAttribute};
+use crate::row::attribute::{find_column_attribute, parse_column_attribute, ColumnAttribute};
 
 static SEMANTIC_TYPES: Lazy<HashMap<&'static str, SemanticType>> = Lazy::new(|| {
     HashMap::from([
@@ -204,12 +204,10 @@ pub(crate) fn parse_fields_from_fields_named(named: &FieldsNamed) -> Result<Vec<
             let column_data_type = field_type
                 .extract_ident()
                 .and_then(convert_primitive_type_to_column_data_type);
-            let attrs = &field.attrs;
-            let attr = find_column_attribute(attrs);
-            let column_attribute = match attr {
-                Some(attr) => parse_attribute(attr),
-                None => Ok(ColumnAttribute::default()),
-            }?;
+            let column_attribute = find_column_attribute(&field.attrs)
+                .map(parse_column_attribute)
+                .transpose()?
+                .unwrap_or_default();
 
             Ok(PrasedField {
                 ident,
@@ -223,6 +221,7 @@ pub(crate) fn parse_fields_from_fields_named(named: &FieldsNamed) -> Result<Vec<
         .filter(|field| !field.column_attribute.skip)
         .collect::<Vec<_>>())
 }
+
 fn convert_primitive_type_to_column_data_type(ident: &Ident) -> Option<ColumnDataType> {
     PRIMITIVE_TYPE_TO_COLUMN_DATA_TYPE
         .get(ident.to_string().as_str())
