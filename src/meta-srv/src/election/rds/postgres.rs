@@ -324,6 +324,7 @@ impl PgElection {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_pg_client(
         leader_value: String,
         pg_client: ElectionPgClient,
