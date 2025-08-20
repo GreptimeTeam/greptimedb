@@ -174,17 +174,25 @@ impl LocalGcWorker {
             )
             .await?;
 
+        let unused_len = unused_files.len();
+
         info!(
             "Found {} unused files to delete for region {}",
-            unused_files.len(),
-            region_id
+            unused_len, region_id
         );
 
         self.access_layer
             .object_store()
             .delete_iter(unused_files.into_iter().map(|e| e.path().to_string()))
             .await
-            .context(OpenDalSnafu)
+            .context(OpenDalSnafu)?;
+
+        info!(
+            "Successfully deleted {} unused files for region {}",
+            unused_len, region_id
+        );
+
+        Ok(())
     }
 
     /// Get the manifest manager for the region.
