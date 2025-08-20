@@ -89,6 +89,7 @@ struct ElectionSqlSet {
 }
 
 impl<'a> ElectionSqlFactory<'a> {
+    #[cfg(test)]
     fn new(lock_id: u64, table_name: &'a str) -> Self {
         Self {
             lock_id,
@@ -329,33 +330,21 @@ impl PgElection {
         store_key_prefix: String,
         candidate_lease_ttl: Duration,
         meta_lease_ttl: Duration,
-        table_name: &str,
-        lock_id: u64,
-    ) -> Result<ElectionRef> {
-        Self::with_pg_client_with_schema(
-            leader_value,
-            pg_client,
-            store_key_prefix,
-            candidate_lease_ttl,
-            meta_lease_ttl,
-            table_name,
-            None,
-            lock_id,
-        )
-        .await
-    }
-
-    pub async fn with_pg_client_with_schema(
-        leader_value: String,
-        pg_client: ElectionPgClient,
-        store_key_prefix: String,
-        candidate_lease_ttl: Duration,
-        meta_lease_ttl: Duration,
-        table_name: &str,
         schema: Option<&str>,
+        table_name: &str,
         lock_id: u64,
     ) -> Result<ElectionRef> {
-        let sql_factory = ElectionSqlFactory::with_schema(lock_id, table_name, schema);
+        let schema_env = std::env::var("GT_POSTGRES_SCHEMA").ok();
+        let schema_opt = match (schema, schema_env.as_deref()) {
+            (Some(s), _) if !s.is_empty() => Some(s),
+            _ => schema_env.as_deref(),
+        };
+        if let Some(s) = schema_opt {
+            common_telemetry::info!("PgElection uses schema: {}", s);
+        } else {
+            common_telemetry::info!("PgElection uses default search_path (no schema provided)");
+        }
+        let sql_factory = ElectionSqlFactory::with_schema(lock_id, table_name, schema_opt);
 
         let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {

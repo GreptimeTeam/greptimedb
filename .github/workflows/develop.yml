@@ -723,6 +723,10 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
+      - name: Ensure Postgres schema (greptime_schema)
+        working-directory: tests-integration/fixtures
+        run: |
+          docker compose exec -T postgres psql -U greptimedb -d postgres -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS greptime_schema AUTHORIZATION greptimedb; GRANT USAGE, CREATE ON SCHEMA greptime_schema TO greptimedb;"
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -741,6 +745,7 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES_SCHEMA: greptime_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
@@ -776,6 +781,10 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
+      - name: Ensure Postgres schema (metrics)
+        working-directory: tests-integration/fixtures
+        run: |
+          docker compose exec -T postgres psql -U greptimedb -d postgres -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS greptime_schema AUTHORIZATION greptimedb; GRANT USAGE, CREATE ON SCHEMA greptime_schema TO greptimedb;"
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -793,6 +802,7 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES_SCHEMA: greptime_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093

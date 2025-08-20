@@ -324,14 +324,14 @@ pub async fn metasrv_builder(
                 idle_session_timeout,
                 statement_timeout,
             )?;
-            let election = PgElection::with_pg_client_with_schema(
+            let election = PgElection::with_pg_client(
                 opts.grpc.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
-                &opts.meta_table_name,
                 opts.schema.as_deref(),
+                &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
             .await?;

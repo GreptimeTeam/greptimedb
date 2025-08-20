@@ -205,10 +205,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
     /// Builds the template set for the given table name.
     fn build(&self) -> PgSqlTemplateSet {
         let table_ident = self.table_name;
-        let table_ref = match self.schema {
-            Some(schema) if !schema.is_empty() => format!("\"{}\".\"{}\"", schema, table_ident),
-            _ => format!("\"{}\"", table_ident),
-        };
+        let table_ref = Self::format_table_ref(table_ident, self.schema);
         // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
             table_ref: table_ref.clone(),
@@ -230,6 +227,14 @@ impl<'a> PgSqlTemplateFactory<'a> {
                 left_bounded: format!("DELETE FROM {table_ref} WHERE k >= $1 RETURNING k,v;"),
                 prefix: format!("DELETE FROM {table_ref} WHERE k LIKE $1 RETURNING k,v;"),
             },
+        }
+    }
+
+    /// Formats the table reference with schema if provided.
+    fn format_table_ref(table_name: &str, schema: Option<&str>) -> String {
+        match schema {
+            Some(s) if !s.is_empty() => format!("\"{}\".\"{}\"", s, table_name),
+            _ => format!("\"{}\"", table_name),
         }
     }
 }
@@ -909,6 +914,9 @@ mod tests {
             return None;
         }
 
+        let schema_env = std::env::var("GT_POSTGRES_SCHEMA").ok();
+        let schema_opt = schema_env.as_deref();
+
         let mut cfg = Config::new();
         cfg.url = Some(endpoints);
         let pool = cfg
@@ -916,7 +924,7 @@ mod tests {
             .context(CreatePostgresPoolSnafu)
             .unwrap();
         let client = pool.get().await.unwrap();
-        let template_factory = PgSqlTemplateFactory::with_schema(table_name, None);
+        let template_factory = PgSqlTemplateFactory::with_schema(table_name, schema_opt);
         let sql_templates = template_factory.build();
         // Do not attempt to create schema implicitly.
         client
@@ -1050,5 +1058,17 @@ mod tests {
         assert!(get.contains("\"greptime_schema\".\"greptime_metakv\""));
         let del = t.generate_batch_delete_query(1);
         assert!(del.contains("\"greptime_schema\".\"greptime_metakv\""));
+    }
+
+    #[test]
+    fn test_format_table_ref() {
+        let t = PgSqlTemplateFactory::format_table_ref("test_table", None);
+        assert_eq!(t, "\"test_table\"");
+
+        let t = PgSqlTemplateFactory::format_table_ref("test_table", Some("test_schema"));
+        assert_eq!(t, "\"test_schema\".\"test_table\"");
+
+        let t = PgSqlTemplateFactory::format_table_ref("test_table", Some(""));
+        assert_eq!(t, "\"test_table\"");
     }
 }
