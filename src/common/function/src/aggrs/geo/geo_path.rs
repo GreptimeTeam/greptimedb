@@ -117,6 +117,7 @@ impl GeoPathAccumulator {
                 .into(),
             )]),
         )
+        .with_aliases(["json_encode_path"])
     }
 }
 

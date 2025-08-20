@@ -22,7 +22,6 @@ use crate::options::QueryOptions;
 use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
-mod my_sum_udaf_example;
 mod query_engine_test;
 mod time_range_filter_test;
 

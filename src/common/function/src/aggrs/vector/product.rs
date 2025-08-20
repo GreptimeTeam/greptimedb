@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use common_query::error::{CreateAccumulatorSnafu, Error, InvalidFuncArgsSnafu};
-use common_query::logical_plan::{
-    create_aggregate_function, Accumulator, AggregateFunctionCreator,
-};
-use common_query::prelude::AccumulatorCreatorFunction;
-use datafusion_expr::AggregateUDF;
-use datatypes::prelude::{ConcreteDataType, Value, *};
-use datatypes::vectors::VectorRef;
+use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, StringArray};
+use arrow_schema::{DataType, Field};
+use datafusion::logical_expr::{Signature, TypeSignature, Volatility};
+use datafusion_common::{Result, ScalarValue};
+use datafusion_expr::{Accumulator, AggregateUDF, SimpleAggregateUDF};
+use datafusion_functions_aggregate_common::accumulator::AccumulatorArgs;
 use nalgebra::{Const, DVectorView, Dyn, OVector};
-use snafu::ensure;
 
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, veclit_to_binlit};
+use crate::scalars::vector::impl_conv::{
+    binlit_as_veclit, parse_veclit_from_strlit, veclit_to_binlit,
+};
 
 /// Aggregates by multiplying elements across the same dimension, returns a vector.
 #[derive(Debug, Default)]
@@ -35,57 +34,42 @@ pub struct VectorProduct {
     has_null: bool,
 }
 
-#[as_aggr_func_creator]
-#[derive(Debug, Default, AggrFuncTypeStore)]
-pub struct VectorProductCreator {}
-
-impl AggregateFunctionCreator for VectorProductCreator {
-    fn creator(&self) -> AccumulatorCreatorFunction {
-        let creator: AccumulatorCreatorFunction = Arc::new(move |types: &[ConcreteDataType]| {
-            ensure!(
-                types.len() == 1,
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "The length of the args is not correct, expect exactly one, have: {}",
-                        types.len()
-                    )
-                }
-            );
-            let input_type = &types[0];
-            match input_type {
-                ConcreteDataType::String(_) | ConcreteDataType::Binary(_) => {
-                    Ok(Box::new(VectorProduct::default()))
-                }
-                _ => {
-                    let err_msg = format!(
-                        "\"VEC_PRODUCT\" aggregate function not support data type {:?}",
-                        input_type.logical_type_id(),
-                    );
-                    CreateAccumulatorSnafu { err_msg }.fail()?
-                }
-            }
-        });
-        creator
-    }
-
-    fn output_type(&self) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::binary_datatype())
-    }
-
-    fn state_types(&self) -> common_query::error::Result<Vec<ConcreteDataType>> {
-        Ok(vec![self.output_type()?])
-    }
-}
-
 impl VectorProduct {
     /// Create a new `AggregateUDF` for the `vec_product` aggregate function.
     pub fn uadf_impl() -> AggregateUDF {
-        create_aggregate_function(
-            "vec_product".to_string(),
-            1,
-            Arc::new(VectorProductCreator::default()),
-        )
-        .into()
+        let signature = Signature::one_of(
+            vec![
+                TypeSignature::Exact(vec![DataType::Utf8]),
+                TypeSignature::Exact(vec![DataType::Binary]),
+            ],
+            Volatility::Immutable,
+        );
+        let udaf = SimpleAggregateUDF::new_with_signature(
+            "vec_product",
+            signature,
+            DataType::Binary,
+            Arc::new(Self::accumulator),
+            vec![Arc::new(Field::new("x", DataType::Binary, true))],
+        );
+        AggregateUDF::from(udaf)
+    }
+
+    fn accumulator(args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        if args.schema.fields().len() != 1 {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "expect creating `VEC_PRODUCT` with only one input field, actual {}",
+                args.schema.fields().len()
+            )));
+        }
+
+        let t = args.schema.field(0).data_type();
+        if !matches!(t, DataType::Utf8 | DataType::Binary) {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "unexpected input datatype {t} when creating `VEC_PRODUCT`"
+            )));
+        }
+
+        Ok(Box::new(VectorProduct::default()))
     }
 
     fn inner(&mut self, len: usize) -> &mut OVector<f32, Dyn> {
@@ -94,59 +78,73 @@ impl VectorProduct {
         })
     }
 
-    fn update(&mut self, values: &[VectorRef], is_update: bool) -> Result<(), Error> {
+    fn update(&mut self, values: &[ArrayRef], is_update: bool) -> Result<()> {
         if values.is_empty() || self.has_null {
             return Ok(());
         };
-        let column = &values[0];
-        let len = column.len();
 
-        match as_veclit_if_const(column)? {
-            Some(column) => {
-                let vec_column = DVectorView::from_slice(&column, column.len()).scale(len as f32);
-                *self.inner(vec_column.len()) =
-                    (*self.inner(vec_column.len())).component_mul(&vec_column);
+        let vectors = match values[0].data_type() {
+            DataType::Utf8 => {
+                let arr: &StringArray = values[0].as_string();
+                arr.iter()
+                    .filter_map(|x| x.map(|s| parse_veclit_from_strlit(s).map_err(Into::into)))
+                    .map(|x| x.map(Cow::Owned))
+                    .collect::<Result<Vec<_>>>()?
             }
-            None => {
-                for i in 0..len {
-                    let Some(arg0) = as_veclit(column.get_ref(i))? else {
-                        if is_update {
-                            self.has_null = true;
-                            self.product = None;
-                        }
-                        return Ok(());
-                    };
-                    let vec_column = DVectorView::from_slice(&arg0, arg0.len());
-                    *self.inner(vec_column.len()) =
-                        (*self.inner(vec_column.len())).component_mul(&vec_column);
-                }
+            DataType::Binary => {
+                let arr: &BinaryArray = values[0].as_binary();
+                arr.iter()
+                    .filter_map(|x| x.map(|b| binlit_as_veclit(b).map_err(Into::into)))
+                    .collect::<Result<Vec<_>>>()?
             }
+            _ => {
+                return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                    "unsupported data type {} for `VEC_PRODUCT`",
+                    values[0].data_type()
+                )))
+            }
+        };
+        if vectors.len() != values[0].len() {
+            if is_update {
+                self.has_null = true;
+                self.product = None;
+            }
+            return Ok(());
         }
+
+        vectors.iter().for_each(|v| {
+            let v = DVectorView::from_slice(v, v.len());
+            let inner = self.inner(v.len());
+            *inner = inner.component_mul(&v);
+        });
         Ok(())
     }
 }
 
 impl Accumulator for VectorProduct {
-    fn state(&self) -> common_query::error::Result<Vec<Value>> {
+    fn state(&mut self) -> Result<Vec<ScalarValue>> {
         self.evaluate().map(|v| vec![v])
     }
 
-    fn update_batch(&mut self, values: &[VectorRef]) -> common_query::error::Result<()> {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         self.update(values, true)
     }
 
-    fn merge_batch(&mut self, states: &[VectorRef]) -> common_query::error::Result<()> {
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
         self.update(states, false)
     }
 
-    fn evaluate(&self) -> common_query::error::Result<Value> {
+    fn evaluate(&mut self) -> Result<ScalarValue> {
         match &self.product {
-            None => Ok(Value::Null),
-            Some(vector) => {
-                let v = vector.as_slice();
-                Ok(Value::from(veclit_to_binlit(v)))
-            }
+            None => Ok(ScalarValue::Null),
+            Some(vector) => Ok(ScalarValue::Binary(Some(veclit_to_binlit(
+                vector.as_slice(),
+            )))),
         }
+    }
+
+    fn size(&self) -> usize {
+        size_of_val(self)
     }
 }
 
@@ -154,7 +152,8 @@ impl Accumulator for VectorProduct {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{ConstantVector, StringVector};
+    use datatypes::scalars::ScalarVector;
+    use datatypes::vectors::{ConstantVector, StringVector, Vector};
 
     use super::*;
 
@@ -165,59 +164,60 @@ mod tests {
         vec_product.update_batch(&[]).unwrap();
         assert!(vec_product.product.is_none());
         assert!(!vec_product.has_null);
-        assert_eq!(Value::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
 
         // test update one not-null value
         let mut vec_product = VectorProduct::default();
-        let v: Vec<VectorRef> = vec![Arc::new(StringVector::from(vec![Some(
+        let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Some(
             "[1.0,2.0,3.0]".to_string(),
         )]))];
         vec_product.update_batch(&v).unwrap();
         assert_eq!(
-            Value::from(veclit_to_binlit(&[1.0, 2.0, 3.0])),
+            ScalarValue::Binary(Some(veclit_to_binlit(&[1.0, 2.0, 3.0]))),
             vec_product.evaluate().unwrap()
         );
 
         // test update one null value
         let mut vec_product = VectorProduct::default();
-        let v: Vec<VectorRef> = vec![Arc::new(StringVector::from(vec![Option::<String>::None]))];
+        let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![Option::<String>::None]))];
         vec_product.update_batch(&v).unwrap();
-        assert_eq!(Value::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
 
         // test update no null-value batch
         let mut vec_product = VectorProduct::default();
-        let v: Vec<VectorRef> = vec![Arc::new(StringVector::from(vec![
+        let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
         ]))];
         vec_product.update_batch(&v).unwrap();
         assert_eq!(
-            Value::from(veclit_to_binlit(&[28.0, 80.0, 162.0])),
+            ScalarValue::Binary(Some(veclit_to_binlit(&[28.0, 80.0, 162.0]))),
             vec_product.evaluate().unwrap()
         );
 
         // test update null-value batch
         let mut vec_product = VectorProduct::default();
-        let v: Vec<VectorRef> = vec![Arc::new(StringVector::from(vec![
+        let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             None,
             Some("[7.0,8.0,9.0]".to_string()),
         ]))];
         vec_product.update_batch(&v).unwrap();
-        assert_eq!(Value::Null, vec_product.evaluate().unwrap());
+        assert_eq!(ScalarValue::Null, vec_product.evaluate().unwrap());
 
         // test update with constant vector
         let mut vec_product = VectorProduct::default();
-        let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
+        let v: Vec<ArrayRef> = vec![Arc::new(ConstantVector::new(
             Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
             4,
-        ))];
+        ))
+        .to_arrow_array()];
 
         vec_product.update_batch(&v).unwrap();
 
         assert_eq!(
-            Value::from(veclit_to_binlit(&[4.0, 8.0, 12.0])),
+            ScalarValue::Binary(Some(veclit_to_binlit(&[1.0, 16.0, 81.0]))),
             vec_product.evaluate().unwrap()
         );
     }
