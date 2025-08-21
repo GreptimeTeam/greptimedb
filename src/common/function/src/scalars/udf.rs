@@ -16,15 +16,12 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use common_query::error::FromScalarValueSnafu;
 use common_query::prelude::ColumnarValue;
 use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use datafusion_expr::ScalarUDF;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
-use datatypes::vectors::Helper;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
 
 use crate::function::{FunctionContext, FunctionRef};
 use crate::state::FunctionState;
@@ -76,13 +73,7 @@ impl ScalarUDFImpl for ScalarUdf {
         let columns = args
             .args
             .iter()
-            .map(|x| {
-                ColumnarValue::try_from(x).and_then(|y| match y {
-                    ColumnarValue::Vector(z) => Ok(z),
-                    ColumnarValue::Scalar(z) => Helper::try_from_scalar_value(z, args.number_rows)
-                        .context(FromScalarValueSnafu),
-                })
-            })
+            .map(|x| ColumnarValue::try_from(x).and_then(|y| y.try_into_vector(args.number_rows)))
             .collect::<common_query::error::Result<Vec<_>>>()?;
         let v = self
             .function
