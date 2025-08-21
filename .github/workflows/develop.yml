@@ -723,22 +723,6 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
-      - name: Wait for Postgres healthy
-        working-directory: tests-integration/fixtures
-        run: |
-          for i in {1..30}; do
-            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres; then
-              exit 0
-            fi
-            echo "Postgres not ready yet, retrying... ($i)"
-            sleep 2
-          done
-          echo "Postgres didn't become ready in time" >&2
-          exit 1
-      - name: Ensure Postgres schema (greptime_schema)
-        working-directory: tests-integration/fixtures
-        run: |
-          docker compose exec -T postgres psql -U greptimedb -d postgres -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS greptime_schema AUTHORIZATION greptimedb; GRANT USAGE, CREATE ON SCHEMA greptime_schema TO greptimedb;"
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -793,22 +777,6 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
-      - name: Wait for Postgres healthy
-        working-directory: tests-integration/fixtures
-        run: |
-          for i in {1..30}; do
-            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres; then
-              exit 0
-            fi
-            echo "Postgres not ready yet, retrying... ($i)"
-            sleep 2
-          done
-          echo "Postgres didn't become ready in time" >&2
-          exit 1
-      - name: Ensure Postgres schema (greptime_schema)
-        working-directory: tests-integration/fixtures
-        run: |
-          docker compose exec -T postgres psql -U greptimedb -d postgres -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS greptime_schema AUTHORIZATION greptimedb; GRANT USAGE, CREATE ON SCHEMA greptime_schema TO greptimedb;"
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
