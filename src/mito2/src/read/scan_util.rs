@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
+use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
@@ -635,6 +636,35 @@ pub(crate) fn scan_mem_ranges(
             let mut source = Source::Iter(iter);
             while let Some(batch) = source.next_batch().await? {
                 yield batch;
+            }
+
+            // Report the memtable scan metrics to partition metrics
+            if let Some(ref metrics) = mem_scan_metrics {
+                let data = metrics.data();
+                part_metrics.report_mem_scan_metrics(&data);
+            }
+        }
+    }
+}
+
+/// Scans memtable ranges at `index` using flat format that returns RecordBatch.
+#[allow(dead_code)]
+pub(crate) fn scan_flat_mem_ranges(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    index: RowGroupIndex,
+) -> impl Stream<Item = Result<RecordBatch>> {
+    try_stream! {
+        let ranges = stream_ctx.input.build_mem_ranges(index);
+        part_metrics.inc_num_mem_ranges(ranges.len());
+        for range in ranges {
+            let build_reader_start = Instant::now();
+            let mem_scan_metrics = Some(MemScanMetrics::default());
+            let mut iter = range.build_record_batch_iter(mem_scan_metrics.clone())?;
+            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
+
+            while let Some(record_batch) = iter.next().transpose()? {
+                yield record_batch;
             }
 
             // Report the memtable scan metrics to partition metrics
