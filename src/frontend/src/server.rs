@@ -137,7 +137,7 @@ where
         grpc: &GrpcOptions,
         meta_client: &Option<MetaClientOptions>,
         name: Option<String>,
-        use_process_manager: bool,
+        external: bool,
     ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
@@ -145,7 +145,12 @@ where
             self.grpc_server_builder(grpc)?
         };
 
-        let user_provider = self.plugins.get::<UserProviderRef>();
+        let user_provider = if external {
+            self.plugins.get::<UserProviderRef>()
+        } else {
+            // skip authentication for internal grpc port
+            None
+        };
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
         let runtime = if meta_client.is_none() {
@@ -168,7 +173,7 @@ where
             .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler));
 
-        let grpc_server = if use_process_manager {
+        let grpc_server = if external {
             let frontend_grpc_handler =
                 FrontendGrpcHandler::new(self.instance.process_manager().clone());
             grpc_server.frontend_grpc_handler(frontend_grpc_handler)
