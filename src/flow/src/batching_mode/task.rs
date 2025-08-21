@@ -46,7 +46,7 @@ use tokio::time::Instant;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::TaskState;
+use crate::batching_mode::state::{FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
@@ -128,6 +128,11 @@ pub struct TaskArgs<'a> {
     pub catalog_manager: CatalogManagerRef,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
+}
+
+pub struct PlanInfo {
+    pub plan: LogicalPlan,
+    pub filter: Option<FilterExprInfo>,
 }
 
 impl BatchingTask {
@@ -232,8 +237,9 @@ impl BatchingTask {
         max_window_cnt: Option<usize>,
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
-            debug!("Generate new query: {}", new_query);
-            self.execute_logical_plan(frontend_client, &new_query).await
+            debug!("Generate new query: {}", new_query.plan);
+            self.execute_logical_plan(frontend_client, &new_query.plan)
+                .await
         } else {
             debug!("Generate no query");
             Ok(None)
@@ -244,7 +250,7 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
         max_window_cnt: Option<usize>,
-    ) -> Result<Option<LogicalPlan>, Error> {
+    ) -> Result<Option<PlanInfo>, Error> {
         let (table, df_schema) = get_table_info_df_schema(
             self.config.catalog_manager.clone(),
             self.config.sink_table_name.clone(),
@@ -259,7 +265,7 @@ impl BatchingTask {
             )
             .await?;
 
-        let insert_into = if let Some((new_query, _column_cnt)) = new_query {
+        let insert_into_info = if let Some(new_query) = new_query {
             // first check if all columns in input query exists in sink table
             // since insert into ref to names in record batch generate by given query
             let table_columns = df_schema
@@ -267,7 +273,7 @@ impl BatchingTask {
                 .into_iter()
                 .map(|c| c.name)
                 .collect::<BTreeSet<_>>();
-            for column in new_query.schema().columns() {
+            for column in new_query.plan.schema().columns() {
                 ensure!(
                     table_columns.contains(column.name()),
                     InvalidQuerySnafu {
@@ -283,7 +289,7 @@ impl BatchingTask {
             let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
             // update_at& time index placeholder (if exists) should have default value
-            LogicalPlan::Dml(DmlStatement::new(
+            let plan = LogicalPlan::Dml(DmlStatement::new(
                 datafusion_common::TableReference::Full {
                     catalog: self.config.sink_table_name[0].clone().into(),
                     schema: self.config.sink_table_name[1].clone().into(),
@@ -291,15 +297,26 @@ impl BatchingTask {
                 },
                 table_source,
                 WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
-                Arc::new(new_query),
-            ))
+                Arc::new(new_query.plan),
+            ));
+            PlanInfo {
+                plan,
+                filter: new_query.filter,
+            }
         } else {
             return Ok(None);
         };
-        let insert_into = insert_into.recompute_schema().context(DatafusionSnafu {
-            context: "Failed to recompute schema",
-        })?;
-        Ok(Some(insert_into))
+        let insert_into = insert_into_info
+            .plan
+            .recompute_schema()
+            .context(DatafusionSnafu {
+                context: "Failed to recompute schema",
+            })?;
+
+        Ok(Some(PlanInfo {
+            plan: insert_into,
+            filter: insert_into_info.filter,
+        }))
     }
 
     pub async fn create_table(
@@ -468,7 +485,8 @@ impl BatchingTask {
             };
 
             let res = if let Some(new_query) = &new_query {
-                self.execute_logical_plan(&frontend_client, new_query).await
+                self.execute_logical_plan(&frontend_client, &new_query.plan)
+                    .await
             } else {
                 Ok(None)
             };
@@ -511,7 +529,12 @@ impl BatchingTask {
                         .inc();
                     match new_query {
                         Some(query) => {
-                            common_telemetry::error!(err; "Failed to execute query for flow={} with query: {query}", self.config.flow_id)
+                            common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
+                            // Re-add dirty windows back since query failed
+                            self.state.write().unwrap().dirty_time_windows.add_windows(
+                                query.filter.map(|f| f.time_ranges).unwrap_or_default(),
+                            );
+                            // TODO(discord9): add some backoff here? half the query time window or what
                         }
                         None => {
                             common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id)
@@ -546,7 +569,7 @@ impl BatchingTask {
         engine: QueryEngineRef,
         sink_table_schema: &Arc<Schema>,
         max_window_cnt: Option<usize>,
-    ) -> Result<Option<(LogicalPlan, usize)>, Error> {
+    ) -> Result<Option<PlanInfo>, Error> {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -559,7 +582,6 @@ impl BatchingTask {
             .unwrap_or(u64::MIN);
 
         let low_bound = Timestamp::new_second(low_bound as i64);
-        let schema_len = self.config.output_schema.fields().len();
 
         let expire_time_window_bound = self
             .config
@@ -592,10 +614,9 @@ impl BatchingTask {
                     context: format!("Failed to rewrite plan:\n {}\n", plan),
                 })?
                 .data;
-            let schema_len = plan.schema().fields().len();
 
             // since no time window lower/upper bound is found, just return the original query(with auto columns)
-            return Ok(Some((plan, schema_len)));
+            return Ok(Some(PlanInfo { plan, filter: None }));
         };
 
         debug!(
@@ -636,9 +657,11 @@ impl BatchingTask {
             "Flow id={:?}, Generated filter expr: {:?}",
             self.config.flow_id,
             expr.as_ref()
-                .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to generate filter expr from {expr:?}"),
-                }))
+                .map(
+                    |expr| expr_to_sql(&expr.expr).with_context(|_| DatafusionSnafu {
+                        context: format!("Failed to generate filter expr from {expr:?}"),
+                    })
+                )
                 .transpose()?
                 .map(|s| s.to_string())
         );
@@ -649,7 +672,7 @@ impl BatchingTask {
             return Ok(None);
         };
 
-        let mut add_filter = AddFilterRewriter::new(expr);
+        let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
         let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
 
         let plan =
@@ -665,7 +688,12 @@ impl BatchingTask {
         // only apply optimize after complex rewrite is done
         let new_plan = apply_df_optimizer(rewrite).await?;
 
-        Ok(Some((new_plan, schema_len)))
+        let info = PlanInfo {
+            plan: new_plan.clone(),
+            filter: Some(expr),
+        };
+
+        Ok(Some(info))
     }
 }
 
