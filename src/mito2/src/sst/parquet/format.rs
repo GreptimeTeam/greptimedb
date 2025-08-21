@@ -930,12 +930,16 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::value::{Value, ValueRef};
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use mito_codec::row_converter::{
+        DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
+    };
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::sst::parquet::flat_format::FlatWriteFormat;
+    use crate::sst::parquet::flat_format::{sequence_column_index, FlatWriteFormat};
     use crate::sst::FlatSchemaOptions;
 
     const TEST_SEQUENCE: u64 = 1;
@@ -1386,9 +1390,7 @@ mod tests {
 
         // Test without override sequence - should return clone
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
-        let sequence_column = result.column(
-            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
-        );
+        let sequence_column = result.column(sequence_column_index(result.num_columns()));
         let sequence_array = sequence_column
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -1403,9 +1405,7 @@ mod tests {
         let result = format
             .convert_batch(record_batch, Some(&override_sequence_array))
             .unwrap();
-        let sequence_column = result.column(
-            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
-        );
+        let sequence_column = result.column(sequence_column_index(result.num_columns()));
         let sequence_array = sequence_column
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -1456,5 +1456,143 @@ mod tests {
             err.to_string().contains("Column number difference"),
             "{err:?}"
         );
+    }
+
+    fn build_test_encoded_pk_array(
+        pk_values_per_row: &[&[Option<i64>]],
+        use_sparse: bool,
+    ) -> Arc<PrimaryKeyArray> {
+        let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
+
+        if use_sparse {
+            // Create sparse codec for encoding primary keys with 2 i64 fields (tag0, tag1)
+            let fields = vec![
+                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
+                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
+            ];
+            let codec = SparsePrimaryKeyCodec::with_fields(fields);
+
+            for pk_values_row in pk_values_per_row {
+                let values: Vec<(ColumnId, Value)> = pk_values_row
+                    .iter()
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        let column_id = if i == 0 { 1 } else { 3 }; // tag0 = 1, tag1 = 3
+                        let value = match opt {
+                            Some(val) => Value::Int64(*val),
+                            None => Value::Null,
+                        };
+                        (column_id, value)
+                    })
+                    .collect();
+
+                let mut buffer = Vec::new();
+                codec
+                    .encode_value_refs(
+                        &values
+                            .iter()
+                            .map(|(id, val)| (*id, val.as_value_ref()))
+                            .collect::<Vec<_>>(),
+                        &mut buffer,
+                    )
+                    .unwrap();
+                builder.append_value(&buffer);
+            }
+        } else {
+            // Create dense codec for encoding primary keys with 2 i64 fields (tag0, tag1)
+            let fields = vec![
+                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
+                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
+            ];
+            let codec = DensePrimaryKeyCodec::with_fields(fields);
+
+            for pk_values_row in pk_values_per_row {
+                let values: Vec<ValueRef> = pk_values_row
+                    .iter()
+                    .map(|opt| match opt {
+                        Some(val) => ValueRef::Int64(*val),
+                        None => ValueRef::Null,
+                    })
+                    .collect();
+
+                let encoded = codec.encode(values.into_iter()).unwrap();
+                builder.append_value(&encoded);
+            }
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    #[test]
+    fn test_flat_read_format_convert_format_with_dense_encoding() {
+        let metadata = build_test_region_metadata();
+
+        let column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+
+        let num_rows = 4;
+        let original_sequence = 100u64;
+
+        // Create primary key values for each row: tag0=1, tag1=1 for all rows
+        let pk_values_per_row = vec![
+                &[Some(1i64), Some(1i64)][..]; num_rows  // All rows have same primary key values
+            ];
+
+        // Create a test record batch in old format using dense encoding
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_encoded_pk_array(&pk_values_per_row, false), // __primary_key (dense encoding)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+
+        // Create schema for old format (without primary key columns)
+        let old_format_fields = vec![
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ];
+        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
+
+        // Test conversion with dense encoding
+        let result = format.convert_batch(record_batch, None).unwrap();
+
+        // Construct expected RecordBatch in flat format with decoded primary key columns
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag0 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag1 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_encoded_pk_array(&pk_values_per_row, false), // __primary_key (preserved)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expected_record_batch =
+            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+
+        // Compare the actual result with the expected record batch
+        assert_eq!(result, expected_record_batch);
     }
 }

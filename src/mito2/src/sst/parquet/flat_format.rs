@@ -51,7 +51,7 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, PrimaryKeyArray, ReadFormat, StatValues, FIXED_POS_COLUMN_NUM,
+    FormatProjection, PrimaryKeyArray, ReadFormat, StatValues, INTERNAL_COLUMN_NUM,
 };
 use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 
@@ -138,7 +138,7 @@ pub struct FlatReadFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
-    /// Projection.
+    /// Projection computed for the format.
     format_projection: FormatProjection,
     /// Column id to index in SST.
     column_id_to_sst_index: HashMap<ColumnId, usize>,
@@ -248,8 +248,12 @@ impl FlatReadFormat {
         &self.format_projection.projection_indices
     }
 
+    /// Gets the projection.
+    pub(crate) fn format_projection(&self) -> &FormatProjection {
+        &self.format_projection
+    }
+
     /// Creates a sequence array to override.
-    #[allow(dead_code)]
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         self.override_sequence
             .map(|seq| Arc::new(UInt64Array::from_value(seq, length)) as ArrayRef)
@@ -304,9 +308,8 @@ impl FlatReadFormat {
         metadata: &RegionMetadata,
     ) -> Result<bool> {
         // For flat format, compute expected column number:
-        // all columns + internal columns (pk, sequence, op_type) - 1 (time index already counted)
-        // FIXME(yingwen): use INTERNAL_COLUMN_NUM
-        let expected_columns = metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM - 1;
+        // all columns + internal columns (pk, sequence, op_type)
+        let expected_columns = metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM;
 
         if expected_columns == num_columns {
             // Same number of columns, no conversion needed
@@ -340,11 +343,6 @@ impl FlatReadFormat {
 
             Ok(true)
         }
-    }
-
-    /// Returns the format projection.
-    pub(crate) fn format_projection(&self) -> &FormatProjection {
-        &self.format_projection
     }
 
     fn get_stat_values(
