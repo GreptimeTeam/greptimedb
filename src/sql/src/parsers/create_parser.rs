@@ -1142,7 +1142,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, Value};
+    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, ObjectNamePart, Value};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::tokenizer::Tokenizer;
 
@@ -1531,7 +1531,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             assert_eq!(1, stmts.len());
             match &stmts[0] {
                 Statement::CreateFlow(c) => c.clone(),
-                _ => unreachable!(),
+                _ => panic!("{:?}", stmts[0]),
             }
         }
         struct CreateFlowWoutQuery {
@@ -1553,6 +1553,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             /// Comment string
             pub comment: Option<String>,
         }
+
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
         let testcases = vec![
             (
                 r"
@@ -1561,36 +1563,12 @@ SINK TO schema_1.table_1
 EXPIRE AFTER INTERVAL '5 minutes'
 COMMENT 'test comment'
 AS
-SELECT max(c1), min(c2) FROM schema_2.table_2;";
-        let stmts =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, stmts.len());
-        let create_task = match &stmts[0] {
-            Statement::CreateFlow(c) => c,
-            _ => unreachable!(),
-        };
-
-        let expected = CreateFlow {
-            flow_name: vec![Ident::new("task_1")].into(),
-            sink_table_name: vec![Ident::new("schema_1"), Ident::new("table_1")].into(),
-            or_replace: true,
-            if_not_exists: true,
-            expire_after: Some(300),
-            comment: Some("test comment".to_string()),
-            // ignore query parse result
-            query: create_task.query.clone(),
-        };
-        assert_eq!(create_task, &expected);
-
-        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
-        let sql = r"
-        SELECT max(c1), min(c2) FROM schema_2.table_2;",
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
                     sink_table_name: ObjectName(vec![
-                        Ident::new("schema_1"),
-                        Ident::new("table_1"),
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
                     ]),
                     or_replace: true,
                     if_not_exists: true,
@@ -1608,10 +1586,10 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
                     sink_table_name: ObjectName(vec![
-                        Ident::new("schema_1"),
-                        Ident::new("table_1"),
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
                     ]),
                     or_replace: true,
                     if_not_exists: true,
@@ -1630,10 +1608,10 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
                     sink_table_name: ObjectName(vec![
-                        Ident::new("schema_1"),
-                        Ident::new("table_1"),
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
                     ]),
                     or_replace: true,
                     if_not_exists: true,
@@ -1652,10 +1630,10 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
                     sink_table_name: ObjectName(vec![
-                        Ident::new("schema_1"),
-                        Ident::new("table_1"),
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
                     ]),
                     or_replace: true,
                     if_not_exists: true,
@@ -1672,10 +1650,12 @@ EXPIRE AFTER '2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::with_quote('`', "task_2")]),
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::with_quote(
+                        '`', "task_2",
+                    ))]),
                     sink_table_name: ObjectName(vec![
-                        Ident::new("schema_1"),
-                        Ident::new("table_1"),
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
                     ]),
                     or_replace: false,
                     if_not_exists: false,
