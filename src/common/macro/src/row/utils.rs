@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 
-use greptime_proto::v1::ColumnDataType;
+use greptime_proto::v1::column_data_type_extension::TypeExt;
+use greptime_proto::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension};
 use once_cell::sync::Lazy;
 use quote::format_ident;
 use syn::{
@@ -32,33 +33,35 @@ static SEMANTIC_TYPES: Lazy<HashMap<&'static str, SemanticType>> = Lazy::new(|| 
     ])
 });
 
-static DATATYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataType>> =
+static DATATYPE_TO_COLUMN_DATA_TYPE: Lazy<HashMap<&'static str, ColumnDataTypeWithExtension>> =
     Lazy::new(|| {
         HashMap::from([
             // Timestamp
-            ("timestampsecond", ColumnDataType::TimestampSecond),
-            ("timestampmillisecond", ColumnDataType::TimestampMillisecond),
+            ("timestampsecond", ColumnDataType::TimestampSecond.into()),
             (
-                "timestamptimemicrosecond",
-                ColumnDataType::TimestampMicrosecond,
+                "timestampmillisecond",
+                ColumnDataType::TimestampMillisecond.into(),
             ),
             (
-                "timestamptimenanosecond",
-                ColumnDataType::TimestampNanosecond,
+                "timestampmicrosecond",
+                ColumnDataType::TimestampMicrosecond.into(),
+            ),
+            (
+                "timestampnanosecond",
+                ColumnDataType::TimestampNanosecond.into(),
             ),
             // Date
-            ("date", ColumnDataType::Date),
-            ("datetime", ColumnDataType::Datetime),
+            ("date", ColumnDataType::Date.into()),
+            ("datetime", ColumnDataType::Datetime.into()),
             // Time
-            ("timesecond", ColumnDataType::TimeSecond),
-            ("timemillisecond", ColumnDataType::TimeMillisecond),
-            ("timemicrosecond", ColumnDataType::TimeMicrosecond),
-            ("timenanosecond", ColumnDataType::TimeNanosecond),
+            ("timesecond", ColumnDataType::TimeSecond.into()),
+            ("timemillisecond", ColumnDataType::TimeMillisecond.into()),
+            ("timemicrosecond", ColumnDataType::TimeMicrosecond.into()),
+            ("timenanosecond", ColumnDataType::TimeNanosecond.into()),
             // Others
-            ("string", ColumnDataType::String),
-            ("json", ColumnDataType::Json),
-            ("decimal128", ColumnDataType::Decimal128),
-            ("vector", ColumnDataType::Vector),
+            ("string", ColumnDataType::String.into()),
+            ("json", ColumnDataTypeWithExtension::json()),
+            // TODO(weny): support vector and decimal128.
         ])
     });
 
@@ -101,7 +104,7 @@ pub(crate) fn semantic_type_from_str(ident: &str) -> Option<SemanticType> {
 }
 
 /// Convert a field type to a column data type.
-pub(crate) fn column_data_type_from_str(ident: &str) -> Option<ColumnDataType> {
+pub(crate) fn column_data_type_from_str(ident: &str) -> Option<ColumnDataTypeWithExtension> {
     // Ignores the case of the identifier.
     let lowercase = ident.to_lowercase();
     let lowercase_str = lowercase.as_str();
@@ -186,15 +189,41 @@ pub(crate) fn convert_semantic_type_to_proto_semantic_type(
     }
 }
 
-pub(crate) struct PrasedField<'a> {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ColumnDataTypeWithExtension {
+    pub(crate) data_type: ColumnDataType,
+    pub(crate) extension: Option<ColumnDataTypeExtension>,
+}
+
+impl ColumnDataTypeWithExtension {
+    pub(crate) fn json() -> Self {
+        Self {
+            data_type: ColumnDataType::Json,
+            extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
+        }
+    }
+}
+
+impl From<ColumnDataType> for ColumnDataTypeWithExtension {
+    fn from(data_type: ColumnDataType) -> Self {
+        Self {
+            data_type,
+            extension: None,
+        }
+    }
+}
+
+pub(crate) struct ParsedField<'a> {
     pub(crate) ident: &'a Ident,
     pub(crate) field_type: FieldType<'a>,
-    pub(crate) column_data_type: Option<ColumnDataType>,
+    pub(crate) column_data_type: Option<ColumnDataTypeWithExtension>,
     pub(crate) column_attribute: ColumnAttribute,
 }
 
 /// Parse fields from fields named.
-pub(crate) fn parse_fields_from_fields_named(named: &FieldsNamed) -> Result<Vec<PrasedField<'_>>> {
+pub(crate) fn parse_fields_from_fields_named(named: &FieldsNamed) -> Result<Vec<ParsedField<'_>>> {
     Ok(named
         .named
         .iter()
@@ -209,31 +238,34 @@ pub(crate) fn parse_fields_from_fields_named(named: &FieldsNamed) -> Result<Vec<
                 .transpose()?
                 .unwrap_or_default();
 
-            Ok(PrasedField {
+            Ok(ParsedField {
                 ident,
                 field_type,
                 column_data_type,
                 column_attribute,
             })
         })
-        .collect::<Result<Vec<PrasedField<'_>>>>()?
+        .collect::<Result<Vec<ParsedField<'_>>>>()?
         .into_iter()
         .filter(|field| !field.column_attribute.skip)
         .collect::<Vec<_>>())
 }
 
-fn convert_primitive_type_to_column_data_type(ident: &Ident) -> Option<ColumnDataType> {
+fn convert_primitive_type_to_column_data_type(
+    ident: &Ident,
+) -> Option<ColumnDataTypeWithExtension> {
     PRIMITIVE_TYPE_TO_COLUMN_DATA_TYPE
         .get(ident.to_string().as_str())
         .cloned()
+        .map(ColumnDataTypeWithExtension::from)
 }
 
 /// Get the column data type from the attribute or the inferred column data type.
 pub(crate) fn get_column_data_type(
-    infer_column_data_type: &Option<ColumnDataType>,
+    infer_column_data_type: &Option<ColumnDataTypeWithExtension>,
     attribute: &ColumnAttribute,
-) -> Option<ColumnDataType> {
-    attribute.column_data_type.or(*infer_column_data_type)
+) -> Option<ColumnDataTypeWithExtension> {
+    attribute.datatype.or(*infer_column_data_type)
 }
 
 /// Convert a column data type to a value data ident.
@@ -274,7 +306,8 @@ pub(crate) fn convert_column_data_type_to_value_data_ident(
             format_ident!("IntervalMonthDayNanoValue")
         }
         ColumnDataType::Decimal128 => format_ident!("Decimal128Value"),
-        ColumnDataType::Json => format_ident!("JsonValue"),
+        // Json is a special case, it is actually a string column.
+        ColumnDataType::Json => format_ident!("StringValue"),
         ColumnDataType::Vector => format_ident!("VectorValue"),
     }
 }

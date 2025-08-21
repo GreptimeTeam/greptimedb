@@ -14,13 +14,14 @@
 
 use std::collections::HashMap;
 
-use greptime_proto::v1::ColumnDataType;
 use once_cell::sync::Lazy;
 use syn::meta::ParseNestedMeta;
 use syn::spanned::Spanned;
 use syn::{Attribute, LitStr, Meta, Result};
 
-use crate::row::utils::{column_data_type_from_str, semantic_type_from_str, SemanticType};
+use crate::row::utils::{
+    column_data_type_from_str, semantic_type_from_str, ColumnDataTypeWithExtension, SemanticType,
+};
 use crate::row::{
     META_KEY_COL, META_KEY_DATATYPE, META_KEY_NAME, META_KEY_SEMANTIC, META_KEY_SKIP,
 };
@@ -31,7 +32,7 @@ pub(crate) struct ColumnAttribute {
     /// User-defined name of the column.,
     pub(crate) name: Option<String>,
     /// Data type of the column.
-    pub(crate) column_data_type: Option<ColumnDataType>,
+    pub(crate) datatype: Option<ColumnDataTypeWithExtension>,
     /// Semantic type of the column.
     pub(crate) semantic_type: SemanticType,
     /// Whether to skip the column.
@@ -90,7 +91,7 @@ fn parse_datatype_field(meta: &ParseNestedMeta<'_>, attribute: &mut ColumnAttrib
     let Some(value) = column_data_type_from_str(&ident) else {
         return Err(meta.error(format!("unexpected {META_KEY_DATATYPE}: {ident}")));
     };
-    attribute.column_data_type = Some(value);
+    attribute.datatype = Some(value);
     Ok(())
 }
 

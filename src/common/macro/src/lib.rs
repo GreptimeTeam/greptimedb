@@ -232,7 +232,7 @@ pub fn derive_to_row(input: TokenStream) -> TokenStream {
     output.unwrap_or_else(|e| e.to_compile_error()).into()
 }
 
-/// Derive macro to convert a struct to a row.
+/// Derive macro to convert a struct to a row with move semantics.
 ///
 /// # Example
 /// ```rust, ignore

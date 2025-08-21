@@ -19,7 +19,7 @@ use syn::{DeriveInput, Result};
 
 use crate::row::utils::{
     convert_column_data_type_to_value_data_ident, extract_struct_fields, get_column_data_type,
-    parse_fields_from_fields_named, PrasedField,
+    parse_fields_from_fields_named, ParsedField,
 };
 use crate::row::{META_KEY_COL, META_KEY_DATATYPE};
 
@@ -34,7 +34,7 @@ pub(crate) fn derive_into_row_impl(input: DeriveInput) -> Result<TokenStream2> {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let fields = parse_fields_from_fields_named(fields)?;
 
-    // Implement `to_row` method.
+    // Implement `into_row` method.
     let impl_to_row_method = impl_into_row_method_combined(&fields)?;
     Ok(quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
@@ -43,11 +43,11 @@ pub(crate) fn derive_into_row_impl(input: DeriveInput) -> Result<TokenStream2> {
     })
 }
 
-fn impl_into_row_method_combined(fields: &[PrasedField<'_>]) -> Result<TokenStream2> {
+fn impl_into_row_method_combined(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
     let value_exprs = fields
         .iter()
         .map(|field| {
-            let PrasedField {ident, field_type, column_data_type, column_attribute} = field;
+            let ParsedField {ident, field_type, column_data_type, column_attribute} = field;
             let Some(column_data_type) = get_column_data_type(column_data_type, column_attribute)
             else {
                 return Err(syn::Error::new(
@@ -57,7 +57,7 @@ fn impl_into_row_method_combined(fields: &[PrasedField<'_>]) -> Result<TokenStre
                     ),
                 ));
             };
-            let value_data = convert_column_data_type_to_value_data_ident(&column_data_type);
+            let value_data = convert_column_data_type_to_value_data_ident(&column_data_type.data_type);
             let expr = if field_type.is_optional() {
                 quote! {
                     match self.#ident {
