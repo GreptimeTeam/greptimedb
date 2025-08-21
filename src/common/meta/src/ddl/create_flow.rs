@@ -378,8 +378,6 @@ pub enum CreateFlowState {
     CreateMetadata,
 }
 
-pub const FLOW_EVAL_INTERVAL_KEY: &str = "flow_eval_interval";
-
 /// The type of flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlowType {
@@ -447,6 +445,10 @@ impl From<&CreateFlowData> for CreateRequest {
             create_if_not_exists: true,
             or_replace: value.task.or_replace,
             expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
+            eval_interval: value
+                .task
+                .eval_interval
+                .map(|seconds| api::v1::EvalInterval { seconds }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
             flow_options: value.task.flow_options.clone(),
@@ -466,6 +468,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             flow_name,
             sink_table_name,
             expire_after,
+            eval_interval,
             comment,
             sql,
             flow_options: mut options,
@@ -505,6 +508,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             flow_name,
             raw_sql: sql,
             expire_after,
+            eval_interval,
             comment,
             options,
             created_time: create_time,
