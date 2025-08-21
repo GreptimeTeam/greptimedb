@@ -152,7 +152,7 @@ impl ReadFormat {
         flat_format: bool,
     ) -> Self {
         if flat_format {
-            Self::new_flat(metadata, column_ids)
+            Self::new_flat(metadata, column_ids, false)
         } else {
             Self::new_primary_key(metadata, column_ids)
         }
@@ -170,8 +170,9 @@ impl ReadFormat {
     pub fn new_flat(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        convert_to_flat: bool,
     ) -> Self {
-        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids))
+        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids, convert_to_flat))
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -1346,19 +1347,19 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), false);
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), false);
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), false);
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), false);
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
@@ -1368,6 +1369,7 @@ mod tests {
         let mut format = FlatReadFormat::new(
             metadata,
             std::iter::once(1), // Just read tag0
+            false,
         );
 
         let num_rows = 4;
@@ -1383,7 +1385,7 @@ mod tests {
             RecordBatch::try_new(format.arrow_schema().clone(), test_columns).unwrap();
 
         // Test without override sequence - should return clone
-        let result = format.convert_batch(&record_batch, None).unwrap();
+        let result = format.convert_batch(record_batch.clone(), None).unwrap();
         let sequence_column = result.column(
             crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
         );
@@ -1399,7 +1401,7 @@ mod tests {
         format.set_override_sequence(Some(override_sequence));
         let override_sequence_array = format.new_override_sequence_array(num_rows).unwrap();
         let result = format
-            .convert_batch(&record_batch, Some(&override_sequence_array))
+            .convert_batch(record_batch, Some(&override_sequence_array))
             .unwrap();
         let sequence_column = result.column(
             crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
@@ -1411,5 +1413,48 @@ mod tests {
 
         let expected_override = UInt64Array::from(vec![override_sequence; num_rows]);
         assert_eq!(sequence_array, &expected_override);
+    }
+
+    #[test]
+    fn test_need_convert_to_flat() {
+        let metadata = build_test_region_metadata();
+
+        // Test case 1: Same number of columns, no conversion needed
+        // For flat format: all columns (5) + internal columns (3)
+        let expected_columns = metadata.column_metadatas.len() + 3;
+        let result =
+            FlatReadFormat::need_convert_to_flat("test.parquet", expected_columns, &metadata)
+                .unwrap();
+        assert!(
+            !result,
+            "Should not need conversion when column counts match"
+        );
+
+        // Test case 2: Different number of columns, need conversion
+        // Missing primary key columns (2 primary keys in test metadata)
+        let num_columns_without_pk = expected_columns - metadata.primary_key.len();
+        let result =
+            FlatReadFormat::need_convert_to_flat("test.parquet", num_columns_without_pk, &metadata)
+                .unwrap();
+        assert!(
+            result,
+            "Should need conversion when primary key columns are missing"
+        );
+
+        // Test case 3: Invalid case - actual columns more than expected
+        let too_many_columns = expected_columns + 1;
+        let err = FlatReadFormat::need_convert_to_flat("test.parquet", too_many_columns, &metadata)
+            .unwrap_err();
+        assert!(err.to_string().contains("Expected columns"), "{err:?}");
+
+        // Test case 4: Invalid case - column difference doesn't match primary key count
+        let wrong_diff_columns = expected_columns - 1; // Difference of 1, but we have 2 primary keys
+        let err =
+            FlatReadFormat::need_convert_to_flat("test.parquet", wrong_diff_columns, &metadata)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("Column number difference"),
+            "{err:?}"
+        );
     }
 }
