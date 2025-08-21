@@ -85,7 +85,8 @@ pub struct LoggingOptions {
     pub otlp_export_protocol: Option<OtlpExportProtocol>,
 
     /// Additional HTTP headers for OTLP exporter.
-    pub otlp_headers: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub otlp_headers: HashMap<String, String>,
 }
 
 /// The protocol of OTLP export.
@@ -180,7 +181,7 @@ impl Default for LoggingOptions {
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
             otlp_export_protocol: None,
-            otlp_headers: None,
+            otlp_headers: HashMap::new(),
         }
     }
 }
@@ -474,7 +475,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
             .with_http()
             .with_endpoint(endpoint)
             .with_protocol(Protocol::HttpBinary)
-            .with_headers(opts.otlp_headers.clone().unwrap_or_default())
+            .with_headers(opts.otlp_headers.clone())
             .build()
             .expect("Failed to create OTLP HTTP exporter "),
     }
