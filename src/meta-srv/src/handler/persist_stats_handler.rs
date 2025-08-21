@@ -160,10 +160,10 @@ impl PersistStatsHandler {
             warn!("persist_interval is less than 60 seconds, set to 60 seconds");
             persist_interval = Duration::from_secs(60);
         }
-        assert!(
-            persist_interval.as_millis() != 0,
-            "persist_interval must be greater than zero"
-        );
+        if persist_interval.as_millis() == 0 {
+            warn!("persist_interval as milliseconds is zero, set to 60 second");
+            persist_interval = Duration::from_secs(60);
+        }
 
         Self {
             inserter,
