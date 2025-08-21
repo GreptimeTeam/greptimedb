@@ -24,7 +24,6 @@ use common_macro::ToRow;
 use common_meta::datanode::RegionStat;
 use common_meta::DatanodeId;
 use common_telemetry::warn;
-use common_time::util::current_time_millis;
 use dashmap::DashMap;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
@@ -49,7 +48,7 @@ const DEFAULT_CONTEXT: InserterContext = InserterContext {
     schema: DEFAULT_PRIVATE_SCHEMA_NAME,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PersistedRegionStat {
     region_id: RegionId,
     write_bytess: u64,
@@ -85,10 +84,11 @@ struct PersistRegionStat<'a> {
     timestamp_millis: i64,
 }
 
-fn persist_region_stats(
+/// Compute the region stat to persist.
+fn compute_persist_region_stat(
     region_stat: &RegionStat,
     datanode_id: DatanodeId,
-    aligned_ts: i64,
+    timestamp_millis: i64,
     persisted_region_stat: Option<PersistedRegionStat>,
 ) -> PersistRegionStat {
     let write_bytes_delta = persisted_region_stat
@@ -110,8 +110,43 @@ fn persist_region_stats(
         sst_num: region_stat.sst_num,
         sst_size: region_stat.sst_size,
         write_bytes_delta,
-        timestamp_millis: aligned_ts,
+        timestamp_millis,
     }
+}
+
+fn to_persisted_if_leader(
+    region_stat: &RegionStat,
+    last_persisted_region_stats: &DashMap<RegionId, PersistedRegionStat>,
+    datanode_id: DatanodeId,
+    timestamp_millis: i64,
+) -> Option<(Row, PersistedRegionStat)> {
+    if matches!(region_stat.role, RegionRole::Leader) {
+        let persisted_region_stat = last_persisted_region_stats.get(&region_stat.id).map(|s| *s);
+        Some((
+            compute_persist_region_stat(
+                region_stat,
+                datanode_id,
+                timestamp_millis,
+                persisted_region_stat,
+            )
+            .to_row(),
+            PersistedRegionStat::from(region_stat),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Align the timestamp to the nearest interval.
+///
+/// # Panics
+/// Panics if `interval` as milliseconds is zero.
+fn align_ts(ts: i64, interval: Duration) -> i64 {
+    assert!(
+        interval.as_millis() != 0,
+        "interval must be greater than zero"
+    );
+    ts / interval.as_millis() as i64 * interval.as_millis() as i64
 }
 
 impl PersistStatsHandler {
@@ -146,34 +181,26 @@ impl PersistStatsHandler {
         last_persisted_time.elapsed() >= self.persist_interval
     }
 
-    async fn persist(&self, datanode_id: DatanodeId, region_stats: &[RegionStat]) {
-        let timestamp = current_time_millis();
-        let persist_interval_millis = self.persist_interval.as_millis() as i64;
-        // Safety: `persist_interval_millis` is guaranteed to be greater than zero.
-        let aligned_ts = timestamp / persist_interval_millis * persist_interval_millis;
+    async fn persist(
+        &self,
+        timestamp_millis: i64,
+        datanode_id: DatanodeId,
+        region_stats: &[RegionStat],
+    ) {
+        // Safety: persist_interval is greater than zero.
+        let aligned_ts = align_ts(timestamp_millis, self.persist_interval);
         let (rows, incoming_region_stats): (Vec<_>, Vec<_>) = region_stats
             .iter()
             .flat_map(|region_stat| {
-                if matches!(region_stat.role, RegionRole::Leader) {
-                    let persisted_region_stat = self
-                        .last_persisted_region_stats
-                        .get(&region_stat.id)
-                        .map(|s| *s);
-                    Some((
-                        persist_region_stats(
-                            region_stat,
-                            datanode_id,
-                            aligned_ts,
-                            persisted_region_stat,
-                        )
-                        .to_row(),
-                        PersistedRegionStat::from(region_stat),
-                    ))
-                } else {
-                    None
-                }
+                to_persisted_if_leader(
+                    region_stat,
+                    &self.last_persisted_region_stats,
+                    datanode_id,
+                    aligned_ts,
+                )
             })
             .unzip();
+
         if rows.is_empty() {
             return;
         }
@@ -228,9 +255,305 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(HandleControl::Continue);
         }
 
-        self.persist(current_stat.id, &current_stat.region_stats)
-            .await;
+        self.persist(
+            current_stat.timestamp_millis,
+            current_stat.id,
+            &current_stat.region_stats,
+        )
+        .await;
 
         Ok(HandleControl::Continue)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use client::inserter::{Context as InserterContext, InsertOptions};
+    use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
+    use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::handler::test_utils::TestEnv;
+
+    fn create_test_region_stat(
+        table_id: u32,
+        region_number: u32,
+        write_bytes: u64,
+        engine: &str,
+    ) -> RegionStat {
+        let region_id = RegionId::new(table_id, region_number);
+        RegionStat {
+            id: region_id,
+            rcus: 100,
+            wcus: 200,
+            approximate_bytes: 1024,
+            engine: engine.to_string(),
+            role: RegionRole::Leader,
+            num_rows: 1000,
+            memtable_size: 512,
+            manifest_size: 256,
+            sst_size: 2048,
+            sst_num: 5,
+            index_size: 128,
+            region_manifest: RegionManifestInfo::Mito {
+                manifest_version: 1,
+                flushed_entry_id: 100,
+            },
+            write_bytes,
+            data_topic_latest_entry_id: 200,
+            metadata_topic_latest_entry_id: 200,
+        }
+    }
+
+    #[test]
+    fn test_compute_persist_region_stat_with_no_persisted_stat() {
+        let region_stat = create_test_region_stat(1, 1, 1000, "mito");
+        let datanode_id = 123;
+        let timestamp_millis = 1640995200000; // 2022-01-01 00:00:00 UTC
+        let result = compute_persist_region_stat(&region_stat, datanode_id, timestamp_millis, None);
+        assert_eq!(result.table_id, 1);
+        assert_eq!(result.region_id, region_stat.id.as_u64());
+        assert_eq!(result.region_number, 1);
+        assert_eq!(result.manifest_size, 256);
+        assert_eq!(result.datanode_id, datanode_id);
+        assert_eq!(result.engine, "mito");
+        assert_eq!(result.num_rows, 1000);
+        assert_eq!(result.sst_num, 5);
+        assert_eq!(result.sst_size, 2048);
+        assert_eq!(result.write_bytes_delta, 0); // No previous stat, so delta is 0
+        assert_eq!(result.timestamp_millis, timestamp_millis);
+    }
+
+    #[test]
+    fn test_compute_persist_region_stat_with_persisted_stat_increase() {
+        let region_stat = create_test_region_stat(2, 3, 1500, "mito");
+        let datanode_id = 456;
+        let timestamp_millis = 1640995260000; // 2022-01-01 00:01:00 UTC
+        let persisted_stat = PersistedRegionStat {
+            region_id: region_stat.id,
+            write_bytess: 1000, // Previous write bytes
+        };
+        let result = compute_persist_region_stat(
+            &region_stat,
+            datanode_id,
+            timestamp_millis,
+            Some(persisted_stat),
+        );
+        assert_eq!(result.table_id, 2);
+        assert_eq!(result.region_id, region_stat.id.as_u64());
+        assert_eq!(result.region_number, 3);
+        assert_eq!(result.manifest_size, 256);
+        assert_eq!(result.datanode_id, datanode_id);
+        assert_eq!(result.engine, "mito");
+        assert_eq!(result.num_rows, 1000);
+        assert_eq!(result.sst_num, 5);
+        assert_eq!(result.sst_size, 2048);
+        assert_eq!(result.write_bytes_delta, 500); // 1500 - 1000 = 500
+        assert_eq!(result.timestamp_millis, timestamp_millis);
+    }
+
+    #[test]
+    fn test_compute_persist_region_stat_with_persisted_stat_decrease() {
+        let region_stat = create_test_region_stat(3, 5, 800, "mito");
+        let datanode_id = 789;
+        let timestamp_millis = 1640995320000; // 2022-01-01 00:02:00 UTC
+        let persisted_stat = PersistedRegionStat {
+            region_id: region_stat.id,
+            write_bytess: 1200, // Previous write bytes (higher than current)
+        };
+        let result = compute_persist_region_stat(
+            &region_stat,
+            datanode_id,
+            timestamp_millis,
+            Some(persisted_stat),
+        );
+        assert_eq!(result.table_id, 3);
+        assert_eq!(result.region_id, region_stat.id.as_u64());
+        assert_eq!(result.region_number, 5);
+        assert_eq!(result.manifest_size, 256);
+        assert_eq!(result.datanode_id, datanode_id);
+        assert_eq!(result.engine, "mito");
+        assert_eq!(result.num_rows, 1000);
+        assert_eq!(result.sst_num, 5);
+        assert_eq!(result.sst_size, 2048);
+        assert_eq!(result.write_bytes_delta, 0); // 800 - 1200 would be negative, so 0 due to checked_sub
+        assert_eq!(result.timestamp_millis, timestamp_millis);
+    }
+
+    #[test]
+    fn test_compute_persist_region_stat_with_persisted_stat_equal() {
+        let region_stat = create_test_region_stat(4, 7, 2000, "mito");
+        let datanode_id = 101;
+        let timestamp_millis = 1640995380000; // 2022-01-01 00:03:00 UTC
+        let persisted_stat = PersistedRegionStat {
+            region_id: region_stat.id,
+            write_bytess: 2000, // Same as current write bytes
+        };
+        let result = compute_persist_region_stat(
+            &region_stat,
+            datanode_id,
+            timestamp_millis,
+            Some(persisted_stat),
+        );
+        assert_eq!(result.table_id, 4);
+        assert_eq!(result.region_id, region_stat.id.as_u64());
+        assert_eq!(result.region_number, 7);
+        assert_eq!(result.manifest_size, 256);
+        assert_eq!(result.datanode_id, datanode_id);
+        assert_eq!(result.engine, "mito");
+        assert_eq!(result.num_rows, 1000);
+        assert_eq!(result.sst_num, 5);
+        assert_eq!(result.sst_size, 2048);
+        assert_eq!(result.write_bytes_delta, 0); // 2000 - 2000 = 0
+        assert_eq!(result.timestamp_millis, timestamp_millis);
+    }
+
+    #[test]
+    fn test_compute_persist_region_stat_with_overflow_protection() {
+        let region_stat = create_test_region_stat(8, 15, 500, "mito");
+        let datanode_id = 505;
+        let timestamp_millis = 1640995620000; // 2022-01-01 00:07:00 UTC
+        let persisted_stat = PersistedRegionStat {
+            region_id: region_stat.id,
+            write_bytess: 1000, // Higher than current, would cause underflow
+        };
+        let result = compute_persist_region_stat(
+            &region_stat,
+            datanode_id,
+            timestamp_millis,
+            Some(persisted_stat),
+        );
+        assert_eq!(result.table_id, 8);
+        assert_eq!(result.region_id, region_stat.id.as_u64());
+        assert_eq!(result.region_number, 15);
+        assert_eq!(result.manifest_size, 256);
+        assert_eq!(result.datanode_id, datanode_id);
+        assert_eq!(result.engine, "mito");
+        assert_eq!(result.num_rows, 1000);
+        assert_eq!(result.sst_num, 5);
+        assert_eq!(result.sst_size, 2048);
+        assert_eq!(result.write_bytes_delta, 0); // checked_sub returns None, so default to 0
+        assert_eq!(result.timestamp_millis, timestamp_millis);
+    }
+
+    struct MockInserter {
+        requests: Arc<Mutex<Vec<api::v1::RowInsertRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Inserter for MockInserter {
+        async fn insert_rows(
+            &self,
+            _context: &InserterContext<'_>,
+            requests: api::v1::RowInsertRequests,
+        ) -> client::error::Result<()> {
+            self.requests.lock().unwrap().extend(requests.inserts);
+
+            Ok(())
+        }
+
+        fn set_options(&mut self, _options: &InsertOptions) {}
+    }
+
+    #[tokio::test]
+    async fn test_not_persist_region_stats() {
+        let env = TestEnv::new();
+        let mut ctx = env.ctx();
+
+        let requests = Arc::new(Mutex::new(vec![]));
+        let inserter = MockInserter {
+            requests: requests.clone(),
+        };
+        let handler = PersistStatsHandler::new(Box::new(inserter), Duration::from_secs(10));
+        let mut acc = HeartbeatAccumulator {
+            stat: Some(Stat {
+                id: 1,
+                timestamp_millis: 1640995200000,
+                region_stats: vec![create_test_region_stat(1, 1, 1000, "mito")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        handler.last_persisted_time.insert(1, Instant::now());
+        // Do not persist
+        handler
+            .handle(&HeartbeatRequest::default(), &mut ctx, &mut acc)
+            .await
+            .unwrap();
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_persist_region_stats() {
+        let env = TestEnv::new();
+        let mut ctx = env.ctx();
+        let requests = Arc::new(Mutex::new(vec![]));
+        let inserter = MockInserter {
+            requests: requests.clone(),
+        };
+
+        let handler = PersistStatsHandler::new(Box::new(inserter), Duration::from_secs(10));
+
+        let region_stat = create_test_region_stat(1, 1, 1000, "mito");
+        let timestamp_millis = 1640995200000;
+        let datanode_id = 1;
+        let region_id = RegionId::new(1, 1);
+        let mut acc = HeartbeatAccumulator {
+            stat: Some(Stat {
+                id: datanode_id,
+                timestamp_millis,
+                region_stats: vec![region_stat.clone()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        handler.last_persisted_region_stats.insert(
+            region_id,
+            PersistedRegionStat {
+                region_id,
+                write_bytess: 500,
+            },
+        );
+        let (expected_row, expected_persisted_region_stat) = to_persisted_if_leader(
+            &region_stat,
+            &handler.last_persisted_region_stats,
+            datanode_id,
+            timestamp_millis,
+        )
+        .unwrap();
+        let before_insert_time = Instant::now();
+        // Persist
+        handler
+            .handle(&HeartbeatRequest::default(), &mut ctx, &mut acc)
+            .await
+            .unwrap();
+        let request = {
+            let mut requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            requests.pop().unwrap()
+        };
+        assert_eq!(request.table_name, META_REGION_STATS_TABLE_NAME.to_string());
+        assert_eq!(request.rows.unwrap().rows, vec![expected_row]);
+
+        // Check last persisted time
+        assert!(handler
+            .last_persisted_time
+            .get(&datanode_id)
+            .unwrap()
+            .gt(&before_insert_time));
+
+        // Check last persisted region stats
+        assert_eq!(
+            handler
+                .last_persisted_region_stats
+                .get(&region_id)
+                .unwrap()
+                .value(),
+            &expected_persisted_region_stat
+        );
     }
 }
