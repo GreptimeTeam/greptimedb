@@ -663,7 +663,7 @@ impl BatchingTask {
             })?
             .data;
         // only apply optimize after complex rewrite is done
-        let new_plan = apply_df_optimizer(rewrite).await?;
+        let new_plan = apply_df_optimizer(rewrite, &query_ctx).await?;
 
         Ok(Some((new_plan, schema_len)))
     }

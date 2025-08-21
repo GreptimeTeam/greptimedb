@@ -118,7 +118,7 @@ impl StatementExecutor {
                 .collect(),
             return_field: Arc::new(arrow::datatypes::Field::new("result", ret_type, true)),
             number_rows: if args.is_empty() { 1 } else { args[0].len() },
-            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+            config_options: Arc::new(query_ctx.create_config_options()),
         };
 
         // Execute the async UDF
