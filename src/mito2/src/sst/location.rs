@@ -56,33 +56,6 @@ pub fn index_file_path(
     util::join_path(&index_dir, &format!("{}.puffin", region_file_id.file_id()))
 }
 
-/// Get RegionFileId from sst or index filename
-pub fn parse_file_id_from_path(filepath: &str) -> crate::error::Result<FileId> {
-    let filename = filepath.rsplit('/').next().context(UnexpectedSnafu {
-        reason: format!("invalid file path: {}", filepath),
-    })?;
-    let parts: Vec<&str> = filename.split('.').collect();
-    if parts.len() != 2 {
-        return UnexpectedSnafu {
-            reason: format!("invalid file name: {}", filename),
-        }
-        .fail();
-    }
-    if parts[1] != "parquet" && parts[1] != "puffin" {
-        return UnexpectedSnafu {
-            reason: format!("invalid file extension: {}", parts[1]),
-        }
-        .fail();
-    }
-    let file_id = parts[0];
-    FileId::parse_str(file_id).map_err(|e| {
-        UnexpectedSnafu {
-            reason: format!("invalid file id: {}, err: {}", file_id, e),
-        }
-        .build()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use store_api::storage::RegionId;
