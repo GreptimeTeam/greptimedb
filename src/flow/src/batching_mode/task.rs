@@ -80,7 +80,7 @@ pub struct TaskConfig {
     pub catalog_manager: CatalogManagerRef,
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
-    pub flow_eval_interval_ms: Option<u128>,
+    pub flow_eval_interval: Option<Duration>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -129,7 +129,7 @@ pub struct TaskArgs<'a> {
     pub catalog_manager: CatalogManagerRef,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
-    pub flow_eval_interval_ms: Option<u128>,
+    pub flow_eval_interval: Option<Duration>,
 }
 
 pub struct PlanInfo {
@@ -152,7 +152,7 @@ impl BatchingTask {
             catalog_manager,
             shutdown_rx,
             batch_opts,
-            flow_eval_interval_ms: flow_eval_interval,
+            flow_eval_interval,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -167,7 +167,7 @@ impl BatchingTask {
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
                 batch_opts,
-                flow_eval_interval_ms: flow_eval_interval,
+                flow_eval_interval,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         })
@@ -456,6 +456,13 @@ impl BatchingTask {
     ) {
         let flow_id_str = self.config.flow_id.to_string();
         let mut max_window_cnt = None;
+        let mut interval = self
+            .config
+            .flow_eval_interval
+            .map(|d| tokio::time::interval(d));
+        if let Some(tick) = &mut interval {
+            tick.tick().await; // pass the first tick immediately
+        }
         loop {
             // first check if shutdown signal is received
             // if so, break the loop
@@ -504,28 +511,32 @@ impl BatchingTask {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
                     
-                    let sleep_until = if let Some(eval_interval) = self.config.flow_eval_interval {
-                        tokio::time::Instant::now() + eval_interval.to_std_duration()
+                    // here use proper ticking if set eval interval
+                    if let Some(eval_interval) = &mut interval {
+                        eval_interval.tick().await;
                     } else {
                         // if not explicitly set, just automatically calculate next start time
                         // using time window size and more args
-                        let state = self.state.write().unwrap();
+                        let sleep_until = {
+                            let state = self.state.write().unwrap();
 
-                        let time_window_size = self
-                            .config
-                            .time_window_expr
-                            .as_ref()
-                            .and_then(|t| *t.time_window_size());
+                            let time_window_size = self
+                                .config
+                                .time_window_expr
+                                .as_ref()
+                                .and_then(|t| *t.time_window_size());
 
-                        state.get_next_start_query_time(
-                            self.config.flow_id,
-                            &time_window_size,
-                            min_refresh,
-                            Some(self.config.batch_opts.query_timeout),
-                            self.config.batch_opts.experimental_max_filter_num_per_query,
-                        )
+                            state.get_next_start_query_time(
+                                self.config.flow_id,
+                                &time_window_size,
+                                min_refresh,
+                                Some(self.config.batch_opts.query_timeout),
+                                self.config.batch_opts.experimental_max_filter_num_per_query,
+                            )
+                        };
+
+                        tokio::time::sleep_until(sleep_until).await;
                     };
-                    tokio::time::sleep_until(sleep_until).await;
                 }
                 // no new data, sleep for some time before checking for new data
                 Ok(None) => {

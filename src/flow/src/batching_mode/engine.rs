@@ -16,11 +16,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::flow::{DirtyWindowRequests, FlowResponse};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FlowType, FLOW_EVAL_INTERVAL_KEY};
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::TableMetadataManagerRef;
@@ -336,6 +337,7 @@ impl BatchingEngine {
             create_if_not_exists,
             or_replace,
             expire_after,
+            eval_interval,
             comment: _,
             sql,
             flow_options,
@@ -371,19 +373,7 @@ impl BatchingEngine {
         let query_ctx = Arc::new(query_ctx);
 
         // optionally set a eval interval for the flow
-
-        let flow_eval_interval_ms: Option<u128> = flow_options
-            .get(FLOW_EVAL_INTERVAL_KEY)
-            .map(|v| v.parse::<u128>())
-            .transpose()
-            .map_err(|e| {
-                UnexpectedSnafu {
-                    reason: format!("Failed to parse flow eval interval: {e}"),
-                }
-                .build()
-            })?;
-
-        if flow_eval_interval_ms.is_none()
+        if eval_interval.is_none()
             && is_tql(query_ctx.clone().sql_dialect(), &sql)
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu { sql: sql.clone() })?
@@ -468,7 +458,7 @@ impl BatchingEngine {
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
             batch_opts: self.batch_opts.clone(),
-            flow_eval_interval_ms,
+            flow_eval_interval: eval_interval.map(|secs| Duration::from_secs(secs as u64)),
         };
 
         let task = BatchingTask::try_new(task_args)?;

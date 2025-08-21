@@ -32,7 +32,6 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
-use common_meta::ddl::create_flow::FLOW_EVAL_INTERVAL_KEY;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
@@ -797,14 +796,7 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let eval_interval = create_flow
-        .eval_interval
-        .map(common_time::Duration::new_second);
-    let mut flow_options = HashMap::new();
-    if let Some(interval) = eval_interval {
-        let interval_ms = interval.to_std_duration().as_millis();
-        flow_options.insert(FLOW_EVAL_INTERVAL_KEY.to_string(), interval_ms.to_string());
-    }
+    let eval_interval = create_flow.eval_interval;
 
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
@@ -814,9 +806,10 @@ pub fn to_create_flow_task_expr(
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
         expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
+        eval_interval: eval_interval.map(|seconds| api::v1::EvalInterval { seconds }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options,
+        flow_options: Default::default(),
     })
 }
 

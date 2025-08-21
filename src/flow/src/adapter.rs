@@ -773,6 +773,7 @@ impl StreamingEngine {
             create_if_not_exists,
             or_replace,
             expire_after,
+            eval_interval: _,
             comment,
             sql,
             flow_options,
