@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use object_store::util;
-use snafu::OptionExt;
 use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
-use crate::error::UnexpectedSnafu;
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::RegionFileId;
 
 /// Generate region dir from table_dir, region_id and path_type
 pub fn region_dir_from_table_dir(
