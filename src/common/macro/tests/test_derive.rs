@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_macro::ToRow;
-use greptime_proto::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
+use common_macro::{IntoRow, Schema, ToRow};
+use greptime_proto::v1::column_data_type_extension::TypeExt;
+use greptime_proto::v1::value::ValueData;
+use greptime_proto::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row, SemanticType,
+    Value,
+};
 
-#[derive(ToRow)]
+#[derive(ToRow, Schema, IntoRow)]
 struct ToRowOwned {
     my_value: i32,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -28,6 +33,11 @@ struct ToRowOwned {
         datatype = "TimestampMillisecond"
     )]
     my_timestamp: i64,
+    #[allow(dead_code)]
+    #[col(skip)]
+    my_skip: i32,
+    #[col(name = "json_value", datatype = "json")]
+    my_json: String,
 }
 
 #[test]
@@ -38,14 +48,18 @@ fn test_to_row() {
         my_bool: true,
         my_float: 1.0,
         my_timestamp: 1718563200000,
+        my_skip: 1,
+        my_json: r#"{"name":"John", "age":30}"#.to_string(),
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowOwned::schema();
     assert_schema(&schema);
+    let row2 = test.into_row();
+    assert_row(&row2);
 }
 
-#[derive(ToRow)]
+#[derive(ToRow, Schema)]
 struct ToRowRef<'a> {
     my_value: &'a i32,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -58,6 +72,8 @@ struct ToRowRef<'a> {
         datatype = "TimestampMillisecond"
     )]
     my_timestamp: &'a i64,
+    #[col(name = "json_value", datatype = "json")]
+    my_json: &'a str,
 }
 
 #[test]
@@ -69,14 +85,15 @@ fn test_to_row_ref() {
         my_bool: &true,
         my_float: &1.0,
         my_timestamp: &1718563200000,
+        my_json: r#"{"name":"John", "age":30}"#,
     };
     let row = test.to_row();
     assert_row(&row);
-    let schema = test.schema();
+    let schema = ToRowRef::schema();
     assert_schema(&schema);
 }
 
-#[derive(ToRow)]
+#[derive(ToRow, IntoRow)]
 struct ToRowOptional {
     my_value: Option<i32>,
     #[col(name = "string_value", datatype = "string", semantic = "tag")]
@@ -91,17 +108,7 @@ struct ToRowOptional {
     my_timestamp: i64,
 }
 
-#[test]
-fn test_to_row_optional() {
-    let test = ToRowOptional {
-        my_value: None,
-        my_string: None,
-        my_bool: None,
-        my_float: None,
-        my_timestamp: 1718563200000,
-    };
-
-    let row = test.to_row();
+fn assert_row_optional(row: &Row) {
     assert_eq!(row.values.len(), 5);
     assert_eq!(row.values[0].value_data, None);
     assert_eq!(row.values[1].value_data, None);
@@ -113,8 +120,24 @@ fn test_to_row_optional() {
     );
 }
 
+#[test]
+fn test_to_row_optional() {
+    let test = ToRowOptional {
+        my_value: None,
+        my_string: None,
+        my_bool: None,
+        my_float: None,
+        my_timestamp: 1718563200000,
+    };
+
+    let row = test.to_row();
+    assert_row_optional(&row);
+    let row2 = test.into_row();
+    assert_row_optional(&row2);
+}
+
 fn assert_row(row: &Row) {
-    assert_eq!(row.values.len(), 5);
+    assert_eq!(row.values.len(), 6);
     assert_eq!(
         row.values[0].value_data,
         Some(greptime_proto::v1::value::ValueData::I32Value(1))
@@ -140,7 +163,7 @@ fn assert_row(row: &Row) {
 }
 
 fn assert_schema(schema: &[ColumnSchema]) {
-    assert_eq!(schema.len(), 5);
+    assert_eq!(schema.len(), 6);
     assert_eq!(schema[0].column_name, "my_value");
     assert_eq!(schema[0].datatype, ColumnDataType::Int32 as i32);
     assert_eq!(schema[0].semantic_type, SemanticType::Field as i32);
@@ -159,4 +182,13 @@ fn assert_schema(schema: &[ColumnSchema]) {
         ColumnDataType::TimestampMillisecond as i32
     );
     assert_eq!(schema[4].semantic_type, SemanticType::Timestamp as i32);
+    assert_eq!(schema[5].column_name, "json_value");
+    assert_eq!(schema[5].datatype, ColumnDataType::Json as i32);
+    assert_eq!(schema[5].semantic_type, SemanticType::Field as i32);
+    assert_eq!(
+        schema[5].datatype_extension,
+        Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary as i32))
+        })
+    );
 }
