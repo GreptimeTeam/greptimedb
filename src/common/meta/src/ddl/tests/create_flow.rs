@@ -271,8 +271,9 @@ fn test_flow_query_context_conversion_from_query_context() {
         timezone: "America/Los_Angeles".to_string(),
         extensions: [
             ("unused_key".to_string(), "unused_value".to_string()),
-            ("another_key".to_string(), "another_value".to_string())
-        ].into(),
+            ("another_key".to_string(), "another_value".to_string()),
+        ]
+        .into(),
         channel: 99,
     };
 
@@ -317,7 +318,7 @@ fn test_flow_info_conversion_with_flow_context() {
 #[test]
 fn test_mixed_serialization_format_support() {
     // Test that we can deserialize both old and new formats
-    
+
     // Test new FlowQueryContext format
     let new_format = r#"{"catalog": "test", "schema": "test", "timezone": "UTC"}"#;
     let ctx_from_new: FlowQueryContext = serde_json::from_str(new_format).unwrap();

@@ -1423,7 +1423,6 @@ impl From<FlowQueryContext> for PbQueryContext {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
 
     use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
@@ -1433,7 +1432,7 @@ mod tests {
     use table::metadata::{RawTableInfo, RawTableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
-    use super::{AlterTableTask, CreateTableTask};
+    use super::{AlterTableTask, CreateTableTask, *};
 
     #[test]
     fn test_basic_ser_de_create_table_task() {
@@ -1575,7 +1574,7 @@ mod tests {
         let mut extensions = HashMap::new();
         extensions.insert("key1".to_string(), "value1".to_string());
         extensions.insert("key2".to_string(), "value2".to_string());
-        
+
         let query_ctx = QueryContext {
             current_catalog: "test_catalog".to_string(),
             current_schema: "test_schema".to_string(),
@@ -1585,7 +1584,7 @@ mod tests {
         };
 
         let flow_ctx: FlowQueryContext = query_ctx.into();
-        
+
         assert_eq!(flow_ctx.catalog, "test_catalog");
         assert_eq!(flow_ctx.schema, "test_schema");
         assert_eq!(flow_ctx.timezone, "UTC");
@@ -1600,7 +1599,7 @@ mod tests {
         };
 
         let query_ctx: QueryContext = flow_ctx.clone().into();
-        
+
         assert_eq!(query_ctx.current_catalog, "prod_catalog");
         assert_eq!(query_ctx.current_schema, "public");
         assert_eq!(query_ctx.timezone, "America/New_York");
@@ -1614,8 +1613,8 @@ mod tests {
 
     #[test]
     fn test_flow_query_context_conversion_from_query_context_ref() {
-        use session::context::QueryContextBuilder;
         use common_time::Timezone;
+        use session::context::QueryContextBuilder;
 
         let session_ctx = QueryContextBuilder::default()
             .current_catalog("session_catalog".to_string())
@@ -1641,9 +1640,9 @@ mod tests {
 
         let serialized = serde_json::to_string(&flow_ctx).unwrap();
         let deserialized: FlowQueryContext = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(flow_ctx, deserialized);
-        
+
         // Verify JSON structure
         let json_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(json_value["catalog"], "test_catalog");
@@ -1660,7 +1659,7 @@ mod tests {
         };
 
         let pb_ctx: PbQueryContext = flow_ctx.into();
-        
+
         assert_eq!(pb_ctx.current_catalog, "pb_catalog");
         assert_eq!(pb_ctx.current_schema, "pb_schema");
         assert_eq!(pb_ctx.timezone, "Asia/Tokyo");
