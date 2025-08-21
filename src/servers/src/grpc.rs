@@ -205,6 +205,7 @@ pub struct GrpcServer {
         >,
     >,
     bind_addr: Option<SocketAddr>,
+    name: Option<String>,
 }
 
 /// Grpc Server configuration
@@ -315,7 +316,7 @@ impl Server for GrpcServer {
                 .context(TcpBindSnafu { addr })?;
             let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
             let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
-            info!("gRPC server is bound to {}", addr);
+            info!("gRPC server(name={}) is bound to {}", self.name(), addr);
 
             *shutdown_tx = Some(tx);
 
@@ -357,7 +358,11 @@ impl Server for GrpcServer {
     }
 
     fn name(&self) -> &str {
-        GRPC_SERVER
+        if let Some(name) = &self.name {
+            name
+        } else {
+            GRPC_SERVER
+        }
     }
 
     fn bind_addr(&self) -> Option<SocketAddr> {

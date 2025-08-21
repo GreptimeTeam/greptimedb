@@ -136,6 +136,7 @@ where
         &mut self,
         grpc: &GrpcOptions,
         meta_client: &Option<MetaClientOptions>,
+        name: Option<String>,
     ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
@@ -162,6 +163,7 @@ where
         let frontend_grpc_handler =
             FrontendGrpcHandler::new(self.instance.process_manager().clone());
         let grpc_server = builder
+            .name(name)
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
             .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
@@ -200,14 +202,18 @@ where
         {
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client)?;
+            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client, None)?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
         {
             // Always init Internal GRPC server
             let grpc_addr = parse_addr(&opts.internal_grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client)?;
+            let grpc_server = self.build_grpc_server(
+                &opts.grpc,
+                &opts.meta_client,
+                Some("INTERNAL_GRPC_SERVER".to_string()),
+            )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
