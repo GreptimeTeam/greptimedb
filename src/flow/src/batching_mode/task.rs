@@ -451,6 +451,7 @@ impl BatchingTask {
         frontend_client: Arc<FrontendClient>,
     ) {
         let flow_id_str = self.config.flow_id.to_string();
+        let mut max_window_cnt = None;
         loop {
             // first check if shutdown signal is received
             // if so, break the loop
@@ -474,7 +475,7 @@ impl BatchingTask {
 
             let min_refresh = self.config.batch_opts.experimental_min_refresh_duration;
 
-            let new_query = match self.gen_insert_plan(&engine, None).await {
+            let new_query = match self.gen_insert_plan(&engine, max_window_cnt).await {
                 Ok(new_query) => new_query,
                 Err(err) => {
                     common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
@@ -494,6 +495,10 @@ impl BatchingTask {
             match res {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
+                    // can increase max_window_cnt to query more windows next time
+                    max_window_cnt = max_window_cnt.map(|cnt| {
+                        (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
+                    });
                     let sleep_until = {
                         let state = self.state.write().unwrap();
 
@@ -535,6 +540,10 @@ impl BatchingTask {
                                 query.filter.map(|f| f.time_ranges).unwrap_or_default(),
                             );
                             // TODO(discord9): add some backoff here? half the query time window or what
+                            // backoff meaning use smaller `max_window_cnt` for next query
+
+                            // since last query failed, we should not try to query too many windows
+                            max_window_cnt = Some(1);
                         }
                         None => {
                             common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id)
