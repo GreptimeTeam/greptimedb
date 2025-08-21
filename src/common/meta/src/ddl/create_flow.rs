@@ -47,7 +47,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::metrics;
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, QueryContext};
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -67,7 +67,7 @@ impl CreateFlowProcedure {
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
-                query_context,
+                flow_context: query_context.into(), // Convert to FlowQueryContext
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
                 did_replace: false,
@@ -204,7 +204,8 @@ impl CreateFlowProcedure {
             let request = FlowRequest {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
-                    query_context: Some(self.data.query_context.clone().into()),
+                    // Convert FlowQueryContext to QueryContext
+                    query_context: Some(QueryContext::from(self.data.flow_context.clone()).into()),
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
@@ -415,7 +416,9 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
-    pub(crate) query_context: QueryContext,
+    /// Use alias for backward compatibility with QueryContext serialized data
+    #[serde(alias = "query_context")]
+    pub(crate) flow_context: FlowQueryContext,
     /// For verify if prev value is consistent when need to update flow metadata.
     /// only set when `or_replace` is true.
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
@@ -495,7 +498,8 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name,
             flownode_ids,
             catalog_name,
-            query_context: Some(value.query_context.clone()),
+            // Convert FlowQueryContext back to QueryContext for storage
+            query_context: Some(QueryContext::from(value.flow_context.clone())),
             flow_name,
             raw_sql: sql,
             expire_after,
