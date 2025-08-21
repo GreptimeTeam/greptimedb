@@ -34,11 +34,32 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
 };
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
+use sqlparser::dialect::Dialect;
 
 use crate::error::{
-    ConvertToLogicalExpressionSnafu, ParseSqlValueSnafu, Result, SimplificationSnafu,
+    ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, ParseSqlValueSnafu, Result,
+    SimplificationSnafu,
 };
+use crate::parser::{ParseOptions, ParserContext};
+use crate::statements::statement::Statement;
+
+/// Check if the given SQL query is a TQL statement.
+pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
+    let stmts = ParserContext::create_with_dialect(sql, dialect, ParseOptions::default())?;
+
+    ensure!(
+        stmts.len() == 1,
+        InvalidSqlSnafu {
+            msg: format!("Expect only one statement, found {}", stmts.len())
+        }
+    );
+    let stmt = &stmts[0];
+    match stmt {
+        Statement::Tql(_) => Ok(true),
+        _ => Ok(false),
+    }
+}
 
 /// Convert a parser expression to a scalar value. This function will try the
 /// best to resolve and reduce constants. Exprs like `1 + 1` or `now()` can be
@@ -86,7 +107,7 @@ pub fn parser_expr_to_scalar_value_literal(
         if !have_now {
             return ParseSqlValueSnafu {
                 msg: format!(
-                    "expected now() expression, but not found in {:?}",
+                    "expected now() expression, but not found in {}",
                     logical_expr
                 ),
             }
