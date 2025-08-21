@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use ahash::HashMap;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -27,6 +28,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -36,6 +38,8 @@ use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::dist_plan::region_pruner::ConstraintPruner;
+use crate::dist_plan::PredicateExtractor;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -101,16 +105,19 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
 
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
+    partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
 }
 
 impl DistExtensionPlanner {
     pub fn new(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
+            partition_rule_manager,
             region_query_handler,
         }
     }
@@ -150,7 +157,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name).await else {
+        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
             // no peers found, going to execute them locally
             return fallback(optimized_plan).await;
         };
@@ -184,7 +191,11 @@ impl DistExtensionPlanner {
         Ok(extractor.table_name)
     }
 
-    async fn get_regions(&self, table_name: &TableName) -> Result<Vec<RegionId>> {
+    async fn get_regions(
+        &self,
+        table_name: &TableName,
+        logical_plan: &LogicalPlan,
+    ) -> Result<Vec<RegionId>> {
         let table = self
             .catalog_manager
             .table(
@@ -198,7 +209,101 @@ impl DistExtensionPlanner {
             .with_context(|| TableNotFoundSnafu {
                 table: table_name.to_string(),
             })?;
-        Ok(table.table_info().region_ids())
+
+        let table_info = table.table_info();
+        let all_regions = table_info.region_ids();
+
+        // Extract partition columns
+        let partition_columns: Vec<String> = table_info
+            .meta
+            .partition_column_names()
+            .map(|s| s.to_string())
+            .collect();
+        if partition_columns.is_empty() {
+            return Ok(all_regions);
+        }
+        let partition_column_types = partition_columns
+            .iter()
+            .map(|col_name| {
+                let data_type = table_info
+                    .meta
+                    .schema
+                    .column_schema_by_name(col_name)
+                    // Safety: names are retrieved above from the same table
+                    .unwrap()
+                    .data_type
+                    .clone();
+                (col_name.clone(), data_type)
+            })
+            .collect::<HashMap<_, _>>();
+
+        // Extract predicates from logical plan
+        let partition_expressions = match PredicateExtractor::extract_partition_expressions(
+            logical_plan,
+            &partition_columns,
+        ) {
+            Ok(expressions) => expressions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to extract partition expressions for table {} (id: {}), using all regions: {:?}",
+                    table_name,
+                    table.table_info().table_id(),
+                    err
+                );
+                return Ok(all_regions);
+            }
+        };
+
+        if partition_expressions.is_empty() {
+            return Ok(all_regions);
+        }
+
+        // Get partition information for the table if partition rule manager is available
+        let partitions = match self
+            .partition_rule_manager
+            .find_table_partitions(table.table_info().table_id())
+            .await
+        {
+            Ok(partitions) => partitions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to get partition information for table {}, using all regions: {:?}",
+                    table_name,
+                    err
+                );
+                return Ok(all_regions);
+            }
+        };
+        if partitions.is_empty() {
+            return Ok(all_regions);
+        }
+
+        // Apply region pruning based on partition rules
+        let pruned_regions = match ConstraintPruner::prune_regions(
+            &partition_expressions,
+            &partitions,
+            partition_column_types,
+        ) {
+            Ok(regions) => regions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to prune regions for table {}, using all regions: {:?}",
+                    table_name,
+                    err
+                );
+                return Ok(all_regions);
+            }
+        };
+
+        common_telemetry::debug!(
+            "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
+            table_name,
+            partition_expressions.len(),
+            all_regions.len(),
+            pruned_regions.len()
+        );
+
+        Ok(pruned_regions)
     }
 
     /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.

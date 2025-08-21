@@ -687,7 +687,7 @@ pub fn build_file_range_scan_stream(
             let mut source = Source::PruneReader(reader);
             while let Some(mut batch) = source.next_batch().await? {
                 if let Some(compact_batch) = compat_batch {
-                    batch = compact_batch.compat_batch(batch)?;
+                    batch = compact_batch.as_primary_key().unwrap().compat_batch(batch)?;
                 }
                 yield batch;
             }

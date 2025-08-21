@@ -20,7 +20,7 @@ use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, Valu
 use client::inserter::{Context as InserterContext, Inserter};
 use client::DEFAULT_CATALOG_NAME;
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
-use common_macro::ToRow;
+use common_macro::{Schema, ToRow};
 use common_meta::datanode::RegionStat;
 use common_meta::DatanodeId;
 use common_telemetry::warn;
@@ -63,7 +63,7 @@ impl From<&RegionStat> for PersistedRegionStat {
     }
 }
 
-#[derive(ToRow)]
+#[derive(ToRow, Schema)]
 struct PersistRegionStat<'a> {
     table_id: u32,
     region_id: u64,
