@@ -206,7 +206,7 @@ where
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
-        {
+        if opts.meta_client.is_some() {
             // Always init Internal GRPC server
             let grpc_addr = parse_addr(&opts.internal_grpc.bind_addr)?;
             let grpc_server = self.build_grpc_server(
