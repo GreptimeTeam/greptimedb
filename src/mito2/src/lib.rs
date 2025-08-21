@@ -38,7 +38,6 @@ pub mod extension;
 pub mod flush;
 pub mod manifest;
 pub mod memtable;
-pub mod meter;
 mod metrics;
 pub mod read;
 pub mod region;

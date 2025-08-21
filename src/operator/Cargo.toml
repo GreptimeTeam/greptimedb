@@ -45,6 +45,7 @@ datatypes.workspace = true
 file-engine.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+humantime.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true

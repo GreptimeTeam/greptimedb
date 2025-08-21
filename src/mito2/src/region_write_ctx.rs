@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
@@ -25,7 +26,6 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::error::{Error, Result, WriteGroupSnafu};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::KeyValues;
-use crate::meter::rate_meter::RateMeter;
 use crate::metrics;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
@@ -108,7 +108,7 @@ pub(crate) struct RegionWriteCtx {
     /// Rows to delete.
     pub(crate) delete_num: usize,
     /// Write bytes per second.
-    pub(crate) write_bytes_per_sec: Option<RateMeter>,
+    pub(crate) write_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl RegionWriteCtx {
@@ -117,7 +117,7 @@ impl RegionWriteCtx {
         region_id: RegionId,
         version_control: &VersionControlRef,
         provider: Provider,
-        write_bytes_per_sec: Option<RateMeter>,
+        write_bytes: Option<Arc<AtomicU64>>,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -140,7 +140,7 @@ impl RegionWriteCtx {
             put_num: 0,
             delete_num: 0,
             bulk_parts: vec![],
-            write_bytes_per_sec,
+            write_bytes,
         }
     }
 
@@ -219,7 +219,7 @@ impl RegionWriteCtx {
         }
 
         let mutable_memtable = self.version.memtables.mutable.clone();
-        let prev_memory_usage = if self.write_bytes_per_sec.is_some() {
+        let prev_memory_usage = if self.write_bytes.is_some() {
             Some(mutable_memtable.memory_usage())
         } else {
             None
@@ -257,11 +257,11 @@ impl RegionWriteCtx {
             }
         }
 
-        if let Some(meter) = &self.write_bytes_per_sec {
+        if let Some(write_bytes) = &self.write_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
             let written_bytes =
                 new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            meter.inc_by(written_bytes as u64);
+            write_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
         }
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
@@ -298,7 +298,7 @@ impl RegionWriteCtx {
             .start_timer();
 
         let mutable_memtable = &self.version.memtables.mutable;
-        let prev_memory_usage = if self.write_bytes_per_sec.is_some() {
+        let prev_memory_usage = if self.write_bytes.is_some() {
             Some(mutable_memtable.memory_usage())
         } else {
             None
@@ -333,11 +333,11 @@ impl RegionWriteCtx {
             }
         }
 
-        if let Some(meter) = &self.write_bytes_per_sec {
+        if let Some(write_bytes) = &self.write_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
             let written_bytes =
                 new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            meter.inc_by(written_bytes as u64);
+            write_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
         }
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);

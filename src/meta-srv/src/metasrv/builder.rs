@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use client::client_manager::NodeClients;
+use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
@@ -55,6 +56,7 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
+use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
@@ -77,6 +79,7 @@ use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
 use crate::table_meta_alloc::MetasrvPeerAllocator;
+use crate::utils::insert_forwarder::InsertForwarder;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {
@@ -195,11 +198,18 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
+        let event_inserter = Box::new(InsertForwarder::new(
+            peer_lookup_service.clone(),
+            Some(InsertOptions {
+                ttl: options.event_recorder.ttl,
+                append_mode: true,
+            }),
+        ));
         // Builds the event recorder to record important events and persist them as the system table.
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            meta_peer_client.clone(),
-            options.event_recorder.ttl,
+            event_inserter,
         ))));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
@@ -294,7 +304,6 @@ impl MetasrvBuilder {
                 server_addr: options.grpc.server_addr.clone(),
             },
         ));
-        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
         if !is_remote_wal && options.enable_region_failover {
             ensure!(
@@ -451,6 +460,23 @@ impl MetasrvBuilder {
             .as_ref()
             .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
 
+        let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
+            let inserter = Box::new(InsertForwarder::new(
+                peer_lookup_service.clone(),
+                Some(InsertOptions {
+                    ttl: options.stats_persistence.ttl,
+                    append_mode: true,
+                }),
+            ));
+
+            Some(PersistStatsHandler::new(
+                inserter,
+                options.stats_persistence.interval,
+            ))
+        } else {
+            None
+        };
+
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
@@ -467,6 +493,7 @@ impl MetasrvBuilder {
                     .with_region_lease_handler(Some(region_lease_handler))
                     .with_flush_stats_factor(Some(options.flush_stats_factor))
                     .with_flow_state_handler(Some(flow_state_handler))
+                    .with_persist_stats_handler(persist_region_stats_handler)
                     .add_default_handlers()
             }
         };

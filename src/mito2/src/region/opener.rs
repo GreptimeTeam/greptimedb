@@ -52,7 +52,6 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
-use crate::meter::rate_meter::RateMeter;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -288,7 +287,7 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
-            write_bytes_per_sec: RateMeter::default(),
+            write_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
         })
     }
@@ -472,7 +471,7 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
-            write_bytes_per_sec: RateMeter::default(),
+            write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
             stats: self.stats.clone(),
         };

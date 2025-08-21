@@ -15,7 +15,7 @@
 //! Basic tests for mito engine.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
 
 use api::v1::helper::row;
 use api::v1::value::ValueData;
@@ -91,11 +91,7 @@ async fn test_write_to_region() {
     };
     put_rows(&engine, region_id, rows).await;
     let region = engine.get_region(region_id).unwrap();
-    // Update the write bytes rate.
-    region
-        .write_bytes_per_sec
-        .update_rate(Duration::from_secs(1));
-    assert!(region.write_bytes_per_sec.get_rate() > 0);
+    assert!(region.write_bytes.load(Ordering::Relaxed) > 0);
 }
 
 #[apply(multiple_log_store_factories)]
@@ -168,7 +164,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
 
     // The replay won't update the write bytes rate meter.
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.write_bytes_per_sec.get_total(), 0);
+    assert_eq!(region.write_bytes.load(Ordering::Relaxed), 0);
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
