@@ -37,7 +37,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
-use datatypes::arrow::datatypes::{Field, Schema, SchemaRef};
+use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
@@ -53,7 +53,7 @@ use crate::error::{
 use crate::sst::parquet::format::{
     FormatProjection, PrimaryKeyArray, ReadFormat, StatValues, INTERNAL_COLUMN_NUM,
 };
-use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::{tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, FlatSchemaOptions};
 
 /// Helper for writing the SST format.
 #[allow(dead_code)]
@@ -497,12 +497,10 @@ impl FlatConvertFormat {
             Vec::with_capacity(batch.schema().fields().len() + self.projected_primary_keys.len());
         for (_, _, column_index) in &self.projected_primary_keys {
             let column_metadata = &self.metadata.column_metadatas[*column_index];
-            let field = Field::new(
-                &column_metadata.column_schema.name,
-                column_metadata.column_schema.data_type.as_arrow_type(),
-                column_metadata.column_schema.is_nullable(),
-            );
-            new_fields.push(Arc::new(field));
+            let old_field = &self.metadata.schema.arrow_schema().fields()[*column_index];
+            let field =
+                tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, old_field);
+            new_fields.push(field);
         }
         new_fields.extend(batch.schema().fields().iter().cloned());
 

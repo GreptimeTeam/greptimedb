@@ -93,6 +93,8 @@ pub const COLUMN_ID_ENCODE_SIZE: usize = 4;
 
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
+    ///
+    /// The `region_metadata` should be the metadata of the logical region.
     pub fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
@@ -123,6 +125,7 @@ impl SparsePrimaryKeyCodec {
         }
     }
 
+    /// Creates a new [`SparsePrimaryKeyCodec`] instance with additional label `fields`.
     pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {

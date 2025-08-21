@@ -926,21 +926,25 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::OpType;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{
+        Int64Array, StringArray, TimestampMillisecondArray, UInt64Array, UInt8Array,
+    };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::value::{Value, ValueRef};
+    use datatypes::value::ValueRef;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::sst::parquet::flat_format::{sequence_column_index, FlatWriteFormat};
-    use crate::sst::FlatSchemaOptions;
+    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -1458,69 +1462,123 @@ mod tests {
         );
     }
 
-    fn build_test_encoded_pk_array(
+    fn build_test_dense_pk_array(
+        codec: &DensePrimaryKeyCodec,
         pk_values_per_row: &[&[Option<i64>]],
-        use_sparse: bool,
     ) -> Arc<PrimaryKeyArray> {
         let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
 
-        if use_sparse {
-            // Create sparse codec for encoding primary keys with 2 i64 fields (tag0, tag1)
-            let fields = vec![
-                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
-                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
-            ];
-            let codec = SparsePrimaryKeyCodec::with_fields(fields);
+        for pk_values_row in pk_values_per_row {
+            let values: Vec<ValueRef> = pk_values_row
+                .iter()
+                .map(|opt| match opt {
+                    Some(val) => ValueRef::Int64(*val),
+                    None => ValueRef::Null,
+                })
+                .collect();
 
-            for pk_values_row in pk_values_per_row {
-                let values: Vec<(ColumnId, Value)> = pk_values_row
-                    .iter()
-                    .enumerate()
-                    .map(|(i, opt)| {
-                        let column_id = if i == 0 { 1 } else { 3 }; // tag0 = 1, tag1 = 3
-                        let value = match opt {
-                            Some(val) => Value::Int64(*val),
-                            None => Value::Null,
-                        };
-                        (column_id, value)
-                    })
-                    .collect();
-
-                let mut buffer = Vec::new();
-                codec
-                    .encode_value_refs(
-                        &values
-                            .iter()
-                            .map(|(id, val)| (*id, val.as_value_ref()))
-                            .collect::<Vec<_>>(),
-                        &mut buffer,
-                    )
-                    .unwrap();
-                builder.append_value(&buffer);
-            }
-        } else {
-            // Create dense codec for encoding primary keys with 2 i64 fields (tag0, tag1)
-            let fields = vec![
-                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
-                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
-            ];
-            let codec = DensePrimaryKeyCodec::with_fields(fields);
-
-            for pk_values_row in pk_values_per_row {
-                let values: Vec<ValueRef> = pk_values_row
-                    .iter()
-                    .map(|opt| match opt {
-                        Some(val) => ValueRef::Int64(*val),
-                        None => ValueRef::Null,
-                    })
-                    .collect();
-
-                let encoded = codec.encode(values.into_iter()).unwrap();
-                builder.append_value(&encoded);
-            }
+            let encoded = codec.encode(values.into_iter()).unwrap();
+            builder.append_value(&encoded);
         }
 
         Arc::new(builder.finish())
+    }
+
+    fn build_test_sparse_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__table_id",
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__tsid",
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag1", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            })
+            .primary_key(vec![
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+                1,
+                3,
+            ])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn build_test_sparse_pk_array(
+        codec: &SparsePrimaryKeyCodec,
+        pk_values_per_row: &[SparseTestRow],
+    ) -> Arc<PrimaryKeyArray> {
+        let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
+        for row in pk_values_per_row {
+            let values = vec![
+                (ReservedColumnId::table_id(), ValueRef::UInt32(row.table_id)),
+                (ReservedColumnId::tsid(), ValueRef::UInt64(row.tsid)),
+                (1, ValueRef::String(&row.tag0)),
+                (3, ValueRef::String(&row.tag1)),
+            ];
+
+            let mut buffer = Vec::new();
+            codec.encode_value_refs(&values, &mut buffer).unwrap();
+            builder.append_value(&buffer);
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    #[derive(Clone)]
+    struct SparseTestRow {
+        table_id: u32,
+        tsid: u64,
+        tag0: String,
+        tag1: String,
     }
 
     #[test]
@@ -1543,11 +1601,13 @@ mod tests {
             ];
 
         // Create a test record batch in old format using dense encoding
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let dense_pk_array = build_test_dense_pk_array(&codec, &pk_values_per_row);
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![3; num_rows])), // field0
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
-            build_test_encoded_pk_array(&pk_values_per_row, false), // __primary_key (dense encoding)
+            dense_pk_array.clone(),                        // __primary_key (dense encoding)
             Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
@@ -1585,7 +1645,7 @@ mod tests {
             Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![3; num_rows])), // field0
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
-            build_test_encoded_pk_array(&pk_values_per_row, false), // __primary_key (preserved)
+            dense_pk_array,                                // __primary_key (preserved)
             Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
@@ -1593,6 +1653,98 @@ mod tests {
             RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
 
         // Compare the actual result with the expected record batch
-        assert_eq!(result, expected_record_batch);
+        assert_eq!(expected_record_batch, result);
+    }
+
+    #[test]
+    fn test_flat_read_format_convert_format_with_sparse_encoding() {
+        let metadata = build_test_sparse_region_metadata();
+
+        let column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+
+        let num_rows = 4;
+        let original_sequence = 100u64;
+
+        // Create sparse test data with table_id, tsid and string tags
+        let pk_test_rows = vec![
+            SparseTestRow {
+                table_id: 1,
+                tsid: 123,
+                tag0: "frontend".to_string(),
+                tag1: "pod1".to_string(),
+            };
+            num_rows
+        ];
+
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let sparse_pk_array = build_test_sparse_pk_array(&codec, &pk_test_rows);
+        // Create a test record batch in old format using sparse encoding
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            sparse_pk_array.clone(),                       // __primary_key (sparse encoding)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+
+        // Create schema for old format (without primary key columns)
+        let old_format_fields = vec![
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ];
+        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
+
+        // Test conversion with sparse encoding
+        let result = format.convert_batch(record_batch, None).unwrap();
+
+        // Construct expected RecordBatch in flat format with decoded primary key columns
+        let tag0_array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0; num_rows]),
+            Arc::new(StringArray::from(vec!["frontend"])),
+        ));
+        let tag1_array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0; num_rows]),
+            Arc::new(StringArray::from(vec!["pod1"])),
+        ));
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(vec![1; num_rows])), // __table_id (decoded from primary key)
+            Arc::new(UInt64Array::from(vec![123; num_rows])), // __tsid (decoded from primary key)
+            tag0_array,                                     // tag0 (decoded from primary key)
+            tag1_array,                                     // tag1 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![2; num_rows])),  // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])),  // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            sparse_pk_array,                                // __primary_key (preserved)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expected_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let expected_record_batch =
+            RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        // Compare the actual result with the expected record batch
+        assert_eq!(expected_record_batch, result);
     }
 }
