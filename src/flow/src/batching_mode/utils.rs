@@ -75,25 +75,6 @@ pub async fn get_table_info_df_schema(
     Ok((table, df_schema))
 }
 
-pub fn is_tql(query_ctx: QueryContextRef, sql: &str) -> Result<bool, Error> {
-    let stmts =
-        ParserContext::create_with_dialect(sql, query_ctx.sql_dialect(), ParseOptions::default())
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-    ensure!(
-        stmts.len() == 1,
-        InvalidQuerySnafu {
-            reason: format!("Expect only one statement, found {}", stmts.len())
-        }
-    );
-    let stmt = &stmts[0];
-    match stmt {
-        Statement::Tql(_) => Ok(true),
-        _ => Ok(false),
-    }
-}
-
 /// Convert sql to datafusion logical plan
 /// Also support TQL (but only Eval not Explain or Analyze)
 pub async fn sql_to_df_plan(

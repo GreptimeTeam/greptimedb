@@ -30,17 +30,18 @@ use common_telemetry::{debug, info};
 use common_time::TimeToLive;
 use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::parsers::utils::is_tql;
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{oneshot, RwLock};
 
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
-use crate::batching_mode::utils::{is_tql, sql_to_df_plan};
+use crate::batching_mode::utils::sql_to_df_plan;
 use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, InvalidQuerySnafu,
+    CreateFlowSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, InvalidQuerySnafu,
     TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
@@ -382,7 +383,11 @@ impl BatchingEngine {
                 .build()
             })?;
 
-        if flow_eval_interval_ms.is_none() && is_tql(query_ctx.clone(), &sql)? {
+        if flow_eval_interval_ms.is_none()
+            && is_tql(query_ctx.clone().sql_dialect(), &sql)
+                .map_err(BoxedError::new)
+                .with_context(|_| CreateFlowSnafu { sql: sql.clone() })?
+        {
             InvalidQuerySnafu {
                 reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
             }

@@ -1585,7 +1585,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
         // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
         let sql = r"
-SELECT max(c1), min(c2) FROM schema_2.table_2;",
+        SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
                     flow_name: ObjectName(vec![Ident::new("task_1")]),
                     sink_table_name: ObjectName(vec![
