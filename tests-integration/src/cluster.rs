@@ -462,6 +462,12 @@ impl GreptimeDbClusterBuilder {
         let grpc_port = self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
         fe_opts.grpc.bind_addr = construct_addr(grpc_port);
         fe_opts.grpc.server_addr = construct_addr(grpc_port);
+
+        let internal_grpc_port =
+            self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
+        fe_opts.internal_grpc.bind_addr = construct_addr(internal_grpc_port);
+        fe_opts.internal_grpc.server_addr = construct_addr(internal_grpc_port);
+
         fe_opts.mysql.addr = construct_addr(self.choose_random_unused_port(
             port_range.clone(),
             max_attempts,
