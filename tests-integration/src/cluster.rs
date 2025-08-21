@@ -447,6 +447,9 @@ impl GreptimeDbClusterBuilder {
     fn build_frontend_options(&self) -> FrontendOptions {
         let mut fe_opts = FrontendOptions::default();
 
+        // is distributed test
+        fe_opts.meta_client = Some(Default::default());
+
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;
         let max_attempts = 10;
