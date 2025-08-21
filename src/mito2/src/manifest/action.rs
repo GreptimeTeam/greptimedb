@@ -294,18 +294,23 @@ impl RemovedFilesRecord {
             return Ok(());
         }
 
+        let mut cur_file_cnt = total_removed_files;
+
         let can_evict_until = chrono::Utc::now()
             - chrono::Duration::from_std(opt.keep_ttl).context(DurationOutOfRangeSnafu {
                 input: opt.keep_ttl,
             })?;
 
-        self.removed_files.sort_by_key(|f| f.removed_at);
+        self.removed_files.sort_unstable_by_key(|f| f.removed_at);
         let updated = std::mem::take(&mut self.removed_files)
             .into_iter()
             .filter_map(|f| {
-                if f.removed_at < can_evict_until.timestamp_millis() {
+                if f.removed_at < can_evict_until.timestamp_millis()
+                    && cur_file_cnt >= opt.keep_count
+                {
                     // can evict all files
                     // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
+                    cur_file_cnt -= f.file_ids.len();
                     None
                 } else {
                     Some(f)
@@ -607,6 +612,80 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_region_manifest_removed_files() {
+        let region_metadata = r#"{
+                "column_metadatas": [
+                    {
+                        "column_schema": {
+                            "name": "a",
+                            "data_type": {"Int64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Tag",
+                        "column_id": 1
+                    },
+                    {
+                        "column_schema": {
+                            "name": "b",
+                            "data_type": {"Float64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Field",
+                        "column_id": 2
+                    },
+                    {
+                        "column_schema": {
+                            "name": "c",
+                            "data_type": {"Timestamp": {"Millisecond": null}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Timestamp",
+                        "column_id": 3
+                    }
+                ],
+                "primary_key": [1],
+                "region_id": 4402341478400,
+                "schema_version": 0
+            }"#;
+
+        let metadata: RegionMetadataRef =
+            serde_json::from_str(region_metadata).expect("Failed to parse region metadata");
+        let manifest = RegionManifest {
+            metadata: metadata.clone(),
+            files: HashMap::new(),
+            flushed_entry_id: 0,
+            flushed_sequence: 0,
+            manifest_version: 0,
+            truncated_entry_id: None,
+            compaction_time_window: None,
+            removed_files: RemovedFilesRecord {
+                removed_files: vec![RemovedFiles {
+                    removed_at: 0,
+                    file_ids: HashSet::from([FileId::parse_str(
+                        "4b220a70-2b03-4641-9687-b65d94641208",
+                    )
+                    .unwrap()]),
+                }],
+            },
+        };
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let new: RegionManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(manifest, new);
+    }
+
     /// Test if old version can still be deserialized then serialized to the new version.
     #[test]
     fn test_old_region_manifest_compat() {
