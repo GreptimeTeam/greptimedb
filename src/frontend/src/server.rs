@@ -18,6 +18,7 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::Configurable;
+use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
@@ -131,17 +132,21 @@ where
         }
     }
 
-    fn build_grpc_server(&mut self, opts: &FrontendOptions) -> Result<GrpcServer> {
+    fn build_grpc_server(
+        &mut self,
+        grpc: &GrpcOptions,
+        meta_client: &Option<MetaClientOptions>,
+    ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
-            self.grpc_server_builder(&opts.grpc)?
+            self.grpc_server_builder(grpc)?
         };
 
         let user_provider = self.plugins.get::<UserProviderRef>();
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
-        let runtime = if opts.meta_client.is_none() {
+        let runtime = if meta_client.is_none() {
             Some(builder.runtime().clone())
         } else {
             None
@@ -151,7 +156,7 @@ where
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
             runtime,
-            opts.grpc.flight_compression,
+            grpc.flight_compression,
         );
 
         let frontend_grpc_handler =
@@ -195,7 +200,14 @@ where
         {
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts)?;
+            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client)?;
+            handlers.insert((Box::new(grpc_server), grpc_addr));
+        }
+
+        {
+            // Always init Internal GRPC server
+            let grpc_addr = parse_addr(&opts.internal_grpc.bind_addr)?;
+            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client)?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 

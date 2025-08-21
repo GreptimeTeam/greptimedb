@@ -116,6 +116,8 @@ impl GrpcOptions {
 
 const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
 
+const DEFAULT_INTERNAL_GRPC_ADDR_PORT: &str = "14001";
+
 impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
@@ -132,6 +134,22 @@ impl Default for GrpcOptions {
 }
 
 impl GrpcOptions {
+    /// Default options for internal gRPC server.
+    /// The internal gRPC server is used for communication between different nodes in cluster.
+    /// It is not exposed to the outside world.
+    pub fn internal_default() -> Self {
+        Self {
+            bind_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
+            // If hostname is not set, the server will use the local ip address as the hostname.
+            server_addr: String::new(),
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            flight_compression: FlightCompression::ArrowIpc,
+            runtime_size: 8,
+            tls: TlsOption::default(),
+        }
+    }
+
     pub fn with_bind_addr(mut self, bind_addr: &str) -> Self {
         self.bind_addr = bind_addr.to_string();
         self
