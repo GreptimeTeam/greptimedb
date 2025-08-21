@@ -699,6 +699,30 @@ pub(crate) async fn scan_file_ranges(
     ))
 }
 
+/// Scans file ranges at `index` using flat reader that returns RecordBatch.
+#[allow(dead_code)]
+pub(crate) async fn scan_flat_file_ranges(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    index: RowGroupIndex,
+    read_type: &'static str,
+    range_builder: Arc<RangeBuilderList>,
+) -> Result<impl Stream<Item = Result<RecordBatch>>> {
+    let mut reader_metrics = ReaderMetrics::default();
+    let ranges = range_builder
+        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+        .await?;
+    part_metrics.inc_num_file_ranges(ranges.len());
+    part_metrics.merge_reader_metrics(&reader_metrics);
+
+    Ok(build_flat_file_range_scan_stream(
+        stream_ctx,
+        part_metrics,
+        read_type,
+        ranges,
+    ))
+}
+
 /// Build the stream of scanning the input [`FileRange`]s.
 pub fn build_file_range_scan_stream(
     stream_ctx: Arc<StreamContext>,
@@ -725,6 +749,39 @@ pub fn build_file_range_scan_stream(
                 let prune_metrics = reader.metrics();
                 reader_metrics.merge_from(&prune_metrics);
             }
+        }
+
+        // Reports metrics.
+        reader_metrics.observe_rows(read_type);
+        reader_metrics.filter_metrics.observe();
+        part_metrics.merge_reader_metrics(reader_metrics);
+    }
+}
+
+/// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
+pub fn build_flat_file_range_scan_stream(
+    _stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    read_type: &'static str,
+    ranges: SmallVec<[FileRange; 2]>,
+) -> impl Stream<Item = Result<RecordBatch>> {
+    try_stream! {
+        let reader_metrics = &mut ReaderMetrics::default();
+        for range in ranges {
+            let build_reader_start = Instant::now();
+            let mut reader = range.flat_reader().await?;
+            let build_cost = build_reader_start.elapsed();
+            part_metrics.inc_build_reader_cost(build_cost);
+
+            // TODO: Add compat_batch support for RecordBatch similar to the non-flat version
+            // let compat_batch = range.compat_batch();
+
+            while let Some(record_batch) = reader.next_batch()? {
+                yield record_batch;
+            }
+
+            let prune_metrics = reader.metrics();
+            reader_metrics.merge_from(&prune_metrics);
         }
 
         // Reports metrics.

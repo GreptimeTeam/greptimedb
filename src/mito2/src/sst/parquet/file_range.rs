@@ -22,23 +22,24 @@ use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
-    DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu, Result,
-    StatsNotPresentSnafu,
+    ComputeArrowSnafu, ConvertVectorSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    RecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
-use crate::read::prune::PruneReader;
+use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::read::Batch;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
-    MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
 
 /// A range of a parquet SST. Now it is a row group.
@@ -132,6 +133,21 @@ impl FileRange {
         Ok(prune_reader)
     }
 
+    /// Creates a flat reader that returns RecordBatch.
+    pub(crate) async fn flat_reader(&self) -> Result<FlatPruneReader> {
+        let parquet_reader = self
+            .context
+            .reader_builder
+            .build(self.row_group_idx, self.row_selection.clone())
+            .await?;
+
+        let flat_row_group_reader = FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+        let flat_prune_reader =
+            FlatPruneReader::new_with_row_group_reader(self.context.clone(), flat_row_group_reader);
+
+        Ok(flat_prune_reader)
+    }
+
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.context.compat_batch()
@@ -206,6 +222,11 @@ impl FileRangeContext {
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
         self.base.precise_filter(input)
+    }
+
+    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
+        self.base.precise_filter_flat(input)
     }
 
     //// Decodes parquet metadata and finds if row group contains delete op.
@@ -333,5 +354,52 @@ impl RangeBase {
         input.filter(&BooleanArray::from(mask).into())?;
 
         Ok(Some(input))
+    }
+
+    /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
+        let mut mask = BooleanBuffer::new_set(input.num_rows());
+
+        let flat_format = self
+            .read_format
+            .as_flat()
+            .context(crate::error::UnexpectedSnafu {
+                reason: "Expected flat format for precise_filter_flat",
+            })?;
+
+        // Run filter one by one and combine them result
+        for filter_ctx in &self.filters {
+            let filter = match filter_ctx.filter() {
+                MaybeFilter::Filter(f) => f,
+                // Column matches.
+                MaybeFilter::Matched => continue,
+                // Column doesn't match, filter the entire batch.
+                MaybeFilter::Pruned => return Ok(None),
+            };
+
+            // Get the column directly by its projected index
+            let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
+            if let Some(idx) = column_idx {
+                let column = &input.columns()[idx];
+                // Convert Arrow Array to Vector
+                let vector = datatypes::vectors::Helper::try_into_vector(column.clone())
+                    .context(ConvertVectorSnafu)?;
+                let result = filter.evaluate_vector(&vector).context(RecordBatchSnafu)?;
+                mask = mask.bitand(&result);
+            } else {
+                // Column not found in projection, continue
+                continue;
+            }
+        }
+
+        let filtered_batch =
+            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
+                .context(ComputeArrowSnafu)?;
+
+        if filtered_batch.num_rows() > 0 {
+            Ok(Some(filtered_batch))
+        } else {
+            Ok(None)
+        }
     }
 }

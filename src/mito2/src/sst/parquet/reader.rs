@@ -1332,3 +1332,53 @@ where
         self.next_inner()
     }
 }
+
+/// Reader to read a row group of a parquet file in flat format, returning RecordBatch.
+pub(crate) struct FlatRowGroupReader {
+    /// Context for file ranges.
+    context: FileRangeContextRef,
+    /// Inner parquet reader.
+    reader: ParquetRecordBatchReader,
+    /// Cached sequence array to override sequences.
+    override_sequence: Option<ArrayRef>,
+}
+
+impl FlatRowGroupReader {
+    /// Creates a new flat reader from file range.
+    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+        // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
+        let override_sequence = context
+            .read_format()
+            .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+
+        Self {
+            context,
+            reader,
+            override_sequence,
+        }
+    }
+
+    /// Returns the next RecordBatch.
+    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        match self.reader.next() {
+            Some(batch_result) => {
+                let record_batch = batch_result.context(ArrowReaderSnafu {
+                    path: self.context.file_path(),
+                })?;
+
+                // Apply override sequence if needed
+                if let (Some(flat_format), Some(override_array)) = (
+                    self.context.read_format().as_flat(),
+                    &self.override_sequence,
+                ) {
+                    let converted =
+                        flat_format.convert_batch(&record_batch, Some(override_array))?;
+                    return Ok(Some(converted));
+                }
+
+                Ok(Some(record_batch))
+            }
+            None => Ok(None),
+        }
+    }
+}
