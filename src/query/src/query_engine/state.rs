@@ -139,14 +139,19 @@ impl QueryEngineState {
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
-        // Change TableScan's partition at first
+        // Change TableScan's partition right before enforcing distribution
         physical_optimizer
             .rules
-            .insert(0, Arc::new(ParallelizeScan));
+            .insert(5, Arc::new(ParallelizeScan));
         // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
         physical_optimizer
             .rules
-            .insert(1, Arc::new(PassDistribution));
+            .insert(6, Arc::new(PassDistribution));
+        // Enforce sorting AFTER custom rules that modify the plan structure
+        physical_optimizer.rules.insert(
+            7,
+            Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
+        );
         // Add rule for windowed sort
         physical_optimizer
             .rules

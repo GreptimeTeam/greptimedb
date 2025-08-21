@@ -84,10 +84,6 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -97,10 +93,6 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -176,10 +168,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -189,10 +177,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b) (max_over_time(aggr_op
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -268,10 +252,6 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -281,10 +261,6 @@ tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -355,10 +331,6 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -368,10 +340,6 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -443,10 +411,6 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -456,10 +420,6 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -524,19 +484,11 @@ tql analyze sum(aggr_optimize_not);
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -601,19 +553,16 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 | physical_plan | ProjectionExec: expr=[a@1 as a, b@2 as b, c@3 as c, greptime_timestamp@4 as greptime_timestamp, sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@0 / sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@5 as aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) / aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))]                                                                               |
 |               |   CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 |               |     REDACTED
-|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|               |         RepartitionExec: partitioning=REDACTED
-|               |           CoalescePartitionsExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-|               |             AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                             |
-|               |               SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|               |                 CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-|               |                   RepartitionExec: partitioning=REDACTED
-|               |                     AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                              |
-|               |                       ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c]                                                                                                                                                                                                                                                                                                     |
-|               |                         CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|               |                           SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-|               |                             CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-|               |                               MergeScanExec: REDACTED
+|               |       AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                                   |
+|               |         SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|               |             RepartitionExec: partitioning=REDACTED
+|               |               AggregateExec: mode=Partial, gby=[a@2 as a, b@3 as b, c@4 as c, greptime_timestamp@0 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2])                                                                                                                                                                                                                                                                                                                                    |
+|               |                 ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))@1 as prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)), a@2 as a, b@3 as b, c@4 as c]                                                                                                                                                                                                                                                                                                           |
+|               |                   CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|               |                     SortExec: expr=[a@2 ASC, b@3 ASC, c@4 ASC, d@5 ASC, greptime_timestamp@0 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|               |                       CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|               |                         MergeScanExec: REDACTED
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 |               |         RepartitionExec: partitioning=REDACTED
 |               |           CoalescePartitionsExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -645,9 +594,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 | 0_| 0_|_ProjectionExec: expr=[a@1 as a, b@2 as b, c@3 as c, greptime_timestamp@4 as greptime_timestamp, sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@0 / sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))@5 as aggr_optimize_not.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000))) / aggr_optimize_not_count.sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b, c@2 as c, greptime_timestamp@3 as greptime_timestamp], aggr=[sum(prom_rate(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(120000)))], ordering_mode=PartiallySorted([0, 1, 2]) REDACTED
 |_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -679,10 +625,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -693,10 +635,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -707,10 +645,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
@@ -721,10 +655,6 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromRangeManipulateExec: req range=[1752591864000..1752592164000], interval=[30000], eval range=[120000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[greptime_timestamp], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
