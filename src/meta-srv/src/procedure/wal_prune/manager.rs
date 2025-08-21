@@ -17,9 +17,8 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 
-use common_meta::key::TableMetadataManagerRef;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -28,6 +27,7 @@ use tokio::sync::Semaphore;
 use crate::define_ticker;
 use crate::error::{self, Result};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
+use crate::procedure::wal_prune::utils::{find_pruneable_entry_id_for_topic, should_trigger_prune};
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
 
 pub type WalPruneTickerRef = Arc<WalPruneTicker>;
@@ -109,8 +109,6 @@ define_ticker!(
 /// 2. Periodically receive [Event::Tick] to submit [WalPruneProcedure] to prune remote WAL.
 /// 3. Use a semaphore to limit the number of concurrent [WalPruneProcedure]s.
 pub(crate) struct WalPruneManager {
-    /// Table metadata manager to restore topics from kvbackend.
-    table_metadata_manager: TableMetadataManagerRef,
     /// Receives [Event]s.
     receiver: Receiver<Event>,
     /// Procedure manager.
@@ -125,23 +123,21 @@ pub(crate) struct WalPruneManager {
 }
 
 impl WalPruneManager {
-    /// Returns a new empty [WalPruneManager].
+    /// Returns a new empty [`WalPruneManager`].
     pub fn new(
-        table_metadata_manager: TableMetadataManagerRef,
-        limit: usize,
+        parallelism: usize,
         receiver: Receiver<Event>,
         procedure_manager: ProcedureManagerRef,
         wal_prune_context: WalPruneContext,
     ) -> Self {
         Self {
-            table_metadata_manager,
             receiver,
             procedure_manager,
             wal_prune_context,
             tracker: WalPruneProcedureTracker {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
-            semaphore: Arc::new(Semaphore::new(limit)),
+            semaphore: Arc::new(Semaphore::new(parallelism)),
         }
     }
 
@@ -186,16 +182,21 @@ impl WalPruneManager {
     }
 
     /// Submits a [WalPruneProcedure] for the given topic name.
-    pub async fn submit_procedure(&self, topic_name: &str) -> Result<ProcedureId> {
+    pub async fn wait_procedure(
+        &self,
+        topic_name: &str,
+        prunable_entry_id: u64,
+    ) -> Result<ProcedureId> {
         let guard = self
             .tracker
             .insert_running_procedure(topic_name.to_string())
             .with_context(|| error::PruneTaskAlreadyRunningSnafu { topic: topic_name })?;
 
         let procedure = WalPruneProcedure::new(
-            topic_name.to_string(),
             self.wal_prune_context.clone(),
             Some(guard),
+            topic_name.to_string(),
+            prunable_entry_id,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
@@ -214,13 +215,48 @@ impl WalPruneManager {
         Ok(procedure_id)
     }
 
+    async fn try_prune(&self, topic_name: &str) -> Result<()> {
+        let table_metadata_manager = self.wal_prune_context.table_metadata_manager.clone();
+        let leader_region_registry = self.wal_prune_context.leader_region_registry.clone();
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &table_metadata_manager,
+            &leader_region_registry,
+            topic_name,
+        )
+        .await?;
+        let Some(prunable_entry_id) = prunable_entry_id else {
+            debug!(
+                "No prunable entry id found for topic {}, skipping prune",
+                topic_name
+            );
+            return Ok(());
+        };
+        let current = table_metadata_manager
+            .topic_name_manager()
+            .get(topic_name)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner().pruned_entry_id);
+        if !should_trigger_prune(current, prunable_entry_id) {
+            debug!(
+                "No need to prune topic {}, current pruned entry id: {:?}, prunable entry id: {}",
+                topic_name, current, prunable_entry_id
+            );
+            return Ok(());
+        }
+
+        self.wait_procedure(topic_name, prunable_entry_id)
+            .await
+            .map(|_| ())
+    }
+
     async fn handle_tick_request(&self) -> Result<()> {
         let topics = self.retrieve_sorted_topics().await?;
         let mut tasks = Vec::with_capacity(topics.len());
         for topic_name in topics.iter() {
             tasks.push(async {
                 let _permit = self.semaphore.acquire().await.unwrap();
-                match self.submit_procedure(topic_name).await {
+                match self.try_prune(topic_name).await {
                     Ok(_) => {}
                     Err(error::Error::PruneTaskAlreadyRunning { topic, .. }) => {
                         warn!("Prune task for topic {} is already running", topic);
@@ -244,7 +280,8 @@ impl WalPruneManager {
     /// Since [WalPruneManager] submits procedures depending on the order of the topics, we should sort the topics.
     /// TODO(CookiePie): Can register topics in memory instead of retrieving from the table metadata manager every time.
     async fn retrieve_sorted_topics(&self) -> Result<Vec<String>> {
-        self.table_metadata_manager
+        self.wal_prune_context
+            .table_metadata_manager
             .topic_name_manager()
             .range()
             .await
@@ -264,6 +301,7 @@ mod test {
     use tokio::time::{sleep, timeout};
 
     use super::*;
+    use crate::procedure::test_util::new_wal_prune_metadata;
     use crate::procedure::wal_prune::test_util::TestEnv;
 
     #[tokio::test]
@@ -315,7 +353,6 @@ mod test {
         (
             tx,
             WalPruneManager::new(
-                test_env.table_metadata_manager.clone(),
                 limit,
                 rx,
                 test_env.procedure_manager.clone(),
@@ -330,6 +367,7 @@ mod test {
             .map(|topic| TopicNameKey::new(topic))
             .collect::<Vec<_>>();
         manager
+            .wal_prune_context
             .table_metadata_manager
             .topic_name_manager()
             .batch_put(topic_name_keys)
@@ -358,5 +396,42 @@ mod test {
         timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_pruneable_entry_id_for_topic_none() {
+        let test_env = TestEnv::new();
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &test_env.table_metadata_manager,
+            &test_env.leader_region_registry,
+            "test_topic",
+        )
+        .await
+        .unwrap();
+        assert!(prunable_entry_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_pruneable_entry_id_for_topic_some() {
+        let test_env = TestEnv::new();
+        let topic = "test_topic";
+        let expected_prunable_entry_id = new_wal_prune_metadata(
+            test_env.table_metadata_manager.clone(),
+            test_env.leader_region_registry.clone(),
+            2,
+            5,
+            &[3, 10, 23, 50, 52, 82, 130],
+            topic.to_string(),
+        )
+        .await;
+        let prunable_entry_id = find_pruneable_entry_id_for_topic(
+            &test_env.table_metadata_manager,
+            &test_env.leader_region_registry,
+            topic,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(prunable_entry_id, expected_prunable_entry_id);
     }
 }

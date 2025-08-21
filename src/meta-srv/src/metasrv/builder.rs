@@ -439,7 +439,6 @@ impl MetasrvBuilder {
                 leader_region_registry: leader_region_registry.clone(),
             };
             let wal_prune_manager = WalPruneManager::new(
-                table_metadata_manager.clone(),
                 remote_wal_options.auto_prune_parallelism,
                 rx,
                 procedure_manager.clone(),
