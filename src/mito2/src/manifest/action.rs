@@ -274,7 +274,7 @@ pub struct RemovedFilesRecord {
 pub struct RemovedFiles {
     /// The timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
-    pub at: i64,
+    pub removed_at: i64,
     /// The set of file ids that are removed.
     pub file_ids: HashSet<FileId>,
 }
@@ -282,7 +282,10 @@ pub struct RemovedFiles {
 impl RemovedFilesRecord {
     /// Add a record of removed files with the current timestamp.
     pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
-        self.removed_files.push(RemovedFiles { at, file_ids });
+        self.removed_files.push(RemovedFiles {
+            removed_at: at,
+            file_ids,
+        });
     }
 
     pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
@@ -296,11 +299,11 @@ impl RemovedFilesRecord {
                 input: opt.keep_ttl,
             })?;
 
-        self.removed_files.sort_by_key(|f| f.at);
+        self.removed_files.sort_by_key(|f| f.removed_at);
         let updated = std::mem::take(&mut self.removed_files)
             .into_iter()
             .filter_map(|f| {
-                if f.at < can_evict_until.timestamp_millis() {
+                if f.removed_at < can_evict_until.timestamp_millis() {
                     // can evict all files
                     // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
                     None
