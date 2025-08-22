@@ -31,6 +31,7 @@ use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use datatypes::types::TimestampType;
+use itertools::Itertools;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -406,15 +407,22 @@ impl RegionMetadata {
         }
 
         // Checks there is only one time index.
-        let num_time_index = self
+        let time_indexes = self
             .column_metadatas
             .iter()
             .filter(|col| col.semantic_type == SemanticType::Timestamp)
-            .count();
+            .collect::<Vec<_>>();
         ensure!(
-            num_time_index == 1,
+            time_indexes.len() == 1,
             InvalidMetaSnafu {
-                reason: format!("expect only one time index, found {}", num_time_index),
+                reason: format!(
+                    "expect only one time index, found {}: {:?}",
+                    time_indexes.len(),
+                    time_indexes
+                        .iter()
+                        .map(|c| &c.column_schema.name)
+                        .join(", ")
+                ),
             }
         );
 
