@@ -28,7 +28,6 @@ pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
-pub(crate) mod page_reader;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -246,7 +245,7 @@ mod tests {
         )
         .await;
 
-        writer
+        let sst_info = writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
@@ -280,19 +279,32 @@ mod tests {
             .await;
         }
 
+        let parquet_meta = sst_info.file_metadata.unwrap();
+        let (start, length) = parquet_meta.row_group(0).column(0).byte_range();
         // Doesn't have compressed page cached.
-        let page_key =
-            PageKey::new_compressed(metadata.region_id, handle.file_id().file_id(), 0, 0);
+        let page_key = PageKey::new(
+            handle.file_id().file_id(),
+            0,
+            vec![(start..(start + length))],
+        );
         assert!(cache.get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key =
-                PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), i, 0);
+            let (start, length) = parquet_meta.row_group(i).column(0).byte_range();
+            let page_key = PageKey::new(
+                handle.file_id().file_id(),
+                i,
+                vec![(start..(start + length))],
+            );
             assert!(cache.get_pages(&page_key).is_some());
         }
-        let page_key =
-            PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), 5, 0);
+        let (start, length) = parquet_meta.row_group(5).column(0).byte_range();
+        let page_key = PageKey::new(
+            handle.file_id().file_id(),
+            5,
+            vec![(start..(start + length))],
+        );
         assert!(cache.get_pages(&page_key).is_none());
     }
 
