@@ -190,6 +190,7 @@ fn create_test_flow_task_for_serialization() -> CreateFlowTask {
         or_replace: false,
         create_if_not_exists: false,
         expire_after: None,
+        eval_interval: None,
         comment: "test comment".to_string(),
         sql: "SELECT * FROM source_table".to_string(),
         flow_options: HashMap::new(),
