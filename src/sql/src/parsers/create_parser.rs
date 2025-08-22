@@ -296,7 +296,7 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            Some(self.parse_interval()?)
+            Some(self.parse_interval_no_month("EXPIRE AFTER")?)
         } else {
             None
         };
@@ -305,7 +305,7 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword("EVAL"), Token::make_keyword("INTERVAL")])
         {
-            Some(self.parse_interval()?)
+            Some(self.parse_interval_no_month("EVAL INTERVAL")?)
         } else {
             None
         };
@@ -379,8 +379,14 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parse the interval expr to duration in seconds.
-    fn parse_interval(&mut self) -> Result<i64> {
+    fn parse_interval_no_month(&mut self, context: &str) -> Result<i64> {
         let interval = self.parse_interval_month_day_nano()?.0;
+        if interval.months != 0 {
+            return InvalidIntervalSnafu {
+                reason: format!("Interval with months is not allowed in {context}"),
+            }
+            .fail();
+        }
         Ok(
             interval.nanoseconds / 1_000_000_000
                 + interval.days as i64 * 60 * 60 * 24
@@ -1704,7 +1710,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                 && stmts
                     .unwrap_err()
                     .to_string()
-                    .contains("month interval is not allowed")
+                    .contains("Interval with months is not allowed")
         );
     }
 
