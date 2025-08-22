@@ -242,10 +242,10 @@ pub async fn lookup_frontends(
 /// Find all alive flownodes
 pub fn alive_flownodes(
     meta_peer_client: &MetaPeerClientRef,
-    lease_secs: Duration,
+    lease: Duration,
 ) -> LeaseFilter<'_, FlownodeLeaseKey> {
     LeaseFilter::new(
-        lease_secs,
+        lease,
         FlownodeLeaseKey::prefix_key_by_cluster(),
         meta_peer_client,
     )
@@ -328,8 +328,9 @@ mod tests {
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use api::v1::meta::DatanodeWorkloads;
     use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
+    use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
     use common_meta::kv_backend::ResettableKvBackendRef;
-    use common_meta::peer::Peer;
+    use common_meta::peer::{Peer, PeerLookupService};
     use common_meta::rpc::store::PutRequest;
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
@@ -337,6 +338,7 @@ mod tests {
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::lease::{
         alive_datanodes, is_datanode_accept_ingest_workload, lookup_frontends, ClusterRole,
+        MetaPeerLookupService,
     };
     use crate::test_util::create_meta_peer_client;
 
@@ -505,5 +507,40 @@ mod tests {
 
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].id, 0);
+    }
+
+    #[tokio::test]
+    async fn test_no_active_frontends() {
+        let client = create_meta_peer_client();
+        let in_memory = client.memory_backend();
+
+        let last_activity_ts =
+            current_time_millis() - FRONTEND_HEARTBEAT_INTERVAL_MILLIS as i64 - 1000;
+        let active_frontend_node = NodeInfo {
+            peer: Peer {
+                id: 0,
+                addr: "127.0.0.1:20201".to_string(),
+            },
+            last_activity_ts,
+            status: NodeStatus::Frontend(FrontendStatus {}),
+            version: "1.0.0".to_string(),
+            git_commit: "1234567890".to_string(),
+            start_time_ms: last_activity_ts as u64,
+        };
+
+        let key_prefix = NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend);
+
+        in_memory
+            .put(PutRequest {
+                key: format!("{}{}", key_prefix, "0").into(),
+                value: active_frontend_node.try_into().unwrap(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+
+        let service = MetaPeerLookupService::new(client);
+        let peers = service.active_frontends().await.unwrap();
+        assert_eq!(peers.len(), 0);
     }
 }
