@@ -1001,31 +1001,17 @@ pub async fn label_values_query(
 
     if label_name == METRIC_NAME_LABEL {
         let catalog_manager = handler.catalog_manager();
-        let mut tables_stream = catalog_manager.tables(&catalog, &schema, Some(&query_ctx));
-        let mut table_names = Vec::new();
-        while let Some(table) = tables_stream.next().await {
-            // filter out physical tables
-            match table {
-                Ok(table) => {
-                    if table
-                        .table_info()
-                        .meta
-                        .options
-                        .extra_options
-                        .contains_key(PHYSICAL_TABLE_METADATA_KEY)
-                    {
-                        continue;
-                    }
 
-                    table_names.push(table.table_info().name.clone());
-                }
-                Err(e) => {
-                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-                }
+        match retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await {
+            Ok(table_names) => {
+                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
+                    table_names,
+                ));
+            }
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
             }
         }
-        table_names.sort_unstable();
-        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
         let field_columns = handle_schema_err!(
             retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0).await
@@ -1120,6 +1106,36 @@ fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
     selector.matchers.matchers.remove(pos);
 
     Some(name)
+}
+
+async fn retrieve_table_names(
+    query_ctx: &QueryContext,
+    catalog_manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<Vec<String>> {
+    dbg!(&matches);
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
+    let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(&query_ctx));
+    let mut table_names = Vec::new();
+    while let Some(table) = tables_stream.next().await {
+        let table = table.context(CatalogSnafu)?;
+        if table
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+        {
+            continue;
+        }
+
+        table_names.push(table.table_info().name.clone());
+    }
+
+    table_names.sort_unstable();
+    Ok(table_names)
 }
 
 async fn retrieve_field_names(

@@ -1048,15 +1048,36 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
     assert_eq!(
         prom_resp.data,
-        PrometheusResponse::Labels(vec![
-            "demo".to_string(),
-            "demo_metrics".to_string(),
-            "demo_metrics_with_nanos".to_string(),
-            "logic_table".to_string(),
-            "mito".to_string(),
-            "multi_labels".to_string(),
-            "numbers".to_string()
-        ])
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+            "logic_table",
+            "mito",
+            "multi_labels",
+            "numbers"
+        ]))
+        .unwrap()
+    );
+
+    // query `__name__`
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".*demo.*\"}")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert!(prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
     );
 
     // buildinfo
