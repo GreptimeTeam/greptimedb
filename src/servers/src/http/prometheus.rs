@@ -978,6 +978,7 @@ pub struct LabelValueQuery {
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
+    limit: Option<usize>,
 }
 
 #[axum_macros::debug_handler]
@@ -1100,6 +1101,13 @@ pub async fn label_values_query(
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort_unstable();
+
+    if let Some(limit) = params.limit {
+        if limit > 0 && label_values.len() >= limit {
+            label_values.truncate(limit);
+        }
+    }
+
     PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
 }
 
