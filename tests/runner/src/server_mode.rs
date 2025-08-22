@@ -60,7 +60,6 @@ pub enum ServerMode {
     Frontend {
         http_addr: String,
         rpc_bind_addr: String,
-        internal_rpc_bind_addr: String,
         mysql_addr: String,
         postgres_addr: String,
         metasrv_addr: String,
@@ -101,8 +100,6 @@ struct ConfigContext {
     metasrv_addr: String,
     // for frontend and standalone
     grpc_addr: String,
-    // for frontend in distributed mode
-    internal_grpc_addr: String,
     // for standalone
     mysql_addr: String,
     // for standalone
@@ -127,14 +124,12 @@ impl ServerMode {
     pub fn random_frontend(metasrv_port: u16) -> Self {
         let http_port = get_unique_random_port();
         let rpc_port = get_unique_random_port();
-        let internal_rpc_port = get_unique_random_port();
         let mysql_port = get_unique_random_port();
         let postgres_port = get_unique_random_port();
 
         ServerMode::Frontend {
             http_addr: format!("127.0.0.1:{http_port}"),
             rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
-            internal_rpc_bind_addr: format!("127.0.0.1:{internal_rpc_port}"),
             mysql_addr: format!("127.0.0.1:{mysql_port}"),
             postgres_addr: format!("127.0.0.1:{postgres_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
@@ -329,15 +324,6 @@ impl ServerMode {
             instance_id: id,
             metasrv_addr,
             grpc_addr,
-            internal_grpc_addr: if let ServerMode::Frontend {
-                internal_rpc_bind_addr,
-                ..
-            } = self
-            {
-                internal_rpc_bind_addr.clone()
-            } else {
-                String::new()
-            },
             mysql_addr,
             postgres_addr,
         };
@@ -395,7 +381,6 @@ impl ServerMode {
             ServerMode::Frontend {
                 http_addr,
                 rpc_bind_addr,
-                internal_rpc_bind_addr: _,
                 mysql_addr,
                 postgres_addr,
                 metasrv_addr,
