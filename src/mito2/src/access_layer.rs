@@ -324,7 +324,7 @@ impl AccessLayer {
                 }
 
                 let path = entry.path();
-                if !path.ends_with(".parquet") {
+                if !path.ends_with(".parquet") && !path.ends_with(".puffin") {
                     continue;
                 }
 

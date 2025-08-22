@@ -48,7 +48,7 @@ use crate::meter::rate_meter::RateMeter;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::location::sst_file_path;
+use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -512,6 +512,12 @@ impl MitoRegion {
                 level.files().map(|file| {
                     let meta = file.meta_ref();
                     let region_id = meta.region_id;
+                    let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
+                        let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
+                        (Some(index_file_path), Some(meta.index_file_size))
+                    } else {
+                        (None, None)
+                    };
                     ManifestSstEntry {
                         table_dir: table_dir.to_string(),
                         region_id,
@@ -523,6 +529,8 @@ impl MitoRegion {
                         level: meta.level,
                         file_path: sst_file_path(table_dir, meta.file_id(), path_type),
                         file_size: meta.file_size,
+                        index_file_path,
+                        index_file_size,
                         num_rows: meta.num_rows,
                         num_row_groups: meta.num_row_groups,
                         min_ts: meta.time_range.0,

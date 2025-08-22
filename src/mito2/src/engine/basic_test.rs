@@ -740,7 +740,10 @@ async fn test_list_ssts() {
     ];
 
     for region_id in &region_ids {
-        let request = CreateRequestBuilder::new().build();
+        let mut request = CreateRequestBuilder::new().build();
+        request.column_metadatas[0]
+            .column_schema
+            .set_inverted_index(true); // set inverted index for tag_0
         let column_schemas = rows_schema(&request);
         engine
             .handle_request(*region_id, RegionRequest::Create(request))
@@ -773,6 +776,9 @@ async fn test_list_ssts() {
         .all_ssts_from_manifest()
         .map(|mut e| {
             e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
+            e.index_file_path = e
+                .index_file_path
+                .map(|p| p.replace(&e.file_id, "<file_id>"));
             e.file_id = "<file_id>".to_string();
             format!("\n{:?}", e)
         })
@@ -782,9 +788,9 @@ async fn test_list_ssts() {
     assert_eq!(
         debug_format,
         r#"
-ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
-ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
-ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2483, num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
     );
 
     // list from storage
@@ -797,7 +803,7 @@ ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id:
         .into_iter()
         .map(|mut e| {
             let i = e.file_path.rfind('/').unwrap();
-            e.file_path.replace_range(i.., "/<file_id>.parquet");
+            e.file_path.replace_range(i..(i + 37), "/<file_id>");
             format!("\n{:?}", e)
         })
         .sorted()
@@ -807,7 +813,10 @@ ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id:
         debug_format,
         r#"
 StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None }
 StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None }
-StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }"#
+StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None }"#
     );
 }

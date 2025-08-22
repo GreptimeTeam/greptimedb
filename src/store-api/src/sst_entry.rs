@@ -40,6 +40,10 @@ pub struct ManifestSstEntry {
     pub file_path: String,
     /// File size in bytes.
     pub file_size: u64,
+    /// Full path of the index file in object store.
+    pub index_file_path: Option<String>,
+    /// File size of the index file in object store.
+    pub index_file_size: Option<u64>,
     /// Number of rows in the SST.
     pub num_rows: u64,
     /// Number of row groups in the SST.
