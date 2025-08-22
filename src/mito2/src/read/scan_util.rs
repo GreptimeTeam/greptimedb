@@ -35,7 +35,7 @@ use crate::metrics::{
 };
 use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::{Batch, BoxedBatchStream, ScannerMetrics, Source};
+use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
@@ -841,4 +841,20 @@ pub(crate) async fn maybe_scan_other_ranges(
         }
         .fail()
     }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn maybe_scan_flat_other_ranges(
+    context: &Arc<StreamContext>,
+    index: RowGroupIndex,
+    metrics: &PartitionMetrics,
+) -> Result<BoxedRecordBatchStream> {
+    let _ = context;
+    let _ = index;
+    let _ = metrics;
+
+    crate::error::UnexpectedSnafu {
+        reason: "no other ranges scannable in flat format",
+    }
+    .fail()
 }
