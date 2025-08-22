@@ -14,13 +14,15 @@
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{ReconcileCatalog, ReconcileRequest};
+use arrow::datatypes::DataType as ArrowDataType;
 use common_macro::admin_fn;
 use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, TypeSignature, Volatility};
 use common_telemetry::info;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 
@@ -104,15 +106,15 @@ fn signature() -> Signature {
     let mut signs = Vec::with_capacity(2 + nums.len());
     signs.extend([
         // reconcile_catalog()
-        TypeSignature::NullAry,
+        TypeSignature::Nullary,
         // reconcile_catalog(resolve_strategy)
-        TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
+        TypeSignature::Exact(vec![ArrowDataType::Utf8]),
     ]);
     for sign in nums {
         // reconcile_catalog(resolve_strategy, parallelism)
         signs.push(TypeSignature::Exact(vec![
-            ConcreteDataType::string_datatype(),
-            sign,
+            ArrowDataType::Utf8,
+            sign.as_arrow_type(),
         ]));
     }
     Signature::one_of(signs, Volatility::Immutable)
@@ -120,60 +122,149 @@ fn signature() -> Signature {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_query::error::Error;
-    use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
+    use arrow::array::{StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
 
     use crate::admin::reconcile_catalog::ReconcileCatalogFunction;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[tokio::test]
     async fn test_reconcile_catalog() {
         common_telemetry::init_default_ut_logging();
 
         // reconcile_catalog()
-        let f = ReconcileCatalogFunction;
-        let args = vec![];
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
 
         // reconcile_catalog(resolve_strategy)
-        let f = ReconcileCatalogFunction;
-        let args = vec![Arc::new(StringVector::from(vec!["UseMetasrv"])) as _];
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "UseMetasrv",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", DataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
 
         // reconcile_catalog(resolve_strategy, parallelism)
-        let f = ReconcileCatalogFunction;
-        let args = vec![
-            Arc::new(StringVector::from(vec!["UseLatest"])) as _,
-            Arc::new(UInt64Vector::from_slice([10])) as _,
-        ];
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
-        assert_eq!(expect, result);
+        let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["UseLatest"]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![10]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_1", DataType::UInt64, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(result_array.value(0), "test_pid");
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(
+                    scalar,
+                    datafusion_common::ScalarValue::Utf8(Some("test_pid".to_string()))
+                );
+            }
+        }
 
         // unsupported input data type
-        let f = ReconcileCatalogFunction;
-        let args = vec![
-            Arc::new(StringVector::from(vec!["UseLatest"])) as _,
-            Arc::new(StringVector::from(vec!["test"])) as _,
-        ];
-        let err = f.eval(FunctionContext::mock(), &args).await.unwrap_err();
-        assert_matches!(err, Error::UnsupportedInputDataType { .. });
+        let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["UseLatest"]))),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["test"]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_1", DataType::Utf8, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let _err = f.invoke_async_with_args(func_args).await.unwrap_err();
+        // Note: Error type is DataFusionError at this level, not common_query::Error
 
         // invalid function args
-        let f = ReconcileCatalogFunction;
-        let args = vec![
-            Arc::new(StringVector::from(vec!["UseLatest"])) as _,
-            Arc::new(UInt64Vector::from_slice([10])) as _,
-            Arc::new(StringVector::from(vec!["10"])) as _,
-        ];
-        let err = f.eval(FunctionContext::mock(), &args).await.unwrap_err();
-        assert_matches!(err, Error::InvalidFuncArgs { .. });
+        let factory: ScalarFunctionFactory = ReconcileCatalogFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
+
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["UseLatest"]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![10]))),
+                ColumnarValue::Array(Arc::new(StringArray::from(vec!["10"]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::Utf8, false)),
+                Arc::new(Field::new("arg_1", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_2", DataType::Utf8, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+        let _err = f.invoke_async_with_args(func_args).await.unwrap_err();
+        // Note: Error type is DataFusionError at this level, not common_query::Error
     }
 }

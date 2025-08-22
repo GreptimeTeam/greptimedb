@@ -12,4 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod rate_meter;
+pub(crate) mod attribute;
+pub(crate) mod into_row;
+pub(crate) mod schema;
+pub(crate) mod to_row;
+pub(crate) mod utils;
+
+pub(crate) const META_KEY_COL: &str = "col";
+pub(crate) const META_KEY_NAME: &str = "name";
+pub(crate) const META_KEY_DATATYPE: &str = "datatype";
+pub(crate) const META_KEY_SEMANTIC: &str = "semantic";
+pub(crate) const META_KEY_SKIP: &str = "skip";

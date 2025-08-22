@@ -236,11 +236,6 @@ pub trait EventHandler: Send + Sync + 'static {
     /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
     /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
-
-    /// Returns the handler options for the event type. We can use different options for different event types.
-    fn options(&self, _event_type: &str) -> EventHandlerOptions {
-        EventHandlerOptions::default()
-    }
 }
 
 /// Configuration options for the event recorder.

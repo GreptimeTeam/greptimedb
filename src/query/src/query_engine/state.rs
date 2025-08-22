@@ -38,6 +38,7 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, Phy
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
 use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
+use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
@@ -87,6 +88,7 @@ impl QueryEngineState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
@@ -176,6 +178,7 @@ impl QueryEngineState {
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
+                partition_rule_manager,
                 region_query_handler,
             )))
             .with_optimizer_rules(optimizer.rules)
@@ -359,13 +362,17 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
-        if let Some(region_query_handler) = region_query_handler {
+        if let (Some(region_query_handler), Some(partition_rule_manager)) =
+            (region_query_handler, partition_rule_manager)
+        {
             planners.push(Arc::new(DistExtensionPlanner::new(
                 catalog_manager,
+                partition_rule_manager,
                 region_query_handler,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));

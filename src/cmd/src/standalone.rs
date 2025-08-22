@@ -503,11 +503,11 @@ impl StartCommand {
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, plugin_opts.as_ref(), &fe_opts)
             .await
             .context(error::StartFrontendSnafu)?;
 
-        plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &dn_opts)
+        plugins::setup_datanode_plugins(&mut plugins, plugin_opts.as_ref(), &dn_opts)
             .await
             .context(error::StartDatanodeSnafu)?;
 
@@ -834,6 +834,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     region_manifest: region_stat.manifest.into(),
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
                     metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
+                    write_bytes: 0,
                 }
             })
             .collect::<Vec<_>>();
@@ -877,7 +878,7 @@ mod tests {
         };
 
         let mut plugins = Plugins::new();
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins(&mut plugins, None, &fe_opts)
             .await
             .unwrap();
 

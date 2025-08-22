@@ -61,7 +61,7 @@ use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::BoxedRecordBatchIterator;
-use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
@@ -216,9 +216,6 @@ impl BulkPart {
         self.batch.num_rows()
     }
 }
-
-/// Builder type for primary key dictionary array.
-type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
 
 /// Primary key column builder for handling strings specially.
 enum PrimaryKeyColumnBuilder {

@@ -100,6 +100,26 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
+/// Configuration options for the stats persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatsPersistenceOptions {
+    /// TTL for the stats table that will be used to store the stats.
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
+    /// The interval to persist the stats.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+impl Default for StatsPersistenceOptions {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_days(30),
+            interval: Duration::from_secs(60),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -184,6 +204,8 @@ pub struct MetasrvOptions {
     pub node_max_idle_time: Duration,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
+    /// The stats persistence options.
+    pub stats_persistence: StatsPersistenceOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -213,7 +235,9 @@ impl fmt::Debug for MetasrvOptions {
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
             .field("tracing", &self.tracing)
-            .field("backend", &self.backend);
+            .field("backend", &self.backend)
+            .field("event_recorder", &self.event_recorder)
+            .field("stats_persistence", &self.stats_persistence);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -275,6 +299,7 @@ impl Default for MetasrvOptions {
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
+            stats_persistence: StatsPersistenceOptions::default(),
         }
     }
 }

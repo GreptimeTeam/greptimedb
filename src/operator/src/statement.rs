@@ -29,9 +29,12 @@ mod tql;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
+use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
+use client::inserter::{InsertOptions, Inserter};
 use client::RecordBatches;
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
@@ -48,10 +51,11 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
+use humantime::format_duration;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::QueryEngineRef;
-use session::context::{Channel, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use set::{set_query_timeout, set_read_preference};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -65,6 +69,7 @@ use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, CopyTableRequest};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -614,6 +619,11 @@ impl StatementExecutor {
         }
         Ok(time_ranges)
     }
+
+    /// Returns the inserter for the statement executor.
+    pub(crate) fn inserter(&self) -> &InserterRef {
+        &self.inserter
+    }
 }
 
 fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {
@@ -746,6 +756,61 @@ fn idents_to_full_database_name(
             ),
         }
         .fail(),
+    }
+}
+
+/// The [`Inserter`] implementation for the statement executor.
+pub struct InserterImpl {
+    statement_executor: StatementExecutorRef,
+    options: Option<InsertOptions>,
+}
+
+impl InserterImpl {
+    pub fn new(statement_executor: StatementExecutorRef, options: Option<InsertOptions>) -> Self {
+        Self {
+            statement_executor,
+            options,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Inserter for InserterImpl {
+    async fn insert_rows(
+        &self,
+        context: &client::inserter::Context<'_>,
+        requests: RowInsertRequests,
+    ) -> ClientResult<()> {
+        let mut ctx_builder = QueryContextBuilder::default()
+            .current_catalog(context.catalog.to_string())
+            .current_schema(context.schema.to_string());
+        if let Some(options) = self.options.as_ref() {
+            ctx_builder = ctx_builder
+                .set_extension(
+                    TTL_KEY.to_string(),
+                    format_duration(options.ttl).to_string(),
+                )
+                .set_extension(APPEND_MODE_KEY.to_string(), options.append_mode.to_string());
+        }
+        let query_ctx = ctx_builder.build().into();
+
+        self.statement_executor
+            .inserter()
+            .handle_row_inserts(
+                requests,
+                query_ctx,
+                self.statement_executor.as_ref(),
+                false,
+                false,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ClientExternalSnafu)
+            .map(|_| ())
+    }
+
+    fn set_options(&mut self, options: &InsertOptions) {
+        self.options = Some(*options);
     }
 }
 

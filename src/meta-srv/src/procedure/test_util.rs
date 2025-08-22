@@ -186,6 +186,7 @@ pub fn new_upgrade_region_reply(
     }
 }
 
+/// Mock the test data for WAL pruning.
 pub async fn new_wal_prune_metadata(
     table_metadata_manager: TableMetadataManagerRef,
     leader_region_registry: LeaderRegionRegistryRef,

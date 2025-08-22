@@ -346,6 +346,7 @@ impl FlownodeBuilder {
             None,
             None,
             None,
+            None,
             false,
             Default::default(),
             self.opts.query.clone(),

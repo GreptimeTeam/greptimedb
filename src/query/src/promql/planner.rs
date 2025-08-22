@@ -529,10 +529,7 @@ impl PromPlanner {
             (Some(mut expr), None) => {
                 let input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    lhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(lhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -558,10 +555,7 @@ impl PromPlanner {
             (None, Some(mut expr)) => {
                 let input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    rhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = self.try_build_special_time_expr_with_context(rhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -1310,20 +1304,48 @@ impl PromPlanner {
                 MatchOp::NotEqual => col.not_eq(lit),
                 MatchOp::Re(re) => {
                     // TODO(ruihang): a more programmatic way to handle this in datafusion
-                    if re.as_str() == ".*" {
+
+                    // This is a hack to handle `.+` and `.*`, and is not strictly correct
+                    // `.` doesn't match newline (`\n`). Given this is in PromQL context,
+                    // most of the time it's fine.
+                    if re.as_str() == "^(?:.*)$" {
                         continue;
                     }
-                    DfExpr::BinaryExpr(BinaryExpr {
-                        left: Box::new(col),
-                        op: Operator::RegexMatch,
-                        right: Box::new(re.as_str().lit()),
-                    })
+                    if re.as_str() == "^(?:.+)$" {
+                        col.not_eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexMatch,
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
+                        })
+                    }
                 }
-                MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col),
-                    op: Operator::RegexNotMatch,
-                    right: Box::new(re.as_str().lit()),
-                }),
+                MatchOp::NotRe(re) => {
+                    if re.as_str() == "^(?:.*)$" {
+                        DfExpr::Literal(ScalarValue::Boolean(Some(false)), None)
+                    } else if re.as_str() == "^(?:.+)$" {
+                        col.eq(DfExpr::Literal(
+                            ScalarValue::Utf8(Some(String::new())),
+                            None,
+                        ))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexNotMatch,
+                            right: Box::new(DfExpr::Literal(
+                                ScalarValue::Utf8(Some(re.as_str().to_string())),
+                                None,
+                            )),
+                        })
+                    }
+                }
             };
             exprs.push(expr);
         }
@@ -2666,7 +2688,9 @@ impl PromPlanner {
             | PromExpr::Subquery(_) => None,
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    Some(build_special_time_expr(SPECIAL_TIME_FUNCTION))
+                    // For time() function, don't treat it as a literal
+                    // Let it be handled as a regular function call
+                    None
                 } else {
                     None
                 }
@@ -2703,10 +2727,12 @@ impl PromPlanner {
         }
     }
 
-    fn try_build_special_time_expr(expr: &PromExpr, time_index_col: &str) -> Option<DfExpr> {
+    fn try_build_special_time_expr_with_context(&self, expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
-                if func.name == SPECIAL_TIME_FUNCTION {
+                if func.name == SPECIAL_TIME_FUNCTION
+                    && let Some(time_index_col) = self.ctx.time_index_column.as_ref()
+                {
                     Some(build_special_time_expr(time_index_col))
                 } else {
                     None
@@ -3366,11 +3392,12 @@ mod test {
     fn build_query_engine_state() -> QueryEngineState {
         QueryEngineState::new(
             new_memory_catalog_manager().unwrap(),
-            None,  // region_query_handler
-            None,  // table_mutation_handler
-            None,  // procedure_service_handler
-            None,  // flow_service_handler
-            false, // with_dist_planner
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
             Plugins::default(),
             QueryOptions::default(),
         )

@@ -43,7 +43,6 @@ use crate::error::{
 use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
-use crate::meter::rate_meter::RateMeter;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
@@ -132,9 +131,8 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
-    /// `write_bytes_per_sec` tracks the memtable write throughput in bytes per second.
-    /// [RateUpdater](crate::worker::RateUpdater) will update the rate periodically.
-    pub(crate) write_bytes_per_sec: RateMeter,
+    /// The total bytes written to the region.
+    pub(crate) write_bytes: Arc<AtomicU64>,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -453,6 +451,7 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
+        let write_bytes = self.write_bytes.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -468,6 +467,7 @@ impl MitoRegion {
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
+            write_bytes,
         }
     }
 
@@ -771,14 +771,6 @@ impl RegionMap {
         regions.get(&region_id).cloned()
     }
 
-    /// Iterates over all regions.
-    pub(crate) fn for_each_region(&self, f: impl Fn(&MitoRegionRef)) {
-        let regions = self.regions.read().unwrap();
-        for (_, region) in regions.iter() {
-            f(region);
-        }
-    }
-
     /// Gets writable region by region id.
     ///
     /// Returns error if the region does not exist or is readonly.
@@ -996,6 +988,7 @@ impl ManifestStats {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
 
     use common_datasource::compression::CompressionType;
@@ -1010,7 +1003,6 @@ mod tests {
 
     use crate::access_layer::AccessLayer;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-    use crate::meter::rate_meter::RateMeter;
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
     };
@@ -1180,7 +1172,7 @@ mod tests {
             last_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            write_bytes_per_sec: RateMeter::default(),
+            write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
             stats: ManifestStats::default(),
         };
