@@ -62,7 +62,9 @@ pub(crate) async fn find_pruneable_entry_id_for_topic(
         .topic_region_manager()
         .regions(topic)
         .await
-        .context(TableMetadataManagerSnafu)?;
+        .context(TableMetadataManagerSnafu)?
+        .into_keys()
+        .collect::<Vec<_>>();
     if region_ids.is_empty() {
         return Ok(None);
     }

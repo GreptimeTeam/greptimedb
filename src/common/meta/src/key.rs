@@ -155,6 +155,7 @@ use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::key::flow::flow_state::FlowStateValue;
 use crate::key::node_address::NodeAddressValue;
 use crate::key::table_route::TableRouteKey;
+use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -1434,7 +1435,8 @@ impl_metadata_value! {
     NodeAddressValue,
     SchemaNameValue,
     FlowStateValue,
-    PoisonValue
+    PoisonValue,
+    TopicRegionValue
 }
 
 impl_optional_metadata_value! {
@@ -1676,9 +1678,11 @@ mod tests {
                 .topic_region_manager
                 .regions(&topic)
                 .await
-                .unwrap();
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>();
             assert_eq!(regions.len(), 8);
-            assert_eq!(regions[0], region_id);
+            assert!(regions.contains(&region_id));
         }
     }
 

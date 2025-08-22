@@ -208,7 +208,9 @@ impl RegionFlushTrigger {
             .topic_region_manager()
             .regions(topic)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .context(error::TableMetadataManagerSnafu)?
+            .into_keys()
+            .collect::<Vec<_>>();
         if region_ids.is_empty() {
             debug!("No regions found for topic: {}", topic);
             return Ok(());
