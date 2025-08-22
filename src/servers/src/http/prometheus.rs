@@ -1002,16 +1002,10 @@ pub async fn label_values_query(
     if label_name == METRIC_NAME_LABEL {
         let catalog_manager = handler.catalog_manager();
 
-        match retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await {
-            Ok(table_names) => {
-                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
-                    table_names,
-                ));
-            }
-            Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-            }
-        }
+        let table_names = try_call_return_response!(
+            retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
         let field_columns = handle_schema_err!(
             retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0).await
@@ -1023,16 +1017,10 @@ pub async fn label_values_query(
     } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
         let catalog_manager = handler.catalog_manager();
 
-        match retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await {
-            Ok(schema_names) => {
-                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
-                    schema_names,
-                ));
-            }
-            Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-            }
-        }
+        let schema_names = try_call_return_response!(
+            retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(schema_names));
     }
 
     let queries = params.matches.0;
@@ -1113,12 +1101,31 @@ async fn retrieve_table_names(
     catalog_manager: CatalogManagerRef,
     matches: Vec<String>,
 ) -> Result<Vec<String>> {
-    dbg!(&matches);
     let catalog = query_ctx.current_catalog();
     let schema = query_ctx.current_schema();
 
     let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(&query_ctx));
     let mut table_names = Vec::new();
+
+    // we only provide very limited support for matcher against __name__
+    let name_matcher = matches
+        .get(0)
+        .and_then(|matcher| promql_parser::parser::parse(&matcher).ok())
+        .and_then(|expr| {
+            if let PromqlExpr::VectorSelector(vector_selector) = expr {
+                let matchers = vector_selector.matchers.matchers;
+                for matcher in matchers {
+                    if matcher.name == METRIC_NAME_LABEL {
+                        return Some(matcher);
+                    }
+                }
+
+                None
+            } else {
+                None
+            }
+        });
+
     while let Some(table) = tables_stream.next().await {
         let table = table.context(CatalogSnafu)?;
         if table
@@ -1131,7 +1138,29 @@ async fn retrieve_table_names(
             continue;
         }
 
-        table_names.push(table.table_info().name.clone());
+        let table_name = &table.table_info().name;
+
+        if let Some(matcher) = &name_matcher {
+            match &matcher.op {
+                MatchOp::Equal => {
+                    if table_name == &matcher.value {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                MatchOp::Re(reg) => {
+                    if reg.is_match(table_name) {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                _ => {
+                    // != and !~ are not supported:
+                    // vector must contains at least one non-empty matcher
+                    table_names.push(table_name.clone());
+                }
+            }
+        } else {
+            table_names.push(table_name.clone());
+        }
     }
 
     table_names.sort_unstable();
