@@ -56,10 +56,14 @@ impl HeartbeatTask {
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
-            peer_addr: addrs::resolve_addr(
-                &opts.internal_grpc.bind_addr,
-                Some(&opts.internal_grpc.server_addr),
-            ),
+            // if internal grpc is configured, use its address as the peer address
+            // otherwise use the public grpc address, because peer address only promises to be reachable
+            // by other components, it doesn't matter whether it's internal or external
+            peer_addr: if let Some(internal) = &opts.internal_grpc {
+                addrs::resolve_addr(&internal.bind_addr, Some(&internal.server_addr))
+            } else {
+                addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
+            },
             meta_client,
             report_interval: heartbeat_opts.interval.as_millis() as u64,
             retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,
