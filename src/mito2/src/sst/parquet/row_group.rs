@@ -304,7 +304,8 @@ impl<'a> InMemoryRowGroup<'a> {
         };
 
         // Put pages back to the cache.
-        let page_value = PageValue::new(pages.clone());
+        let pages_to_cache = maybe_copy_pages(ranges, &pages);
+        let page_value = PageValue::new(pages_to_cache);
         self.cache_strategy
             .put_pages(page_key, Arc::new(page_value));
 
@@ -322,6 +323,30 @@ impl<'a> InMemoryRowGroup<'a> {
             return cache.file_cache().read_ranges(key, ranges).await;
         }
         None
+    }
+}
+
+/// Checks whether we should clone the pages based on the given ranges.
+fn should_clone_pages(ranges: &[Range<u64>]) -> bool {
+    // Find the min and max of the ranges.
+    let min = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+    let max = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+    let total_page_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+    let max_page_size = max - min;
+
+    // If the max page size is more than 1.2x of the total page size, we should clone the pages.
+    max_page_size as f64 > total_page_size as f64 * 1.2
+}
+
+/// Reuses the page bytes or copys each pages to new buffers if the shared bytes are too large.
+fn maybe_copy_pages(ranges: &[Range<u64>], pages: &[Bytes]) -> Vec<Bytes> {
+    if should_clone_pages(ranges) {
+        pages
+            .iter()
+            .map(|page| Bytes::copy_from_slice(&page))
+            .collect()
+    } else {
+        pages.to_vec()
     }
 }
 
