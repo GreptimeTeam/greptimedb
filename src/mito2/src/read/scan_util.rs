@@ -24,9 +24,10 @@ use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
+use snafu::OptionExt;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{Result, UnexpectedSnafu};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -773,11 +774,21 @@ pub fn build_flat_file_range_scan_stream(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
-            // TODO: Add compat_batch support for RecordBatch similar to the non-flat version
-            // let compat_batch = range.compat_batch();
-
+            let may_compat = range
+                .compat_batch()
+                .map(|compat| {
+                    compat.as_flat().context(UnexpectedSnafu {
+                        reason: "Invalid compat for flat format",
+                    })
+                })
+                .transpose()?;
             while let Some(record_batch) = reader.next_batch()? {
-                yield record_batch;
+                if let Some(flat_compat) = may_compat {
+                    let batch = flat_compat.compat(record_batch)?;
+                    yield batch;
+                } else {
+                    yield record_batch;
+                }
             }
 
             let prune_metrics = reader.metrics();
