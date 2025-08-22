@@ -16,6 +16,7 @@ use std::{fs, path};
 
 use common_base::secrets::ExposeSecret;
 use common_telemetry::info;
+use opendal::layers::HttpClientLayer;
 use opendal::services::{Fs, Gcs, Oss, S3};
 use snafu::prelude::*;
 
@@ -89,8 +90,9 @@ pub async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<Obj
 
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
+        .layer(HttpClientLayer::new(client))
         .finish();
-    operator.update_http_client(|_| client);
+
     Ok(operator)
 }
 
@@ -113,8 +115,9 @@ pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore>
 
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
+        .layer(HttpClientLayer::new(client))
         .finish();
-    operator.update_http_client(|_| client);
+
     Ok(operator)
 }
 
@@ -136,8 +139,9 @@ pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore>
 
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
+        .layer(HttpClientLayer::new(client))
         .finish();
-    operator.update_http_client(|_| client);
+
     Ok(operator)
 }
 
@@ -169,7 +173,8 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
 
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
+        .layer(HttpClientLayer::new(client))
         .finish();
-    operator.update_http_client(|_| client);
+
     Ok(operator)
 }
