@@ -18,6 +18,7 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::Configurable;
+use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
@@ -131,17 +132,28 @@ where
         }
     }
 
-    fn build_grpc_server(&mut self, opts: &FrontendOptions) -> Result<GrpcServer> {
+    fn build_grpc_server(
+        &mut self,
+        grpc: &GrpcOptions,
+        meta_client: &Option<MetaClientOptions>,
+        name: Option<String>,
+        external: bool,
+    ) -> Result<GrpcServer> {
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
-            self.grpc_server_builder(&opts.grpc)?
+            self.grpc_server_builder(grpc)?
         };
 
-        let user_provider = self.plugins.get::<UserProviderRef>();
+        let user_provider = if external {
+            self.plugins.get::<UserProviderRef>()
+        } else {
+            // skip authentication for internal grpc port
+            None
+        };
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
-        let runtime = if opts.meta_client.is_none() {
+        let runtime = if meta_client.is_none() {
             Some(builder.runtime().clone())
         } else {
             None
@@ -151,18 +163,25 @@ where
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
             runtime,
-            opts.grpc.flight_compression,
+            grpc.flight_compression,
         );
 
-        let frontend_grpc_handler =
-            FrontendGrpcHandler::new(self.instance.process_manager().clone());
         let grpc_server = builder
+            .name(name)
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
             .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
-            .flight_handler(Arc::new(greptime_request_handler))
-            .frontend_grpc_handler(frontend_grpc_handler)
-            .build();
+            .flight_handler(Arc::new(greptime_request_handler));
+
+        let grpc_server = if external {
+            let frontend_grpc_handler =
+                FrontendGrpcHandler::new(self.instance.process_manager().clone());
+            grpc_server.frontend_grpc_handler(frontend_grpc_handler)
+        } else {
+            grpc_server
+        }
+        .build();
+
         Ok(grpc_server)
     }
 
@@ -195,7 +214,19 @@ where
         {
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
-            let grpc_server = self.build_grpc_server(&opts)?;
+            let grpc_server = self.build_grpc_server(&opts.grpc, &opts.meta_client, None, true)?;
+            handlers.insert((Box::new(grpc_server), grpc_addr));
+        }
+
+        if opts.meta_client.is_some() {
+            // Always init Internal GRPC server
+            let grpc_addr = parse_addr(&opts.internal_grpc.bind_addr)?;
+            let grpc_server = self.build_grpc_server(
+                &opts.grpc,
+                &opts.meta_client,
+                Some("INTERNAL_GRPC_SERVER".to_string()),
+                false,
+            )?;
             handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
