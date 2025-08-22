@@ -49,7 +49,7 @@ pub struct FrontendOptions {
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
     /// it provide the same service as the public gRPC service, just only for internal use.
-    pub internal_grpc: GrpcOptions,
+    pub internal_grpc: Option<GrpcOptions>,
     pub mysql: MysqlOptions,
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
@@ -77,7 +77,7 @@ impl Default for FrontendOptions {
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
-            internal_grpc: GrpcOptions::internal_default(),
+            internal_grpc: None,
             mysql: MysqlOptions::default(),
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),

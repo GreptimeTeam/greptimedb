@@ -1,7 +1,3 @@
 [grpc]
 bind_addr = "{grpc_addr}"
 server_addr = "{grpc_addr}"
-
-[internal_grpc]
-bind_addr = "{internal_grpc_addr}"
-server_addr = "{internal_grpc_addr}"
