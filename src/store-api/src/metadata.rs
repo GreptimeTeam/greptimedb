@@ -416,7 +416,7 @@ impl RegionMetadata {
             time_indexes.len() == 1,
             InvalidMetaSnafu {
                 reason: format!(
-                    "expect only one time index, found {}: {:?}",
+                    "expect only one time index, found {}: {}",
                     time_indexes.len(),
                     time_indexes
                         .iter()
