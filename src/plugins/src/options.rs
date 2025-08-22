@@ -18,6 +18,6 @@ use serde::{Deserialize, Serialize};
 pub struct DummyOptions;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PluginOptions {
-    pub dummy: DummyOptions,
+pub enum PluginOptions {
+    Dummy(DummyOptions),
 }

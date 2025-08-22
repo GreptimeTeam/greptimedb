@@ -71,7 +71,7 @@ impl InstanceBuilder {
         maybe_activate_heap_profile(&dn_opts.memory);
         create_resource_limit_metrics(APP_NAME);
 
-        plugins::setup_datanode_plugins(plugins, opts.plugins.as_ref(), dn_opts)
+        plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)
             .await
             .context(StartDatanodeSnafu)?;
 
