@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -37,7 +38,8 @@ impl HttpHandler for NodeLeaseHandler {
         _: http::Method,
         _: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let leases = lease::alive_datanodes(&self.meta_peer_client, u64::MAX).await?;
+        let leases =
+            lease::alive_datanodes(&self.meta_peer_client, Duration::from_secs(u64::MAX)).await?;
         let leases = leases
             .into_iter()
             .map(|(k, v)| HumanLease {

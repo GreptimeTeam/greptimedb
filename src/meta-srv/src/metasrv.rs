@@ -688,7 +688,7 @@ impl Metasrv {
         lookup_datanode_peer(
             peer_id,
             &self.meta_peer_client,
-            distributed_time_constants::DATANODE_LEASE_SECS,
+            Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
         )
         .await
     }
