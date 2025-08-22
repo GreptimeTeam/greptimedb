@@ -14,11 +14,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use common_base::readable_size::ReadableSize;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::distributed_time_constants::TOPIC_STATS_REPORT_INTERVAL_SECS;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, info, warn};
 use common_time::util::current_time_millis;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use dashmap::DashMap;
@@ -400,6 +401,7 @@ impl LogStore for KafkaLogStore {
         let mut entry_records: HashMap<RegionId, Vec<Record>> = HashMap::new();
         let provider = provider.clone();
         let stream = async_stream::stream!({
+            let now = Instant::now();
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
@@ -409,9 +411,6 @@ impl LogStore for KafkaLogStore {
                         topic: &provider.topic,
                     })?;
                 let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
-
-                metrics::METRIC_KAFKA_READ_BYTES_TOTAL
-                    .inc_by(kafka_record.approximate_size() as u64);
 
                 debug!(
                     "Read a record at offset {} for topic {}, high watermark: {}",
@@ -446,6 +445,18 @@ impl LogStore for KafkaLogStore {
                     break;
                 }
             }
+
+            metrics::METRIC_KAFKA_READ_BYTES_TOTAL
+                .inc_by(stream_consumer.total_fetched_bytes() as u64);
+
+            info!(
+                "Fetched {} bytes from topic: {}, start_entry_id: {}, end_offset: {}, elapsed: {:?}",
+                ReadableSize(stream_consumer.total_fetched_bytes()),
+                stream_consumer.topic(),
+                entry_id,
+                end_offset,
+                now.elapsed()
+            );
         });
         Ok(Box::pin(stream))
     }

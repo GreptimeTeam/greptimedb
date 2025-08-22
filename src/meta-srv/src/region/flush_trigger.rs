@@ -78,6 +78,8 @@ pub struct RegionFlushTrigger {
     server_addr: String,
     /// The flush trigger size.
     flush_trigger_size: ReadableSize,
+    /// The checkpoint trigger size.
+    checkpoint_trigger_size: ReadableSize,
     /// The receiver of events.
     receiver: Receiver<Event>,
 }
@@ -91,6 +93,7 @@ impl RegionFlushTrigger {
         mailbox: MailboxRef,
         server_addr: String,
         flush_trigger_size: ReadableSize,
+        checkpoint_trigger_size: ReadableSize,
     ) -> (Self, RegionFlushTicker) {
         let (tx, rx) = Self::channel();
         let region_flush_ticker = RegionFlushTicker::new(TICKER_INTERVAL, tx);
@@ -101,6 +104,7 @@ impl RegionFlushTrigger {
             mailbox,
             server_addr,
             flush_trigger_size,
+            checkpoint_trigger_size,
             receiver: rx,
         };
         (region_flush_trigger, region_flush_ticker)
@@ -238,7 +242,7 @@ impl RegionFlushTrigger {
                 .context(error::TableMetadataManagerSnafu)?;
         }
 
-        metrics::METRIC_META_TRIGGERED_REGION_PERSIST_CHECKPOINTS_TOTAL
+        metrics::METRIC_META_TRIGGERED_REGION_CHECKPOINT_TOTAL
             .with_label_values(&[topic])
             .inc_by(regions.len() as u64);
 
@@ -271,7 +275,7 @@ impl RegionFlushTrigger {
                 .map(|(region_id, value)| (*region_id, value.min_entry_id().unwrap_or_default())),
             avg_record_size as u64,
             latest_entry_id,
-            self.flush_trigger_size / 2,
+            self.checkpoint_trigger_size,
         );
         let region_manifests = self
             .leader_region_registry
@@ -293,6 +297,22 @@ impl RegionFlushTrigger {
                     itertools::Either::Right((region_id, region.manifest.prunable_entry_id()))
                 }
             });
+
+        let min_entry_id = inactive_regions
+            .iter()
+            .min_by_key(|(_, entry_id)| *entry_id);
+        let min_entry_id = active_regions
+            .iter()
+            .min_by_key(|(_, entry_id)| *entry_id)
+            .or(min_entry_id);
+
+        if let Some((_, min_entry_id)) = min_entry_id {
+            let replay_size = (latest_entry_id.saturating_sub(*min_entry_id))
+                .saturating_mul(avg_record_size as u64);
+            metrics::METRIC_META_TOPIC_ESTIMISTED_REPLY_SIZE
+                .with_label_values(&[topic])
+                .set(replay_size as i64);
+        }
 
         // Selects regions to flush from the set of active regions.
         let mut regions_to_flush = filter_regions_by_replay_size(

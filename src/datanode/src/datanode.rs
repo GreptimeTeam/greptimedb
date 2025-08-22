@@ -23,18 +23,15 @@ use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::datanode::TopicStatsReporter;
-use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_options_allocator::prepare_wal_options;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::{error, info, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
-use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{default_index_file, GlobalIndexCollector};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -49,10 +46,8 @@ use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::path_utils::{table_dir, WAL_DIR};
+use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{RegionEngineRef, RegionRole};
-use store_api::region_request::{PathType, RegionOpenRequest};
-use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -70,6 +65,7 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
+use crate::utils::{build_region_open_requests, RegionOpenRequests};
 
 /// Datanode service.
 pub struct Datanode {
@@ -252,16 +248,12 @@ impl DatanodeBuilder {
             .recovery_mode()
             .await
             .context(GetMetadataSnafu)?;
-        let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
-        let table_values = datanode_table_manager
-            .tables(node_id)
-            .try_collect::<Vec<_>>()
-            .await
-            .context(GetMetadataSnafu)?;
 
+        let region_open_requests =
+            build_region_open_requests(node_id, self.kv_backend.clone()).await?;
         let open_all_regions = open_all_regions(
             region_server.clone(),
-            table_values,
+            region_open_requests,
             !controlled_by_metasrv,
             self.opts.init_regions_parallelism,
             // Ignore nonexistent regions in recovery mode.
@@ -347,22 +339,18 @@ impl DatanodeBuilder {
     ) -> Result<()> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
+        // TODO(weny): Considering introducing a readonly kv_backend trait.
         let runtime_switch_manager = RuntimeSwitchManager::new(kv_backend.clone());
         let is_recovery_mode = runtime_switch_manager
             .recovery_mode()
             .await
             .context(GetMetadataSnafu)?;
-
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
-        let table_values = datanode_table_manager
-            .tables(node_id)
-            .try_collect::<Vec<_>>()
-            .await
-            .context(GetMetadataSnafu)?;
+        let region_open_requests =
+            build_region_open_requests(node_id, self.kv_backend.clone()).await?;
 
         open_all_regions(
             region_server.clone(),
-            table_values,
+            region_open_requests,
             open_with_writable,
             self.opts.init_regions_parallelism,
             is_recovery_mode,
@@ -609,73 +597,24 @@ impl DatanodeBuilder {
 /// Open all regions belong to this datanode.
 async fn open_all_regions(
     region_server: RegionServer,
-    table_values: Vec<DatanodeTableValue>,
+    region_open_requests: RegionOpenRequests,
     open_with_writable: bool,
     init_regions_parallelism: usize,
     ignore_nonexistent_region: bool,
 ) -> Result<()> {
-    let mut regions = vec![];
-    #[cfg(feature = "enterprise")]
-    let mut follower_regions = vec![];
-    for table_value in table_values {
-        for region_number in table_value.regions {
-            // Augments region options with wal options if a wal options is provided.
-            let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
-                &mut region_options,
-                RegionId::new(table_value.table_id, region_number),
-                &table_value.region_info.region_wal_options,
-            );
-
-            regions.push((
-                RegionId::new(table_value.table_id, region_number),
-                table_value.region_info.engine.clone(),
-                table_value.region_info.region_storage_path.clone(),
-                region_options,
-            ));
-        }
-
+    let RegionOpenRequests {
+        leader_regions,
         #[cfg(feature = "enterprise")]
-        for region_number in table_value.follower_regions {
-            // Augments region options with wal options if a wal options is provided.
-            let mut region_options = table_value.region_info.region_options.clone();
-            prepare_wal_options(
-                &mut region_options,
-                RegionId::new(table_value.table_id, region_number),
-                &table_value.region_info.region_wal_options,
-            );
+        follower_regions,
+    } = region_open_requests;
 
-            follower_regions.push((
-                RegionId::new(table_value.table_id, region_number),
-                table_value.region_info.engine.clone(),
-                table_value.region_info.region_storage_path.clone(),
-                region_options,
-            ));
-        }
-    }
-    let num_regions = regions.len();
-    info!("going to open {} region(s)", num_regions);
-
-    let mut region_requests = Vec::with_capacity(regions.len());
-    for (region_id, engine, store_path, options) in regions {
-        let table_dir = table_dir(&store_path, region_id.table_id());
-        region_requests.push((
-            region_id,
-            RegionOpenRequest {
-                engine,
-                table_dir,
-                path_type: PathType::Bare,
-                options,
-                skip_wal_replay: false,
-            },
-        ));
-    }
-
+    let leader_region_num = leader_regions.len();
+    info!("going to open {} region(s)", leader_region_num);
     let now = Instant::now();
     let open_regions = region_server
         .handle_batch_open_requests(
             init_regions_parallelism,
-            region_requests,
+            leader_regions,
             ignore_nonexistent_region,
         )
         .await?;
@@ -686,19 +625,19 @@ async fn open_all_regions(
     );
     if !ignore_nonexistent_region {
         ensure!(
-            open_regions.len() == num_regions,
+            open_regions.len() == leader_region_num,
             error::UnexpectedSnafu {
                 violated: format!(
                     "Expected to open {} of regions, only {} of regions has opened",
-                    num_regions,
+                    leader_region_num,
                     open_regions.len()
                 )
             }
         );
-    } else if open_regions.len() != num_regions {
+    } else if open_regions.len() != leader_region_num {
         warn!(
             "ignore nonexistent region, expected to open {} of regions, only {} of regions has opened",
-            num_regions,
+            leader_region_num,
             open_regions.len()
         );
     }
@@ -717,31 +656,14 @@ async fn open_all_regions(
     if !follower_regions.is_empty() {
         use tokio::time::Instant;
 
-        info!(
-            "going to open {} follower region(s)",
-            follower_regions.len()
-        );
-        let mut region_requests = Vec::with_capacity(follower_regions.len());
-        let num_regions = follower_regions.len();
-        for (region_id, engine, store_path, options) in follower_regions {
-            let table_dir = table_dir(&store_path, region_id.table_id());
-            region_requests.push((
-                region_id,
-                RegionOpenRequest {
-                    engine,
-                    table_dir,
-                    path_type: PathType::Bare,
-                    options,
-                    skip_wal_replay: true,
-                },
-            ));
-        }
+        let follower_region_num = follower_regions.len();
+        info!("going to open {} follower region(s)", follower_region_num);
 
         let now = Instant::now();
         let open_regions = region_server
             .handle_batch_open_requests(
                 init_regions_parallelism,
-                region_requests,
+                follower_regions,
                 ignore_nonexistent_region,
             )
             .await?;
@@ -753,19 +675,19 @@ async fn open_all_regions(
 
         if !ignore_nonexistent_region {
             ensure!(
-                open_regions.len() == num_regions,
+                open_regions.len() == follower_region_num,
                 error::UnexpectedSnafu {
                     violated: format!(
                         "Expected to open {} of follower regions, only {} of regions has opened",
-                        num_regions,
+                        follower_region_num,
                         open_regions.len()
                     )
                 }
             );
-        } else if open_regions.len() != num_regions {
+        } else if open_regions.len() != follower_region_num {
             warn!(
                 "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
-                num_regions,
+                follower_region_num,
                 open_regions.len()
             );
         }

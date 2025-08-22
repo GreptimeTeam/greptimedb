@@ -40,6 +40,8 @@ impl HandlerContext {
                 path_type: PathType::Bare,
                 options: region_options,
                 skip_wal_replay,
+                // TODO(weny): add checkpoint.
+                checkpoint: None,
             });
             let result = self.region_server.handle_request(region_id, request).await;
             let success = result.is_ok();

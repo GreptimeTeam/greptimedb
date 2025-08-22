@@ -42,6 +42,8 @@ pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::ZERO;
 pub const DEFAULT_AUTO_PRUNE_PARALLELISM: usize = 10;
 /// Default size of WAL to trigger flush.
 pub const DEFAULT_FLUSH_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(512);
+/// Default checkpoint trigger size.
+pub const DEFAULT_CHECKPOINT_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(128);
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};

@@ -22,7 +22,9 @@ use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{
+    AffectedRows, PathType, RegionOpenRequest, RegionRequest, ReplayCheckpoint,
+};
 use store_api::storage::RegionId;
 
 use crate::engine::create::region_options_for_metadata_region;
@@ -204,12 +206,18 @@ impl MetricEngineInner {
         request: RegionOpenRequest,
     ) -> (RegionOpenRequest, RegionOpenRequest) {
         let metadata_region_options = region_options_for_metadata_region(&request.options);
+        let checkpoint = request.checkpoint;
+
         let open_metadata_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),
             path_type: PathType::Metadata,
             options: metadata_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            checkpoint: checkpoint.map(|checkpoint| ReplayCheckpoint {
+                entry_id: checkpoint.metadata_entry_id.unwrap_or_default(),
+                metadata_entry_id: None,
+            }),
         };
 
         let mut data_region_options = request.options;
@@ -223,6 +231,10 @@ impl MetricEngineInner {
             options: data_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
+            checkpoint: checkpoint.map(|checkpoint| ReplayCheckpoint {
+                entry_id: checkpoint.entry_id,
+                metadata_entry_id: None,
+            }),
         };
 
         (open_metadata_region_request, open_data_region_request)

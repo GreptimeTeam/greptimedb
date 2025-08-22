@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
     KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_AUTO_PRUNE_INTERVAL,
-    DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
 };
 
 /// Kafka wal configurations for metasrv.
@@ -41,6 +41,8 @@ pub struct MetasrvKafkaConfig {
     pub auto_prune_parallelism: usize,
     // The size of WAL to trigger flush.
     pub flush_trigger_size: ReadableSize,
+    // The checkpoint trigger size.
+    pub checkpoint_trigger_size: ReadableSize,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -52,6 +54,7 @@ impl Default for MetasrvKafkaConfig {
             auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
             auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
             flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
+            checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
         }
     }
 }

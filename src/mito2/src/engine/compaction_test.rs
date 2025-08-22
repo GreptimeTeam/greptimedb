@@ -792,6 +792,7 @@ async fn test_change_region_compaction_window() {
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -875,6 +876,7 @@ async fn test_open_overwrite_compaction_window() {
                 path_type: PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await

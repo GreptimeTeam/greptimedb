@@ -40,7 +40,9 @@ use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, MetadataValue, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{
+    BatchDeleteRequest, BatchGetRequest, BatchPutRequest, PutRequest, RangeRequest,
+};
 use crate::rpc::KeyValue;
 
 // The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
@@ -191,6 +193,23 @@ impl TopicRegionManager {
         };
         self.kv_backend.put(put_req).await?;
         Ok(())
+    }
+
+    pub async fn batch_get(
+        &self,
+        keys: Vec<TopicRegionKey<'_>>,
+    ) -> Result<HashMap<RegionId, TopicRegionValue>> {
+        let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchGetRequest { keys: raw_keys };
+        let resp = self.kv_backend.batch_get(req).await?;
+
+        let v = resp
+            .kvs
+            .into_iter()
+            .map(|kv| topic_region_decoder(&kv).map(|(key, value)| (key.region_id, value)))
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        Ok(v)
     }
 
     pub async fn batch_put(
