@@ -130,6 +130,39 @@ impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
     }
 }
 
+impl ReplayCheckpoint {
+    /// Creates a new [`ReplayCheckpoint`] with the given entry id and metadata entry id.
+    pub fn new(entry_id: u64, metadata_entry_id: Option<u64>) -> Self {
+        Self {
+            entry_id,
+            metadata_entry_id,
+        }
+    }
+}
+
+impl TopicRegionValue {
+    /// Creates a new [`TopicRegionValue`] with the given checkpoint.
+    pub fn new(checkpoint: Option<ReplayCheckpoint>) -> Self {
+        Self { checkpoint }
+    }
+
+    /// Returns the minimum entry id of the region.
+    ///
+    /// If the metadata entry id is not set, it returns the entry id.
+    pub fn min_entry_id(&self) -> Option<u64> {
+        match self.checkpoint {
+            Some(ReplayCheckpoint {
+                entry_id,
+                metadata_entry_id,
+            }) => match metadata_entry_id {
+                Some(metadata_entry_id) => Some(entry_id.min(metadata_entry_id)),
+                None => Some(entry_id),
+            },
+            None => None,
+        }
+    }
+}
+
 fn topic_region_decoder(value: &KeyValue) -> Result<(TopicRegionKey<'_>, TopicRegionValue)> {
     let key = TopicRegionKey::from_bytes(&value.key)?;
     let value = if value.value.is_empty() {

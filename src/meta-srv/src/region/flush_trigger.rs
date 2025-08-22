@@ -19,9 +19,10 @@ use std::time::{Duration, Instant};
 use api::v1::meta::MailboxMessage;
 use common_base::readable_size::ReadableSize;
 use common_meta::instruction::{FlushRegions, Instruction};
+use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
-use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::region_registry::{LeaderRegion, LeaderRegionRegistryRef};
 use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_telemetry::{debug, error, info};
 use common_time::util::current_time_millis;
@@ -197,6 +198,53 @@ impl RegionFlushTrigger {
         Some((latest_entry_id, stat.avg_record_size))
     }
 
+    async fn persist_region_checkpoints(
+        &self,
+        topic: &str,
+        region_ids: &[RegionId],
+        leader_regions: &HashMap<RegionId, LeaderRegion>,
+    ) -> Result<()> {
+        if region_ids.is_empty() {
+            return Ok(());
+        }
+
+        let regions = region_ids
+            .iter()
+            .flat_map(|region_id| match leader_regions.get(region_id) {
+                Some(leader_region) => {
+                    let entry_id = leader_region.manifest.replay_entry_id();
+                    let metadata_entry_id = leader_region.manifest.metadata_replay_entry_id();
+
+                    Some((
+                        TopicRegionKey::new(*region_id, topic),
+                        Some(TopicRegionValue::new(Some(ReplayCheckpoint::new(
+                            entry_id,
+                            metadata_entry_id,
+                        )))),
+                    ))
+                }
+                None => None,
+            })
+            .collect::<Vec<_>>();
+
+        let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
+        let batch_size = max_txn_ops.min(regions.len());
+        for batch in regions.chunks(batch_size) {
+            let batch = batch.to_vec();
+            self.table_metadata_manager
+                .topic_region_manager()
+                .batch_put(batch)
+                .await
+                .context(error::TableMetadataManagerSnafu)?;
+        }
+
+        metrics::METRIC_META_TRIGGERED_REGION_PERSIST_CHECKPOINTS_TOTAL
+            .with_label_values(&[topic])
+            .inc_by(regions.len() as u64);
+
+        Ok(())
+    }
+
     async fn flush_regions_in_topic(
         &self,
         topic: &str,
@@ -208,17 +256,35 @@ impl RegionFlushTrigger {
             .topic_region_manager()
             .regions(topic)
             .await
-            .context(error::TableMetadataManagerSnafu)?
-            .into_keys()
-            .collect::<Vec<_>>();
+            .context(error::TableMetadataManagerSnafu)?;
+
         if region_ids.is_empty() {
             debug!("No regions found for topic: {}", topic);
             return Ok(());
         }
 
-        let (inactive_regions, active_regions): (Vec<_>, Vec<_>) = self
+        // Filters regions need to persist checkpoints.
+        let regions_to_persist = filter_regions_by_replay_size(
+            topic,
+            region_ids
+                .iter()
+                .map(|(region_id, value)| (*region_id, value.min_entry_id().unwrap_or_default())),
+            avg_record_size as u64,
+            latest_entry_id,
+            self.flush_trigger_size / 2,
+        );
+        let region_manifests = self
             .leader_region_registry
-            .batch_get(region_ids.iter().cloned())
+            .batch_get(region_ids.keys().cloned());
+
+        if let Err(err) = self
+            .persist_region_checkpoints(topic, &regions_to_persist, &region_manifests)
+            .await
+        {
+            error!(err; "Failed to persist region checkpoints for topic: {}", topic);
+        }
+
+        let (inactive_regions, active_regions): (Vec<_>, Vec<_>) = region_manifests
             .into_iter()
             .partition_map(|(region_id, region)| {
                 if !region.manifest.is_inactive() {
@@ -229,7 +295,7 @@ impl RegionFlushTrigger {
             });
 
         // Selects regions to flush from the set of active regions.
-        let mut regions_to_flush = select_regions_to_flush(
+        let mut regions_to_flush = filter_regions_by_replay_size(
             topic,
             active_regions.into_iter(),
             avg_record_size as u64,
@@ -241,7 +307,7 @@ impl RegionFlushTrigger {
         // Selects regions to flush from the set of inactive regions.
         // For inactive regions, we use a lower flush trigger size (half of the normal size)
         // to encourage more aggressive flushing to update the region's topic latest entry id.
-        let inactive_regions_to_flush = select_regions_to_flush(
+        let inactive_regions_to_flush = filter_regions_by_replay_size(
             topic,
             inactive_regions.into_iter(),
             avg_record_size as u64,
@@ -306,26 +372,26 @@ impl RegionFlushTrigger {
     }
 }
 
-/// Select regions to flush based on the estimated replay size.
+/// Filter regions based on the estimated replay size.
 ///
-/// The regions are selected if the estimated replay size exceeds the flush trigger size.
+/// Returns the regions if its estimated replay size exceeds the given threshold.
 /// The estimated replay size is calculated as:
 /// `(latest_entry_id - prunable_entry_id) * avg_record_size`
-fn select_regions_to_flush<I: Iterator<Item = (RegionId, u64)>>(
+fn filter_regions_by_replay_size<I: Iterator<Item = (RegionId, u64)>>(
     topic: &str,
     regions: I,
     avg_record_size: u64,
     latest_entry_id: u64,
-    flush_trigger_size: ReadableSize,
+    threshold: ReadableSize,
 ) -> Vec<RegionId> {
     let mut regions_to_flush = Vec::new();
-    for (region_id, prunable_entry_id) in regions {
-        if prunable_entry_id < latest_entry_id {
-            let replay_size = (latest_entry_id - prunable_entry_id).saturating_mul(avg_record_size);
-            if replay_size > flush_trigger_size.as_bytes() {
+    for (region_id, entry_id) in regions {
+        if entry_id < latest_entry_id {
+            let replay_size = (latest_entry_id - entry_id).saturating_mul(avg_record_size);
+            if replay_size > threshold.as_bytes() {
                 debug!(
-                    "Region {}: estimated replay size {} exceeds flush trigger size {}, prunable entry id: {}, topic latest entry id: {}, topic: '{}'",
-                    region_id, ReadableSize(replay_size), flush_trigger_size, prunable_entry_id, latest_entry_id, topic
+                    "Region {}: estimated replay size {} exceeds threshold {}, prunable entry id: {}, topic latest entry id: {}, topic: '{}'",
+                    region_id, ReadableSize(replay_size), threshold, entry_id, latest_entry_id, topic
                 );
                 regions_to_flush.push(region_id);
             }
@@ -423,7 +489,7 @@ mod tests {
             (region_id(1, 3), 95), // replay_size = 50
         ];
 
-        let result = select_regions_to_flush(
+        let result = filter_regions_by_replay_size(
             topic,
             regions.into_iter(),
             avg_record_size,
@@ -447,7 +513,7 @@ mod tests {
             (region_id(1, 3), 90), // replay_size = 100
         ];
 
-        let result = select_regions_to_flush(
+        let result = filter_regions_by_replay_size(
             topic,
             regions.into_iter(),
             avg_record_size,
@@ -467,7 +533,7 @@ mod tests {
         let regions = vec![(region_id(1, 1), 50), (region_id(1, 2), 10)];
 
         // replay_size will always be 0, so none should be flushed
-        let result = select_regions_to_flush(
+        let result = filter_regions_by_replay_size(
             topic,
             regions.into_iter(),
             avg_record_size,
@@ -489,7 +555,7 @@ mod tests {
             (region_id(1, 2), 99),  // replay_size = 10
         ];
 
-        let result = select_regions_to_flush(
+        let result = filter_regions_by_replay_size(
             topic,
             regions.into_iter(),
             avg_record_size,
@@ -514,7 +580,7 @@ mod tests {
             (region_id(1, 4), 200), // replay_size = 0
         ];
 
-        let result = select_regions_to_flush(
+        let result = filter_regions_by_replay_size(
             topic,
             regions.into_iter(),
             avg_record_size,

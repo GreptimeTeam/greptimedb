@@ -133,6 +133,34 @@ impl LeaderRegionManifestInfo {
         }
     }
 
+    /// Returns the replay entry id of the data region.
+    pub fn replay_entry_id(&self) -> u64 {
+        match self {
+            LeaderRegionManifestInfo::Mito {
+                flushed_entry_id,
+                topic_latest_entry_id,
+                ..
+            } => (*flushed_entry_id).max(*topic_latest_entry_id),
+            LeaderRegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                data_topic_latest_entry_id,
+                ..
+            } => (*data_flushed_entry_id).max(*data_topic_latest_entry_id),
+        }
+    }
+
+    /// Returns the replay entry id of the metadata region.
+    pub fn metadata_replay_entry_id(&self) -> Option<u64> {
+        match self {
+            LeaderRegionManifestInfo::Metric {
+                metadata_flushed_entry_id,
+                metadata_topic_latest_entry_id,
+                ..
+            } => Some((*metadata_flushed_entry_id).max(*metadata_topic_latest_entry_id)),
+            _ => None,
+        }
+    }
+
     /// A region is considered inactive if the flushed entry id is less than the topic's latest entry id.
     ///
     /// The `topic_latest_entry_id` of a region is updated only when its memtable is empty during a flush.
