@@ -1104,13 +1104,13 @@ async fn retrieve_table_names(
     let catalog = query_ctx.current_catalog();
     let schema = query_ctx.current_schema();
 
-    let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(&query_ctx));
+    let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(query_ctx));
     let mut table_names = Vec::new();
 
     // we only provide very limited support for matcher against __name__
     let name_matcher = matches
-        .get(0)
-        .and_then(|matcher| promql_parser::parser::parse(&matcher).ok())
+        .first()
+        .and_then(|matcher| promql_parser::parser::parse(matcher).ok())
         .and_then(|expr| {
             if let PromqlExpr::VectorSelector(vector_selector) = expr {
                 let matchers = vector_selector.matchers.matchers;
