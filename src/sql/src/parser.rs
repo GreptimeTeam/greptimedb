@@ -64,7 +64,6 @@ impl ParserContext<'_> {
 
     pub(crate) fn add_table_alias(&mut self, alias: String, table_name: ObjectName) -> Result<()> {
         if self.table_aliases.contains_key(&alias) {
-            println!("Duplicate alias: {} AS {}", alias, table_name);
             return error::InvalidSqlSnafu {
                 msg: format!("Duplicate alias '{}'", alias),
             }

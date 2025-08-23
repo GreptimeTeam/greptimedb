@@ -40,7 +40,7 @@ impl ParserContext<'_> {
         match set_expr {
             sqlparser::ast::SetExpr::Select(select) => {
                 for table_with_joins in &select.from {
-                    self.process_table_with_joins(&table_with_joins)?;
+                    self.process_table_with_joins(table_with_joins)?;
                 }
             }
             sqlparser::ast::SetExpr::Query(query) => {
@@ -69,27 +69,25 @@ impl ParserContext<'_> {
 
     fn process_table_factor(&mut self, table_factor: &sqlparser::ast::TableFactor) -> Result<()> {
         match table_factor {
-            sqlparser::ast::TableFactor::Table { name, alias, .. } => {
-                if let Some(alias) = alias {
-                    let alias_name = &alias.name;
-                    let full_table_name = Self::convert_sql_object_name(name.clone());
-                    self.add_table_alias(alias_name.to_string(), full_table_name.clone())?;
-                    println!("Found table alias: {} AS {}", full_table_name, alias_name);
-                }
+            sqlparser::ast::TableFactor::Table { name, alias: Some(alias), .. } => {
+                let alias_name = &alias.name;
+                let full_table_name = Self::convert_sql_object_name(name.clone());
+                self.add_table_alias(alias_name.to_string(), full_table_name.clone())?;
+            }
+            sqlparser::ast::TableFactor::Table { alias: None, .. } => {
             }
             sqlparser::ast::TableFactor::Derived {
-                alias, subquery, ..
+                alias: Some(alias), subquery, ..
             } => {
-                if let Some(alias) = alias {
-                    let alias_name = &alias.name;
-                    let derived_name =
-                        ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
-                            sqlparser::ast::Ident::new(format!("derived_{}", alias_name)),
-                        )]);
-                    self.add_table_alias(alias_name.to_string(), derived_name)?;
-                    println!("Registered subquery alias: {}", alias_name);
-                }
+                let alias_name = &alias.name;
+                let derived_name =
+                    ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                        sqlparser::ast::Ident::new(format!("derived_{}", alias_name)),
+                    )]);
+                self.add_table_alias(alias_name.to_string(), derived_name)?;
                 self.process_set_expr_table_aliases(&subquery.body)?;
+            }
+            sqlparser::ast::TableFactor::Derived { alias: None, .. } => {
             }
             sqlparser::ast::TableFactor::NestedJoin { .. } => {}
             sqlparser::ast::TableFactor::TableFunction { .. } => {}
@@ -99,7 +97,7 @@ impl ParserContext<'_> {
     }
 
     fn convert_sql_object_name(name: sqlparser::ast::ObjectName) -> ObjectName {
-        ObjectName(name.0.into_iter().collect())
+        ObjectName(name.0)
     }
 }
 
