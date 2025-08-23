@@ -22,7 +22,7 @@ use crate::options::PluginOptions;
 #[allow(unused_mut)]
 pub async fn setup_datanode_plugins(
     plugins: &mut Plugins,
-    plugin_options: Option<&PluginOptions>,
+    plugin_options: &[PluginOptions],
     dn_opts: &DatanodeOptions,
 ) -> Result<()> {
     Ok(())

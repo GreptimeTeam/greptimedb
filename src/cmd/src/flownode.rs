@@ -291,7 +291,7 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
 
         let mut plugins = Plugins::new();
-        plugins::setup_flownode_plugins(&mut plugins, plugin_opts.as_ref(), &opts)
+        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFlownodeSnafu)?;
 
