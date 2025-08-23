@@ -1003,7 +1003,7 @@ pub async fn label_values_query(
     if label_name == METRIC_NAME_LABEL {
         let catalog_manager = handler.catalog_manager();
 
-        let table_names = try_call_return_response!(
+        let mut table_names = try_call_return_response!(
             retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
         );
 
@@ -1021,7 +1021,7 @@ pub async fn label_values_query(
     } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
         let catalog_manager = handler.catalog_manager();
 
-        let schema_names = try_call_return_response!(
+        let mut schema_names = try_call_return_response!(
             retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
         );
         truncate_results(&mut schema_names, params.limit);
