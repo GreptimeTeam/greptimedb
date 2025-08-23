@@ -326,28 +326,33 @@ impl<'a> InMemoryRowGroup<'a> {
     }
 }
 
-/// Checks whether we should clone the pages based on the given ranges.
-fn should_clone_pages(ranges: &[Range<u64>]) -> bool {
-    // Find the min and max of the ranges.
-    let min = ranges.iter().map(|r| r.start).min().unwrap_or(0);
-    let max = ranges.iter().map(|r| r.end).max().unwrap_or(0);
-    let total_page_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-    let max_page_size = max - min;
+// /// Checks whether we should clone the pages based on the given ranges.
+// fn should_clone_pages(ranges: &[Range<u64>]) -> bool {
+//     // Find the min and max of the ranges.
+//     let min = ranges.iter().map(|r| r.start).min().unwrap_or(0);
+//     let max = ranges.iter().map(|r| r.end).max().unwrap_or(0);
+//     let total_page_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
+//     let max_page_size = max - min;
 
-    // If the max page size is more than 1.2x of the total page size, we should clone the pages.
-    max_page_size as f64 > total_page_size as f64 * 1.2
-}
+//     // If the max page size is more than 1.2x of the total page size, we should clone the pages.
+//     max_page_size as f64 > total_page_size as f64 * 1.2
+// }
 
 /// Reuses the page bytes or copys each pages to new buffers if the shared bytes are too large.
-fn maybe_copy_pages(ranges: &[Range<u64>], pages: &[Bytes]) -> Vec<Bytes> {
-    if should_clone_pages(ranges) {
-        pages
-            .iter()
-            .map(|page| Bytes::copy_from_slice(&page))
-            .collect()
-    } else {
-        pages.to_vec()
-    }
+fn maybe_copy_pages(_ranges: &[Range<u64>], pages: &[Bytes]) -> Vec<Bytes> {
+    pages
+        .iter()
+        .map(|page| Bytes::copy_from_slice(&page))
+        .collect()
+
+    // if should_clone_pages(ranges) {
+    //     pages
+    //         .iter()
+    //         .map(|page| Bytes::copy_from_slice(&page))
+    //         .collect()
+    // } else {
+    //     pages.to_vec()
+    // }
 }
 
 impl RowGroups for InMemoryRowGroup<'_> {
