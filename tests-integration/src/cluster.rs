@@ -316,10 +316,11 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..100 {
-            let alive_datanodes = meta_srv::lease::alive_datanodes(meta_peer_client, u64::MAX)
-                .await
-                .unwrap()
-                .len();
+            let alive_datanodes =
+                meta_srv::lease::alive_datanodes(meta_peer_client, Duration::from_secs(u64::MAX))
+                    .await
+                    .unwrap()
+                    .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -462,6 +463,7 @@ impl GreptimeDbClusterBuilder {
         let grpc_port = self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
         fe_opts.grpc.bind_addr = construct_addr(grpc_port);
         fe_opts.grpc.server_addr = construct_addr(grpc_port);
+
         fe_opts.mysql.addr = construct_addr(self.choose_random_unused_port(
             port_range.clone(),
             max_attempts,

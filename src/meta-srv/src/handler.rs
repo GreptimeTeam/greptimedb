@@ -55,6 +55,7 @@ use tokio::sync::{oneshot, watch, Notify, RwLock};
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
+use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
 use crate::pubsub::PublisherRef;
@@ -74,10 +75,12 @@ pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod on_leader_start_handler;
+pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
 pub mod remap_flow_peer_handler;
 pub mod response_header_handler;
+
 #[cfg(test)]
 pub mod test_utils;
 
@@ -537,6 +540,9 @@ pub struct HeartbeatHandlerGroupBuilder {
     /// A simple handler for flow internal state report
     flow_state_handler: Option<FlowStateHandler>,
 
+    /// The handler to persist stats.
+    persist_stats_handler: Option<PersistStatsHandler>,
+
     /// The plugins.
     plugins: Option<Plugins>,
 
@@ -554,6 +560,7 @@ impl HeartbeatHandlerGroupBuilder {
             region_lease_handler: None,
             flush_stats_factor: None,
             flow_state_handler: None,
+            persist_stats_handler: None,
             plugins: None,
             pushers,
             handlers: vec![],
@@ -579,6 +586,11 @@ impl HeartbeatHandlerGroupBuilder {
     /// Sets the flush stats factor.
     pub fn with_flush_stats_factor(mut self, flush_stats_factor: Option<usize>) -> Self {
         self.flush_stats_factor = flush_stats_factor;
+        self
+    }
+
+    pub fn with_persist_stats_handler(mut self, handler: Option<PersistStatsHandler>) -> Self {
+        self.persist_stats_handler = handler;
         self
     }
 
@@ -624,6 +636,11 @@ impl HeartbeatHandlerGroupBuilder {
         }
         self.add_handler_last(CollectLeaderRegionHandler);
         self.add_handler_last(CollectTopicStatsHandler);
+        // Persist stats handler should be in front of collect stats handler.
+        // Because collect stats handler will consume the stats from the accumulator.
+        if let Some(persist_stats_handler) = self.persist_stats_handler.take() {
+            self.add_handler_last(persist_stats_handler);
+        }
         self.add_handler_last(CollectStatsHandler::new(self.flush_stats_factor));
         self.add_handler_last(RemapFlowPeerHandler::default());
 

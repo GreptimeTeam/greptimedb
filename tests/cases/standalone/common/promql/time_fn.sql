@@ -14,6 +14,10 @@ tql eval (0, 0, '1s') time() + 1;
 
 tql eval (0, 0, '1s') 1 + time();
 
+tql eval (10000, 10000, '1s') time() * time();
+
+tql eval (10000, 10000, '1s') time() / time();
+
 -- expect error: parse error: comparisons between scalars must use BOOL modifier
 tql eval (0, 0, '1s') time() < 1;
 
@@ -38,14 +42,19 @@ insert into metrics values (0, 0), (1000, 1), (2000, 2), (3000, 3);
 
 tql eval (1, 2, '1s') time() + metrics;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (1, 2, '1s') time() == metrics;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (1, 2, '1s') time() == bool metrics;
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (1, 2, '1s') metrics + time();
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (1, 2, '1s') metrics == time();
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (1, 2, '1s') metrics == bool time();
 
 -- other time-related functions

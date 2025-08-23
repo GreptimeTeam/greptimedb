@@ -33,7 +33,9 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{
+    ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt32Array, UInt64Array,
+};
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
@@ -55,11 +57,15 @@ use crate::sst::to_sst_arrow_schema;
 
 /// Arrow array type for the primary key dictionary.
 pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
+/// Builder type for primary key dictionary array.
+pub(crate) type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
 
 /// Number of columns that have fixed positions.
 ///
 /// Contains: time index and internal columns.
 pub(crate) const FIXED_POS_COLUMN_NUM: usize = 4;
+/// Number of internal columns.
+pub(crate) const INTERNAL_COLUMN_NUM: usize = 3;
 
 /// Helper for writing the SST format with primary key.
 pub(crate) struct PrimaryKeyWriteFormat {

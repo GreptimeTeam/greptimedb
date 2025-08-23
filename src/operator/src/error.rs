@@ -20,6 +20,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::parquet;
+use datafusion_common::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
@@ -42,15 +43,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute admin function"))]
-    ExecuteAdminFunction {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_query::error::Error,
-    },
-
     #[snafu(display("Failed to build admin function args: {msg}"))]
     BuildAdminFunctionArgs { msg: String },
+
+    #[snafu(display("Failed to execute admin function: {msg}, error: {error}"))]
+    ExecuteAdminFunction {
+        msg: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Expected {expected} args, but actual {actual}"))]
     FunctionArityMismatch { expected: usize, actual: usize },
@@ -851,6 +854,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -897,6 +909,8 @@ impl ErrorExt for Error {
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
             #[cfg(feature = "enterprise")]
             Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
@@ -926,7 +940,7 @@ impl ErrorExt for Error {
             Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
-            Error::EncodeJson { .. } => StatusCode::Unexpected,
+            Error::ExecuteAdminFunction { .. } | Error::EncodeJson { .. } => StatusCode::Unexpected,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,
@@ -969,7 +983,6 @@ impl ErrorExt for Error {
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
             Error::CreateLogicalTables { .. } => StatusCode::Unexpected,
-            Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
             Error::ColumnOptions { source, .. } => source.status_code(),

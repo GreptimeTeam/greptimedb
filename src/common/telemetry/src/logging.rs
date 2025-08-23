@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! logging stuffs, inspired by databend
+use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
@@ -20,8 +21,9 @@ use std::time::Duration;
 
 use common_base::serde::empty_string_as_default;
 use once_cell::sync::{Lazy, OnceCell};
+use opentelemetry::trace::TracerProvider;
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::{Protocol, SpanExporterBuilder, WithExportConfig};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::Sampler;
 use opentelemetry_semantic_conventions::resource;
@@ -41,7 +43,7 @@ use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 pub const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
 
 /// The default endpoint when use HTTP exporter protocol.
-pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
+pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 
 /// The default logs directory.
 pub const DEFAULT_LOGGING_DIR: &str = "logs";
@@ -73,7 +75,7 @@ pub struct LoggingOptions {
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
 
-    /// The endpoint of OTLP. Default is "http://localhost:4318".
+    /// The endpoint of OTLP.
     pub otlp_endpoint: Option<String>,
 
     /// The tracing sample ratio.
@@ -81,6 +83,10 @@ pub struct LoggingOptions {
 
     /// The protocol of OTLP export.
     pub otlp_export_protocol: Option<OtlpExportProtocol>,
+
+    /// Additional HTTP headers for OTLP exporter.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub otlp_headers: HashMap<String, String>,
 }
 
 /// The protocol of OTLP export.
@@ -175,6 +181,7 @@ impl Default for LoggingOptions {
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
             otlp_export_protocol: None,
+            otlp_headers: HashMap::new(),
         }
     }
 }
@@ -404,24 +411,24 @@ pub fn init_global_logging(
                 .map(Sampler::ParentBased)
                 .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
 
-            let trace_config = opentelemetry_sdk::trace::config()
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(build_otlp_exporter(opts))
                 .with_sampler(sampler)
-                .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                    KeyValue::new(
-                        resource::SERVICE_INSTANCE_ID,
-                        node_id.unwrap_or("none".to_string()),
-                    ),
-                    KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
-                    KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                ]));
-
-            let tracer = opentelemetry_otlp::new_pipeline()
-                .tracing()
-                .with_exporter(build_otlp_exporter(opts))
-                .with_trace_config(trace_config)
-                .install_batch(opentelemetry_sdk::runtime::Tokio)
-                .expect("otlp tracer install failed");
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder_empty()
+                        .with_attributes([
+                            KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                            KeyValue::new(
+                                resource::SERVICE_INSTANCE_ID,
+                                node_id.unwrap_or("none".to_string()),
+                            ),
+                            KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
+                            KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+                        ])
+                        .build(),
+                )
+                .build();
+            let tracer = provider.tracer("greptimedb");
 
             tracing::subscriber::set_global_default(
                 subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
@@ -436,7 +443,7 @@ pub fn init_global_logging(
     guards
 }
 
-fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
+fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
     let protocol = opts
         .otlp_export_protocol
         .clone()
@@ -458,17 +465,19 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
         });
 
     match protocol {
-        OtlpExportProtocol::Grpc => SpanExporterBuilder::Tonic(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(endpoint),
-        ),
-        OtlpExportProtocol::Http => SpanExporterBuilder::Http(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(endpoint)
-                .with_protocol(Protocol::HttpBinary),
-        ),
+        OtlpExportProtocol::Grpc => SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .expect("Failed to create OTLP gRPC exporter "),
+
+        OtlpExportProtocol::Http => SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .with_protocol(Protocol::HttpBinary)
+            .with_headers(opts.otlp_headers.clone())
+            .build()
+            .expect("Failed to create OTLP HTTP exporter "),
     }
 }
 

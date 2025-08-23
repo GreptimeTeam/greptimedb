@@ -724,7 +724,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-otlp_endpoint = "http://localhost:4318"
+otlp_endpoint = "http://localhost:4318/v1/traces"
 
 ## Whether to append logs to stdout.
 append_stdout = true
@@ -737,6 +737,13 @@ max_log_files = 720
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.

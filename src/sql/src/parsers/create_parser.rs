@@ -17,6 +17,7 @@ pub mod trigger;
 
 use std::collections::HashMap;
 
+use arrow_buffer::IntervalMonthDayNano;
 use common_catalog::consts::default_engine;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
@@ -57,6 +58,8 @@ pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
+
+pub type RawIntervalExpr = String;
 
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
@@ -348,7 +351,20 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the interval expr to duration in seconds.
     fn parse_interval(&mut self) -> Result<i64> {
+        let interval = self.parse_interval_month_day_nano()?.0;
+        Ok(
+            interval.nanoseconds / 1_000_000_000
+                + interval.days as i64 * 60 * 60 * 24
+                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
+                                                                       // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                       // which we use in database to parse i.e. ttl interval and many other intervals
+        )
+    }
+
+    /// Parse interval expr to [`IntervalMonthDayNano`].
+    fn parse_interval_month_day_nano(&mut self) -> Result<(IntervalMonthDayNano, RawIntervalExpr)> {
         let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+        let raw_interval_expr = interval_expr.to_string();
         let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
             .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
             .ok()
@@ -356,13 +372,7 @@ impl<'a> ParserContext<'a> {
                 reason: format!("cannot cast {} to interval type", interval_expr),
             })?;
         if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
-            Ok(
-                interval.nanoseconds / 1_000_000_000
-                    + interval.days as i64 * 60 * 60 * 24
-                    + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                           // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                           // which we use in database to parse i.e. ttl interval and many other intervals
-            )
+            Ok((interval, raw_interval_expr))
         } else {
             unreachable!()
         }

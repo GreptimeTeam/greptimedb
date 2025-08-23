@@ -256,6 +256,15 @@ create_topic_timeout = "30s"
 ## TTL for the events table that will be used to store the events. Default is `90d`.
 ttl = "90d"
 
+## Configuration options for the stats persistence.
+[stats_persistence]
+## TTL for the stats table that will be used to store the stats. Default is `30d`.
+## Set to `0s` to disable stats persistence.
+ttl = "30d"
+## The interval to persist the stats. Default is `60s`.
+## The minimum value is `60s`, if the value is less than `60s`, it will be overridden to `60s`.
+interval = "60s"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
@@ -269,7 +278,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-otlp_endpoint = "http://localhost:4318"
+otlp_endpoint = "http://localhost:4318/v1/traces"
 
 ## Whether to append logs to stdout.
 append_stdout = true
@@ -282,6 +291,14 @@ max_log_files = 720
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.

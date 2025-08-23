@@ -18,7 +18,8 @@ use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, TypeSignature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
@@ -82,7 +83,13 @@ fn signature() -> Signature {
     Signature::one_of(
         vec![
             // add_region_follower(region_id, peer)
-            TypeSignature::Uniform(2, ConcreteDataType::numerics()),
+            TypeSignature::Uniform(
+                2,
+                ConcreteDataType::numerics()
+                    .into_iter()
+                    .map(|dt| dt.as_arrow_type())
+                    .collect(),
+            ),
         ],
         Volatility::Immutable,
     )
@@ -92,38 +99,57 @@ fn signature() -> Signature {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{UInt64Vector, VectorRef};
+    use arrow::array::UInt64Array;
+    use arrow::datatypes::{DataType, Field};
+    use datafusion_expr::ColumnarValue;
 
     use super::*;
-    use crate::function::{AsyncFunction, FunctionContext};
+    use crate::function::FunctionContext;
+    use crate::function_factory::ScalarFunctionFactory;
 
     #[test]
     fn test_add_region_follower_misc() {
-        let f = AddRegionFollowerFunction;
+        let factory: ScalarFunctionFactory = AddRegionFollowerFunction::factory().into();
+        let f = factory.provide(FunctionContext::mock());
         assert_eq!("add_region_follower", f.name());
-        assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            f.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::UInt64, f.return_type(&[]).unwrap());
         assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::OneOf(sigs),
-                             volatility: Volatility::Immutable
+                         datafusion_expr::Signature {
+                             type_signature: datafusion_expr::TypeSignature::OneOf(sigs),
+                             volatility: datafusion_expr::Volatility::Immutable
                          } if sigs.len() == 1));
     }
 
     #[tokio::test]
     async fn test_add_region_follower() {
-        let f = AddRegionFollowerFunction;
-        let args = vec![1, 1];
-        let args = args
-            .into_iter()
-            .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
-            .collect::<Vec<_>>();
+        let factory: ScalarFunctionFactory = AddRegionFollowerFunction::factory().into();
+        let provider = factory.provide(FunctionContext::mock());
+        let f = provider.as_async().unwrap();
 
-        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
-        let expect: VectorRef = Arc::new(UInt64Vector::from_slice([0u64]));
-        assert_eq!(result, expect);
+        let func_args = datafusion::logical_expr::ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![1]))),
+                ColumnarValue::Array(Arc::new(UInt64Array::from(vec![2]))),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("arg_0", DataType::UInt64, false)),
+                Arc::new(Field::new("arg_1", DataType::UInt64, false)),
+            ],
+            return_field: Arc::new(Field::new("result", DataType::UInt64, true)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let result = f.invoke_async_with_args(func_args).await.unwrap();
+
+        match result {
+            ColumnarValue::Array(array) => {
+                let result_array = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                assert_eq!(result_array.value(0), 0u64);
+            }
+            ColumnarValue::Scalar(scalar) => {
+                assert_eq!(scalar, datafusion_common::ScalarValue::UInt64(Some(0)));
+            }
+        }
     }
 }

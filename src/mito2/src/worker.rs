@@ -55,8 +55,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error;
-use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -208,7 +207,7 @@ impl WorkerGroup {
                 }
                 .start()
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(WorkerGroup {
             workers,
@@ -272,6 +271,12 @@ impl WorkerGroup {
         let index = region_id_to_index(region_id, self.workers.len());
 
         &self.workers[index]
+    }
+
+    pub(crate) fn all_regions(&self) -> impl Iterator<Item = MitoRegionRef> + use<'_> {
+        self.workers
+            .iter()
+            .flat_map(|worker| worker.regions.list_regions())
     }
 }
 
@@ -348,7 +353,7 @@ impl WorkerGroup {
                 }
                 .start()
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(WorkerGroup {
             workers,
@@ -427,7 +432,7 @@ struct WorkerStarter<S> {
 
 impl<S: LogStore> WorkerStarter<S> {
     /// Starts a region worker and its background thread.
-    fn start(self) -> RegionWorker {
+    fn start(self) -> Result<RegionWorker> {
         let regions = Arc::new(RegionMap::default());
         let opening_regions = Arc::new(OpeningRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
@@ -480,14 +485,14 @@ impl<S: LogStore> WorkerStarter<S> {
             worker_thread.run().await;
         });
 
-        RegionWorker {
+        Ok(RegionWorker {
             id: self.id,
             regions,
             opening_regions,
             sender,
             handle: Mutex::new(Some(handle)),
             running,
-        }
+        })
     }
 }
 

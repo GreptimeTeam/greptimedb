@@ -978,6 +978,7 @@ pub struct LabelValueQuery {
     #[serde(flatten)]
     matches: Matches,
     db: Option<String>,
+    limit: Option<usize>,
 }
 
 #[axum_macros::debug_handler]
@@ -1005,6 +1006,8 @@ pub async fn label_values_query(
         let table_names = try_call_return_response!(
             retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
         );
+
+        truncate_results(&mut table_names, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
         let field_columns = handle_schema_err!(
@@ -1013,6 +1016,7 @@ pub async fn label_values_query(
         .unwrap_or_default();
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
         field_columns.sort_unstable();
+        truncate_results(&mut field_columns, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
     } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
         let catalog_manager = handler.catalog_manager();
@@ -1020,6 +1024,7 @@ pub async fn label_values_query(
         let schema_names = try_call_return_response!(
             retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
         );
+        truncate_results(&mut schema_names, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(schema_names));
     }
 
@@ -1074,7 +1079,17 @@ pub async fn label_values_query(
 
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort_unstable();
+    truncate_results(&mut label_values, params.limit);
+
     PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+}
+
+fn truncate_results(label_values: &mut Vec<String>, limit: Option<usize>) {
+    if let Some(limit) = limit {
+        if limit > 0 && label_values.len() >= limit {
+            label_values.truncate(limit);
+        }
+    }
 }
 
 /// Take metric name from the [VectorSelector].

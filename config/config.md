@@ -187,12 +187,13 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
-| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
+| `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `slow_query` | -- | -- | The slow query log options. |
 | `slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
@@ -295,12 +296,13 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
-| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
+| `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `slow_query` | -- | -- | The slow query log options. |
 | `slow_query.enable` | Bool | `true` | Whether to enable slow query log. |
@@ -387,16 +389,20 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
+| `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
+| `stats_persistence.ttl` | String | `30d` | TTL for the stats table that will be used to store the stats. Default is `30d`.<br/>Set to `0s` to disable stats persistence. |
+| `stats_persistence.interval` | String | `60s` | The interval to persist the stats. Default is `60s`.<br/>The minimum value is `60s`, if the value is less than `60s`, it will be overridden to `60s`. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
-| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
+| `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The metasrv can export its metrics and send to Prometheus compatible service (e.g. `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
@@ -559,12 +565,13 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
-| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
+| `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `export_metrics` | -- | -- | The datanode can export its metrics and send to Prometheus compatible service (e.g. `greptimedb` itself) from remote-write API.<br/>This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape. |
 | `export_metrics.enable` | Bool | `false` | whether enable export metrics. |
@@ -628,12 +635,13 @@
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
-| `logging.otlp_endpoint` | String | `http://localhost:4318` | The OTLP tracing endpoint. |
+| `logging.otlp_endpoint` | String | `http://localhost:4318/v1/traces` | The OTLP tracing endpoint. |
 | `logging.append_stdout` | Bool | `true` | Whether to append logs to stdout. |
 | `logging.log_format` | String | `text` | The log format. Can be `text`/`json`. |
 | `logging.max_log_files` | Integer | `720` | The maximum amount of log files. |
 | `logging.otlp_export_protocol` | String | `http` | The OTLP tracing export protocol. Can be `grpc`/`http`. |
-| `logging.tracing_sample_ratio` | -- | -- | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
+| `logging.otlp_headers` | -- | -- | Additional OTLP headers, only valid when using OTLP http |
+| `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |

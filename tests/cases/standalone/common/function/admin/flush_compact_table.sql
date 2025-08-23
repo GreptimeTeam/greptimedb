@@ -10,6 +10,10 @@ ADMIN FLUSH_TABLE('test');
 
 ADMIN COMPACT_TABLE('test');
 
+SELECT FLUSH_TABLE('test');
+
+SELECT COMPACT_TABLE('test');
+
 --- doesn't change anything ---
 SELECT * FROM test;
 

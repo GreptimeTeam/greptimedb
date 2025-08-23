@@ -32,6 +32,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
+use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
 use store_api::ManifestVersion;
 
@@ -46,6 +47,7 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -131,6 +133,8 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
+    /// The total bytes written to the region.
+    pub(crate) write_bytes: Arc<AtomicU64>,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -449,6 +453,7 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
+        let write_bytes = self.write_bytes.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -464,6 +469,7 @@ impl MitoRegion {
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
+            write_bytes,
         }
     }
 
@@ -492,6 +498,48 @@ impl MitoRegion {
                 .build()
             })?;
         Ok(())
+    }
+
+    /// Returns the SST entries of the region.
+    pub fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
+        let table_dir = self.table_dir();
+        let path_type = self.access_layer.path_type();
+        self.version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| {
+                level.files().map(|file| {
+                    let meta = file.meta_ref();
+                    let region_id = meta.region_id;
+                    let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
+                        let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
+                        (Some(index_file_path), Some(meta.index_file_size))
+                    } else {
+                        (None, None)
+                    };
+                    ManifestSstEntry {
+                        table_dir: table_dir.to_string(),
+                        region_id,
+                        table_id: region_id.table_id(),
+                        region_number: region_id.region_number(),
+                        region_group: region_id.region_group(),
+                        region_sequence: region_id.region_sequence(),
+                        file_id: meta.file_id.to_string(),
+                        level: meta.level,
+                        file_path: sst_file_path(table_dir, meta.file_id(), path_type),
+                        file_size: meta.file_size,
+                        index_file_path,
+                        index_file_size,
+                        num_rows: meta.num_rows,
+                        num_row_groups: meta.num_row_groups,
+                        min_ts: meta.time_range.0,
+                        max_ts: meta.time_range.1,
+                        sequence: meta.sequence.map(|s| s.get()),
+                    }
+                })
+            })
+            .collect()
     }
 }
 
@@ -984,6 +1032,7 @@ impl ManifestStats {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
 
     use common_datasource::compression::CompressionType;
@@ -1167,6 +1216,7 @@ mod tests {
             last_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
+            write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
             stats: ManifestStats::default(),
         };

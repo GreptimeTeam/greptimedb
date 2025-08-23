@@ -287,6 +287,7 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
+            write_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
         })
     }
@@ -470,6 +471,7 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
+            write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
             stats: self.stats.clone(),
         };
@@ -649,8 +651,13 @@ where
         }
         last_entry_id = last_entry_id.max(entry_id);
 
-        let mut region_write_ctx =
-            RegionWriteCtx::new(region_id, version_control, provider.clone());
+        let mut region_write_ctx = RegionWriteCtx::new(
+            region_id,
+            version_control,
+            provider.clone(),
+            // For WAL replay, we don't need to track the write bytes rate.
+            None,
+        );
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows

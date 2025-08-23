@@ -15,6 +15,7 @@
 //! Basic tests for mito engine.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use api::v1::helper::row;
 use api::v1::value::ValueData;
@@ -26,11 +27,13 @@ use common_recordbatch::RecordBatches;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use futures::TryStreamExt;
+use itertools::Itertools;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    PathType, RegionCreateRequest, RegionOpenRequest, RegionPutRequest,
+    PathType, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
 };
 use store_api::storage::RegionId;
 
@@ -89,6 +92,8 @@ async fn test_write_to_region() {
         rows: build_rows(0, 42),
     };
     put_rows(&engine, region_id, rows).await;
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.write_bytes.load(Ordering::Relaxed) > 0);
 }
 
 #[apply(multiple_log_store_factories)]
@@ -158,6 +163,10 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
         .await
         .unwrap();
     assert_eq!(0, result.affected_rows);
+
+    // The replay won't update the write bytes rate meter.
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(region.write_bytes.load(Ordering::Relaxed), 0);
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
@@ -712,4 +721,98 @@ async fn test_cache_null_primary_key() {
 | 1     |       | 10.0    | 1970-01-01T00:00:01 |
 +-------+-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_list_ssts() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Create 3 regions and write some rows to each of them
+    let region_ids = vec![
+        RegionId::new(11, 1),
+        RegionId::new(11, 2),
+        RegionId::new(22, 42),
+    ];
+
+    for region_id in &region_ids {
+        let mut request = CreateRequestBuilder::new().build();
+        request.column_metadatas[0]
+            .column_schema
+            .set_inverted_index(true); // set inverted index for tag_0
+        let column_schemas = rows_schema(&request);
+        engine
+            .handle_request(*region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        // write some rows
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("x", 0, 10, 0),
+        };
+        put_rows(&engine, *region_id, rows).await;
+    }
+
+    // flush to generate sst
+    for region_id in &region_ids {
+        engine
+            .handle_request(
+                *region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    // list from manifest
+    let debug_format = engine
+        .all_ssts_from_manifest()
+        .map(|mut e| {
+            e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
+            e.index_file_path = e
+                .index_file_path
+                .map(|p| p.replace(&e.file_id, "<file_id>"));
+            e.file_id = "<file_id>".to_string();
+            format!("\n{:?}", e)
+        })
+        .sorted()
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        debug_format,
+        r#"
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2515, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10) }"#
+    );
+
+    // list from storage
+    let storage_entries = engine
+        .all_ssts_from_storage()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let debug_format = storage_entries
+        .into_iter()
+        .map(|mut e| {
+            let i = e.file_path.rfind('/').unwrap();
+            e.file_path.replace_range(i..(i + 37), "/<file_id>");
+            format!("\n{:?}", e)
+        })
+        .sorted()
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        debug_format,
+        r#"
+StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None }
+StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None }"#
+    );
 }

@@ -12,6 +12,7 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
+      - 'Makefile'
   workflow_dispatch:
 
 name: CI

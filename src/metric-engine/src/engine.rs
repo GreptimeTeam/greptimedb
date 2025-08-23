@@ -487,7 +487,7 @@ mod test {
     use mito2::sst::location::region_dir_from_table_dir;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::region_request::{
-        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest,
+        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     };
 
     use super::*;

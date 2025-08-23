@@ -12,17 +12,183 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use static_assertions::{assert_fields, assert_impl_all};
+use common_macro::{IntoRow, Schema, ToRow};
+use greptime_proto::v1::column_data_type_extension::TypeExt;
+use greptime_proto::v1::value::ValueData;
+use greptime_proto::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row, SemanticType,
+    Value,
+};
 
-#[as_aggr_func_creator]
-#[derive(Debug, Default, AggrFuncTypeStore)]
-struct Foo {}
+#[derive(ToRow, Schema, IntoRow)]
+struct ToRowOwned {
+    my_value: i32,
+    #[col(name = "string_value", datatype = "string", semantic = "tag")]
+    my_string: String,
+    my_bool: bool,
+    my_float: f32,
+    #[col(
+        name = "timestamp_value",
+        semantic = "Timestamp",
+        datatype = "TimestampMillisecond"
+    )]
+    my_timestamp: i64,
+    #[allow(dead_code)]
+    #[col(skip)]
+    my_skip: i32,
+    #[col(name = "json_value", datatype = "json")]
+    my_json: String,
+}
 
 #[test]
-#[allow(clippy::extra_unused_type_parameters)]
-fn test_derive() {
-    let _ = Foo::default();
-    assert_fields!(Foo: input_types);
-    assert_impl_all!(Foo: std::fmt::Debug, Default, common_query::logical_plan::accumulator::AggrFuncTypeStore);
+fn test_to_row() {
+    let test = ToRowOwned {
+        my_value: 1,
+        my_string: "test".to_string(),
+        my_bool: true,
+        my_float: 1.0,
+        my_timestamp: 1718563200000,
+        my_skip: 1,
+        my_json: r#"{"name":"John", "age":30}"#.to_string(),
+    };
+    let row = test.to_row();
+    assert_row(&row);
+    let schema = ToRowOwned::schema();
+    assert_schema(&schema);
+    let row2 = test.into_row();
+    assert_row(&row2);
+}
+
+#[derive(ToRow, Schema)]
+struct ToRowRef<'a> {
+    my_value: &'a i32,
+    #[col(name = "string_value", datatype = "string", semantic = "tag")]
+    my_string: &'a String,
+    my_bool: &'a bool,
+    my_float: &'a f32,
+    #[col(
+        name = "timestamp_value",
+        semantic = "Timestamp",
+        datatype = "TimestampMillisecond"
+    )]
+    my_timestamp: &'a i64,
+    #[col(name = "json_value", datatype = "json")]
+    my_json: &'a str,
+}
+
+#[test]
+fn test_to_row_ref() {
+    let string = "test".to_string();
+    let test = ToRowRef {
+        my_value: &1,
+        my_string: &string,
+        my_bool: &true,
+        my_float: &1.0,
+        my_timestamp: &1718563200000,
+        my_json: r#"{"name":"John", "age":30}"#,
+    };
+    let row = test.to_row();
+    assert_row(&row);
+    let schema = ToRowRef::schema();
+    assert_schema(&schema);
+}
+
+#[derive(ToRow, IntoRow)]
+struct ToRowOptional {
+    my_value: Option<i32>,
+    #[col(name = "string_value", datatype = "string", semantic = "tag")]
+    my_string: Option<String>,
+    my_bool: Option<bool>,
+    my_float: Option<f32>,
+    #[col(
+        name = "timestamp_value",
+        semantic = "Timestamp",
+        datatype = "TimestampMillisecond"
+    )]
+    my_timestamp: i64,
+}
+
+fn assert_row_optional(row: &Row) {
+    assert_eq!(row.values.len(), 5);
+    assert_eq!(row.values[0].value_data, None);
+    assert_eq!(row.values[1].value_data, None);
+    assert_eq!(row.values[2].value_data, None);
+    assert_eq!(row.values[3].value_data, None);
+    assert_eq!(
+        row.values[4].value_data,
+        Some(greptime_proto::v1::value::ValueData::TimestampMillisecondValue(1718563200000))
+    );
+}
+
+#[test]
+fn test_to_row_optional() {
+    let test = ToRowOptional {
+        my_value: None,
+        my_string: None,
+        my_bool: None,
+        my_float: None,
+        my_timestamp: 1718563200000,
+    };
+
+    let row = test.to_row();
+    assert_row_optional(&row);
+    let row2 = test.into_row();
+    assert_row_optional(&row2);
+}
+
+fn assert_row(row: &Row) {
+    assert_eq!(row.values.len(), 6);
+    assert_eq!(
+        row.values[0].value_data,
+        Some(greptime_proto::v1::value::ValueData::I32Value(1))
+    );
+    assert_eq!(
+        row.values[1].value_data,
+        Some(greptime_proto::v1::value::ValueData::StringValue(
+            "test".to_string()
+        ))
+    );
+    assert_eq!(
+        row.values[2].value_data,
+        Some(greptime_proto::v1::value::ValueData::BoolValue(true))
+    );
+    assert_eq!(
+        row.values[3].value_data,
+        Some(greptime_proto::v1::value::ValueData::F32Value(1.0))
+    );
+    assert_eq!(
+        row.values[4].value_data,
+        Some(greptime_proto::v1::value::ValueData::TimestampMillisecondValue(1718563200000))
+    );
+}
+
+fn assert_schema(schema: &[ColumnSchema]) {
+    assert_eq!(schema.len(), 6);
+    assert_eq!(schema[0].column_name, "my_value");
+    assert_eq!(schema[0].datatype, ColumnDataType::Int32 as i32);
+    assert_eq!(schema[0].semantic_type, SemanticType::Field as i32);
+    assert_eq!(schema[1].column_name, "string_value");
+    assert_eq!(schema[1].datatype, ColumnDataType::String as i32);
+    assert_eq!(schema[1].semantic_type, SemanticType::Tag as i32);
+    assert_eq!(schema[2].column_name, "my_bool");
+    assert_eq!(schema[2].datatype, ColumnDataType::Boolean as i32);
+    assert_eq!(schema[2].semantic_type, SemanticType::Field as i32);
+    assert_eq!(schema[3].column_name, "my_float");
+    assert_eq!(schema[3].datatype, ColumnDataType::Float32 as i32);
+    assert_eq!(schema[3].semantic_type, SemanticType::Field as i32);
+    assert_eq!(schema[4].column_name, "timestamp_value");
+    assert_eq!(
+        schema[4].datatype,
+        ColumnDataType::TimestampMillisecond as i32
+    );
+    assert_eq!(schema[4].semantic_type, SemanticType::Timestamp as i32);
+    assert_eq!(schema[5].column_name, "json_value");
+    assert_eq!(schema[5].datatype, ColumnDataType::Json as i32);
+    assert_eq!(schema[5].semantic_type, SemanticType::Field as i32);
+    assert_eq!(
+        schema[5].datatype_extension,
+        Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary as i32))
+        })
+    );
 }

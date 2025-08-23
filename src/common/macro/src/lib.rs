@@ -16,6 +16,7 @@ mod admin_fn;
 mod aggr_func;
 mod print_caller;
 mod range_fn;
+mod row;
 mod stack_trace_debug;
 mod utils;
 
@@ -27,6 +28,9 @@ use range_fn::process_range_fn;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 use crate::admin_fn::process_admin_fn;
+use crate::row::into_row::derive_into_row_impl;
+use crate::row::schema::derive_schema_impl;
+use crate::row::to_row::derive_to_row_impl;
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
@@ -185,4 +189,118 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     };
 
     gen.into()
+}
+
+/// Derive macro to convert a struct to a row.
+///
+/// # Example
+/// ```rust, ignore
+/// use api::v1::Row;
+/// use api::v1::value::ValueData;
+/// use api::v1::Value;
+///
+/// #[derive(ToRow)]
+/// struct ToRowTest {
+///     my_value: i32,
+///     #[col(name = "string_value", datatype = "string", semantic = "tag")]
+///     my_string: String,  
+///     my_bool: bool,
+///     my_float: f32,
+///     #[col(
+///         name = "timestamp_value",
+///         semantic = "Timestamp",
+///         datatype = "TimestampMillisecond"
+///     )]
+///     my_timestamp: i64,
+///     #[col(skip)]
+///     my_skip: i32,
+/// }
+///
+/// let row = ToRowTest {
+///     my_value: 1,
+///     my_string: "test".to_string(),
+///     my_bool: true,
+///     my_float: 1.0,
+///     my_timestamp: 1718563200000,
+///     my_skip: 1,
+/// }.to_row();
+/// ```
+#[proc_macro_derive(ToRow, attributes(col))]
+pub fn derive_to_row(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let output = derive_to_row_impl(input);
+    output.unwrap_or_else(|e| e.to_compile_error()).into()
+}
+
+/// Derive macro to convert a struct to a row with move semantics.
+///
+/// # Example
+/// ```rust, ignore
+/// use api::v1::Row;
+/// use api::v1::value::ValueData;
+/// use api::v1::Value;
+///
+/// #[derive(IntoRow)]
+/// struct IntoRowTest {
+///     my_value: i32,
+///     #[col(name = "string_value", datatype = "string", semantic = "tag")]
+///     my_string: String,  
+///     my_bool: bool,
+///     my_float: f32,
+///     #[col(
+///         name = "timestamp_value",
+///         semantic = "Timestamp",
+///         datatype = "TimestampMillisecond"
+///     )]
+///     my_timestamp: i64,
+///     #[col(skip)]
+///     my_skip: i32,
+/// }
+///
+/// let row = IntoRowTest {
+///     my_value: 1,
+///     my_string: "test".to_string(),
+///     my_bool: true,
+///     my_float: 1.0,
+///     my_timestamp: 1718563200000,
+///     my_skip: 1,
+/// }.into_row();
+/// ```
+#[proc_macro_derive(IntoRow, attributes(col))]
+pub fn derive_into_row(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let output = derive_into_row_impl(input);
+    output.unwrap_or_else(|e| e.to_compile_error()).into()
+}
+
+/// Derive macro to convert a struct to a schema.
+///
+/// # Example
+/// ```rust, ignore
+/// use api::v1::ColumnSchema;
+///
+/// #[derive(Schema)]
+/// struct SchemaTest {
+///     my_value: i32,
+///     #[col(name = "string_value", datatype = "string", semantic = "tag")]
+///     my_string: String,  
+///     my_bool: bool,
+///     my_float: f32,
+///     #[col(
+///         name = "timestamp_value",
+///         semantic = "Timestamp",
+///         datatype = "TimestampMillisecond"
+///     )]
+///     my_timestamp: i64,
+///     #[col(skip)]
+///     my_skip: i32,
+/// }
+///
+/// let schema = SchemaTest::schema();
+/// ```
+#[proc_macro_derive(Schema, attributes(col))]
+pub fn derive_schema(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let output = derive_schema_impl(input);
+    output.unwrap_or_else(|e| e.to_compile_error()).into()
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
@@ -106,6 +107,8 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) put_num: usize,
     /// Rows to delete.
     pub(crate) delete_num: usize,
+    /// Write bytes per second.
+    pub(crate) write_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl RegionWriteCtx {
@@ -114,6 +117,7 @@ impl RegionWriteCtx {
         region_id: RegionId,
         version_control: &VersionControlRef,
         provider: Provider,
+        write_bytes: Option<Arc<AtomicU64>>,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -136,6 +140,7 @@ impl RegionWriteCtx {
             put_num: 0,
             delete_num: 0,
             bulk_parts: vec![],
+            write_bytes,
         }
     }
 
@@ -213,7 +218,13 @@ impl RegionWriteCtx {
             return;
         }
 
-        let mutable = self.version.memtables.mutable.clone();
+        let mutable_memtable = self.version.memtables.mutable.clone();
+        let prev_memory_usage = if self.write_bytes.is_some() {
+            Some(mutable_memtable.memory_usage())
+        } else {
+            None
+        };
+
         let mutations = mem::take(&mut self.wal_entry.mutations)
             .into_iter()
             .enumerate()
@@ -224,13 +235,13 @@ impl RegionWriteCtx {
             .collect::<Vec<_>>();
 
         if mutations.len() == 1 {
-            if let Err(err) = mutable.write(&mutations[0].1) {
+            if let Err(err) = mutable_memtable.write(&mutations[0].1) {
                 self.notifiers[mutations[0].0].err = Some(Arc::new(err));
             }
         } else {
             let mut tasks = FuturesUnordered::new();
             for (i, kvs) in mutations {
-                let mutable = mutable.clone();
+                let mutable = mutable_memtable.clone();
                 // use tokio runtime to schedule tasks.
                 tasks.push(common_runtime::spawn_blocking_global(move || {
                     (i, mutable.write(&kvs))
@@ -246,6 +257,12 @@ impl RegionWriteCtx {
             }
         }
 
+        if let Some(write_bytes) = &self.write_bytes {
+            let new_memory_usage = mutable_memtable.memory_usage();
+            let written_bytes =
+                new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            write_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
+        }
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
         self.version_control
@@ -280,6 +297,13 @@ impl RegionWriteCtx {
             .with_label_values(&["write_bulk"])
             .start_timer();
 
+        let mutable_memtable = &self.version.memtables.mutable;
+        let prev_memory_usage = if self.write_bytes.is_some() {
+            Some(mutable_memtable.memory_usage())
+        } else {
+            None
+        };
+
         if self.bulk_parts.len() == 1 {
             let part = self.bulk_parts.swap_remove(0);
             let num_rows = part.num_rows();
@@ -293,7 +317,7 @@ impl RegionWriteCtx {
 
         let mut tasks = FuturesUnordered::new();
         for (i, part) in self.bulk_parts.drain(..).enumerate() {
-            let mutable = self.version.memtables.mutable.clone();
+            let mutable = mutable_memtable.clone();
             tasks.push(common_runtime::spawn_blocking_global(move || {
                 let num_rows = part.num_rows();
                 (i, mutable.write_bulk(part), num_rows)
@@ -309,6 +333,12 @@ impl RegionWriteCtx {
             }
         }
 
+        if let Some(write_bytes) = &self.write_bytes {
+            let new_memory_usage = mutable_memtable.memory_usage();
+            let written_bytes =
+                new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            write_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
+        }
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }

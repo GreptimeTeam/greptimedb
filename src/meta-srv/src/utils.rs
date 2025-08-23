@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod insert_forwarder;
+
 #[macro_export]
 macro_rules! define_ticker {
     (

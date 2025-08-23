@@ -91,10 +91,12 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
                 .map(Arc::new)
                 .map(Some)
                 .inspect(|set| {
-                    info!(
-                        "Initialized table_flownode cache for table_id: {}, set: {:?}",
-                        table_id, set
-                    );
+                    if set.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                        info!(
+                            "Initialized table_flownode cache for table_id: {}, set: {:?}",
+                            table_id, set
+                        );
+                    };
                 })
         })
     })
