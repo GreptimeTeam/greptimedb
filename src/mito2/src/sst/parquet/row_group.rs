@@ -304,8 +304,8 @@ impl<'a> InMemoryRowGroup<'a> {
         };
 
         // Put pages back to the cache.
-        let pages_to_cache = maybe_copy_pages(ranges, &pages);
-        let page_value = PageValue::new(pages_to_cache);
+        let pages = copy_pages(ranges, pages);
+        let page_value = PageValue::new(pages.clone());
         self.cache_strategy
             .put_pages(page_key, Arc::new(page_value));
 
@@ -338,21 +338,12 @@ impl<'a> InMemoryRowGroup<'a> {
 //     max_page_size as f64 > total_page_size as f64 * 1.2
 // }
 
-/// Reuses the page bytes or copys each pages to new buffers if the shared bytes are too large.
-fn maybe_copy_pages(_ranges: &[Range<u64>], pages: &[Bytes]) -> Vec<Bytes> {
+/// Copies each pages to new buffers.
+fn copy_pages(_ranges: &[Range<u64>], pages: Vec<Bytes>) -> Vec<Bytes> {
     pages
-        .iter()
+        .into_iter()
         .map(|page| Bytes::copy_from_slice(&page))
         .collect()
-
-    // if should_clone_pages(ranges) {
-    //     pages
-    //         .iter()
-    //         .map(|page| Bytes::copy_from_slice(&page))
-    //         .collect()
-    // } else {
-    //     pages.to_vec()
-    // }
 }
 
 impl RowGroups for InMemoryRowGroup<'_> {
