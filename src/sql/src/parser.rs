@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use snafu::ResultExt;
@@ -38,6 +39,7 @@ pub struct ParseOptions {}
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
+    pub(crate) table_aliases: HashMap<String, ObjectName>,
 }
 
 impl ParserContext<'_> {
@@ -48,12 +50,28 @@ impl ParserContext<'_> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        Ok(ParserContext { parser, sql })
+        Ok(ParserContext {
+            parser,
+            sql,
+            table_aliases: HashMap::new(),
+        })
     }
 
     /// Parses parser context to Query.
     pub fn parser_query(&mut self) -> Result<Box<Query>> {
         self.parser.parse_query().context(SyntaxSnafu)
+    }
+
+    pub(crate) fn add_table_alias(&mut self, alias: String, table_name: ObjectName) -> Result<()> {
+        if self.table_aliases.contains_key(&alias) {
+            println!("Duplicate alias: {} AS {}", alias, table_name);
+            return error::InvalidSqlSnafu {
+                msg: format!("Duplicate alias '{}'", alias),
+            }
+            .fail();
+        }
+        self.table_aliases.insert(alias, table_name);
+        Ok(())
     }
 
     /// Parses SQL with given dialect
@@ -95,7 +113,12 @@ impl ParserContext<'_> {
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
-        ParserContext { parser, sql }.intern_parse_table_name()
+        ParserContext {
+            parser,
+            sql,
+            table_aliases: HashMap::new(),
+        }
+        .intern_parse_table_name()
     }
 
     pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
