@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::prelude::*;
-use sqlparser::ast::{Ident, ObjectName};
+use sqlparser::ast::ObjectName;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
@@ -83,7 +83,9 @@ impl ParserContext<'_> {
                 if let Some(alias) = alias {
                     let alias_name = &alias.name;
                     let derived_name =
-                        ObjectName(vec![Ident::new(format!("derived_{}", alias_name))]);
+                        ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                            sqlparser::ast::Ident::new(format!("derived_{}", alias_name)),
+                        )]);
                     self.add_table_alias(alias_name.to_string(), derived_name)?;
                     println!("Registered subquery alias: {}", alias_name);
                 }
@@ -97,12 +99,7 @@ impl ParserContext<'_> {
     }
 
     fn convert_sql_object_name(name: sqlparser::ast::ObjectName) -> ObjectName {
-        ObjectName(
-            name.0
-                .into_iter()
-                .map(|ident| Ident::new(ident.value))
-                .collect(),
-        )
+        ObjectName(name.0.into_iter().collect())
     }
 }
 
