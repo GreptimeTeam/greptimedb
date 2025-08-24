@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_meta::peer::Peer;
 use snafu::ensure;
@@ -61,10 +62,12 @@ impl RoundRobinSelector {
         let mut peers = match self.select_target {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
-                let lease_kvs =
-                    lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs)
-                        .with_condition(lease::is_datanode_accept_ingest_workload)
-                        .await?;
+                let lease_kvs = lease::alive_datanodes(
+                    &ctx.meta_peer_client,
+                    Duration::from_secs(ctx.datanode_lease_secs),
+                )
+                .with_condition(lease::is_datanode_accept_ingest_workload)
+                .await?;
 
                 let mut exclude_peer_ids = self
                     .node_excluder
@@ -82,8 +85,11 @@ impl RoundRobinSelector {
             }
             SelectTarget::Flownode => {
                 // 1. get alive flownodes.
-                let lease_kvs =
-                    lease::alive_flownodes(&ctx.meta_peer_client, ctx.flownode_lease_secs).await?;
+                let lease_kvs = lease::alive_flownodes(
+                    &ctx.meta_peer_client,
+                    Duration::from_secs(ctx.flownode_lease_secs),
+                )
+                .await?;
 
                 // 2. map into peers
                 lease_kvs

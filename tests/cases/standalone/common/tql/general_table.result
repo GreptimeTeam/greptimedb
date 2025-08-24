@@ -27,8 +27,8 @@ TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[job@0 as job, ts@1 as ts, sum(prom_irate(ts_range,value))@2 / 1000000000 as sum(prom_irate(ts_range,value)) / Float64(1000000000)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SortExec: expr=[job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_SortPreservingMergeExec: [job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, ts@1 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED

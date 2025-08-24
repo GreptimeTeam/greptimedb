@@ -62,6 +62,7 @@ macro_rules! add_service {
 }
 
 pub struct GrpcServerBuilder {
+    name: Option<String>,
     config: GrpcServerConfig,
     runtime: Runtime,
     routes_builder: RoutesBuilder,
@@ -77,6 +78,7 @@ pub struct GrpcServerBuilder {
 impl GrpcServerBuilder {
     pub fn new(config: GrpcServerConfig, runtime: Runtime) -> Self {
         Self {
+            name: None,
             config,
             runtime,
             routes_builder: RoutesBuilder::default(),
@@ -91,6 +93,10 @@ impl GrpcServerBuilder {
 
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    pub fn name(self, name: Option<String>) -> Self {
+        Self { name, ..self }
     }
 
     /// Add handler for [DatabaseService] service.
@@ -190,6 +196,7 @@ impl GrpcServerBuilder {
             tls_config: self.tls_config,
             otel_arrow_service: Mutex::new(self.otel_arrow_service),
             bind_addr: None,
+            name: self.name,
         }
     }
 }

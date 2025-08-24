@@ -160,7 +160,8 @@ impl<C: Access> ReadCache<C> {
             .map_ok(|entry| async {
                 let (path, mut meta) = entry.into_parts();
 
-                if !cloned_op.info().full_capability().list_has_content_length {
+                // TODO(dennis): Use a better API, see https://github.com/apache/opendal/issues/6522
+                if meta.content_length() == 0 {
                     meta = cloned_op.stat(&path).await?;
                 }
 

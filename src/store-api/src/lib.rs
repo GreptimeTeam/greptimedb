@@ -27,6 +27,7 @@ pub mod mito_engine_options;
 pub mod path_utils;
 pub mod region_engine;
 pub mod region_request;
+pub mod sst_entry;
 pub mod storage;
 
 pub type ManifestVersion = u64;
