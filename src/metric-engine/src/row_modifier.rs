@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use bytes::Bytes;
 use datatypes::value::ValueRef;
+use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -29,9 +31,6 @@ use store_api::storage::consts::{ReservedColumnId, PRIMARY_KEY_COLUMN_NAME};
 use store_api::storage::{ColumnId, TableId};
 
 use crate::error::{EncodePrimaryKeySnafu, Result};
-
-// A random number
-const TSID_HASH_SEED: u32 = 846793005;
 
 /// A row modifier modifies [`Rows`].
 ///
@@ -147,7 +146,7 @@ impl RowModifier {
 
     /// Fills internal columns of a row with table name and a hash of tag values.
     pub fn fill_internal_columns(table_id: TableId, iter: &RowIter<'_>) -> (Value, Value) {
-        let mut hasher = TsidGenerator::default();
+        let mut hasher = FxHashTsidGenerator::default();
         for (name, value) in iter.primary_keys_with_name() {
             // The type is checked before. So only null is ignored.
             if let Some(ValueData::StringValue(string)) = &value.value_data {
@@ -163,31 +162,48 @@ impl RowModifier {
     }
 }
 
+/// TS_ID generator based on fxhash.
+pub type FxHashTsidGenerator = TsidGenerator<FxHasher>;
+
 /// Tsid generator.
-pub struct TsidGenerator {
-    hasher: mur3::Hasher128,
+pub struct TsidGenerator<T> {
+    hasher: T,
 }
 
-impl Default for TsidGenerator {
+impl<T> Default for TsidGenerator<T>
+where
+    T: Default,
+{
     fn default() -> Self {
         Self {
-            hasher: mur3::Hasher128::with_seed(TSID_HASH_SEED),
+            hasher: T::default(),
         }
     }
 }
 
-impl TsidGenerator {
+impl<T: Hasher> TsidGenerator<T> {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_hasher(hasher: T) -> Self {
+        Self { hasher }
+    }
+
     /// Writes a label pair to the generator.
     pub fn write_label(&mut self, name: &str, value: &str) {
         name.hash(&mut self.hasher);
         value.hash(&mut self.hasher);
     }
 
+    /// Write raw label bytes.
+    pub fn write_label_bytes(&mut self, name: &Bytes, value: &Bytes) {
+        self.hasher.write(name);
+        self.hasher.write_u8(0xFF);
+        self.hasher.write(value);
+        self.hasher.write_u8(0xFF);
+    }
+
     /// Generates a new TSID.
     pub fn finish(&mut self) -> u64 {
-        // TSID is 64 bits, simply truncate the 128 bits hash
-        let (hash, _) = self.hasher.finish128();
-        hash
+        self.hasher.finish()
     }
 }
 

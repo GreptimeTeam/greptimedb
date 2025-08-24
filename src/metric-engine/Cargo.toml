@@ -7,12 +7,17 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+testing = []
+
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -24,13 +29,13 @@ common-time.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
 futures-util.workspace = true
+fxhash = "0.2"
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
 mito-codec.workspace = true
 mito2.workspace = true
 moka.workspace = true
-mur3 = "0.1"
 object-store.workspace = true
 prometheus.workspace = true
 serde.workspace = true
@@ -44,4 +49,12 @@ tracing.workspace = true
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
+criterion = "0.7"
 mito2 = { workspace = true, features = ["test"] }
+mur3 = "0.1"
+prost.workspace = true
+
+[[bench]]
+name = "bench_tsid_generator"
+harness = false
+required-features = ["testing"]
