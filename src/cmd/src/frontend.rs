@@ -41,6 +41,7 @@ use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
 use servers::export_metrics::ExportMetricsTask;
+use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -144,6 +145,14 @@ pub struct StartCommand {
     /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
     #[clap(long, alias = "rpc-hostname")]
     rpc_server_addr: Option<String>,
+    /// The address to bind the internal gRPC server.
+    #[clap(long, alias = "internal-rpc-addr")]
+    internal_rpc_bind_addr: Option<String>,
+    /// The address advertised to the metasrv, and used for connections from outside the host.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `internal_rpc_bind_addr`.
+    #[clap(long, alias = "internal-rpc-hostname")]
+    internal_rpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -239,6 +248,31 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_server_addr {
             opts.grpc.server_addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &self.internal_rpc_bind_addr {
+            if let Some(internal_grpc) = &mut opts.internal_grpc {
+                internal_grpc.bind_addr = addr.to_string();
+            } else {
+                let grpc_options = GrpcOptions {
+                    bind_addr: addr.to_string(),
+                    ..Default::default()
+                };
+
+                opts.internal_grpc = Some(grpc_options);
+            }
+        }
+
+        if let Some(addr) = &self.internal_rpc_server_addr {
+            if let Some(internal_grpc) = &mut opts.internal_grpc {
+                internal_grpc.server_addr = addr.to_string();
+            } else {
+                let grpc_options = GrpcOptions {
+                    server_addr: addr.to_string(),
+                    ..Default::default()
+                };
+                opts.internal_grpc = Some(grpc_options);
+            }
         }
 
         if let Some(addr) = &self.mysql_addr {
@@ -448,6 +482,8 @@ mod tests {
             http_addr: Some("127.0.0.1:1234".to_string()),
             mysql_addr: Some("127.0.0.1:5678".to_string()),
             postgres_addr: Some("127.0.0.1:5432".to_string()),
+            internal_rpc_bind_addr: Some("127.0.0.1:4010".to_string()),
+            internal_rpc_server_addr: Some("10.0.0.24:4010".to_string()),
             influxdb_enable: Some(false),
             disable_dashboard: Some(false),
             ..Default::default()
@@ -459,6 +495,10 @@ mod tests {
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
         assert_eq!(opts.mysql.addr, "127.0.0.1:5678");
         assert_eq!(opts.postgres.addr, "127.0.0.1:5432");
+
+        let internal_grpc = opts.internal_grpc.as_ref().unwrap();
+        assert_eq!(internal_grpc.bind_addr, "127.0.0.1:4010");
+        assert_eq!(internal_grpc.server_addr, "10.0.0.24:4010");
 
         let default_opts = FrontendOptions::default().component;
 
