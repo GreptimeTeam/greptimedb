@@ -67,6 +67,12 @@ services:
       - POSTGRES_USER=greptimedb
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=admin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
 
   mysql:
     image: bitnami/mysql:5.7

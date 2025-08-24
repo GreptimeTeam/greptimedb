@@ -723,6 +723,19 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
+      - name: Wait for Postgres (fallback)
+        working-directory: tests-integration/fixtures
+        run: |
+          for i in {1..60}; do
+            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432; then
+              echo "Postgres is ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres not ready in time"
+          docker compose ps
+          docker compose logs postgres
+          exit 1
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -777,6 +790,19 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
+      - name: Wait for Postgres (fallback)
+        working-directory: tests-integration/fixtures
+        run: |
+          for i in {1..60}; do
+            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432; then
+              echo "Postgres is ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres not ready in time"
+          docker compose ps
+          docker compose logs postgres
+          exit 1
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
