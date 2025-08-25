@@ -79,6 +79,42 @@ key_path = ""
 ## For now, gRPC tls config does not support auto reload.
 watch = false
 
+## The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.
+[internal_grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:4010"
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+server_addr = "127.0.0.1:4010"
+## The number of server worker threads.
+runtime_size = 8
+## Compression mode for frontend side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+## Default to `none`
+flight_compression = "arrow_ipc"
+
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
+
 ## MySQL server options.
 [mysql]
 ## Whether to enable.
