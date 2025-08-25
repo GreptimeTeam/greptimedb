@@ -1109,9 +1109,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
             "demo_metrics",
             "demo_metrics_with_nanos",
             "logic_table",
-            "mito",
             "multi_labels",
-            "numbers"
         ]))
         .unwrap()
     );
