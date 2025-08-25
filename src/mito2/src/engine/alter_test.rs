@@ -207,6 +207,7 @@ async fn test_alter_region() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -293,6 +294,7 @@ async fn test_put_after_alter() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -611,6 +613,7 @@ async fn test_alter_column_fulltext_options() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -722,6 +725,7 @@ async fn test_alter_column_set_inverted_index() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await

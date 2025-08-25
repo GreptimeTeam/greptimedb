@@ -28,6 +28,17 @@ use rskafka::record::RecordAndOffset;
 
 use crate::kafka::index::{NextBatchHint, RegionWalIndexIterator};
 
+pub struct FetchResult {
+    /// The offsets of the fetched records.
+    pub records: Vec<RecordAndOffset>,
+
+    /// The high watermark of the partition.
+    pub high_watermark: i64,
+
+    /// The size of the response encoded in bytes.
+    pub encoded_response_size: usize,
+}
+
 #[async_trait::async_trait]
 pub trait FetchClient: std::fmt::Debug + Send + Sync {
     /// Fetch records.
@@ -38,7 +49,9 @@ pub trait FetchClient: std::fmt::Debug + Send + Sync {
         offset: i64,
         bytes: Range<i32>,
         max_wait_ms: i32,
-    ) -> rskafka::client::error::Result<(Vec<RecordAndOffset>, i64)>;
+    ) -> rskafka::client::error::Result<FetchResult>;
+
+    fn topic(&self) -> &str;
 }
 
 #[async_trait::async_trait]
@@ -48,15 +61,25 @@ impl FetchClient for PartitionClient {
         offset: i64,
         bytes: Range<i32>,
         max_wait_ms: i32,
-    ) -> rskafka::client::error::Result<(Vec<RecordAndOffset>, i64)> {
-        self.fetch_records(offset, bytes, max_wait_ms).await
+    ) -> rskafka::client::error::Result<FetchResult> {
+        self.fetch_records(offset, bytes, max_wait_ms)
+            .await
+            .map(|r| FetchResult {
+                records: r.records,
+                high_watermark: r.high_watermark,
+                encoded_response_size: r.encoded_response_size,
+            })
+    }
+
+    fn topic(&self) -> &str {
+        self.topic()
     }
 }
 
-struct FetchResult {
+struct FetchResultInner {
     records_and_offsets: Vec<RecordAndOffset>,
     batch_size: usize,
-    fetch_bytes: i32,
+    fetch_bytes: usize,
     watermark: i64,
     used_offset: i64,
 }
@@ -97,7 +120,23 @@ pub struct Consumer {
 
     /// The fetch future.
     #[builder(default = "Fuse::terminated()")]
-    fetch_fut: Fuse<BoxFuture<'static, rskafka::client::error::Result<FetchResult>>>,
+    fetch_fut: Fuse<BoxFuture<'static, rskafka::client::error::Result<FetchResultInner>>>,
+
+    /// Total fetched bytes.
+    #[builder(default = "0")]
+    total_fetched_bytes: u64,
+}
+
+impl Consumer {
+    /// Returns the total fetched bytes.
+    pub fn total_fetched_bytes(&self) -> u64 {
+        self.total_fetched_bytes
+    }
+
+    /// Returns the topic name.
+    pub fn topic(&self) -> &str {
+        self.client.topic()
+    }
 }
 
 pub(crate) struct RecordsBuffer {
@@ -184,15 +223,20 @@ impl Stream for Consumer {
                         let fetch_range =
                             1i32..(bytes.saturating_add(1).min(*this.max_batch_size) as i32);
                         *this.fetch_fut = FutureExt::fuse(Box::pin(async move {
-                            let (records_and_offsets, watermark) = client
+                            let FetchResult {
+                                records: records_and_offsets,
+                                high_watermark: watermark,
+                                encoded_response_size,
+                                ..
+                            } = client
                                 .fetch_records(offset, fetch_range, max_wait_ms)
                                 .await?;
 
-                            Ok(FetchResult {
+                            Ok(FetchResultInner {
                                 records_and_offsets,
                                 watermark,
                                 used_offset: offset,
-                                fetch_bytes: bytes as i32,
+                                fetch_bytes: encoded_response_size,
                                 batch_size: len,
                             })
                         }));
@@ -206,7 +250,7 @@ impl Stream for Consumer {
             let data = futures::ready!(this.fetch_fut.poll_unpin(cx));
 
             match data {
-                Ok(FetchResult {
+                Ok(FetchResultInner {
                     mut records_and_offsets,
                     watermark,
                     used_offset,
@@ -217,9 +261,10 @@ impl Stream for Consumer {
                     records_and_offsets.sort_unstable_by_key(|x| x.offset);
                     *this.last_high_watermark = watermark;
                     if !records_and_offsets.is_empty() {
-                        *this.avg_record_size = fetch_bytes as usize / records_and_offsets.len();
+                        *this.avg_record_size = fetch_bytes / records_and_offsets.len();
                         debug!("set avg_record_size: {}", *this.avg_record_size);
                     }
+                    *this.total_fetched_bytes += fetch_bytes as u64;
 
                     debug!(
                         "Fetch result: {:?}, used_offset: {used_offset}, max_batch_size: {fetch_bytes}, expected batch_num: {batch_size}, actual batch_num: {}",
@@ -254,7 +299,7 @@ mod tests {
     use futures::TryStreamExt;
     use rskafka::record::{Record, RecordAndOffset};
 
-    use super::FetchClient;
+    use super::*;
     use crate::kafka::consumer::{Consumer, RecordsBuffer};
     use crate::kafka::index::{MultipleRegionWalIndexIterator, RegionWalRange, RegionWalVecIndex};
 
@@ -270,7 +315,7 @@ mod tests {
             offset: i64,
             bytes: Range<i32>,
             _max_wait_ms: i32,
-        ) -> rskafka::client::error::Result<(Vec<RecordAndOffset>, i64)> {
+        ) -> rskafka::client::error::Result<FetchResult> {
             let record_size = self.record.approximate_size();
             let num = (bytes.end.unsigned_abs() as usize / record_size).max(1);
 
@@ -280,8 +325,18 @@ mod tests {
                     offset: offset + idx as i64,
                 })
                 .collect::<Vec<_>>();
+
             let max_offset = offset + records.len() as i64;
-            Ok((records, max_offset))
+            let encoded_response_size = records.iter().map(|r| r.record.approximate_size()).sum();
+            Ok(FetchResult {
+                records,
+                high_watermark: max_offset,
+                encoded_response_size,
+            })
+        }
+
+        fn topic(&self) -> &str {
+            "test"
         }
     }
 
@@ -315,6 +370,7 @@ mod tests {
                 index: Box::new(index),
             },
             fetch_fut: Fuse::terminated(),
+            total_fetched_bytes: 0,
         };
 
         let records = consumer.try_collect::<Vec<_>>().await.unwrap();
@@ -347,6 +403,7 @@ mod tests {
                 index: Box::new(index),
             },
             fetch_fut: Fuse::terminated(),
+            total_fetched_bytes: 0,
         };
 
         let records = consumer.try_collect::<Vec<_>>().await.unwrap();
@@ -388,6 +445,7 @@ mod tests {
                 index: Box::new(iter),
             },
             fetch_fut: Fuse::terminated(),
+            total_fetched_bytes: 0,
         };
 
         let records = consumer.try_collect::<Vec<_>>().await.unwrap();

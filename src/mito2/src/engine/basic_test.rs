@@ -158,6 +158,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await

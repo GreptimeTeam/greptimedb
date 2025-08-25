@@ -200,7 +200,7 @@ mod tests {
 
     use common_wal::maybe_skip_kafka_integration_test;
     use common_wal::test_util::get_kafka_endpoints;
-    use rskafka::client::partition::UnknownTopicHandling;
+    use rskafka::client::partition::{FetchResult, UnknownTopicHandling};
     use rskafka::record::Record;
 
     use super::*;
@@ -289,8 +289,8 @@ mod tests {
             .await;
         if expect_success {
             assert!(res.is_ok());
-            let (record, _high_watermark) = res.unwrap();
-            assert!(!record.is_empty());
+            let FetchResult { records, .. } = res.unwrap();
+            assert!(!records.is_empty());
         } else {
             let err = res.unwrap_err();
             // The error is in a private module so we check it through `to_string()`.

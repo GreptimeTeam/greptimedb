@@ -149,6 +149,26 @@ pub fn prepare_wal_options(
     }
 }
 
+/// Extracts the topic from the wal options.
+pub fn extract_topic_from_wal_options(
+    region_id: RegionId,
+    region_options: &HashMap<RegionNumber, String>,
+) -> Option<String> {
+    region_options
+        .get(&region_id.region_number())
+        .and_then(|wal_options| {
+            serde_json::from_str::<WalOptions>(wal_options)
+                .ok()
+                .and_then(|wal_options| {
+                    if let WalOptions::Kafka(kafka_wal_option) = wal_options {
+                        Some(kafka_wal_option.topic)
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

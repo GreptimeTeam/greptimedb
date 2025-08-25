@@ -107,6 +107,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
+        .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
         .parse_options(request.options)
         {
             Ok(opener) => opener,

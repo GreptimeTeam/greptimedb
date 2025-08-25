@@ -115,6 +115,7 @@ impl TestEnv {
                     path_type: PathType::Bare, // Use Bare path type for engine regions
                     options: physical_region_option,
                     skip_wal_replay: true,
+                    checkpoint: None,
                 }),
             )
             .await

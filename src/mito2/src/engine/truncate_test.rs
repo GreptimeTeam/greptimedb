@@ -276,6 +276,7 @@ async fn test_engine_truncate_reopen() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -384,6 +385,7 @@ async fn test_engine_truncate_during_flush() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await

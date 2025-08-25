@@ -1410,6 +1410,7 @@ mod tests {
                     path_type: PathType::Bare,
                     options: Default::default(),
                     skip_wal_replay: false,
+                    checkpoint: None,
                 }),
             )
             .await
@@ -1579,6 +1580,7 @@ mod tests {
                             path_type: PathType::Bare,
                             options: Default::default(),
                             skip_wal_replay: false,
+                            checkpoint: None,
                         },
                     ),
                     (
@@ -1589,6 +1591,7 @@ mod tests {
                             path_type: PathType::Bare,
                             options: Default::default(),
                             skip_wal_replay: false,
+                            checkpoint: None,
                         },
                     ),
                 ],
@@ -1610,6 +1613,7 @@ mod tests {
                             path_type: PathType::Bare,
                             options: Default::default(),
                             skip_wal_replay: false,
+                            checkpoint: None,
                         },
                     ),
                     (
@@ -1620,6 +1624,7 @@ mod tests {
                             path_type: PathType::Bare,
                             options: Default::default(),
                             skip_wal_replay: false,
+                            checkpoint: None,
                         },
                     ),
                 ],

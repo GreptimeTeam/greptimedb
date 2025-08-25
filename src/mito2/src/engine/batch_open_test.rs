@@ -125,6 +125,7 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
                     options: options.clone(),
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
+                    checkpoint: None,
                 },
             )
         })
@@ -137,6 +138,7 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
             options: options.clone(),
             skip_wal_replay: false,
             path_type: PathType::Bare,
+            checkpoint: None,
         },
     ));
 
@@ -190,6 +192,7 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
                     options: options.clone(),
                     skip_wal_replay: false,
                     path_type: PathType::Bare,
+                    checkpoint: None,
                 },
             )
         })
