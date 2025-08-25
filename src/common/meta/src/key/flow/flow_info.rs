@@ -140,7 +140,7 @@ pub struct FlowInfoValue {
     /// If `None`, will automatically decide when to evaluate the flow.
     /// If `Some`, it will be evaluated every `eval_interval` seconds.
     #[serde(default)]
-    pub eval_interval: Option<i64>,
+    pub eval_interval_secs: Option<i64>,
     /// The comment.
     pub comment: String,
     /// The options.
@@ -198,7 +198,7 @@ impl FlowInfoValue {
     }
 
     pub fn eval_interval(&self) -> Option<i64> {
-        self.eval_interval
+        self.eval_interval_secs
     }
 
     pub fn comment(&self) -> &String {

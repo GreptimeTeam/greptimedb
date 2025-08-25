@@ -447,7 +447,7 @@ impl From<&CreateFlowData> for CreateRequest {
             expire_after: value.task.expire_after.map(|value| ExpireAfter { value }),
             eval_interval: value
                 .task
-                .eval_interval
+                .eval_interval_secs
                 .map(|seconds| api::v1::EvalInterval { seconds }),
             comment: value.task.comment.clone(),
             sql: value.task.sql.clone(),
@@ -468,7 +468,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             flow_name,
             sink_table_name,
             expire_after,
-            eval_interval,
+            eval_interval_secs: eval_interval,
             comment,
             sql,
             flow_options: mut options,
@@ -508,7 +508,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             flow_name,
             raw_sql: sql,
             expire_after,
-            eval_interval,
+            eval_interval_secs: eval_interval,
             comment,
             options,
             created_time: create_time,

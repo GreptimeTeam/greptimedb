@@ -90,6 +90,11 @@ pub fn parser_expr_to_scalar_value_literal(
         ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
             if let Expr::ScalarFunction(func) = node {
                 if func.name().to_lowercase() == "now" {
+                    if !func.args.is_empty() {
+                        return Err(datafusion_common::DataFusionError::Plan(
+                            "now() function should not have arguments".to_string(),
+                        ));
+                    }
                     self.found = true;
                     return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
                 }

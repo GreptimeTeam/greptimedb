@@ -364,19 +364,18 @@ impl BatchingEngine {
             }
         }
 
-        let Some(query_ctx) = query_ctx else {
+        let query_ctx = query_ctx.context({
             UnexpectedSnafu {
                 reason: "Query context is None".to_string(),
             }
-            .fail()?
-        };
+        })?;
         let query_ctx = Arc::new(query_ctx);
 
         // optionally set a eval interval for the flow
         if eval_interval.is_none()
             && is_tql(query_ctx.clone().sql_dialect(), &sql)
                 .map_err(BoxedError::new)
-                .with_context(|_| CreateFlowSnafu { sql: sql.clone() })?
+                .context(CreateFlowSnafu { sql: &sql })?
         {
             InvalidQuerySnafu {
                 reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
