@@ -257,6 +257,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read file: {}", path))]
+    FileIo {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+        path: String,
+    },
+
     #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: String,
@@ -970,6 +979,7 @@ impl ErrorExt for Error {
         match self {
             Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
+            | Error::FileIo { .. }
             | Error::TcpBind { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }

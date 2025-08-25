@@ -21,6 +21,7 @@ use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
+#[cfg(feature = "pg_kvbackend")]
 use common_error::ext::BoxedError;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
@@ -40,7 +41,7 @@ use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
 use either::Either;
-use etcd_client::Client;
+use etcd_client::{Client, ConnectOptions};
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -286,7 +287,8 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
+            let etcd_client =
+                create_etcd_client_with_tls(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -435,12 +437,67 @@ pub async fn metasrv_builder(
 }
 
 pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+    create_etcd_client_with_tls(store_addrs, None).await
+}
+
+fn build_connection_options(tls_config: Option<&TlsOption>) -> Result<Option<ConnectOptions>> {
+    use std::fs;
+
+    use common_telemetry::debug;
+    use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
+    use servers::tls::TlsMode;
+
+    // If TLS options are not provided, return None
+    let Some(tls_config) = tls_config else {
+        return Ok(None);
+    };
+    // If TLS is disabled, return None
+    if matches!(tls_config.mode, TlsMode::Disable) {
+        return Ok(None);
+    }
+    let mut etcd_tls_opts = TlsOptions::new();
+    // Set CA certificate if provided
+    if !tls_config.ca_cert_path.is_empty() {
+        debug!("Using CA certificate from {}", tls_config.ca_cert_path);
+        let ca_cert_pem = fs::read(&tls_config.ca_cert_path).context(error::FileIoSnafu {
+            path: &tls_config.ca_cert_path,
+        })?;
+        let ca_cert = Certificate::from_pem(ca_cert_pem);
+        etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
+    }
+    // Set client identity (cert + key) if both are provided
+    if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
+        debug!(
+            "Using client certificate from {} and key from {}",
+            tls_config.cert_path, tls_config.key_path
+        );
+        let cert_pem = fs::read(&tls_config.cert_path).context(error::FileIoSnafu {
+            path: &tls_config.cert_path,
+        })?;
+        let key_pem = fs::read(&tls_config.key_path).context(error::FileIoSnafu {
+            path: &tls_config.key_path,
+        })?;
+        let identity = Identity::from_pem(cert_pem, key_pem);
+        etcd_tls_opts = etcd_tls_opts.identity(identity);
+    }
+    // Enable native TLS roots for additional trust anchors
+    etcd_tls_opts = etcd_tls_opts.with_native_roots();
+    Ok(Some(ConnectOptions::new().with_tls(etcd_tls_opts)))
+}
+
+pub async fn create_etcd_client_with_tls(
+    store_addrs: &[String],
+    tls_config: Option<&TlsOption>,
+) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
+
+    let connect_options = build_connection_options(tls_config)?;
+
+    Client::connect(&etcd_endpoints, connect_options)
         .await
         .context(error::ConnectEtcdSnafu)
 }
@@ -532,4 +589,70 @@ pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
         .context(error::CreateMySqlPoolSnafu)?;
 
     Ok(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use servers::tls::TlsMode;
+
+    use super::*;
+
+    fn create_test_tls_config(ca_cert_path: &str, cert_path: &str, key_path: &str) -> TlsOption {
+        TlsOption {
+            mode: TlsMode::Require,
+            ca_cert_path: ca_cert_path.to_string(),
+            cert_path: cert_path.to_string(),
+            key_path: key_path.to_string(),
+            watch: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_etcd_client_with_tls() {
+        let cert_dir = std::env::current_dir()
+            .unwrap()
+            .join("tests-integration")
+            .join("fixtures")
+            .join("etcd-tls-certs");
+
+        if cert_dir.join("ca.crt").exists()
+            && cert_dir.join("client.crt").exists()
+            && cert_dir.join("client-key.pem").exists()
+        {
+            let tls_config = create_test_tls_config(
+                &cert_dir.join("ca.crt").to_string_lossy(),
+                &cert_dir.join("client.crt").to_string_lossy(),
+                &cert_dir.join("client-key.pem").to_string_lossy(),
+            );
+
+            let endpoints = vec!["https://localhost:2378".to_string()];
+            let result = create_etcd_client_with_tls(&endpoints, Some(&tls_config)).await;
+
+            match result {
+                Ok(_) => {
+                    // Test passes - TLS client created successfully
+                }
+                Err(e) => {
+                    let error_msg = e.to_string().to_lowercase();
+                    let acceptable_errors = [
+                        "connection refused",
+                        "no route to host",
+                        "timeout",
+                        "dns",
+                        "network unreachable",
+                    ];
+
+                    let is_connection_error = acceptable_errors
+                        .iter()
+                        .any(|&err_type| error_msg.contains(err_type));
+
+                    assert!(
+                        is_connection_error,
+                        "TLS configuration error (not a network issue): {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
 }

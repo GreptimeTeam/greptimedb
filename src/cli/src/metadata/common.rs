@@ -19,8 +19,9 @@ use common_error::ext::BoxedError;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
-use meta_srv::bootstrap::create_etcd_client;
+use meta_srv::bootstrap::create_etcd_client_with_tls;
 use meta_srv::metasrv::BackendImpl;
+use servers::tls::{TlsMode, TlsOption};
 
 use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
 
@@ -55,6 +56,26 @@ pub(crate) struct StoreConfig {
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
     meta_table_name: String,
+
+    /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
+    #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
+    backend_tls_mode: TlsMode,
+
+    /// Path to TLS certificate file for backend store connections
+    #[clap(long = "backend-tls-cert-path", default_value = "")]
+    backend_tls_cert_path: String,
+
+    /// Path to TLS private key file for backend store connections
+    #[clap(long = "backend-tls-key-path", default_value = "")]
+    backend_tls_key_path: String,
+
+    /// Path to TLS CA certificate file for backend store connections
+    #[clap(long = "backend-tls-ca-cert-path", default_value = "")]
+    backend_tls_ca_cert_path: String,
+
+    /// Enable watching TLS certificate files for changes
+    #[clap(long = "backend-tls-watch")]
+    backend_tls_watch: bool,
 }
 
 impl StoreConfig {
@@ -67,7 +88,18 @@ impl StoreConfig {
         } else {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
-                    let etcd_client = create_etcd_client(store_addrs)
+                    let tls_config = if self.backend_tls_mode != TlsMode::Disable {
+                        Some(TlsOption {
+                            mode: self.backend_tls_mode.clone(),
+                            cert_path: self.backend_tls_cert_path.clone(),
+                            key_path: self.backend_tls_key_path.clone(),
+                            ca_cert_path: self.backend_tls_ca_cert_path.clone(),
+                            watch: self.backend_tls_watch,
+                        })
+                    } else {
+                        None
+                    };
+                    let etcd_client = create_etcd_client_with_tls(store_addrs, tls_config.as_ref())
                         .await
                         .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
