@@ -35,7 +35,7 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::RegionRole;
-use store_api::region_request::{PathType, ReplayCheckpoint};
+use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
@@ -85,7 +85,7 @@ pub(crate) struct RegionOpener {
     time_provider: TimeProviderRef,
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
-    checkpoint: Option<ReplayCheckpoint>,
+    replay_checkpoint: Option<u64>,
 }
 
 impl RegionOpener {
@@ -119,7 +119,7 @@ impl RegionOpener {
             time_provider,
             stats: Default::default(),
             wal_entry_reader: None,
-            checkpoint: None,
+            replay_checkpoint: None,
         }
     }
 
@@ -151,9 +151,9 @@ impl RegionOpener {
         self.options(RegionOptions::try_from(&options)?)
     }
 
-    /// Sets the checkpoint for the region.
-    pub(crate) fn checkpoint(mut self, checkpoint: Option<ReplayCheckpoint>) -> Self {
-        self.checkpoint = checkpoint;
+    /// Sets the replay checkpoint for the region.
+    pub(crate) fn replay_checkpoint(mut self, replay_checkpoint: Option<u64>) -> Self {
+        self.replay_checkpoint = replay_checkpoint;
         self
     }
 
@@ -441,8 +441,7 @@ impl RegionOpener {
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
             let replay_from_entry_id = self
-                .checkpoint
-                .map(|c| c.entry_id)
+                .replay_checkpoint
                 .unwrap_or_default()
                 .max(flushed_entry_id);
             info!(
