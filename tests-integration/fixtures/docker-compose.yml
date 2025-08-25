@@ -72,7 +72,7 @@ services:
     ports:
         - 5433:5432
     volumes:
-        - ~/apps/postgres:/var/lib/postgresql/data
+        - ~/apps/postgres15:/var/lib/postgresql/data
         - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     environment:
         - POSTGRES_USER=greptimedb
