@@ -19,6 +19,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ResultExt;
 
 use crate::error::{RecordBatchSnafu, Result};
@@ -27,7 +28,7 @@ use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
-use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
+use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
 pub enum Source {
     RowGroup(RowGroupReader),
@@ -235,6 +236,94 @@ impl Iterator for PruneTimeIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_non_empty_batch().transpose()
+    }
+}
+
+pub enum FlatSource {
+    RowGroup(FlatRowGroupReader),
+}
+
+impl FlatSource {
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        match self {
+            FlatSource::RowGroup(r) => r.next_batch(),
+        }
+    }
+}
+
+/// A flat format reader that returns RecordBatch instead of Batch.
+pub struct FlatPruneReader {
+    /// Context for file ranges.
+    context: FileRangeContextRef,
+    source: FlatSource,
+    metrics: ReaderMetrics,
+}
+
+impl FlatPruneReader {
+    pub(crate) fn new_with_row_group_reader(
+        ctx: FileRangeContextRef,
+        reader: FlatRowGroupReader,
+    ) -> Self {
+        Self {
+            context: ctx,
+            source: FlatSource::RowGroup(reader),
+            metrics: Default::default(),
+        }
+    }
+
+    /// Merge metrics with the inner reader and return the merged metrics.
+    pub(crate) fn metrics(&self) -> ReaderMetrics {
+        // FlatRowGroupReader doesn't collect metrics, so just return our own
+        self.metrics.clone()
+    }
+
+    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        while let Some(record_batch) = {
+            let start = std::time::Instant::now();
+            let batch = self.source.next_batch()?;
+            self.metrics.scan_cost += start.elapsed();
+            batch
+        } {
+            // Update metrics for the received batch
+            self.metrics.num_rows += record_batch.num_rows();
+            self.metrics.num_batches += 1;
+
+            match self.prune_flat(record_batch)? {
+                Some(filtered_batch) => {
+                    return Ok(Some(filtered_batch));
+                }
+                None => {
+                    continue;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Prunes batches by the pushed down predicate and returns RecordBatch.
+    fn prune_flat(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
+        // fast path
+        if self.context.filters().is_empty() {
+            return Ok(Some(record_batch));
+        }
+
+        let num_rows_before_filter = record_batch.num_rows();
+        let Some(filtered_batch) = self.context.precise_filter_flat(record_batch)? else {
+            // the entire batch is filtered out
+            self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_filter;
+            return Ok(None);
+        };
+
+        // update metric
+        let filtered_rows = num_rows_before_filter - filtered_batch.num_rows();
+        self.metrics.filter_metrics.rows_precise_filtered += filtered_rows;
+
+        if filtered_batch.num_rows() > 0 {
+            Ok(Some(filtered_batch))
+        } else {
+            Ok(None)
+        }
     }
 }
 

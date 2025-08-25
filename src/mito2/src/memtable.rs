@@ -30,7 +30,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::config::MitoConfig;
-use crate::error::Result;
+use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
@@ -401,6 +401,23 @@ pub(crate) struct MemScanMetricsData {
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
     fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator>;
+
+    /// Returns whether the iterator is a record batch iterator.
+    fn is_record_batch(&self) -> bool {
+        false
+    }
+
+    /// Returns the record batch iterator to read the range.
+    fn build_record_batch(
+        &self,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedRecordBatchIterator> {
+        let _metrics = metrics;
+        UnsupportedOperationSnafu {
+            err_msg: "Record batch iterator is not supported by this memtable",
+        }
+        .fail()
+    }
 }
 
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
@@ -469,6 +486,22 @@ impl MemtableRange {
     /// Builds an iterator to read all rows in range.
     pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
         self.context.builder.build(None)
+    }
+
+    /// Builds a record batch iterator to read all rows in range.
+    ///
+    /// This method doesn't take the optional time range because a bulk part is immutable
+    /// so we don't need to filter rows out of the time range.
+    pub fn build_record_batch_iter(
+        &self,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedRecordBatchIterator> {
+        self.context.builder.build_record_batch(metrics)
+    }
+
+    /// Returns whether the iterator is a record batch iterator.
+    pub fn is_record_batch(&self) -> bool {
+        self.context.builder.is_record_batch()
     }
 
     pub fn num_rows(&self) -> usize {
