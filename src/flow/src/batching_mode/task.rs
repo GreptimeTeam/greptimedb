@@ -510,7 +510,7 @@ impl BatchingTask {
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
-                    
+
                     // here use proper ticking if set eval interval
                     if let Some(eval_interval) = &mut interval {
                         eval_interval.tick().await;
