@@ -698,7 +698,6 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs:  [conflict-check, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -720,22 +719,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+      - name: Setup postgres
+        working-directory: tests-integration/fixtures
+        run: docker compose up postgres
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
-      - name: Wait for Postgres (fallback)
-        working-directory: tests-integration/fixtures
-        run: |
-          for i in {1..60}; do
-            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432; then
-              echo "Postgres is ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "Postgres not ready in time"
-          docker compose ps
-          docker compose logs postgres
-          exit 1
       - name: Run nextest cases
         run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -754,6 +743,7 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5433/postgres
           GT_POSTGRES_SCHEMA: greptime_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
@@ -790,19 +780,6 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
-      - name: Wait for Postgres (fallback)
-        working-directory: tests-integration/fixtures
-        run: |
-          for i in {1..60}; do
-            if docker compose exec -T postgres pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432; then
-              echo "Postgres is ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "Postgres not ready in time"
-          docker compose ps
-          docker compose logs postgres
-          exit 1
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
@@ -820,6 +797,7 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5433/postgres
           GT_POSTGRES_SCHEMA: greptime_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092

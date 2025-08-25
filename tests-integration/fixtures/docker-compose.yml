@@ -57,22 +57,28 @@ services:
       - 'minio_data:/bitnami/minio/data'
 
   postgres:
-    image: docker.io/postgres:15-alpine
+    image: docker.io/postgres:14-alpine
     ports:
       - 5432:5432
     volumes:
       - ~/apps/postgres:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     environment:
       - POSTGRES_USER=greptimedb
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=admin
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U greptimedb -d postgres -h 127.0.0.1 -p 5432"]
-      interval: 2s
-      timeout: 5s
-      retries: 60
-      start_period: 5s
+
+  postgres15:
+    image: docker.io/postgres:15-alpine
+    ports:
+        - 5433:5432
+    volumes:
+        - ~/apps/postgres:/var/lib/postgresql/data
+        - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    environment:
+        - POSTGRES_USER=greptimedb
+        - POSTGRES_DB=postgres
+        - POSTGRES_PASSWORD=admin
+
 
   mysql:
     image: bitnami/mysql:5.7
