@@ -47,7 +47,7 @@ use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
@@ -1143,13 +1143,14 @@ async fn retrieve_table_names(
 
     while let Some(table) = tables_stream.next().await {
         let table = table.context(CatalogSnafu)?;
-        if table
+        if !table
             .table_info()
             .meta
             .options
             .extra_options
-            .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+            .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            // skip non-prometheus (non-metricengine) tables for __name__ query
             continue;
         }
 
