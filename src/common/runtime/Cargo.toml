@@ -28,7 +28,6 @@ parking_lot.workspace = true
 paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
-rand.workspace = true
 ratelimit.workspace = true
 serde.workspace = true
 serde_json.workspace = true

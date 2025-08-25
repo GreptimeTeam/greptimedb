@@ -67,6 +67,12 @@ jobs:
     steps:
       - run: 'echo "No action required"'
 
+  udeps:
+    name: Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
   coverage:
     runs-on: ubuntu-latest
     steps:

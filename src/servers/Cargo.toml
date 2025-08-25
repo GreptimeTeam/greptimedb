@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-dashboard = []
+dashboard = ["dep:rust-embed"]
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
 testing = []
@@ -35,7 +35,6 @@ catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true
 common-grpc.workspace = true
@@ -101,7 +100,7 @@ quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rust-embed = { version = "6.6", features = ["debug-embed"] }
+rust-embed = { version = "6.6", optional = true, features = ["debug-embed"] }
 rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
