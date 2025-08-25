@@ -211,7 +211,7 @@ mod tests {
             auto_prune_interval: Duration::from_secs(0),
             auto_prune_parallelism: 10,
             flush_trigger_size: ReadableSize::mb(512),
-            checkpoint_trigger_size: ReadableSize::mb(64),
+            checkpoint_trigger_size: ReadableSize::mb(128),
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 
