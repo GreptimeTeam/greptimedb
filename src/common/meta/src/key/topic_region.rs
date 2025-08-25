@@ -212,6 +212,16 @@ impl TopicRegionManager {
         Ok(v)
     }
 
+    pub async fn get(&self, key: TopicRegionKey<'_>) -> Result<Option<TopicRegionValue>> {
+        let key_bytes = key.to_bytes();
+        let resp = self.kv_backend.get(&key_bytes).await?;
+        let value = resp
+            .map(|kv| topic_region_decoder(&kv).map(|(_, value)| value))
+            .transpose()?;
+
+        Ok(value)
+    }
+
     pub async fn batch_put(
         &self,
         keys: Vec<(TopicRegionKey<'_>, Option<TopicRegionValue>)>,

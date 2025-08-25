@@ -108,6 +108,10 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
+    #[serde(default)]
+    pub replay_entry_id: Option<u64>,
+    #[serde(default)]
+    pub metadata_replay_entry_id: Option<u64>,
 }
 
 impl OpenRegion {
@@ -124,7 +128,21 @@ impl OpenRegion {
             region_options,
             region_wal_options,
             skip_wal_replay,
+            replay_entry_id: None,
+            metadata_replay_entry_id: None,
         }
+    }
+
+    /// Sets the replay entry id.
+    pub fn with_replay_entry_id(mut self, replay_entry_id: Option<u64>) -> Self {
+        self.replay_entry_id = replay_entry_id;
+        self
+    }
+
+    /// Sets the metadata replay entry id.
+    pub fn with_metadata_replay_entry_id(mut self, metadata_replay_entry_id: Option<u64>) -> Self {
+        self.metadata_replay_entry_id = metadata_replay_entry_id;
+        self
     }
 }
 
@@ -352,6 +370,8 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
+            replay_entry_id: None,
+            metadata_replay_entry_id: None,
         };
         assert_eq!(expected, deserialized);
     }

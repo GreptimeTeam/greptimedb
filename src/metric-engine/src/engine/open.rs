@@ -22,9 +22,7 @@ use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{
-    AffectedRows, PathType, RegionOpenRequest, RegionRequest, ReplayCheckpoint,
-};
+use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, ReplayCheckpoint};
 use store_api::storage::RegionId;
 
 use crate::engine::create::region_options_for_metadata_region;
@@ -250,25 +248,17 @@ impl MetricEngineInner {
         let data_region_id = utils::to_data_region_id(region_id);
         let (open_metadata_region_request, open_data_region_request) =
             self.transform_open_physical_region_request(request);
-
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::Open(open_metadata_region_request),
+        let _ = self
+            .mito
+            .handle_batch_open_requests(
+                2,
+                vec![
+                    (metadata_region_id, open_metadata_region_request),
+                    (data_region_id, open_data_region_request),
+                ],
             )
             .await
-            .with_context(|_| OpenMitoRegionSnafu {
-                region_type: "metadata",
-            })?;
-        self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Open(open_data_region_request),
-            )
-            .await
-            .with_context(|_| OpenMitoRegionSnafu {
-                region_type: "data",
-            })?;
+            .context(BatchOpenMitoRegionSnafu {})?;
 
         info!("Opened physical metric region {region_id}");
         PHYSICAL_REGION_COUNT.inc();

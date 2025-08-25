@@ -446,8 +446,7 @@ impl LogStore for KafkaLogStore {
                 }
             }
 
-            metrics::METRIC_KAFKA_READ_BYTES_TOTAL
-                .inc_by(stream_consumer.total_fetched_bytes() as u64);
+            metrics::METRIC_KAFKA_READ_BYTES_TOTAL.inc_by(stream_consumer.total_fetched_bytes());
 
             info!(
                 "Fetched {} bytes from topic: {}, start_entry_id: {}, end_offset: {}, elapsed: {:?}",

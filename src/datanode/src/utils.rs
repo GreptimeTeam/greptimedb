@@ -17,9 +17,8 @@ use std::collections::HashMap;
 use common_meta::key::datanode_table::DatanodeTableManager;
 use common_meta::key::topic_region::{TopicRegionKey, TopicRegionManager, TopicRegionValue};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_options_allocator::prepare_wal_options;
+use common_meta::wal_options_allocator::{extract_topic_from_wal_options, prepare_wal_options};
 use common_meta::DatanodeId;
-use common_wal::options::WalOptions;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::path_utils::table_dir;
@@ -36,20 +35,13 @@ pub(crate) struct RegionOpenRequests {
     pub follower_regions: Vec<(RegionId, RegionOpenRequest)>,
 }
 
-fn extract_topic_regions(
+fn group_region_by_topic(
     region_id: RegionId,
     region_options: &HashMap<RegionNumber, String>,
     topic_regions: &mut HashMap<String, Vec<RegionId>>,
 ) {
-    if let Some(wal_options) = region_options.get(&region_id.region_number()) {
-        let _ = serde_json::from_str::<WalOptions>(wal_options).map(|wal_options| {
-            if let WalOptions::Kafka(kafka_wal_option) = wal_options {
-                topic_regions
-                    .entry(kafka_wal_option.topic)
-                    .or_default()
-                    .push(region_id);
-            }
-        });
+    if let Some(topic) = extract_topic_from_wal_options(region_id, region_options) {
+        topic_regions.entry(topic).or_default().push(region_id);
     }
 }
 
@@ -93,7 +85,7 @@ pub(crate) async fn build_region_open_requests(
                 region_id,
                 &table_value.region_info.region_wal_options,
             );
-            extract_topic_regions(
+            group_region_by_topic(
                 region_id,
                 &table_value.region_info.region_wal_options,
                 &mut topic_regions,
@@ -117,7 +109,7 @@ pub(crate) async fn build_region_open_requests(
                 RegionId::new(table_value.table_id, region_number),
                 &table_value.region_info.region_wal_options,
             );
-            extract_topic_regions(
+            group_region_by_topic(
                 region_id,
                 &table_value.region_info.region_wal_options,
                 &mut topic_regions,
