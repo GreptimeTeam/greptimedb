@@ -204,8 +204,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
 
     /// Builds the template set for the given table name.
     fn build(&self) -> PgSqlTemplateSet {
-        let table_ident = self.table_name;
-        let table_ref = Self::format_table_ref(table_ident, self.schema);
+        let table_ident = Self::format_table_ref(self.table_name, self.schema);
         // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
             table_ref: table_ref.clone(),
