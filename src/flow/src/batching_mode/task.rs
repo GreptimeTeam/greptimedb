@@ -75,11 +75,12 @@ pub struct TaskConfig {
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
-    sink_table_name: [String; 3],
+    pub sink_table_name: [String; 3],
     pub source_table_names: HashSet<[String; 3]>,
-    catalog_manager: CatalogManagerRef,
-    query_type: QueryType,
-    batch_opts: Arc<BatchingModeOptions>,
+    pub catalog_manager: CatalogManagerRef,
+    pub query_type: QueryType,
+    pub batch_opts: Arc<BatchingModeOptions>,
+    pub flow_eval_interval: Option<Duration>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -102,7 +103,7 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
 }
 
 #[derive(Debug, Clone)]
-enum QueryType {
+pub enum QueryType {
     /// query is a tql query
     Tql,
     /// query is a sql query
@@ -128,6 +129,7 @@ pub struct TaskArgs<'a> {
     pub catalog_manager: CatalogManagerRef,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
+    pub flow_eval_interval: Option<Duration>,
 }
 
 pub struct PlanInfo {
@@ -150,6 +152,7 @@ impl BatchingTask {
             catalog_manager,
             shutdown_rx,
             batch_opts,
+            flow_eval_interval,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -164,6 +167,7 @@ impl BatchingTask {
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
                 batch_opts,
+                flow_eval_interval,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         })
@@ -452,6 +456,13 @@ impl BatchingTask {
     ) {
         let flow_id_str = self.config.flow_id.to_string();
         let mut max_window_cnt = None;
+        let mut interval = self
+            .config
+            .flow_eval_interval
+            .map(|d| tokio::time::interval(d));
+        if let Some(tick) = &mut interval {
+            tick.tick().await; // pass the first tick immediately
+        }
         loop {
             // first check if shutdown signal is received
             // if so, break the loop
@@ -499,24 +510,33 @@ impl BatchingTask {
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
-                    let sleep_until = {
-                        let state = self.state.write().unwrap();
 
-                        let time_window_size = self
-                            .config
-                            .time_window_expr
-                            .as_ref()
-                            .and_then(|t| *t.time_window_size());
+                    // here use proper ticking if set eval interval
+                    if let Some(eval_interval) = &mut interval {
+                        eval_interval.tick().await;
+                    } else {
+                        // if not explicitly set, just automatically calculate next start time
+                        // using time window size and more args
+                        let sleep_until = {
+                            let state = self.state.write().unwrap();
 
-                        state.get_next_start_query_time(
-                            self.config.flow_id,
-                            &time_window_size,
-                            min_refresh,
-                            Some(self.config.batch_opts.query_timeout),
-                            self.config.batch_opts.experimental_max_filter_num_per_query,
-                        )
+                            let time_window_size = self
+                                .config
+                                .time_window_expr
+                                .as_ref()
+                                .and_then(|t| *t.time_window_size());
+
+                            state.get_next_start_query_time(
+                                self.config.flow_id,
+                                &time_window_size,
+                                min_refresh,
+                                Some(self.config.batch_opts.query_timeout),
+                                self.config.batch_opts.experimental_max_filter_num_per_query,
+                            )
+                        };
+
+                        tokio::time::sleep_until(sleep_until).await;
                     };
-                    tokio::time::sleep_until(sleep_until).await;
                 }
                 // no new data, sleep for some time before checking for new data
                 Ok(None) => {

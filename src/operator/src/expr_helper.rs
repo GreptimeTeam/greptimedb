@@ -796,6 +796,8 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let eval_interval = create_flow.eval_interval;
+
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -804,9 +806,10 @@ pub fn to_create_flow_task_expr(
         or_replace: create_flow.or_replace,
         create_if_not_exists: create_flow.if_not_exists,
         expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
+        eval_interval: eval_interval.map(|seconds| api::v1::EvalInterval { seconds }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: HashMap::new(),
+        flow_options: Default::default(),
     })
 }
 
@@ -840,6 +843,18 @@ mod tests {
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmt.is_err(),
+            "Expected error for invalid TQL EVAL parameters: {:#?}",
+            stmt
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
+        let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
                 .pop()
@@ -860,7 +875,7 @@ TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         );
         assert!(expr.source_table_names.is_empty());
         assert_eq!(
-            r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+            r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
         );
     }

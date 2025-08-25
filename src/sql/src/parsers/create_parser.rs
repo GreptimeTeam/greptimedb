@@ -39,6 +39,7 @@ use crate::error::{
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
+use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
@@ -295,7 +296,16 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            Some(self.parse_interval()?)
+            Some(self.parse_interval_no_month("EXPIRE AFTER")?)
+        } else {
+            None
+        };
+
+        let eval_interval = if self
+            .parser
+            .consume_tokens(&[Token::make_keyword("EVAL"), Token::make_keyword("INTERVAL")])
+        {
+            Some(self.parse_interval_no_month("EVAL INTERVAL")?)
         } else {
             None
         };
@@ -321,10 +331,39 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
+        let query = Box::new(self.parse_sql_or_tql(true)?);
+
+        Ok(Statement::CreateFlow(CreateFlow {
+            flow_name,
+            sink_table_name: output_table_name,
+            or_replace,
+            if_not_exists,
+            expire_after,
+            eval_interval,
+            comment,
+            query,
+        }))
+    }
+
+    fn parse_sql_or_tql(&mut self, require_now_expr: bool) -> Result<SqlOrTql> {
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
 
-        let query = self.parse_statement()?;
+        // only accept sql or tql
+        let query = match self.parser.peek_token().token {
+            Token::Word(w) => match w.keyword {
+                Keyword::SELECT => self.parse_query(),
+                Keyword::NoKeyword
+                    if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
+                {
+                    self.parse_tql(require_now_expr)
+                }
+
+                _ => self.unsupported(self.peek_token_as_string()),
+            },
+            _ => self.unsupported(self.peek_token_as_string()),
+        }?;
+
         let end_token = self.parser.peek_token();
 
         let raw_query = if end_token == Token::EOF {
@@ -335,23 +374,19 @@ impl<'a> ParserContext<'a> {
             &self.sql[start_index..end_index.min(self.sql.len())]
         };
         let raw_query = raw_query.trim_end_matches(";");
-
-        let query = Box::new(SqlOrTql::try_from_statement(query, raw_query)?);
-
-        Ok(Statement::CreateFlow(CreateFlow {
-            flow_name,
-            sink_table_name: output_table_name,
-            or_replace,
-            if_not_exists,
-            expire_after,
-            comment,
-            query,
-        }))
+        let query = SqlOrTql::try_from_statement(query, raw_query)?;
+        Ok(query)
     }
 
     /// Parse the interval expr to duration in seconds.
-    fn parse_interval(&mut self) -> Result<i64> {
+    fn parse_interval_no_month(&mut self, context: &str) -> Result<i64> {
         let interval = self.parse_interval_month_day_nano()?.0;
+        if interval.months != 0 {
+            return InvalidIntervalSnafu {
+                reason: format!("Interval with months is not allowed in {context}"),
+            }
+            .fail();
+        }
         Ok(
             interval.nanoseconds / 1_000_000_000
                 + interval.days as i64 * 60 * 60 * 24
@@ -365,7 +400,7 @@ impl<'a> ParserContext<'a> {
     fn parse_interval_month_day_nano(&mut self) -> Result<(IntervalMonthDayNano, RawIntervalExpr)> {
         let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
         let raw_interval_expr = interval_expr.to_string();
-        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
+        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone(), false)?
             .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
             .ok()
             .with_context(|| InvalidIntervalSnafu {
@@ -1113,7 +1148,7 @@ mod tests {
     use common_catalog::consts::FILE_ENGINE;
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
-    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, Value};
+    use sqlparser::ast::{BinaryOperator, Expr, ObjectName, ObjectNamePart, Value};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::tokenizer::Tokenizer;
 
@@ -1450,7 +1485,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
-EXPIRE AFTER '1 month 2 days 1h 2 min'
+EXPIRE AFTER '2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
@@ -1461,7 +1496,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     ]),
                     or_replace: false,
                     if_not_exists: false,
-                    expire_after: Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60),
+                    expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     comment: None,
                 },
             ),
@@ -1476,6 +1511,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 or_replace: expected.or_replace,
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
+                eval_interval: None,
                 comment: expected.comment,
                 // ignore query parse result
                 query: create_task.query.clone(),
@@ -1490,35 +1526,176 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
 
     #[test]
     fn test_parse_create_flow() {
-        let sql = r"
+        use pretty_assertions::assert_eq;
+        fn parse_create_flow(sql: &str) -> CreateFlow {
+            let stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(1, stmts.len());
+            match &stmts[0] {
+                Statement::CreateFlow(c) => c.clone(),
+                _ => panic!("{:?}", stmts[0]),
+            }
+        }
+        struct CreateFlowWoutQuery {
+            /// Flow name
+            pub flow_name: ObjectName,
+            /// Output (sink) table name
+            pub sink_table_name: ObjectName,
+            /// Whether to replace existing task
+            pub or_replace: bool,
+            /// Create if not exist
+            pub if_not_exists: bool,
+            /// `EXPIRE AFTER`
+            /// Duration in second as `i64`
+            pub expire_after: Option<i64>,
+            /// Duration for flow evaluation interval
+            /// Duration in seconds as `i64`
+            /// If not set, flow will be evaluated based on time window size and other args.
+            pub eval_interval: Option<i64>,
+            /// Comment string
+            pub comment: Option<String>,
+        }
+
+        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
+        let testcases = vec![
+            (
+                r"
 CREATE OR REPLACE FLOW IF NOT EXISTS task_1
 SINK TO schema_1.table_1
 EXPIRE AFTER INTERVAL '5 minutes'
 COMMENT 'test comment'
 AS
-SELECT max(c1), min(c2) FROM schema_2.table_2;";
-        let stmts =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, stmts.len());
-        let create_task = match &stmts[0] {
-            Statement::CreateFlow(c) => c,
-            _ => unreachable!(),
-        };
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: true,
+                    if_not_exists: true,
+                    expire_after: Some(300),
+                    eval_interval: None,
+                    comment: Some("test comment".to_string()),
+                },
+            ),
+            (
+                r"
+CREATE OR REPLACE FLOW IF NOT EXISTS task_1
+SINK TO schema_1.table_1
+EXPIRE AFTER INTERVAL '300 s'
+COMMENT 'test comment'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: true,
+                    if_not_exists: true,
+                    expire_after: Some(300),
+                    eval_interval: None,
+                    comment: Some("test comment".to_string()),
+                },
+            ),
+            (
+                r"
+CREATE OR REPLACE FLOW IF NOT EXISTS task_1
+SINK TO schema_1.table_1
+EXPIRE AFTER '5 minutes'
+EVAL INTERVAL '10 seconds'
+COMMENT 'test comment'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: true,
+                    if_not_exists: true,
+                    expire_after: Some(300),
+                    eval_interval: Some(10),
+                    comment: Some("test comment".to_string()),
+                },
+            ),
+            (
+                r"
+CREATE OR REPLACE FLOW IF NOT EXISTS task_1
+SINK TO schema_1.table_1
+EXPIRE AFTER '5 minutes'
+EVAL INTERVAL INTERVAL '10 seconds'
+COMMENT 'test comment'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("task_1"))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: true,
+                    if_not_exists: true,
+                    expire_after: Some(300),
+                    eval_interval: Some(10),
+                    comment: Some("test comment".to_string()),
+                },
+            ),
+            (
+                r"
+CREATE FLOW `task_2`
+SINK TO schema_1.table_1
+EXPIRE AFTER '2 days 1h 2 min'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName(vec![ObjectNamePart::Identifier(Ident::with_quote(
+                        '`', "task_2",
+                    ))]),
+                    sink_table_name: ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("schema_1")),
+                        ObjectNamePart::Identifier(Ident::new("table_1")),
+                    ]),
+                    or_replace: false,
+                    if_not_exists: false,
+                    expire_after: Some(2 * 86400 + 3600 + 2 * 60),
+                    eval_interval: None,
+                    comment: None,
+                },
+            ),
+        ];
 
-        let expected = CreateFlow {
-            flow_name: vec![Ident::new("task_1")].into(),
-            sink_table_name: vec![Ident::new("schema_1"), Ident::new("table_1")].into(),
-            or_replace: true,
-            if_not_exists: true,
-            expire_after: Some(300),
-            comment: Some("test comment".to_string()),
-            // ignore query parse result
-            query: create_task.query.clone(),
-        };
-        assert_eq!(create_task, &expected);
+        for (sql, expected) in testcases {
+            let create_task = parse_create_flow(sql);
 
-        // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
+            let expected = CreateFlow {
+                flow_name: expected.flow_name,
+                sink_table_name: expected.sink_table_name,
+                or_replace: expected.or_replace,
+                if_not_exists: expected.if_not_exists,
+                expire_after: expected.expire_after,
+                eval_interval: expected.eval_interval,
+                comment: expected.comment,
+                // ignore query parse result
+                query: create_task.query.clone(),
+            };
+
+            assert_eq!(create_task, expected, "input sql is:\n{sql}");
+            let show_create = create_task.to_string();
+            let recreated = parse_create_flow(&show_create);
+            assert_eq!(recreated, expected, "input sql is:\n{show_create}");
+        }
+    }
+
+    #[test]
+    fn test_create_flow_no_month() {
         let sql = r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
@@ -1526,21 +1703,15 @@ EXPIRE AFTER '1 month 2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let stmts =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert_eq!(1, stmts.len());
-        let create_task = match &stmts[0] {
-            Statement::CreateFlow(c) => c,
-            _ => unreachable!(),
-        };
-        assert!(!create_task.or_replace);
-        assert!(!create_task.if_not_exists);
-        assert_eq!(
-            create_task.expire_after,
-            Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60)
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmts.is_err()
+                && stmts
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Interval with months is not allowed")
         );
-        assert!(create_task.comment.is_none());
-        assert_eq!(create_task.flow_name.to_string(), "`task_2`");
     }
 
     #[test]
