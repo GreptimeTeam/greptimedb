@@ -24,8 +24,11 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_registry::{LeaderRegion, LeaderRegionRegistryRef};
 use common_meta::stats::topic::TopicStatsRegistryRef;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
+use common_wal::config::kafka::common::{
+    DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+};
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -92,9 +95,23 @@ impl RegionFlushTrigger {
         topic_stats_registry: TopicStatsRegistryRef,
         mailbox: MailboxRef,
         server_addr: String,
-        flush_trigger_size: ReadableSize,
-        checkpoint_trigger_size: ReadableSize,
+        mut flush_trigger_size: ReadableSize,
+        mut checkpoint_trigger_size: ReadableSize,
     ) -> (Self, RegionFlushTicker) {
+        if flush_trigger_size.as_bytes() == 0 {
+            flush_trigger_size = DEFAULT_FLUSH_TRIGGER_SIZE;
+            warn!(
+                "flush_trigger_size is not set, using default value: {}",
+                flush_trigger_size
+            );
+        }
+        if checkpoint_trigger_size.as_bytes() == 0 {
+            checkpoint_trigger_size = DEFAULT_CHECKPOINT_TRIGGER_SIZE;
+            warn!(
+                "checkpoint_trigger_size is not set, using default value: {}",
+                checkpoint_trigger_size
+            );
+        }
         let (tx, rx) = Self::channel();
         let region_flush_ticker = RegionFlushTicker::new(TICKER_INTERVAL, tx);
         let region_flush_trigger = Self {
