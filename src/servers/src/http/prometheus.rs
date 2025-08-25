@@ -34,6 +34,7 @@ use futures::future::join_all;
 use futures::StreamExt;
 use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::parser::token::{self};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
@@ -856,10 +857,22 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
             }
             collect_metric_names(expr, metric_names)
         }
-        PromqlExpr::Unary(UnaryExpr { expr }) => collect_metric_names(expr, metric_names),
-        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
-            collect_metric_names(lhs, metric_names);
-            collect_metric_names(rhs, metric_names);
+        PromqlExpr::Unary(UnaryExpr { .. }) => {
+            metric_names.clear();
+            return;
+        }
+        PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
+            if matches!(
+                op.id(),
+                token::T_LAND // INTERSECT
+                    | token::T_LOR // UNION
+                    | token::T_LUNLESS // EXCEPT
+            ) {
+                collect_metric_names(lhs, metric_names)
+            } else {
+                metric_names.clear();
+                return;
+            }
         }
         PromqlExpr::Paren(ParenExpr { expr }) => collect_metric_names(expr, metric_names),
         PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => collect_metric_names(expr, metric_names),
@@ -1390,7 +1403,7 @@ mod tests {
             TestCase {
                 name: "metric with unary operator",
                 promql: "-cpu_usage",
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -1427,14 +1440,14 @@ mod tests {
             TestCase {
                 name: "same metric addition",
                 promql: "cpu_usage + cpu_usage",
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
             TestCase {
                 name: "metric with scalar addition",
                 promql: r#"sum(rate(cpu_usage{job="node"}[5m])) + 100"#,
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -1457,7 +1470,7 @@ mod tests {
             TestCase {
                 name: "unless with different metrics",
                 promql: "cpu_usage unless memory_usage",
-                expected_metric: None,
+                expected_metric: Some("cpu_usage"),
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
