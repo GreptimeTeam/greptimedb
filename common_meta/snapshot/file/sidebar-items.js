@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Content"],"struct":["Document","KeyValue","Metadata","MetadataContent"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACCESS_KEY_ID","ENABLE_VIRTUAL_HOST_STYLE","ENDPOINT","REGION","SECRET_ACCESS_KEY","SESSION_TOKEN"],"fn":["build_s3_backend","is_supported_in_s3"]};
