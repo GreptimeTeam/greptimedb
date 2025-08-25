@@ -55,6 +55,11 @@ pub(crate) struct StoreConfig {
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
     meta_table_name: String,
+
+    /// Optional PostgreSQL schema for metadata table (defaults to current search_path if unset).
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long)]
+    pg_schema: Option<String>,
 }
 
 impl StoreConfig {
@@ -78,8 +83,10 @@ impl StoreConfig {
                     let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, None)
                         .await
                         .map_err(BoxedError::new)?;
+                    let schema_opt = self.pg_schema.as_deref();
                     Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
                         pool,
+                        schema_opt,
                         table_name,
                         max_txn_ops,
                     )
