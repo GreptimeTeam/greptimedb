@@ -79,7 +79,7 @@ impl FetchClient for PartitionClient {
 struct FetchResultInner {
     records_and_offsets: Vec<RecordAndOffset>,
     batch_size: usize,
-    fetch_bytes: i32,
+    fetch_bytes: usize,
     watermark: i64,
     used_offset: i64,
 }
@@ -236,7 +236,7 @@ impl Stream for Consumer {
                                 records_and_offsets,
                                 watermark,
                                 used_offset: offset,
-                                fetch_bytes: encoded_response_size as i32,
+                                fetch_bytes: encoded_response_size,
                                 batch_size: len,
                             })
                         }));
@@ -261,7 +261,7 @@ impl Stream for Consumer {
                     records_and_offsets.sort_unstable_by_key(|x| x.offset);
                     *this.last_high_watermark = watermark;
                     if !records_and_offsets.is_empty() {
-                        *this.avg_record_size = fetch_bytes as usize / records_and_offsets.len();
+                        *this.avg_record_size = fetch_bytes / records_and_offsets.len();
                         debug!("set avg_record_size: {}", *this.avg_record_size);
                     }
                     *this.total_fetched_bytes += fetch_bytes as u64;
