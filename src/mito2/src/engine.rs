@@ -113,6 +113,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
+use crate::sst::file_purger::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -127,6 +128,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     plugins: Plugins,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
@@ -139,6 +141,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Self {
         Self {
@@ -147,6 +150,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -174,6 +178,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.log_store.clone(),
             self.object_store_manager,
             self.schema_metadata_manager,
+            self.file_ref_manager,
             self.plugins,
         )
         .await?;
@@ -210,6 +215,7 @@ impl MitoEngine {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let builder = MitoEngineBuilder::new(
@@ -218,6 +224,7 @@ impl MitoEngine {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
         );
         builder.try_build().await
@@ -928,6 +935,7 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -942,6 +950,7 @@ impl MitoEngine {
                     write_buffer_manager,
                     listener,
                     schema_metadata_manager,
+                    file_ref_manager,
                     time_provider,
                 )
                 .await?,

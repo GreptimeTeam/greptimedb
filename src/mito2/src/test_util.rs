@@ -73,7 +73,7 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
-use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
+use crate::sst::file_purger::{FilePurgerRef, FileReferenceManagerRef, NoopFilePurger};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -209,6 +209,7 @@ pub struct TestEnv {
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
 }
 
@@ -243,6 +244,7 @@ impl TestEnv {
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
+            file_ref_manager: Arc::new(Default::default()),
             kv_backend,
         }
     }
@@ -280,6 +282,7 @@ impl TestEnv {
                 log_store,
                 zelf.object_store_manager.as_ref().unwrap().clone(),
                 zelf.schema_metadata_manager.clone(),
+                zelf.file_ref_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -333,6 +336,7 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -345,6 +349,7 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -388,6 +393,7 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -400,6 +406,7 @@ impl TestEnv {
                 listener,
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -432,6 +439,7 @@ impl TestEnv {
                 listener,
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -444,6 +452,7 @@ impl TestEnv {
                 listener,
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
             )
             .await
             .unwrap(),
@@ -480,6 +489,7 @@ impl TestEnv {
                 log_store,
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -489,6 +499,7 @@ impl TestEnv {
                 log_store,
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
+                self.file_ref_manager.clone(),
                 Plugins::new(),
             )
             .await

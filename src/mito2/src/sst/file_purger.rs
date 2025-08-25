@@ -37,6 +37,10 @@ pub struct PurgeRequest {
 pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Send a purge request to the background worker.
     fn send_request(&self, request: PurgeRequest);
+
+    fn add_new_file(&self, _: &FileMeta) {
+        // noop
+    }
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
@@ -56,6 +60,7 @@ pub struct LocalFilePurger {
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
+    file_ref_manager: FileReferenceManagerRef,
     /// Whether the underlying object store is local filesystem.
     /// if it is, we can delete the file directly.
     /// Otherwise, we should inform the global file ref manager to delete the file.
@@ -76,12 +81,14 @@ impl LocalFilePurger {
         scheduler: SchedulerRef,
         sst_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Self {
         let is_local_fs = sst_layer.object_store().info().scheme() == object_store::Scheme::Fs;
         Self {
             scheduler,
             sst_layer,
             cache_manager,
+            file_ref_manager,
             is_local_fs,
         }
     }
@@ -152,6 +159,11 @@ impl FilePurger for LocalFilePurger {
             // TODO(discord9): instead inform the global file purger to delete the file.
         }
     }
+
+    fn add_new_file(&self, file_meta: &FileMeta) {
+        self.file_ref_manager
+            .add_file(file_meta, self.sst_layer.clone());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -164,6 +176,11 @@ impl FileRef {
     pub fn new(region_id: RegionId, file_id: FileId) -> Self {
         Self { region_id, file_id }
     }
+}
+
+/// Returns the path of the tmp ref file for given table id and datanode id.
+pub fn ref_file_path(table_id: TableId, node_id: u64) -> String {
+    format!("{}/{}/{:020}.refs", table_id, PURGER_REFS_PATH, node_id)
 }
 
 /// Manages all file references in one datanode.
@@ -191,6 +208,10 @@ impl FileReferenceManager {
         Self::default()
     }
 
+    pub async fn clean_dropped_tables(&self) {
+        todo!("Remove tables's access layer which have empty manifest meaning they are dropped.");
+    }
+
     pub async fn upload_ref_file(&self) {
         let files_per_table = {
             let guard = self.files_per_table.lock().unwrap();
@@ -212,10 +233,7 @@ impl FileReferenceManager {
                 continue;
             }
             let access_layer = access_layer.unwrap();
-            let path = format!(
-                "{}/{}_{:020}.refs",
-                PURGER_REFS_PATH, table_id, self.node_id
-            );
+            let path = ref_file_path(table_id, self.node_id);
             let content = serde_json::to_vec(&file_refs).unwrap_or_default();
             if let Err(e) = access_layer.object_store().write(&path, content).await {
                 error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
@@ -302,7 +320,12 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+        let file_purger = Arc::new(LocalFilePurger::new(
+            scheduler.clone(),
+            layer,
+            None,
+            Arc::new(Default::default()),
+        ));
 
         {
             let handle = FileHandle::new(
@@ -367,7 +390,12 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+        let file_purger = Arc::new(LocalFilePurger::new(
+            scheduler.clone(),
+            layer,
+            None,
+            Arc::new(Default::default()),
+        ));
 
         {
             let handle = FileHandle::new(

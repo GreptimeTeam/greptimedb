@@ -78,7 +78,7 @@ impl HandlerContext {
                 warn!("Another gc task is running for the region: {region_id}");
             }
             let mut watcher = register_result.into_watcher();
-            let result = self.flush_tasks.wait_until_finish(&mut watcher).await;
+            let result = self.gc_tasks.wait_until_finish(&mut watcher).await;
             match result {
                 Ok(()) => Some(InstructionReply::GcRegions(SimpleReply {
                     result: true,
