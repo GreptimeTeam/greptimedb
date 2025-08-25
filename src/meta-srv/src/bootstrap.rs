@@ -337,7 +337,7 @@ pub async fn metasrv_builder(
             .await?;
 
             let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
-            let kv_backend = PgStore::with_pg_pool_with_schema(
+            let kv_backend = PgStore::with_pg_pool(
                 pool,
                 opts.schema.as_deref(),
                 &opts.meta_table_name,
