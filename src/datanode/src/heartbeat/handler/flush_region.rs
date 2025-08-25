@@ -73,10 +73,7 @@ impl HandlerContext {
     }
 
     /// Handles a single region flush operation.
-    async fn handle_single_region_flush(
-        &self,
-        region_id: RegionId,
-    ) -> Result<(), error::Error> {
+    async fn handle_single_region_flush(&self, region_id: RegionId) -> Result<(), error::Error> {
         let request = RegionRequest::Flush(RegionFlushRequest {
             row_group_size: None,
         });
