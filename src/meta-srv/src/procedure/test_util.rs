@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
-    DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
+    DowngradeRegionReply, FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::test_utils::new_test_table_info;
@@ -101,7 +101,7 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
     }
 }
 
-/// Generates a [InstructionReply::FlushRegion] reply.
+/// Generates a [InstructionReply::FlushRegion] reply using SimpleReply format.
 pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
     MailboxMessage {
         id,
@@ -111,6 +111,53 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::FlushRegion(SimpleReply {
+                result,
+                error,
+            }))
+            .unwrap(),
+        )),
+    }
+}
+
+/// Generates a [InstructionReply::FlushRegionsV2] reply for a specific region using the unified format.
+pub fn new_flush_region_reply_for_region(
+    id: u64,
+    region_id: RegionId,
+    result: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    let flush_reply = if result {
+        FlushRegionReply::success_single(region_id)
+    } else {
+        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+    };
+
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::FlushRegionsV2(flush_reply)).unwrap(),
+        )),
+    }
+}
+
+/// Generates a legacy [InstructionReply::FlushRegionSimple] reply for backward compatibility testing.
+pub fn new_flush_region_simple_reply(
+    id: u64,
+    result: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::FlushRegionSimple(SimpleReply {
                 result,
                 error,
             }))

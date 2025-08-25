@@ -65,6 +65,7 @@ impl PreFlushRegion {
     fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
+        // Use FlushRegion instruction for synchronous single region flush
         Instruction::FlushRegion(region_id)
     }
 
@@ -117,13 +118,42 @@ impl PreFlushRegion {
                         now.elapsed()
                     );
 
-                    let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply else {
-                        return error::UnexpectedInstructionReplySnafu {
-                            mailbox_message: msg.to_string(),
-                            reason: "expect flush region reply",
+                    let reply_result = match reply {
+                        InstructionReply::FlushRegion(SimpleReply { result, error }) => {
+                            // Handle FlushRegion reply (single region)
+                            (result, error.clone())
                         }
-                        .fail();
+                        InstructionReply::FlushRegionsV2(flush_reply) => {
+                            // Handle unified FlushRegionsV2 reply
+                            if flush_reply.results.len() != 1 {
+                                return error::UnexpectedInstructionReplySnafu {
+                                    mailbox_message: msg.to_string(),
+                                    reason: "expect region flush results",
+                                }
+                                .fail();
+                            }
+                            let (reply_region_id, result) = &flush_reply.results[0];
+                            if *reply_region_id != region_id {
+                                return error::UnexpectedInstructionReplySnafu {
+                                    mailbox_message: msg.to_string(),
+                                    reason: "flush reply region ID mismatch",
+                                }
+                                .fail();
+                            }
+                            match result {
+                                Ok(()) => (true, None),
+                                Err(err) => (false, Some(err.clone())),
+                            }
+                        }
+                        _ => {
+                            return error::UnexpectedInstructionReplySnafu {
+                                mailbox_message: msg.to_string(),
+                                reason: "expect flush region reply",
+                            }
+                            .fail();
+                        }
                     };
+                    let (result, error) = reply_result;
 
                     if error.is_some() {
                         warn!(
