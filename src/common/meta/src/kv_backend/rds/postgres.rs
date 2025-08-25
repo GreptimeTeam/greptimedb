@@ -207,7 +207,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
         let table_ident = Self::format_table_ref(self.table_name, self.schema);
         // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
-            table_ref: table_ref.clone(),
+            table_ident: table_ident.clone(),
             // Do not attempt to create schema implicitly to avoid extra privileges requirement.
             create_table_statement: format!(
                 "CREATE TABLE IF NOT EXISTS {table_ref}(k bytea PRIMARY KEY, v bytea)",
