@@ -28,7 +28,7 @@ The index build mode (synchronous or asynchronous) can be selected via configura
 
 This RFC introduces four `IndexBuildType`s to trigger index building:
 
-- **Manual Rebuild**: Triggered by the user via `ADMIN build_index("table_name")`, for scenarios like recovering from failed builds or migrating data
+- **Manual Rebuild**: Triggered by the user via `ADMIN build_index("table_name")`, for scenarios like recovering from failed builds or migrating data. SST files whose `ColumnIndexMetadata` (see below) is already consistent with the `RegionMetadata` will be skipped.
 - **Schema Change**: Automatically triggered when the schema of an indexed column is altered.
 - **Flush**: Automatically builds indexes for new SST files created by a flush.
 - **Compact**: Automatically builds indexes for new SST files created by a compaction.
