@@ -184,28 +184,32 @@ impl SparsePrimaryKeyCodec {
         I: Iterator<Item = (ColumnId, &'a Bytes)>,
     {
         for (tag_column_id, tag_value) in row {
-            buffer.reserve(6 + tag_value.len() / 8 * 9);
+            let value_len = tag_value.len();
+            buffer.reserve(6 + value_len / 8 * 9);
             buffer.put_u32(tag_column_id);
             buffer.put_u8(1);
             buffer.put_u8(!tag_value.is_empty() as u8);
-            let mut len = 0;
+
             // Manual implementation of memcomparable::ser::Serializer::serialize_bytes
             // to avoid byte-by-byte put.
-            for chunk in tag_value.chunks(8) {
-                buffer.extend_from_slice(chunk);
-                if chunk.len() != 8 {
-                    buffer.put_bytes(0, 8 - chunk.len());
-                }
-                len += chunk.len();
+            let mut len = 0;
+            let num_chucks = value_len / 8;
+            let remainder = value_len % 8;
+
+            for idx in 0..num_chucks {
+                buffer.extend_from_slice(&tag_value[idx * 8..idx * 8 + 8]);
+                len += 8;
                 // append an extra byte that signals the number of significant bytes in this chunk
                 // 1-8: many bytes were significant and this group is the last group
                 // 9: all 8 bytes were significant and there is more data to come
-                let extra = if len == tag_value.len() {
-                    chunk.len() as u8
-                } else {
-                    9
-                };
+                let extra = if len == value_len { 8 } else { 9 };
                 buffer.put_u8(extra);
+            }
+
+            if remainder != 0 {
+                buffer.extend_from_slice(&tag_value[len..value_len]);
+                buffer.put_bytes(0, 8 - remainder);
+                buffer.put_u8(remainder as u8);
             }
         }
         Ok(())
