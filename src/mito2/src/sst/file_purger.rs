@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common_telemetry::{error, info};
+use serde::{Deserialize, Serialize};
+use store_api::storage::{RegionId, TableId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileId, FileMeta};
 
 /// Request to remove a file.
 #[derive(Debug)]
@@ -53,6 +56,10 @@ pub struct LocalFilePurger {
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
+    /// Whether the underlying object store is local filesystem.
+    /// if it is, we can delete the file directly.
+    /// Otherwise, we should inform the global file ref manager to delete the file.
+    is_local_fs: bool,
 }
 
 impl fmt::Debug for LocalFilePurger {
@@ -70,25 +77,17 @@ impl LocalFilePurger {
         sst_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
     ) -> Self {
+        let is_local_fs = sst_layer.object_store().info().scheme() == object_store::Scheme::Fs;
         Self {
             scheduler,
             sst_layer,
             cache_manager,
+            is_local_fs,
         }
     }
-}
 
-impl FilePurger for LocalFilePurger {
-    fn send_request(&self, request: PurgeRequest) {
-        // TODO(discord9): replace with something more informative later
-        // also later in phase 2 all datanode should have centralized mgr that keep track of
-        // all the in-use file handlers, and write tmp files for them periodically
-        info!(
-            "Should delete with request, but use gc instead: {:?}",
-            request
-        );
-        return;
-        let file_meta = request.file_meta;
+    /// Deletes the file(and it's index, if any) from cache and storage.
+    fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
 
         // Remove meta of the file from cache.
@@ -142,6 +141,113 @@ impl FilePurger for LocalFilePurger {
         })) {
             error!(e; "Failed to schedule the file purge request");
         }
+    }
+}
+
+impl FilePurger for LocalFilePurger {
+    fn send_request(&self, request: PurgeRequest) {
+        if self.is_local_fs {
+            self.delete_file(request.file_meta);
+        } else {
+            // TODO(discord9): instead inform the global file purger to delete the file.
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileRef {
+    pub region_id: RegionId,
+    pub file_id: FileId,
+}
+
+impl FileRef {
+    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
+        Self { region_id, file_id }
+    }
+}
+
+/// Manages all file references in one datanode.
+/// It keeps track of which files are referenced and group by table ids.
+/// And periodically update the references to tmp file in object storage.
+/// This is useful for ensuring that files are not deleted while they are still in use by any
+/// query.
+#[derive(Debug, Default)]
+pub struct FileReferenceManager {
+    /// Datanode id. used to determine tmp ref file name.
+    node_id: u64,
+    files_per_table: Mutex<HashMap<TableId, HashSet<FileRef>>>,
+    /// Access layer per table. Will be used to upload tmp file for recording references
+    /// to the object storage.
+    /// Also will be cleaned up if corresponding table is dropped and manifest become empty.
+    table_access_layers: Mutex<HashMap<TableId, AccessLayerRef>>,
+}
+
+const PURGER_REFS_PATH: &str = ".purger_refs";
+
+pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
+
+impl FileReferenceManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn upload_ref_file(&self) {
+        let files_per_table = {
+            let guard = self.files_per_table.lock().unwrap();
+            guard.clone()
+        };
+        for (table_id, file_refs) in files_per_table {
+            if file_refs.is_empty() {
+                continue;
+            }
+            let access_layer = {
+                let guard = self.table_access_layers.lock().unwrap();
+                guard.get(&table_id).cloned()
+            };
+            if access_layer.is_none() {
+                error!(
+                    "No access layer found for table {}, skip uploading ref file",
+                    table_id
+                );
+                continue;
+            }
+            let access_layer = access_layer.unwrap();
+            let path = format!(
+                "{}/{}_{:020}.refs",
+                PURGER_REFS_PATH, table_id, self.node_id
+            );
+            let content = serde_json::to_vec(&file_refs).unwrap_or_default();
+            if let Err(e) = access_layer.object_store().write(&path, content).await {
+                error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
+            } else {
+                info!(
+                    "Successfully uploaded ref file to {}, table {}",
+                    path, table_id
+                );
+            }
+        }
+    }
+
+    pub fn add_file(&self, file_meta: &FileMeta, table_access_layer: AccessLayerRef) {
+        let table_id = file_meta.region_id.table_id();
+        {
+            let mut guard = self.files_per_table.lock().unwrap();
+            let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
+            guard.entry(table_id).or_default().insert(file_ref);
+        }
+        {
+            let mut guard = self.table_access_layers.lock().unwrap();
+            guard
+                .entry(table_id)
+                .or_insert_with(|| table_access_layer.clone());
+        }
+    }
+
+    pub fn remove_file(&self, file_meta: &FileMeta) {
+        let table_id = file_meta.region_id.table_id();
+        let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
+        let mut guard = self.files_per_table.lock().unwrap();
+        guard.entry(table_id).or_default().remove(&file_ref);
     }
 }
 
