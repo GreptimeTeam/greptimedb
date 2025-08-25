@@ -198,7 +198,7 @@ struct PgSqlTemplateFactory<'a> {
 
 impl<'a> PgSqlTemplateFactory<'a> {
     /// Creates a new factory with optional schema.
-    fn with_schema(table_name: &'a str, schema: Option<&'a str>) -> Self {
+    fn new(schema_name: Option<&'a str>, table_name: &'a str) -> Self {
         Self { table_name, schema }
     }
 
