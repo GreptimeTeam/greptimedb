@@ -37,11 +37,37 @@ services:
       - "2379:2379"
       - "2380:2380"
     environment:
-      ALLOW_NONE_AUTHENTICATION: "yes"
       ETCD_NAME: etcd
       ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
       ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
       ETCD_MAX_REQUEST_BYTES: 10485760
+
+  etcd-tls:
+    image: docker.io/bitnami/etcd:3.5
+    ports:
+      - "2378:2378"
+      - "2381:2381"
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: etcd-tls
+      ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2378
+      ETCD_ADVERTISE_CLIENT_URLS: https://etcd-tls:2378
+      ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2381
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER: etcd-tls=https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-tls-cluster
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_CERT_FILE: /certs/server.crt
+      ETCD_KEY_FILE: /certs/server-key.pem
+      ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_PEER_CERT_FILE: /certs/server.crt
+      ETCD_PEER_KEY_FILE: /certs/server-key.pem
+      ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_CLIENT_CERT_AUTH: "true"
+      ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_MAX_REQUEST_BYTES: 10485760
+    volumes:
+      - ./etcd-tls-certs:/certs:ro
 
   minio:
     image: docker.io/bitnami/minio:2024

@@ -65,8 +65,8 @@ node_max_idle_time = "24hours"
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
 
-## TLS configuration for kv store backend (only applicable for PostgreSQL/MySQL backends)
-## When using PostgreSQL or MySQL as metadata store, you can configure TLS here
+## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
+## When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here
 [backend_tls]
 ## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
 ## - "disable" - No TLS

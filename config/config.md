@@ -344,7 +344,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
-| `backend_tls` | -- | -- | TLS configuration for kv store backend (only applicable for PostgreSQL/MySQL backends)<br/>When using PostgreSQL or MySQL as metadata store, you can configure TLS here |
+| `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here |
 | `backend_tls.mode` | String | `prefer` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- "disable" - No TLS<br/>- "prefer" (default) - Try TLS, fallback to plain<br/>- "require" - Require TLS<br/>- "verify_ca" - Require TLS and verify CA<br/>- "verify_full" - Require TLS and verify hostname |
 | `backend_tls.cert_path` | String | `""` | Path to client certificate file (for client authentication)<br/>Like "/path/to/client.crt" |
 | `backend_tls.key_path` | String | `""` | Path to client private key file (for client authentication)<br/>Like "/path/to/client.key" |
