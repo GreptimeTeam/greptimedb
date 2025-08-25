@@ -17,7 +17,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
 
-use crate::error::{self, FromScalarValueSnafu, IntoVectorSnafu, Result};
+use crate::error::{self, GeneralDataFusionSnafu, IntoVectorSnafu, Result};
 use crate::prelude::ScalarValue;
 
 /// Represents the result from an expression
@@ -40,12 +40,16 @@ impl ColumnarValue {
 
     /// Convert a columnar value into an VectorRef
     pub fn try_into_vector(self, num_rows: usize) -> Result<VectorRef> {
-        match self {
-            ColumnarValue::Vector(v) => Ok(v),
+        Ok(match self {
+            ColumnarValue::Vector(v) => v,
             ColumnarValue::Scalar(s) => {
-                Helper::try_from_scalar_value(s, num_rows).context(FromScalarValueSnafu)
+                let v = s
+                    .to_array_of_size(num_rows)
+                    .context(GeneralDataFusionSnafu)?;
+                let data_type = v.data_type().clone();
+                Helper::try_into_vector(v).context(IntoVectorSnafu { data_type })?
             }
-        }
+        })
     }
 }
 
