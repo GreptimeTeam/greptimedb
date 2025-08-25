@@ -719,9 +719,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      - name: Setup postgres
-        working-directory: tests-integration/fixtures
-        run: docker compose up postgres
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
