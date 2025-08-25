@@ -13,6 +13,7 @@ aquamarine.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
