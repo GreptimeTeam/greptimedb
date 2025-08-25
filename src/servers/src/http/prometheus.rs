@@ -857,10 +857,7 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
             }
             collect_metric_names(expr, metric_names)
         }
-        PromqlExpr::Unary(UnaryExpr { .. }) => {
-            metric_names.clear();
-            return;
-        }
+        PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
         PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
             if matches!(
                 op.id(),
@@ -870,8 +867,7 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
             ) {
                 collect_metric_names(lhs, metric_names)
             } else {
-                metric_names.clear();
-                return;
+                metric_names.clear()
             }
         }
         PromqlExpr::Paren(ParenExpr { expr }) => collect_metric_names(expr, metric_names),
