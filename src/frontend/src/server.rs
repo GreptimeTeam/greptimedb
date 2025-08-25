@@ -173,7 +173,7 @@ where
             .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler));
 
-        let grpc_server = if external {
+        let grpc_server = if !external {
             let frontend_grpc_handler =
                 FrontendGrpcHandler::new(self.instance.process_manager().clone());
             grpc_server.frontend_grpc_handler(frontend_grpc_handler)
