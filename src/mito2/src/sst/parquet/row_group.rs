@@ -34,7 +34,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::FileId;
-use crate::sst::parquet::helper::fetch_byte_ranges;
+use crate::sst::parquet::helper::{fetch_byte_ranges, MERGE_GAP};
 
 pub(crate) struct RowGroupBase<'a> {
     metadata: &'a RowGroupMetaData,
@@ -304,8 +304,8 @@ impl<'a> InMemoryRowGroup<'a> {
         };
 
         // Put pages back to the cache.
-        let pages = copy_pages(ranges, pages);
-        let page_value = PageValue::new(pages.clone());
+        let total_range_size = compute_total_range_size(ranges);
+        let page_value = PageValue::new(pages.clone(), total_range_size);
         self.cache_strategy
             .put_pages(page_key, Arc::new(page_value));
 
@@ -338,12 +338,42 @@ impl<'a> InMemoryRowGroup<'a> {
 //     max_page_size as f64 > total_page_size as f64 * 1.2
 // }
 
-/// Copies each pages to new buffers.
-fn copy_pages(_ranges: &[Range<u64>], pages: Vec<Bytes>) -> Vec<Bytes> {
-    pages
-        .into_iter()
-        .map(|page| Bytes::copy_from_slice(&page))
-        .collect()
+// /// Copies each pages to new buffers.
+// fn copy_pages(_ranges: &[Range<u64>], pages: Vec<Bytes>) -> Vec<Bytes> {
+//     pages
+//         .into_iter()
+//         .map(|page| Bytes::copy_from_slice(&page))
+//         .collect()
+// }
+
+/// Computes the total range size after merging with gap logic.
+fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
+    if ranges.is_empty() {
+        return 0;
+    }
+
+    let gap = MERGE_GAP as u64;
+    let mut sorted_ranges = ranges.to_vec();
+    sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+
+    let mut total_size = 0;
+    let mut cur = sorted_ranges[0].clone();
+
+    for range in sorted_ranges.into_iter().skip(1) {
+        if range.start <= cur.end + gap {
+            // There is an overlap or the gap is small enough to merge
+            cur.end = cur.end.max(range.end);
+        } else {
+            // No overlap and the gap is too large, add current range to total and start a new one
+            total_size += cur.end - cur.start;
+            cur = range;
+        }
+    }
+
+    // Add the last range
+    total_size += cur.end - cur.start;
+
+    total_size
 }
 
 impl RowGroups for InMemoryRowGroup<'_> {

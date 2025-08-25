@@ -692,21 +692,27 @@ impl PageKey {
 pub struct PageValue {
     /// Compressed page in the row group.
     pub compressed: Vec<Bytes>,
+    /// Total size of the pages (may be larger than sum of compressed bytes due to gaps).
+    pub page_size: u64,
 }
 
 impl PageValue {
     /// Creates a new value from a range of compressed pages.
-    pub fn new(bytes: Vec<Bytes>) -> PageValue {
-        PageValue { compressed: bytes }
+    pub fn new(bytes: Vec<Bytes>, page_size: u64) -> PageValue {
+        PageValue {
+            compressed: bytes,
+            page_size,
+        }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
+            + self.page_size as usize
             + self
                 .compressed
                 .iter()
-                .map(|b| b.len() + mem::size_of_val(b))
+                .map(|b| mem::size_of_val(b))
                 .sum::<usize>()
     }
 }
