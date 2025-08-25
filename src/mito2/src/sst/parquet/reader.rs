@@ -1372,7 +1372,7 @@ impl FlatRowGroupReader {
                     &self.override_sequence,
                 ) {
                     let converted =
-                        flat_format.convert_batch(&record_batch, Some(override_array))?;
+                        flat_format.convert_batch(record_batch, Some(override_array))?;
                     return Ok(Some(converted));
                 }
 
