@@ -121,6 +121,7 @@ impl SchedulerEnv {
                     object_store: self.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
+                    remove_file_options: Default::default(),
                 },
                 Default::default(),
                 Default::default(),
