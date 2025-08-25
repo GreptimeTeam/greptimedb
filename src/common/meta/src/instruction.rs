@@ -227,6 +227,8 @@ pub enum Instruction {
     FlushRegions(FlushRegions),
     /// Flushes a single region.
     FlushRegion(RegionId),
+    /// Triggers garbage collection for a table.
+    GcRegions(Vec<RegionId>),
 }
 
 /// The reply of [UpgradeRegion].
@@ -258,6 +260,7 @@ pub enum InstructionReply {
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
     FlushRegion(SimpleReply),
+    GcRegions(SimpleReply),
 }
 
 impl Display for InstructionReply {
@@ -270,6 +273,7 @@ impl Display for InstructionReply {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
             Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
+            Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegions({})", reply),
         }
     }
 }

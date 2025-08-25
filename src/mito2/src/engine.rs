@@ -113,6 +113,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
+use crate::sst::file_purger::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -127,6 +128,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     plugins: Plugins,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
@@ -139,6 +141,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Self {
         Self {
@@ -147,6 +150,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -174,6 +178,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.log_store.clone(),
             self.object_store_manager,
             self.schema_metadata_manager,
+            self.file_ref_manager,
             self.plugins,
         )
         .await?;
@@ -210,6 +215,7 @@ impl MitoEngine {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let builder = MitoEngineBuilder::new(
@@ -218,9 +224,14 @@ impl MitoEngine {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
         );
         builder.try_build().await
+    }
+
+    pub fn mito_config(&self) -> &MitoConfig {
+        &self.inner.config
     }
 
     /// Returns true if the specific region exists.
@@ -319,7 +330,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 
@@ -421,6 +432,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
             RegionEdit {
                 files_to_add: _,
                 files_to_remove: _,
+                timestamp_ms: _,
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
@@ -923,6 +935,7 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -937,6 +950,7 @@ impl MitoEngine {
                     write_buffer_manager,
                     listener,
                     schema_metadata_manager,
+                    file_ref_manager,
                     time_provider,
                 )
                 .await?,
@@ -967,6 +981,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -977,6 +992,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -987,6 +1003,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -997,6 +1014,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: Some(Duration::from_secs(1)),
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -1005,6 +1023,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: Some(1),
             flushed_sequence: None,
@@ -1013,6 +1032,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
