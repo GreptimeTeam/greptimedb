@@ -32,7 +32,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
 
-use crate::error::{self, ExecuteAdminFunctionSnafu, IntoVectorsSnafu, Result};
+use crate::error::{self, CastSnafu, ExecuteAdminFunctionSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DUMMY_COLUMN: &str = "<dummy>";
@@ -118,7 +118,7 @@ impl StatementExecutor {
                 .collect(),
             return_field: Arc::new(arrow::datatypes::Field::new("result", ret_type, true)),
             number_rows: if args.is_empty() { 1 } else { args[0].len() },
-            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+            config_options: Arc::new(query_ctx.create_config_options()),
         };
 
         // Execute the async UDF
@@ -134,22 +134,11 @@ impl StatementExecutor {
             })?;
 
         // Convert result back to VectorRef
-        let result = match result_columnar {
-            datafusion_expr::ColumnarValue::Array(array) => {
-                datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
-            }
-            datafusion_expr::ColumnarValue::Scalar(scalar) => {
-                let array =
-                    scalar
-                        .to_array_of_size(1)
-                        .with_context(|_| ExecuteAdminFunctionSnafu {
-                            msg: format!("Failed to convert scalar to array for {}", fn_name),
-                        })?;
-                datatypes::vectors::Helper::try_into_vector(array).context(IntoVectorsSnafu)?
-            }
-        };
+        let result_columnar: common_query::prelude::ColumnarValue =
+            (&result_columnar).try_into().context(CastSnafu)?;
 
-        let result_vector: VectorRef = result;
+        let result_vector: VectorRef = result_columnar.try_into_vector(1).context(CastSnafu)?;
+
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
             stmt.to_string(),

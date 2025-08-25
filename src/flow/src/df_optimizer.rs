@@ -44,6 +44,7 @@ use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
@@ -57,8 +58,9 @@ use crate::plan::TypedPlan;
 // TODO(discord9): use `Analyzer` to manage rules if more `AnalyzerRule` is needed
 pub async fn apply_df_optimizer(
     plan: datafusion_expr::LogicalPlan,
+    query_ctx: &QueryContextRef,
 ) -> Result<datafusion_expr::LogicalPlan, Error> {
-    let cfg = ConfigOptions::new();
+    let cfg = query_ctx.create_config_options();
     let analyzer = Analyzer::with_rules(vec![
         Arc::new(CountWildcardToTimeIndexRule),
         Arc::new(AvgExpandRule),
@@ -107,12 +109,12 @@ pub async fn sql_to_flow_plan(
         .context(ExternalSnafu)?;
     let plan = engine
         .planner()
-        .plan(&stmt, query_ctx)
+        .plan(&stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
-    let opted_plan = apply_df_optimizer(plan).await?;
+    let opted_plan = apply_df_optimizer(plan, &query_ctx).await?;
 
     // TODO(discord9): add df optimization
     let sub_plan = DFLogicalSubstraitConvertor {}

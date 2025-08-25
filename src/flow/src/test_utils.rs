@@ -172,7 +172,9 @@ pub async fn sql_to_substrait(engine: Arc<dyn QueryEngine>, sql: &str) -> proto:
         .plan(&stmt, QueryContext::arc())
         .await
         .unwrap();
-    let plan = apply_df_optimizer(plan).await.unwrap();
+    let plan = apply_df_optimizer(plan, &QueryContext::arc())
+        .await
+        .unwrap();
 
     // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
     let bytes = DFLogicalSubstraitConvertor {}

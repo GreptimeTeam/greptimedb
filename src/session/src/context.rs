@@ -28,6 +28,7 @@ use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_telemetry::warn;
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
+use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
@@ -219,6 +220,13 @@ impl From<&QueryContext> for api::v1::QueryContext {
 impl QueryContext {
     pub fn arc() -> QueryContextRef {
         Arc::new(QueryContextBuilder::default().build())
+    }
+
+    /// Create a new  datafusion's ConfigOptions instance based on the current QueryContext.
+    pub fn create_config_options(&self) -> ConfigOptions {
+        let mut config = ConfigOptions::default();
+        config.execution.time_zone = self.timezone().to_string();
+        config
     }
 
     pub fn with(catalog: &str, schema: &str) -> QueryContext {

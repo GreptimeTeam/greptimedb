@@ -22,6 +22,7 @@ common-recordbatch.workspace = true
 common-session.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+datafusion-common.workspace = true
 derive_builder.workspace = true
 derive_more = { version = "1", default-features = false, features = ["debug"] }
 snafu.workspace = true
