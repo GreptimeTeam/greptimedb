@@ -230,7 +230,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
     }
 
     /// Formats the table reference with schema if provided.
-    fn format_table_ref(table_name: &str, schema: Option<&str>) -> String {
+    fn format_table_ident(schema_name: Option<&str>, table_name: &str) -> String {
         match schema {
             Some(s) if !s.is_empty() => format!("\"{}\".\"{}\"", s, table_name),
             _ => format!("\"{}\"", table_name),
