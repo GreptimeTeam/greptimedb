@@ -722,7 +722,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs: [conflict-check, clippy, fmt, udeps]
+    needs: [conflict-check, clippy, fmt, check-udeps]
     steps:
       - uses: actions/checkout@v4
         with:
