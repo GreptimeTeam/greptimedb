@@ -26,8 +26,6 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
@@ -36,7 +34,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::{future, ready, Stream};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use session::context::{Channel, QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, ResultExt};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
@@ -46,10 +44,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{extract_header, FlightCompression, TonicResult};
-use crate::http::authorize::AuthScheme;
-use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
-use crate::http::AUTHORIZATION_HEADER;
+use crate::grpc::{utils, FlightCompression, TonicResult};
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -218,35 +213,8 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, _, stream) = request.into_parts();
 
-        let auth_schema = extract_header(
-            &headers,
-            &[AUTHORIZATION_HEADER, http::header::AUTHORIZATION.as_str()],
-        )?
-        .map(|x| x.try_into())
-        .transpose()?
-        .map(|x: AuthScheme| x.into());
-
-        let (catalog, schema) =
-            if let Some(db) = extract_header(&headers, &[GREPTIME_DB_HEADER_NAME])? {
-                parse_catalog_and_schema_from_db_string(db)
-            } else {
-                (
-                    DEFAULT_CATALOG_NAME.to_string(),
-                    DEFAULT_SCHEMA_NAME.to_string(),
-                )
-            };
-
-        let query_ctx = Arc::new(
-            QueryContextBuilder::default()
-                .current_catalog(catalog)
-                .current_schema(schema)
-                .channel(Channel::Grpc)
-                .build(),
-        );
-
-        if !self.validate_auth(auth_schema, query_ctx.clone()).await? {
-            return Err(Status::unauthenticated("auth failed"));
-        }
+        let query_ctx = utils::create_query_context_from_grpc_metadata(&headers)?;
+        utils::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);

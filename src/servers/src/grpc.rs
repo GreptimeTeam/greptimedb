@@ -20,6 +20,7 @@ pub mod frontend_grpc_handler;
 pub mod greptime_handler;
 pub mod prom_query_gateway;
 pub mod region_server;
+pub mod utils;
 
 use std::net::SocketAddr;
 
@@ -38,7 +39,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::metadata::MetadataMap;
 use tonic::service::interceptor::InterceptedService;
 use tonic::service::Routes;
 use tonic::transport::server::TcpIncoming;
@@ -46,9 +46,7 @@ use tonic::transport::ServerTlsConfig;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
-use crate::error::{
-    AlreadyStartedSnafu, InternalSnafu, InvalidParameterSnafu, Result, StartGrpcSnafu, TcpBindSnafu,
-};
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
@@ -185,31 +183,6 @@ impl FlightCompression {
     pub fn arrow_compression(&self) -> bool {
         self == &FlightCompression::ArrowIpc || self == &FlightCompression::All
     }
-}
-
-pub(crate) fn extract_header<'a>(
-    headers: &'a MetadataMap,
-    keys: &[&str],
-) -> TonicResult<Option<&'a str>> {
-    let mut value = None;
-    for key in keys {
-        if let Some(v) = headers.get(*key) {
-            value = Some(v);
-            break;
-        }
-    }
-
-    let Some(v) = value else {
-        return Ok(None);
-    };
-    let Ok(v) = std::str::from_utf8(v.as_bytes()) else {
-        return Err(InvalidParameterSnafu {
-            reason: "expect valid UTF-8 value",
-        }
-        .build()
-        .into());
-    };
-    Ok(Some(v))
 }
 
 pub struct GrpcServer {

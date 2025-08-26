@@ -18,9 +18,8 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use api::helper::request_type;
-use api::v1::auth_header::AuthScheme;
-use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
-use auth::{Identity, Password, UserInfoRef, UserProviderRef};
+use api::v1::{GreptimeRequest, RequestHeader};
+use auth::UserProviderRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -42,20 +41,17 @@ use table::TableRef;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{
-    AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
-};
+use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
-use crate::grpc::{FlightCompression, TonicResult};
+use crate::grpc::{utils, FlightCompression, TonicResult};
 use crate::metrics;
-use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
+use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 #[derive(Clone)]
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
-    user_provider: Option<UserProviderRef>,
+    pub(crate) user_provider: Option<UserProviderRef>,
     runtime: Option<Runtime>,
     pub(crate) flight_compression: FlightCompression,
 }
@@ -87,7 +83,7 @@ impl GreptimeRequestHandler {
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
-        let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
+        let user_info = utils::auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();
@@ -183,31 +179,6 @@ impl GreptimeRequestHandler {
             }
         });
     }
-
-    pub(crate) async fn validate_auth(
-        &self,
-        auth_schema: Option<AuthScheme>,
-        query_ctx: QueryContextRef,
-    ) -> Result<bool> {
-        if self.user_provider.is_none() {
-            return Ok(true);
-        }
-
-        let auth_schema = auth_schema.context(NotFoundAuthHeaderSnafu)?;
-
-        let header = RequestHeader {
-            authorization: Some(AuthHeader {
-                auth_scheme: Some(auth_schema),
-            }),
-            catalog: query_ctx.current_catalog().to_string(),
-            schema: query_ctx.current_schema(),
-            ..Default::default()
-        };
-
-        Ok(auth(self.user_provider.clone(), Some(&header), &query_ctx)
-            .await
-            .is_ok())
-    }
 }
 
 pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
@@ -216,45 +187,6 @@ pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
         .as_ref()
         .map(request_type)
         .unwrap_or_default()
-}
-
-pub(crate) async fn auth(
-    user_provider: Option<UserProviderRef>,
-    header: Option<&RequestHeader>,
-    query_ctx: &QueryContextRef,
-) -> Result<UserInfoRef> {
-    let Some(user_provider) = user_provider else {
-        return Ok(auth::userinfo_by_name(None));
-    };
-
-    let auth_scheme = header
-        .and_then(|header| {
-            header
-                .authorization
-                .as_ref()
-                .and_then(|x| x.auth_scheme.clone())
-        })
-        .context(NotFoundAuthHeaderSnafu)?;
-
-    match auth_scheme {
-        AuthScheme::Basic(Basic { username, password }) => user_provider
-            .auth(
-                Identity::UserId(&username, None),
-                Password::PlainText(password.into()),
-                query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-            )
-            .await
-            .context(AuthSnafu),
-        AuthScheme::Token(_) => Err(UnsupportedAuthScheme {
-            name: "Token AuthScheme".to_string(),
-        }),
-    }
-    .inspect_err(|e| {
-        METRIC_AUTH_FAILURE
-            .with_label_values(&[e.status_code().as_ref()])
-            .inc();
-    })
 }
 
 /// Creates a new `QueryContext` from the provided request header and extensions.
