@@ -74,6 +74,11 @@ impl HandlerContext {
 
     /// Handles a single region flush operation.
     async fn handle_single_region_flush(&self, region_id: RegionId) -> Result<(), error::Error> {
+        self.perform_region_flush(region_id).await
+    }
+
+    /// Performs the actual region flush operation.
+    async fn perform_region_flush(&self, region_id: RegionId) -> Result<(), error::Error> {
         let request = RegionRequest::Flush(RegionFlushRequest {
             row_group_size: None,
         });
@@ -87,10 +92,7 @@ impl HandlerContext {
     async fn handle_flush_hint(&self, region_ids: Vec<RegionId>) {
         let start_time = Instant::now();
         for region_id in &region_ids {
-            let request = RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            });
-            let result = self.region_server.handle_request(*region_id, request).await;
+            let result = self.perform_region_flush(*region_id).await;
             match result {
                 Ok(_) => {}
                 Err(error::Error::RegionNotFound { .. }) => {
@@ -156,11 +158,13 @@ impl HandlerContext {
             .try_register(
                 region_id,
                 Box::pin(async move {
-                    let request = RegionRequest::Flush(RegionFlushRequest {
-                        row_group_size: None,
-                    });
                     region_server_moved
-                        .handle_request(region_id, request)
+                        .handle_request(
+                            region_id,
+                            RegionRequest::Flush(RegionFlushRequest {
+                                row_group_size: None,
+                            }),
+                        )
                         .await?;
                     Ok(())
                 }),
