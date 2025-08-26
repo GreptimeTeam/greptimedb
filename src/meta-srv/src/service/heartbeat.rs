@@ -110,7 +110,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                     warn!("Quit because it is no longer the leader");
                     let _ = tx
                         .send(Err(Status::aborted(format!(
-                            "The requested meta node is not leader, node addr: {}",
+                            "The requested metasrv node is not leader, node addr: {}",
                             ctx.server_addr
                         ))))
                         .await;
