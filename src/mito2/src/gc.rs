@@ -106,7 +106,7 @@ impl LocalGcWorker {
         let table_id = regions_to_gc
             .first()
             .context(UnexpectedSnafu {
-                reason: "Expecte at least one region, found none",
+                reason: "Expect at least one region, found none",
             })?
             .table_id();
         let mut zelf = Self {

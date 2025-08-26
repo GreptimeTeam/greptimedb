@@ -17,6 +17,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use common_telemetry::{error, info};
+use object_store::EntryMode;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::region_request::PathType;
@@ -25,7 +26,7 @@ use store_api::storage::{RegionId, TableId};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
-use crate::error::{OpenDalSnafu, Result};
+use crate::error::{OpenDalSnafu, Result, SerdeJsonSnafu};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -198,7 +199,7 @@ pub struct TableFileRefs {
 pub const PURGER_REFS_PATH: &str = ".purger_refs";
 
 /// Returns the path of the tmp ref file for given table id and datanode id.
-pub fn ref_file_path(table_id: TableId, node_id: u64, path_type: PathType) -> String {
+pub fn ref_file_path(table_dir: &str, node_id: u64, path_type: PathType) -> String {
     let path_type_postfix = match path_type {
         PathType::Bare => "",
         PathType::Data => "data",
@@ -206,11 +207,16 @@ pub fn ref_file_path(table_id: TableId, node_id: u64, path_type: PathType) -> St
     };
     format!(
         "{}/{}/{:020}{}.refs",
-        table_id,
+        table_dir,
         PURGER_REFS_PATH,
         node_id,
         format!(".{path_type_postfix}")
     )
+}
+
+/// Returns the directory path to store all purger ref files.
+pub fn ref_dir(table_dir: &str) -> String {
+    object_store::util::join_dir(table_dir, PURGER_REFS_PATH)
 }
 
 /// Manages all file references in one datanode.
@@ -236,6 +242,39 @@ pub struct TableFileRefsManifest {
     pub ts: i64,
 }
 
+/// Reads all ref files for a table from the given access layer.
+/// Returns a list of `TableFileRefsManifest`.
+pub async fn read_all_ref_files_for_table(
+    access_layer: &AccessLayerRef,
+) -> Result<Vec<TableFileRefsManifest>> {
+    let ref_dir = ref_dir(access_layer.table_dir());
+    // list everything under the ref dir. And filter out by path type in `.<path-type>.refs` postfix.
+    let entries = access_layer
+        .object_store()
+        .list(&ref_dir)
+        .await
+        .context(OpenDalSnafu)?;
+    let mut manifests = Vec::new();
+
+    for entry in entries {
+        if entry.metadata().mode() != EntryMode::FILE {
+            continue;
+        }
+        // read file and parse as `TableFileRefsManifest`.
+        let buf = access_layer
+            .object_store()
+            .read(&entry.path())
+            .await
+            .context(OpenDalSnafu)?
+            .to_bytes();
+
+        let manifest: TableFileRefsManifest =
+            serde_json::from_slice(&buf).context(SerdeJsonSnafu)?;
+        manifests.push(manifest);
+    }
+    Ok(manifests)
+}
+
 impl FileReferenceManager {
     pub fn new() -> Self {
         Self::default()
@@ -251,14 +290,18 @@ impl FileReferenceManager {
         }
         let access_layer = &file_refs.access_layer;
 
-        let path = ref_file_path(table_id, self.node_id, access_layer.path_type());
+        let path = ref_file_path(
+            access_layer.table_dir(),
+            self.node_id,
+            access_layer.path_type(),
+        );
 
         let ref_manifest = TableFileRefsManifest {
             file_refs: file_refs.files.clone(),
             ts: now,
         };
 
-        let content = serde_json::to_vec(&ref_manifest).unwrap_or_default();
+        let content = serde_json::to_string(&ref_manifest).context(SerdeJsonSnafu)?;
 
         if let Err(e) = access_layer.object_store().write(&path, content).await {
             error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
