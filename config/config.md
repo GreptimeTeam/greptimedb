@@ -250,11 +250,11 @@
 | `internal_grpc.server_addr` | String | `127.0.0.1:4010` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `internal_grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `internal_grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
-| `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
-| `grpc.tls.mode` | String | `disable` | TLS mode. |
-| `grpc.tls.cert_path` | String | Unset | Certificate file path. |
-| `grpc.tls.key_path` | String | Unset | Private key file path. |
-| `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `internal_grpc.tls` | -- | -- | internal gRPC server TLS options, see `mysql.tls` section. |
+| `internal_grpc.tls.mode` | String | `disable` | TLS mode. |
+| `internal_grpc.tls.cert_path` | String | Unset | Certificate file path. |
+| `internal_grpc.tls.key_path` | String | Unset | Private key file path. |
+| `internal_grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |

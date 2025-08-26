@@ -97,8 +97,8 @@ runtime_size = 8
 ## Default to `none`
 flight_compression = "arrow_ipc"
 
-## gRPC server TLS options, see `mysql.tls` section.
-[grpc.tls]
+## internal gRPC server TLS options, see `mysql.tls` section.
+[internal_grpc.tls]
 ## TLS mode.
 mode = "disable"
 
