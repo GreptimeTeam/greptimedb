@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, SimpleReply};
+use common_meta::instruction::{CollectFileRefs, GcRegions, InstructionReply, SimpleReply};
 use common_telemetry::{info, warn};
 use futures::future::BoxFuture;
 use mito2::engine::MitoEngine;
 use mito2::gc::LocalGcWorker;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 
 use crate::error::{GcMitoEngineSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu};
 use crate::heartbeat::handler::HandlerContext;
@@ -26,10 +26,12 @@ use crate::heartbeat::handler::HandlerContext;
 impl HandlerContext {
     pub(crate) fn handle_gc_regions_instruction(
         self,
-        region_ids: Vec<RegionId>,
+        gc_regions: GcRegions,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
+            let region_ids = gc_regions.region_ids.clone();
             info!("Received gc regions instruction: {:?}", region_ids);
+            let region_ids = gc_regions.region_ids;
             let mut table_id = None;
             let is_same_table = region_ids.windows(2).all(|w| {
                 let t1 = w[0].table_id();
@@ -49,7 +51,10 @@ impl HandlerContext {
                 }));
             }
 
-            let (region_id, gc_worker) = match self.create_gc_worker(region_ids).await {
+            let (region_id, gc_worker) = match self
+                .create_gc_worker(region_ids, gc_regions.ts_millis)
+                .await
+            {
                 Ok(worker) => worker,
                 Err(e) => {
                     return Some(InstructionReply::GcRegions(SimpleReply {
@@ -95,6 +100,7 @@ impl HandlerContext {
     async fn create_gc_worker(
         &self,
         mut region_ids: Vec<RegionId>,
+        ref_ts_millis: i64,
     ) -> Result<(RegionId, LocalGcWorker)> {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
@@ -114,6 +120,7 @@ impl HandlerContext {
             region_ids,
             Default::default(),
             mito_config.clone(),
+            ref_ts_millis,
         )
         .await
         .context(GcMitoEngineSnafu { region_id })?;
@@ -149,19 +156,36 @@ impl HandlerContext {
     }
 
     pub fn handle_collect_file_refs_instruction(
-        &self,
-        region_id: RegionId,
+        self,
+        collect_file_refs: CollectFileRefs,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
-        todo!()
+        Box::pin(async move {
+            match self
+                .trigger_file_refs_upload(collect_file_refs.region_id, collect_file_refs.ts_millis)
+                .await
+            {
+                Ok(()) => Some(InstructionReply::CollectFileRefs(SimpleReply {
+                    result: true,
+                    error: None,
+                })),
+                Err(e) => Some(InstructionReply::CollectFileRefs(SimpleReply {
+                    result: false,
+                    error: Some(format!(
+                        "Failed to collect file refs for region {}: {}",
+                        collect_file_refs.region_id, e
+                    )),
+                })),
+            }
+        })
     }
 
-    async fn trigger_file_refs_upload(&self, region_id: RegionId) -> Result<()> {
+    async fn trigger_file_refs_upload(&self, region_id: RegionId, now: i64) -> Result<()> {
         let (region_id, mito_engine) = self.find_engine_for_regions(&[region_id])?;
 
         let file_ref_mgr = mito_engine.file_ref_manager();
 
         file_ref_mgr
-            .upload_ref_file_for_table(region_id.table_id())
+            .upload_ref_file_for_table(region_id.table_id(), now)
             .await
             .with_context(|_| GcMitoEngineSnafu { region_id })?;
 

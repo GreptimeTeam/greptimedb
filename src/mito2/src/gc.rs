@@ -43,7 +43,7 @@ use crate::error::{
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::region::opener::new_manifest_dir;
-use crate::sst::file::{self, FileId, RegionFileId};
+use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +86,9 @@ pub struct LocalGcWorker {
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
     pub(crate) mito_config: MitoConfig,
+    /// Expected file ref manifest upload time, in milliseconds since UNIX_EPOCH.
+    /// Also accept file ref manifests that are uploaded later than this time.
+    pub(crate) ref_ts_millis: i64,
 }
 
 impl LocalGcWorker {
@@ -98,6 +101,7 @@ impl LocalGcWorker {
         regions_to_gc: Vec<RegionId>,
         opt: FileGcOption,
         mito_config: MitoConfig,
+        ref_ts_millis: i64,
     ) -> Result<Self> {
         let table_id = regions_to_gc
             .first()
@@ -112,6 +116,7 @@ impl LocalGcWorker {
             manifest_mgrs: HashMap::new(),
             opt,
             mito_config,
+            ref_ts_millis,
         };
 
         for region_id in regions_to_gc {
@@ -132,6 +137,7 @@ impl LocalGcWorker {
     }
 
     pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
+        let _ = self.table_id;
         todo!()
     }
 

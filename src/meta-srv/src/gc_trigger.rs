@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CollectFileRefs, GcRegions, Instruction};
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
@@ -174,10 +174,12 @@ impl GcTrigger {
                 .flatten()
                 .collect::<HashMap<_, _>>();
 
-            self.send_upload_ref_instructions(&peers_to_region_ids)
+            let now_millis = common_time::util::current_time_millis();
+
+            self.send_upload_ref_instructions(&peers_to_region_ids, now_millis)
                 .await?;
 
-            self.send_gc_instruction(first_region_peer.clone(), region_ids.clone())
+            self.send_gc_instruction(first_region_peer.clone(), region_ids.clone(), now_millis)
                 .await?;
             info!(
                 "Sent gc instruction to datanode {} for table {} with regions {:?}",
@@ -195,6 +197,7 @@ impl GcTrigger {
     async fn send_upload_ref_instructions(
         &self,
         peers_to_region_ids: &HashMap<Peer, RegionId>,
+        now_millis: i64,
     ) -> Result<()> {
         let mut wait_for_replies = Vec::with_capacity(peers_to_region_ids.len());
         for (peer, region_id) in peers_to_region_ids {
@@ -202,7 +205,10 @@ impl GcTrigger {
                 "Sending upload reference instruction to datanode {} for region {}",
                 peer, region_id
             );
-            let instruction = Instruction::CollectFileRefs(*region_id);
+            let instruction = Instruction::CollectFileRefs(CollectFileRefs {
+                region_id: *region_id,
+                ts_millis: now_millis,
+            });
             let msg = MailboxMessage::json_message(
                 &format!("Upload table reference: {}", instruction),
                 &format!("Metasrv@{}", self.server_addr),
@@ -222,17 +228,34 @@ impl GcTrigger {
             wait_for_replies.push((peer, mailbox_rx));
         }
 
-        todo!("make sure successful replies from all datanodes");
+        // wait for all replies
+        for (peer, mailbox_rx) in wait_for_replies {
+            match mailbox_rx.await {
+                Ok(msg) => continue,
+                Err(e) => {
+                    error!(e; "Failed to receive upload reference reply from datanode {}", peer);
+                    return Err(e);
+                }
+            }
+        }
 
         Ok(())
     }
 
-    async fn send_gc_instruction(&self, peer: Peer, region_ids: Vec<RegionId>) -> Result<()> {
+    async fn send_gc_instruction(
+        &self,
+        peer: Peer,
+        region_ids: Vec<RegionId>,
+        now_millis: i64,
+    ) -> Result<()> {
         info!(
             "Sending gc instruction to datanode {} with regions {:?}",
             peer, region_ids
         );
-        let instruction = Instruction::GcRegions(region_ids);
+        let instruction = Instruction::GcRegions(GcRegions {
+            region_ids,
+            ts_millis: now_millis,
+        });
         let msg = MailboxMessage::json_message(
             &format!("GC regions: {}", instruction),
             &format!("Metasrv@{}", self.server_addr),

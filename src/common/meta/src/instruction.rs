@@ -207,6 +207,18 @@ pub struct FlushRegions {
     pub region_ids: Vec<RegionId>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GcRegions {
+    pub region_ids: Vec<RegionId>,
+    pub ts_millis: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CollectFileRefs {
+    pub region_id: RegionId,
+    pub ts_millis: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
@@ -228,9 +240,9 @@ pub enum Instruction {
     /// Flushes a single region.
     FlushRegion(RegionId),
     /// Triggers garbage collection for a table.
-    GcRegions(Vec<RegionId>),
+    GcRegions(GcRegions),
     /// Trigger datanode to collect and upload table reference to object storage.
-    CollectFileRefs(RegionId),
+    CollectFileRefs(CollectFileRefs),
 }
 
 /// The reply of [UpgradeRegion].
@@ -263,6 +275,7 @@ pub enum InstructionReply {
     DowngradeRegion(DowngradeRegionReply),
     FlushRegion(SimpleReply),
     GcRegions(SimpleReply),
+    CollectFileRefs(SimpleReply),
 }
 
 impl Display for InstructionReply {
@@ -276,6 +289,9 @@ impl Display for InstructionReply {
             }
             Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
             Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegions({})", reply),
+            Self::CollectFileRefs(reply) => {
+                write!(f, "InstructionReply::CollectFileRefs({})", reply)
+            }
         }
     }
 }

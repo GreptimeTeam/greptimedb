@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, TableId};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
-use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu};
+use crate::error::{OpenDalSnafu, Result};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -228,16 +228,20 @@ pub struct FileReferenceManager {
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
 
+/// The tmp file uploaded to object storage to record one table's file references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableFileRefsManifest {
+    pub file_refs: HashSet<FileRef>,
+    /// Unix timestamp in milliseconds sent by metasrv to indicate when the manifest is created. Used for gc worker to make sure it gets the latest version of the manifest.
+    pub ts: i64,
+}
+
 impl FileReferenceManager {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub async fn clean_dropped_tables(&self) {
-        todo!("Remove tables's access layer which have empty manifest meaning they are dropped.");
-    }
-
-    pub async fn upload_ref_file_for_table(&self, table_id: TableId) -> Result<()> {
+    pub async fn upload_ref_file_for_table(&self, table_id: TableId, now: i64) -> Result<()> {
         let Some(file_refs) = self.files_per_table.lock().unwrap().get(&table_id).cloned() else {
             return Ok(());
         };
@@ -248,7 +252,14 @@ impl FileReferenceManager {
         let access_layer = &file_refs.access_layer;
 
         let path = ref_file_path(table_id, self.node_id, access_layer.path_type());
-        let content = serde_json::to_vec(&file_refs.files).unwrap_or_default();
+
+        let ref_manifest = TableFileRefsManifest {
+            file_refs: file_refs.files.clone(),
+            ts: now,
+        };
+
+        let content = serde_json::to_vec(&ref_manifest).unwrap_or_default();
+
         if let Err(e) = access_layer.object_store().write(&path, content).await {
             error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
             return Err(e).context(OpenDalSnafu);

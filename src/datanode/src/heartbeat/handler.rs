@@ -110,12 +110,14 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegion(flush_region) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_region_instruction(flush_region)
             })),
-            Instruction::GcRegions(region_ids) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_gc_regions_instruction(region_ids)
+            Instruction::GcRegions(gc_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_gc_regions_instruction(gc_regions)
             })),
-            Instruction::CollectFileRefs(region_id) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_collect_file_refs_instruction(region_id)
-            })),
+            Instruction::CollectFileRefs(collect_file_refs) => {
+                Ok(Box::new(move |handler_context| {
+                    handler_context.handle_collect_file_refs_instruction(collect_file_refs)
+                }))
+            }
         }
     }
 }

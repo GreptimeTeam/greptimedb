@@ -36,7 +36,7 @@ use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
+use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
