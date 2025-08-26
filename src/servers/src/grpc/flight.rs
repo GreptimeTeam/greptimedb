@@ -46,7 +46,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{FlightCompression, TonicResult};
+use crate::grpc::{extract_header, FlightCompression, TonicResult};
 use crate::http::authorize::AuthScheme;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
@@ -190,7 +190,6 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let query_ctx = QueryContext::arc();
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -205,7 +204,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
-                query_ctx,
+                QueryContext::arc(),
             );
             Ok(Response::new(stream))
         }
@@ -219,33 +218,23 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, _, stream) = request.into_parts();
 
-        let header = |key: &str| -> TonicResult<Option<&str>> {
-            let Some(v) = headers.get(key) else {
-                return Ok(None);
-            };
-            let Ok(v) = std::str::from_utf8(v.as_bytes()) else {
-                return Err(InvalidParameterSnafu {
-                    reason: "expect valid UTF-8 value",
-                }
-                .build()
-                .into());
-            };
-            Ok(Some(v))
-        };
+        let auth_schema = extract_header(
+            &headers,
+            &[AUTHORIZATION_HEADER, http::header::AUTHORIZATION.as_str()],
+        )?
+        .map(|x| x.try_into())
+        .transpose()?
+        .map(|x: AuthScheme| x.into());
 
-        let auth_schema = header(AUTHORIZATION_HEADER)?
-            .map(|x| x.try_into())
-            .transpose()?
-            .map(|x: AuthScheme| x.into());
-
-        let (catalog, schema) = if let Some(db) = header(GREPTIME_DB_HEADER_NAME)? {
-            parse_catalog_and_schema_from_db_string(db)
-        } else {
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-            )
-        };
+        let (catalog, schema) =
+            if let Some(db) = extract_header(&headers, &[GREPTIME_DB_HEADER_NAME])? {
+                parse_catalog_and_schema_from_db_string(db)
+            } else {
+                (
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                )
+            };
 
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
