@@ -204,18 +204,16 @@ impl HandlerContext {
                 None
             } else {
                 // Synchronous mode: return reply with results
-                let reply = self
-                    .handle_flush_sync(region_ids, error_strategy)
-                    .await;
+                let reply = self.handle_flush_sync(region_ids, error_strategy).await;
                 Some(InstructionReply::FlushRegionsV2(reply))
             };
-            
+
             let elapsed = start_time.elapsed();
             debug!(
                 "FlushRegionsV2 strategy: {:?}, elapsed: {:?}, reply: {:?}",
                 strategy, elapsed, reply
             );
-            
+
             reply
         })
     }
