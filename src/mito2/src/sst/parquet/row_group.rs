@@ -326,26 +326,6 @@ impl<'a> InMemoryRowGroup<'a> {
     }
 }
 
-// /// Checks whether we should clone the pages based on the given ranges.
-// fn should_clone_pages(ranges: &[Range<u64>]) -> bool {
-//     // Find the min and max of the ranges.
-//     let min = ranges.iter().map(|r| r.start).min().unwrap_or(0);
-//     let max = ranges.iter().map(|r| r.end).max().unwrap_or(0);
-//     let total_page_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-//     let max_page_size = max - min;
-
-//     // If the max page size is more than 1.2x of the total page size, we should clone the pages.
-//     max_page_size as f64 > total_page_size as f64 * 1.2
-// }
-
-// /// Copies each pages to new buffers.
-// fn copy_pages(_ranges: &[Range<u64>], pages: Vec<Bytes>) -> Vec<Bytes> {
-//     pages
-//         .into_iter()
-//         .map(|page| Bytes::copy_from_slice(&page))
-//         .collect()
-// }
-
 /// Computes the max possible buffer size to read the given `ranges`.
 // See https://github.com/apache/opendal/blob/v0.54.0/core/src/types/read/reader.rs#L166-L192
 fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
