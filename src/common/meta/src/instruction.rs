@@ -229,6 +229,8 @@ pub enum Instruction {
     FlushRegion(RegionId),
     /// Triggers garbage collection for a table.
     GcRegions(Vec<RegionId>),
+    /// Trigger datanode to collect and upload table reference to object storage.
+    CollectFileRefs(RegionId),
 }
 
 /// The reply of [UpgradeRegion].

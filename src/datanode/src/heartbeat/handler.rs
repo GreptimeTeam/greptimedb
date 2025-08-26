@@ -113,6 +113,9 @@ impl RegionHeartbeatResponseHandler {
             Instruction::GcRegions(region_ids) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_gc_regions_instruction(region_ids)
             })),
+            Instruction::CollectFileRefs(region_id) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_collect_file_refs_instruction(region_id)
+            })),
         }
     }
 }
@@ -129,6 +132,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::FlushRegion { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
                 | Some((_, Instruction::GcRegions { .. }))
+                | Some((_, Instruction::CollectFileRefs { .. }))
         )
     }
 

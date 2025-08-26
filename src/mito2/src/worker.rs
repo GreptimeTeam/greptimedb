@@ -131,6 +131,8 @@ pub(crate) struct WorkerGroup {
     purge_scheduler: SchedulerRef,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// File reference manager.
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl WorkerGroup {
@@ -218,6 +220,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 
@@ -267,6 +270,10 @@ impl WorkerGroup {
     /// Returns cache of the group.
     pub(crate) fn cache_manager(&self) -> CacheManagerRef {
         self.cache_manager.clone()
+    }
+
+    pub(crate) fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.file_ref_manager.clone()
     }
 
     /// Get worker for specific `region_id`.
@@ -367,6 +374,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 

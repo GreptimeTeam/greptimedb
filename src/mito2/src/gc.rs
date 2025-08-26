@@ -28,20 +28,22 @@ use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use object_store::Entry;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt as _};
-use store_api::storage::RegionId;
+use snafu::{ensure, OptionExt, ResultExt as _};
+use store_api::storage::{RegionId, TableId};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
     DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
-    Result,
+    Result, UnexpectedSnafu,
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::region::opener::new_manifest_dir;
-use crate::sst::file::FileId;
+use crate::sst::file::{self, FileId, RegionFileId};
 use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,16 +69,19 @@ pub struct FileGcOption {
 impl Default for FileGcOption {
     fn default() -> Self {
         Self {
-            // 30 minutes, because expect long running queries to be finished within 30 minutes
-            lingering_time: Duration::from_secs(60 * 5),
+            // expect long running queries to be finished within a reasonable time
+            lingering_time: Duration::from_secs(60 * 15),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
             max_concurrent_per_gc_job: 32,
         }
     }
 }
+
 pub struct LocalGcWorker {
+    pub(crate) table_id: TableId,
     pub(crate) access_layer: AccessLayerRef,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
     pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
@@ -89,22 +94,45 @@ impl LocalGcWorker {
     ///
     pub async fn try_new(
         access_layer: AccessLayerRef,
+        cache_manager: Option<CacheManagerRef>,
         regions_to_gc: Vec<RegionId>,
         opt: FileGcOption,
         mito_config: MitoConfig,
     ) -> Result<Self> {
+        let table_id = regions_to_gc
+            .first()
+            .context(UnexpectedSnafu {
+                reason: "Expecte at least one region, found none",
+            })?
+            .table_id();
         let mut zelf = Self {
+            table_id,
             access_layer,
+            cache_manager,
             manifest_mgrs: HashMap::new(),
             opt,
             mito_config,
         };
+
         for region_id in regions_to_gc {
+            ensure!(
+                region_id.table_id() == table_id,
+                UnexpectedSnafu {
+                    reason: format!(
+                        "All regions should belong to the same table, found region {} and table {}",
+                        region_id, table_id
+                    ),
+                }
+            );
             let mgr = zelf.open_mgr_for(region_id).await?;
             zelf.manifest_mgrs.insert(region_id, mgr);
         }
 
         Ok(zelf)
+    }
+
+    pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
+        todo!()
     }
 
     /// Run the GC worker in serial mode,
@@ -181,11 +209,7 @@ impl LocalGcWorker {
             unused_len, region_id
         );
 
-        self.access_layer
-            .object_store()
-            .delete_iter(unused_files.into_iter().map(|e| e.path().to_string()))
-            .await
-            .context(OpenDalSnafu)?;
+        self.delete_files(region_id, &unused_files).await?;
 
         info!(
             "Successfully deleted {} unused files for region {}",
@@ -193,6 +217,60 @@ impl LocalGcWorker {
         );
 
         Ok(())
+    }
+
+    async fn delete_files(&self, region_id: RegionId, file_ids: &[FileId]) -> Result<()> {
+        // Remove meta of the file from cache.
+        if let Some(cache) = &self.cache_manager {
+            for file_id in file_ids {
+                cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
+            }
+        }
+
+        for file_id in file_ids {
+            let region_file_id = RegionFileId::new(region_id, *file_id);
+            match self.access_layer.delete_sst(&region_file_id).await {
+                Ok(_) => {
+                    info!("Deleted sst and index file for {}", region_file_id);
+                }
+                Err(e) => {
+                    error!(e; "Failed to delete sst and index file for {}", region_file_id);
+                }
+            }
+        }
+        for file_id in file_ids {
+            let region_file_id = RegionFileId::new(region_id, *file_id);
+
+            if let Some(write_cache) = self
+                .cache_manager
+                .as_ref()
+                .and_then(|cache| cache.write_cache())
+            {
+                // Removes index file from the cache.
+
+                write_cache
+                    .remove(IndexKey::new(region_id, *file_id, FileType::Puffin))
+                    .await;
+
+                // Remove the SST file from the cache.
+                write_cache
+                    .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+                    .await;
+            }
+
+            // Purges index content in the stager.
+            if let Err(e) = self
+                .access_layer
+                .puffin_manager_factory()
+                .purge_stager(region_file_id)
+                .await
+            {
+                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
+                    file_id, region_id);
+            }
+        }
+
+        todo!()
     }
 
     /// Get the manifest manager for the region.
@@ -259,15 +337,16 @@ impl LocalGcWorker {
         in_used: HashSet<FileId>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<FileId>>,
         concurrency: usize,
-    ) -> Result<Vec<Entry>> {
-        let may_linger_until = chrono::Utc::now()
+    ) -> Result<Vec<FileId>> {
+        let now = chrono::Utc::now();
+        let may_linger_until = now
             - chrono::Duration::from_std(self.opt.lingering_time).with_context(|_| {
                 DurationOutOfRangeSnafu {
                     input: self.opt.lingering_time,
                 }
             })?;
 
-        let unknown_file_may_linger_until = chrono::Utc::now()
+        let unknown_file_may_linger_until = now
             - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).with_context(
                 |_| DurationOutOfRangeSnafu {
                     input: self.opt.unknown_file_lingering_time,
@@ -358,14 +437,14 @@ impl LocalGcWorker {
         let mut all_in_exist_linger_files = HashSet::new();
         while let Some(stream) = rx.recv().await {
             all_unused_files_ready_for_delete.extend(
-                stream.into_iter().filter_map(Result::ok).filter(|e| {
+                stream.into_iter().filter_map(Result::ok).filter_map(|e| {
                     let file_id = match location::parse_file_id_from_path(e.name()) {
                         Ok(file_id) => file_id,
                         Err(err) => {
                             error!(err; "Failed to parse file id from path: {}", e.name());
                             // if we can't parse the file id, it means it's not a sst or index file
                             // shouldn't delete it because we don't know what it is
-                            return false;
+                            return None;
                         }
                     };
                     if may_linger_filenames.contains(&file_id) {
@@ -388,7 +467,11 @@ impl LocalGcWorker {
                                 true
                             }
                         };
-                    should_delete
+                    if should_delete {
+                        None
+                    } else {
+                        Some(file_id)
+                    }
                 }),
             );
         }

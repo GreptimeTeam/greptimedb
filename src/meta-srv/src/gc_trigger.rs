@@ -14,6 +14,7 @@
 
 // TODO(discord9): use it
 #![allow(unused)]
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ use crate::error::{
     self, RegionRouteNotFoundSnafu, Result, TableMetadataManagerSnafu, TableRouteNotFoundSnafu,
     UnexpectedSnafu,
 };
-use crate::service::mailbox::{Channel, MailboxRef};
+use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 use crate::{define_ticker, metrics};
 
 /// The interval of the gc ticker.
@@ -149,37 +150,79 @@ impl GcTrigger {
             region_ids.sort_by_key(|f| f.region_number());
 
             // send instruction to first region id's datanode
-
-            let first_region_id = region_ids
+            let (first_region_id, first_region_peer) = phy_table_val
+                .region_routes
                 .first()
-                .ok_or_else(|| TableRouteNotFoundSnafu { table_id }.build())?;
+                .and_then(|r| r.leader_peer.as_ref().map(|p| (r.region.id, p.clone())))
+                .context({ TableRouteNotFoundSnafu { table_id } })?;
 
-            let peer = phy_table_val
+            let all_peers = phy_table_val
                 .region_routes
                 .iter()
-                .find(|r| r.region.id == *first_region_id)
-                .ok_or_else(|| {
-                    RegionRouteNotFoundSnafu {
-                        region_id: *first_region_id,
-                    }
-                    .build()
-                })?
-                .leader_peer
-                .clone()
-                .ok_or_else(|| {
-                    UnexpectedSnafu {
-                        violated: format!("region {} has no leader", first_region_id),
-                    }
-                    .build()
-                })?;
+                .filter_map(|r| r.leader_peer.clone())
+                .collect::<Vec<_>>();
 
-            self.send_gc_instruction(peer.clone(), region_ids.clone())
+            // only need to trigger gc for one region per datanode
+            let peers_to_region_ids: HashMap<Peer, RegionId> = phy_table_val
+                .region_routes
+                .iter()
+                .map(|p| {
+                    p.leader_peer
+                        .as_ref()
+                        .map(|peer| (peer.clone(), p.region.id))
+                })
+                .flatten()
+                .collect::<HashMap<_, _>>();
+
+            self.send_upload_ref_instructions(&peers_to_region_ids)
+                .await?;
+
+            self.send_gc_instruction(first_region_peer.clone(), region_ids.clone())
                 .await?;
             info!(
                 "Sent gc instruction to datanode {} for table {} with regions {:?}",
-                peer, table_id, region_ids
+                first_region_peer, table_id, region_ids
             );
         }
+
+        Ok(())
+    }
+
+    /// Ask all the datanode that have at least one region of the table to upload table reference.
+    ///
+    /// If any datanode fails to reply the instruction within a timeout, then the entire gc operation
+    /// is considered failed.
+    async fn send_upload_ref_instructions(
+        &self,
+        peers_to_region_ids: &HashMap<Peer, RegionId>,
+    ) -> Result<()> {
+        let mut wait_for_replies = Vec::with_capacity(peers_to_region_ids.len());
+        for (peer, region_id) in peers_to_region_ids {
+            info!(
+                "Sending upload reference instruction to datanode {} for region {}",
+                peer, region_id
+            );
+            let instruction = Instruction::CollectFileRefs(*region_id);
+            let msg = MailboxMessage::json_message(
+                &format!("Upload table reference: {}", instruction),
+                &format!("Metasrv@{}", self.server_addr),
+                &format!("Datanode-{}@{}", peer.id, peer.addr),
+                common_time::util::current_time_millis(),
+                &instruction,
+            )
+            .with_context(|_| error::SerializeToJsonSnafu {
+                input: instruction.to_string(),
+            })?;
+
+            let mailbox_rx: MailboxReceiver = self
+                .mailbox
+                .send(&Channel::Datanode(peer.id), msg, Duration::from_secs(60))
+                .await?;
+
+            wait_for_replies.push((peer, mailbox_rx));
+        }
+
+        todo!("make sure successful replies from all datanodes");
 
         Ok(())
     }

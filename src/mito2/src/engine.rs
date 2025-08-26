@@ -97,7 +97,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use store_api::ManifestVersion;
 use tokio::sync::{oneshot, Semaphore};
 
-use crate::cache::CacheStrategy;
+use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
@@ -232,6 +232,14 @@ impl MitoEngine {
 
     pub fn mito_config(&self) -> &MitoConfig {
         &self.inner.config
+    }
+
+    pub fn cache_manager(&self) -> CacheManagerRef {
+        self.inner.workers.cache_manager()
+    }
+
+    pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.inner.workers.file_ref_manager()
     }
 
     /// Returns true if the specific region exists.

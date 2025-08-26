@@ -106,6 +106,12 @@ mod tests {
             sst_file_path("table_dir", region_file_id, PathType::Metadata),
             format!("table_dir/1_0000000002/metadata/{}.parquet", file_id)
         );
+
+        for path_type in &[PathType::Bare, PathType::Data, PathType::Metadata] {
+            let path = sst_file_path("table_dir", region_file_id, *path_type);
+            let parsed_file_id = parse_file_id_from_path(&path).unwrap();
+            assert_eq!(parsed_file_id, file_id);
+        }
     }
 
     #[test]

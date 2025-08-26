@@ -18,11 +18,14 @@ use std::sync::{Arc, Mutex};
 
 use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+use store_api::region_request::PathType;
 use store_api::storage::{RegionId, TableId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -75,6 +78,10 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
+pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
+    sst_layer.object_store().info().scheme() == object_store::Scheme::Fs
+}
+
 impl LocalFilePurger {
     /// Creates a new purger.
     pub fn new(
@@ -83,7 +90,7 @@ impl LocalFilePurger {
         cache_manager: Option<CacheManagerRef>,
         file_ref_manager: FileReferenceManagerRef,
     ) -> Self {
-        let is_local_fs = sst_layer.object_store().info().scheme() == object_store::Scheme::Fs;
+        let is_local_fs = is_local_fs(&sst_layer);
         Self {
             scheduler,
             sst_layer,
@@ -104,7 +111,7 @@ impl LocalFilePurger {
 
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(&file_meta).await {
+            if let Err(e) = sst_layer.delete_sst(&file_meta.file_id()).await {
                 error!(e; "Failed to delete SST file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             } else {
@@ -178,9 +185,32 @@ impl FileRef {
     }
 }
 
+/// File references for a table.
+/// It contains all files referenced by the table.
+#[derive(Debug, Clone)]
+pub struct TableFileRefs {
+    pub files: HashSet<FileRef>,
+    /// Access layer per table. Will be used to upload tmp file for recording references
+    /// to the object storage.
+    pub access_layer: AccessLayerRef,
+}
+
+pub const PURGER_REFS_PATH: &str = ".purger_refs";
+
 /// Returns the path of the tmp ref file for given table id and datanode id.
-pub fn ref_file_path(table_id: TableId, node_id: u64) -> String {
-    format!("{}/{}/{:020}.refs", table_id, PURGER_REFS_PATH, node_id)
+pub fn ref_file_path(table_id: TableId, node_id: u64, path_type: PathType) -> String {
+    let path_type_postfix = match path_type {
+        PathType::Bare => "",
+        PathType::Data => "data",
+        PathType::Metadata => "metadata",
+    };
+    format!(
+        "{}/{}/{:020}{}.refs",
+        table_id,
+        PURGER_REFS_PATH,
+        node_id,
+        format!(".{path_type_postfix}")
+    )
 }
 
 /// Manages all file references in one datanode.
@@ -192,14 +222,9 @@ pub fn ref_file_path(table_id: TableId, node_id: u64) -> String {
 pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
     node_id: u64,
-    files_per_table: Mutex<HashMap<TableId, HashSet<FileRef>>>,
-    /// Access layer per table. Will be used to upload tmp file for recording references
-    /// to the object storage.
-    /// Also will be cleaned up if corresponding table is dropped and manifest become empty.
-    table_access_layers: Mutex<HashMap<TableId, AccessLayerRef>>,
+    /// TODO(discord9): use no hash hasher since table id is sequential.
+    files_per_table: Mutex<HashMap<TableId, TableFileRefs>>,
 }
-
-const PURGER_REFS_PATH: &str = ".purger_refs";
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
 
@@ -212,52 +237,54 @@ impl FileReferenceManager {
         todo!("Remove tables's access layer which have empty manifest meaning they are dropped.");
     }
 
-    pub async fn upload_ref_file(&self) {
-        let files_per_table = {
-            let guard = self.files_per_table.lock().unwrap();
-            guard.clone()
+    pub async fn upload_ref_file_for_table(&self, table_id: TableId) -> Result<()> {
+        let Some(file_refs) = self.files_per_table.lock().unwrap().get(&table_id).cloned() else {
+            return Ok(());
         };
-        for (table_id, file_refs) in files_per_table {
-            if file_refs.is_empty() {
-                continue;
-            }
-            let access_layer = {
-                let guard = self.table_access_layers.lock().unwrap();
-                guard.get(&table_id).cloned()
-            };
-            if access_layer.is_none() {
-                error!(
-                    "No access layer found for table {}, skip uploading ref file",
-                    table_id
-                );
-                continue;
-            }
-            let access_layer = access_layer.unwrap();
-            let path = ref_file_path(table_id, self.node_id);
-            let content = serde_json::to_vec(&file_refs).unwrap_or_default();
-            if let Err(e) = access_layer.object_store().write(&path, content).await {
-                error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
-            } else {
-                info!(
-                    "Successfully uploaded ref file to {}, table {}",
-                    path, table_id
-                );
-            }
+
+        if file_refs.files.is_empty() {
+            return Ok(());
         }
+        let access_layer = &file_refs.access_layer;
+
+        let path = ref_file_path(table_id, self.node_id, access_layer.path_type());
+        let content = serde_json::to_vec(&file_refs.files).unwrap_or_default();
+        if let Err(e) = access_layer.object_store().write(&path, content).await {
+            error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
+            return Err(e).context(OpenDalSnafu);
+        } else {
+            info!(
+                "Successfully uploaded ref file to {}, table {}",
+                path, table_id
+            );
+        }
+
+        Ok(())
     }
 
+    /// Adds a new file reference.
+    /// Also records the access layer for the table if not exists.
+    /// The access layer will be used to upload ref file to object storage.
+    /// If access layer is local file system, the file will be ignored and later when deleted
+    /// will be deleted directly.
     pub fn add_file(&self, file_meta: &FileMeta, table_access_layer: AccessLayerRef) {
+        if is_local_fs(&table_access_layer) {
+            // If the access layer is local file system, we don't need to track the file reference.
+            return;
+        }
         let table_id = file_meta.region_id.table_id();
         {
             let mut guard = self.files_per_table.lock().unwrap();
             let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
-            guard.entry(table_id).or_default().insert(file_ref);
-        }
-        {
-            let mut guard = self.table_access_layers.lock().unwrap();
             guard
                 .entry(table_id)
-                .or_insert_with(|| table_access_layer.clone());
+                .and_modify(|refs| {
+                    refs.files.insert(file_ref.clone());
+                })
+                .or_insert_with(|| TableFileRefs {
+                    files: HashSet::from([file_ref]),
+                    access_layer: table_access_layer.clone(),
+                });
         }
     }
 
@@ -265,7 +292,15 @@ impl FileReferenceManager {
         let table_id = file_meta.region_id.table_id();
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
         let mut guard = self.files_per_table.lock().unwrap();
-        guard.entry(table_id).or_default().remove(&file_ref);
+        guard.entry(table_id).and_modify(|refs| {
+            refs.files.remove(&file_ref);
+        });
+
+        if let Some(refs) = guard.get(&table_id) {
+            if refs.files.is_empty() {
+                guard.remove(&table_id);
+            }
+        }
     }
 }
 

@@ -18,7 +18,7 @@ use futures::future::BoxFuture;
 use mito2::engine::MitoEngine;
 use mito2::gc::LocalGcWorker;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 
 use crate::error::{GcMitoEngineSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu};
 use crate::heartbeat::handler::HandlerContext;
@@ -106,8 +106,11 @@ impl HandlerContext {
             .context(RegionNotFoundSnafu { region_id })?;
         let access_layer = region.access_layer();
 
+        let cache_manager = mito_engine.cache_manager();
+
         let gc_worker = LocalGcWorker::try_new(
             access_layer.clone(),
+            Some(cache_manager),
             region_ids,
             Default::default(),
             mito_config.clone(),
@@ -143,5 +146,25 @@ impl HandlerContext {
             ),
         }
         .fail()
+    }
+
+    pub fn handle_collect_file_refs_instruction(
+        &self,
+        region_id: RegionId,
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
+        todo!()
+    }
+
+    async fn trigger_file_refs_upload(&self, region_id: RegionId) -> Result<()> {
+        let (region_id, mito_engine) = self.find_engine_for_regions(&[region_id])?;
+
+        let file_ref_mgr = mito_engine.file_ref_manager();
+
+        file_ref_mgr
+            .upload_ref_file_for_table(region_id.table_id())
+            .await
+            .with_context(|_| GcMitoEngineSnafu { region_id })?;
+
+        Ok(())
     }
 }
