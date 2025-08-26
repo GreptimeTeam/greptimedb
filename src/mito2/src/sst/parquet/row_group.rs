@@ -377,10 +377,12 @@ fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
     total_size
 }
 
-/// Aligns the given size to the multiple of the pooled buffer size (256 KB).
-// See https://github.com/apache/opendal/blob/v0.54.0/core/src/services/fs/backend.rs#L178
+/// Aligns the given size to the multiple of the pooled buffer size.
+// See:
+// - https://github.com/apache/opendal/blob/v0.54.0/core/src/services/fs/backend.rs#L178
+// - https://github.com/apache/opendal/blob/v0.54.0/core/src/services/fs/reader.rs#L36-L46
 fn align_to_pooled_buf_size(size: u64) -> u64 {
-    const POOLED_BUF_SIZE: u64 = 256 * 1024; // 256 KB
+    const POOLED_BUF_SIZE: u64 = 2 * 1024 * 1024;
     (size + POOLED_BUF_SIZE - 1) / POOLED_BUF_SIZE * POOLED_BUF_SIZE
 }
 
