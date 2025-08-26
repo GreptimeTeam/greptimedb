@@ -599,6 +599,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_etcd_client_tls_without_certs() {
+        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
+            Ok(endpoints_str) => endpoints_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Err(_) => return,
+        };
+
         let tls_config = TlsOption {
             mode: TlsMode::Require,
             ca_cert_path: String::new(),
@@ -607,7 +615,6 @@ mod tests {
             watch: false,
         };
 
-        let endpoints = vec!["https://localhost:2378".to_string()];
         let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
             .await
             .unwrap();
@@ -615,6 +622,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_etcd_client_tls_with_client_certs() {
+        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
+            Ok(endpoints_str) => endpoints_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Err(_) => return,
+        };
+
         let cert_dir = std::env::current_dir()
             .unwrap()
             .join("tests-integration")
@@ -633,7 +648,6 @@ mod tests {
                 watch: false,
             };
 
-            let endpoints = vec!["https://localhost:2378".to_string()];
             let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
                 .await
                 .unwrap();
@@ -642,6 +656,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_etcd_client_tls_with_full_certs() {
+        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
+            Ok(endpoints_str) => endpoints_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Err(_) => return,
+        };
+
         let cert_dir = std::env::current_dir()
             .unwrap()
             .join("tests-integration")
@@ -663,7 +685,6 @@ mod tests {
                 watch: false,
             };
 
-            let endpoints = vec!["https://localhost:2378".to_string()];
             let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
                 .await
                 .unwrap();
