@@ -431,4 +431,18 @@ mod tests {
         expected.sort_by_key(|(region_id, _)| region_id.as_u64());
         assert_eq!(topic_region_map, expected);
     }
+
+    #[test]
+    fn test_topic_region_key_is_match() {
+        let key = "__topic_region/6f153a64-7fac-4cf6-8b0b-a7967dd73879_2/4410931412992";
+        let topic_region_key = TopicRegionKey::try_from(key).unwrap();
+        assert_eq!(
+            topic_region_key.topic,
+            "6f153a64-7fac-4cf6-8b0b-a7967dd73879_2"
+        );
+        assert_eq!(
+            topic_region_key.region_id,
+            RegionId::from_u64(4410931412992)
+        );
+    }
 }

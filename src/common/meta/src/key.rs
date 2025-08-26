@@ -165,6 +165,7 @@ use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
+pub const TOPIC_NAME_PATTERN: &str = r"[a-zA-Z0-9_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
 pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
 pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
@@ -273,6 +274,10 @@ lazy_static! {
 }
 
 lazy_static! {
+    pub static ref TOPIC_NAME_PATTERN_REGEX: Regex = Regex::new(TOPIC_NAME_PATTERN).unwrap();
+}
+
+lazy_static! {
     static ref TABLE_INFO_KEY_PATTERN: Regex =
         Regex::new(&format!("^{TABLE_INFO_KEY_PREFIX}/([0-9]+)$")).unwrap();
 }
@@ -327,7 +332,7 @@ lazy_static! {
 
 lazy_static! {
     pub static ref TOPIC_REGION_PATTERN: Regex = Regex::new(&format!(
-        "^{TOPIC_REGION_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
+        "^{TOPIC_REGION_PREFIX}/({TOPIC_NAME_PATTERN})/([0-9]+)$"
     ))
     .unwrap();
 }

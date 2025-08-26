@@ -27,7 +27,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
-use crate::key::NAME_PATTERN_REGEX;
+use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 pub use crate::wal_options_allocator::topic_creator::{
@@ -109,7 +109,7 @@ pub async fn build_wal_options_allocator(
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
-                NAME_PATTERN_REGEX.is_match(prefix),
+                TOPIC_NAME_PATTERN_REGEX.is_match(prefix),
                 InvalidTopicNamePrefixSnafu { prefix }
             );
             let topic_creator =
