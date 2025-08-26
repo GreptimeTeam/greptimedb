@@ -133,11 +133,11 @@ pub(crate) async fn build_region_open_requests(
                     .map(|region_id| TopicRegionKey::new(*region_id, topic))
             })
             .collect::<Vec<_>>();
-        let topc_region_manager = topic_region_manager
+        let topic_region_manager = topic_region_manager
             .batch_get(keys)
             .await
             .context(GetMetadataSnafu)?;
-        Some(topc_region_manager)
+        Some(topic_region_manager)
     } else {
         None
     };

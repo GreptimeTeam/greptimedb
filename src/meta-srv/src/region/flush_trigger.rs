@@ -251,7 +251,6 @@ impl RegionFlushTrigger {
         let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
         let batch_size = max_txn_ops.min(regions.len());
         for batch in regions.chunks(batch_size) {
-            let batch = batch.to_vec();
             self.table_metadata_manager
                 .topic_region_manager()
                 .batch_put(batch)
