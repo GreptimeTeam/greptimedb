@@ -21,8 +21,6 @@ use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
 use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -37,7 +35,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
-use session::context::{Channel, QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
@@ -46,8 +44,7 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{
-    AuthSnafu, InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidBase64ValueSnafu, InvalidQuerySnafu,
-    JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
+    AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::{FlightCompression, TonicResult};
@@ -188,54 +185,27 @@ impl GreptimeRequestHandler {
 
     pub(crate) async fn validate_auth(
         &self,
-        username_and_password: Option<&str>,
-        db: Option<&str>,
+        auth_schema: Option<AuthScheme>,
+        query_ctx: QueryContextRef,
     ) -> Result<bool> {
         if self.user_provider.is_none() {
             return Ok(true);
         }
 
-        let username_and_password = username_and_password.context(NotFoundAuthHeaderSnafu)?;
-        let username_and_password = BASE64_STANDARD
-            .decode(username_and_password)
-            .context(InvalidBase64ValueSnafu)
-            .and_then(|x| String::from_utf8(x).context(InvalidAuthHeaderInvalidUtf8ValueSnafu))?;
+        let auth_schema = auth_schema.context(NotFoundAuthHeaderSnafu)?;
 
-        let mut split = username_and_password.splitn(2, ':');
-        let (username, password) = match (split.next(), split.next()) {
-            (Some(username), Some(password)) => (username, password),
-            (Some(username), None) => (username, ""),
-            (None, None) => return Ok(false),
-            _ => unreachable!(), // because this iterator won't yield Some after None
-        };
-
-        let (catalog, schema) = if let Some(db) = db {
-            parse_catalog_and_schema_from_db_string(db)
-        } else {
-            (
-                DEFAULT_CATALOG_NAME.to_string(),
-                DEFAULT_SCHEMA_NAME.to_string(),
-            )
-        };
         let header = RequestHeader {
             authorization: Some(AuthHeader {
-                auth_scheme: Some(AuthScheme::Basic(Basic {
-                    username: username.to_string(),
-                    password: password.to_string(),
-                })),
+                auth_scheme: Some(auth_schema),
             }),
-            catalog,
-            schema,
+            catalog: query_ctx.current_catalog().to_string(),
+            schema: query_ctx.current_schema(),
             ..Default::default()
         };
 
-        Ok(auth(
-            self.user_provider.clone(),
-            Some(&header),
-            &QueryContext::arc(),
-        )
-        .await
-        .is_ok())
+        Ok(auth(self.user_provider.clone(), Some(&header), &query_ctx)
+            .await
+            .is_ok())
     }
 }
 

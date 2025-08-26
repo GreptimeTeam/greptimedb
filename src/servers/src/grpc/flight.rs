@@ -36,7 +36,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::{future, ready, Stream};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, ResultExt};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
@@ -47,6 +47,7 @@ use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::{FlightCompression, TonicResult};
+use crate::http::authorize::AuthScheme;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
 use crate::{error, hint_headers};
@@ -232,9 +233,29 @@ impl FlightCraft for GreptimeRequestHandler {
             Ok(Some(v))
         };
 
-        let username_and_password = header(AUTHORIZATION_HEADER)?;
-        let db = header(GREPTIME_DB_HEADER_NAME)?;
-        if !self.validate_auth(username_and_password, db).await? {
+        let auth_schema = header(AUTHORIZATION_HEADER)?
+            .map(|x| x.try_into())
+            .transpose()?
+            .map(|x: AuthScheme| x.into());
+
+        let (catalog, schema) = if let Some(db) = header(GREPTIME_DB_HEADER_NAME)? {
+            parse_catalog_and_schema_from_db_string(db)
+        } else {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            )
+        };
+
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .current_catalog(catalog)
+                .current_schema(schema)
+                .channel(Channel::Grpc)
+                .build(),
+        );
+
+        if !self.validate_auth(auth_schema, query_ctx.clone()).await? {
             return Err(Status::unauthenticated("auth failed"));
         }
 
@@ -243,7 +264,10 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let stream = PutRecordBatchRequestStream {
             flight_data_stream: stream,
-            state: PutRecordBatchRequestStreamState::Init(db.map(ToString::to_string)),
+            state: PutRecordBatchRequestStreamState::Init(
+                query_ctx.current_catalog().to_string(),
+                query_ctx.current_schema(),
+            ),
         };
         self.put_record_batches(stream, tx).await;
 
@@ -292,7 +316,7 @@ pub(crate) struct PutRecordBatchRequestStream {
 }
 
 enum PutRecordBatchRequestStreamState {
-    Init(Option<String>),
+    Init(String, String),
     Started(TableName),
 }
 
@@ -319,21 +343,12 @@ impl Stream for PutRecordBatchRequestStream {
         let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
 
         let result = match &mut self.state {
-            PutRecordBatchRequestStreamState::Init(db) => match poll {
+            PutRecordBatchRequestStreamState::Init(catalog, schema) => match poll {
                 Some(Ok(mut flight_data)) => {
                     let flight_descriptor = flight_data.flight_descriptor.take();
                     let result = if let Some(descriptor) = flight_descriptor {
-                        let table_name = extract_table_name(descriptor).map(|x| {
-                            let (catalog, schema) = if let Some(db) = db {
-                                parse_catalog_and_schema_from_db_string(db)
-                            } else {
-                                (
-                                    DEFAULT_CATALOG_NAME.to_string(),
-                                    DEFAULT_SCHEMA_NAME.to_string(),
-                                )
-                            };
-                            TableName::new(catalog, schema, x)
-                        });
+                        let table_name = extract_table_name(descriptor)
+                            .map(|x| TableName::new(catalog.clone(), schema.clone(), x));
                         let table_name = match table_name {
                             Ok(table_name) => table_name,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
