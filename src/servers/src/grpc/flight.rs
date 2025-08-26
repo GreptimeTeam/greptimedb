@@ -269,7 +269,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 query_ctx.current_schema(),
             ),
         };
-        self.put_record_batches(stream, tx).await;
+        self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
             .and_then(|response| {

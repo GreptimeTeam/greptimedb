@@ -140,6 +140,7 @@ impl GreptimeRequestHandler {
         &self,
         mut stream: PutRecordBatchRequestStream,
         result_sender: mpsc::Sender<TonicResult<DoPutResponse>>,
+        query_ctx: QueryContextRef,
     ) {
         let handler = self.handler.clone();
         let runtime = self
@@ -167,7 +168,7 @@ impl GreptimeRequestHandler {
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
-                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data)
+                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data, query_ctx.clone())
                     .await
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
