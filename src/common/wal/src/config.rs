@@ -208,7 +208,7 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             auto_create_topics: true,
-            auto_prune_interval: Duration::from_secs(0),
+            auto_prune_interval: Duration::from_mins(30),
             auto_prune_parallelism: 10,
             flush_trigger_size: ReadableSize::mb(512),
             checkpoint_trigger_size: ReadableSize::mb(128),

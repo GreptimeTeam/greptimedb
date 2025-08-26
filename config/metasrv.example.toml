@@ -190,7 +190,7 @@ auto_create_topics = true
 ## Interval of automatically WAL pruning.
 ## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
 ## **It's only used when the provider is `kafka`**.
-auto_prune_interval = "10m"
+auto_prune_interval = "30m"
 
 
 ## Estimated size threshold to trigger a flush when using Kafka remote WAL.
