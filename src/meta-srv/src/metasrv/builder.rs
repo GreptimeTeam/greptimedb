@@ -21,7 +21,7 @@ use client::client_manager::NodeClients;
 use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
+use common_event_recorder::{EventRecorderImpl, EventRecorderRef, DEFAULT_COMPACTION_TIME_WINDOW};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -209,7 +209,7 @@ impl MetasrvBuilder {
             Some(InsertOptions {
                 ttl: options.event_recorder.ttl,
                 append_mode: true,
-                twcs_compaction_time_window: None,
+                twcs_compaction_time_window: Some(DEFAULT_COMPACTION_TIME_WINDOW),
             }),
         ));
         // Builds the event recorder to record important events and persist them as the system table.

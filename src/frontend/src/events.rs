@@ -19,7 +19,10 @@ use client::inserter::{Context, InsertOptions, Inserter};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
-use common_event_recorder::{build_row_inserts_request, group_events_by_type, Event, EventHandler};
+use common_event_recorder::{
+    build_row_inserts_request, group_events_by_type, Event, EventHandler,
+    DEFAULT_COMPACTION_TIME_WINDOW,
+};
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
 use datafusion::common::HashMap;
 use operator::statement::{InserterImpl, StatementExecutorRef};
@@ -47,7 +50,7 @@ impl EventHandlerImpl {
                     Some(InsertOptions {
                         ttl: slow_query_ttl,
                         append_mode: true,
-                        twcs_compaction_time_window: None,
+                        twcs_compaction_time_window: Some(DEFAULT_COMPACTION_TIME_WINDOW),
                     }),
                 )) as _,
             )]),
@@ -56,7 +59,7 @@ impl EventHandlerImpl {
                 Some(InsertOptions {
                     ttl: global_ttl,
                     append_mode: true,
-                    twcs_compaction_time_window: None,
+                    twcs_compaction_time_window: Some(DEFAULT_COMPACTION_TIME_WINDOW),
                 }),
             )),
         }
