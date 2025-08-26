@@ -23,7 +23,7 @@ use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::error;
+use crate::error::{self, RegionNotFoundSnafu, RegionNotReadySnafu, UnexpectedSnafu};
 use crate::heartbeat::handler::HandlerContext;
 
 impl HandlerContext {
@@ -127,7 +127,9 @@ impl HandlerContext {
             match &result {
                 Ok(_) => results.push((region_id, Ok(()))),
                 Err(err) => {
-                    results.push((region_id, Err(err.clone())));
+                    // Convert error::Error to String for FlushRegionReply compatibility
+                    let error_string = err.to_string();
+                    results.push((region_id, Err(error_string)));
 
                     // For fail-fast strategy, abort on first error
                     if matches!(error_strategy, FlushErrorStrategy::FailFast) {
@@ -141,14 +143,14 @@ impl HandlerContext {
     }
 
     /// Flushes a single region synchronously with proper error handling.
-    async fn flush_single_region_sync(&self, region_id: RegionId) -> Result<(), String> {
+    async fn flush_single_region_sync(&self, region_id: RegionId) -> Result<(), error::Error> {
         // Check if region is leader and writable
         let Some(writable) = self.region_server.is_region_leader(region_id) else {
-            return Err("Region is not leader".to_string());
+            return Err(RegionNotFoundSnafu { region_id }.build());
         };
 
         if !writable {
-            return Err("Region is not writable".to_string());
+            return Err(RegionNotReadySnafu { region_id }.build());
         }
 
         // Register and execute the flush task
@@ -178,7 +180,10 @@ impl HandlerContext {
         let mut watcher = register_result.into_watcher();
         match self.flush_tasks.wait_until_finish(&mut watcher).await {
             Ok(()) => Ok(()),
-            Err(err) => Err(format!("{err:?}")),
+            Err(err) => Err(UnexpectedSnafu {
+                violated: format!("Flush task failed: {err:?}"),
+            }
+            .build()),
         }
     }
 
