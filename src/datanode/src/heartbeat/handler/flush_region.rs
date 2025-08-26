@@ -185,25 +185,29 @@ impl HandlerContext {
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let start_time = Instant::now();
+            let strategy = flush_regions_v2.strategy;
+            let region_ids = flush_regions_v2.region_ids;
+            let error_strategy = flush_regions_v2.error_strategy;
 
-            if matches!(flush_regions_v2.strategy, FlushStrategy::Async) {
+            let reply = if matches!(strategy, FlushStrategy::Async) {
                 // Asynchronous hint mode: fire-and-forget, no reply expected
-                self.handle_flush_hint(flush_regions_v2.region_ids).await;
+                self.handle_flush_hint(region_ids).await;
                 None
             } else {
                 // Synchronous mode: return reply with results
                 let reply = self
-                    .handle_flush_sync(flush_regions_v2.region_ids, flush_regions_v2.error_strategy)
+                    .handle_flush_sync(region_ids, error_strategy)
                     .await;
-                let elapsed = start_time.elapsed();
-                debug!(
-                    "FlushRegionsV2 sync: {:?}, elapsed: {:?}, success: {}",
-                    reply.results.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                    elapsed,
-                    reply.overall_success
-                );
                 Some(InstructionReply::FlushRegionsV2(reply))
-            }
+            };
+            
+            let elapsed = start_time.elapsed();
+            debug!(
+                "FlushRegionsV2 strategy: {:?}, elapsed: {:?}, reply: {:?}",
+                strategy, elapsed, reply
+            );
+            
+            reply
         })
     }
 

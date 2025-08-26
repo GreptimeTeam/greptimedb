@@ -399,21 +399,14 @@ impl FlushRegionsV2 {
 
 impl From<FlushRegions> for FlushRegionsV2 {
     fn from(legacy: FlushRegions) -> Self {
-        Self {
-            region_ids: legacy.region_ids,
-            strategy: FlushStrategy::Async, // FlushRegions was always async
-            error_strategy: FlushErrorStrategy::TryAll,
-        }
+        // FlushRegions was always async
+        Self::new_async_batch(legacy.region_ids)
     }
 }
 
 impl From<RegionId> for FlushRegionsV2 {
     fn from(region_id: RegionId) -> Self {
-        Self {
-            region_ids: vec![region_id],
-            strategy: FlushStrategy::Sync,
-            error_strategy: FlushErrorStrategy::FailFast,
-        }
+        Self::new_sync_single(region_id)
     }
 }
 
