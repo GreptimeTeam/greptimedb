@@ -47,6 +47,7 @@ impl EventHandlerImpl {
                     Some(InsertOptions {
                         ttl: slow_query_ttl,
                         append_mode: true,
+                        twcs_compaction_time_window: None,
                     }),
                 )) as _,
             )]),
@@ -55,6 +56,7 @@ impl EventHandlerImpl {
                 Some(InsertOptions {
                     ttl: global_ttl,
                     append_mode: true,
+                    twcs_compaction_time_window: None,
                 }),
             )),
         }

@@ -15,6 +15,7 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use client::client_manager::NodeClients;
 use client::inserter::InsertOptions;
@@ -80,6 +81,9 @@ use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
 use crate::table_meta_alloc::MetasrvPeerAllocator;
 use crate::utils::insert_forwarder::InsertForwarder;
+
+/// The time window for twcs compaction of the region stats table.
+const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_days(1);
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {
@@ -205,6 +209,7 @@ impl MetasrvBuilder {
             Some(InsertOptions {
                 ttl: options.event_recorder.ttl,
                 append_mode: true,
+                twcs_compaction_time_window: None,
             }),
         ));
         // Builds the event recorder to record important events and persist them as the system table.
@@ -465,6 +470,9 @@ impl MetasrvBuilder {
                 Some(InsertOptions {
                     ttl: options.stats_persistence.ttl,
                     append_mode: true,
+                    twcs_compaction_time_window: Some(
+                        REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW,
+                    ),
                 }),
             ));
 

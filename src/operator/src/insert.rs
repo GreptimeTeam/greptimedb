@@ -52,7 +52,9 @@ use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TWCS_TIME_WINDOW,
+};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
 use table::requests::{
@@ -1017,6 +1019,14 @@ pub fn fill_table_options_for_create(
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                 table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
+            }
+            if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
+                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
+                // We need to set the compaction type explicitly.
+                table_options.insert(
+                    COMPACTION_TYPE.to_string(),
+                    COMPACTION_TYPE_TWCS.to_string(),
+                );
             }
         }
         // Set append_mode to true for log table.
