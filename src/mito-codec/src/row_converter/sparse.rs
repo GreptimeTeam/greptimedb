@@ -107,8 +107,6 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
-    ///
-    /// The `region_metadata` should be the metadata of the logical region.
     pub fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self::from_columns(region_metadata.primary_key_columns().map(|c| c.column_id))
     }
