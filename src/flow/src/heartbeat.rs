@@ -259,7 +259,12 @@ impl HeartbeatTask {
                             error!(e; "Error while handling heartbeat response");
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        info!("The heartbeat response stream is closed by metasrv");
+                        capture_self.start_with_retry(retry_interval).await;
+
+                        break;
+                    }
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
                         capture_self.start_with_retry(retry_interval).await;

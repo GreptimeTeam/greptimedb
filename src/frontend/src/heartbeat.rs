@@ -93,7 +93,7 @@ impl HeartbeatTask {
 
     fn start_handle_resp_stream(&self, mut resp_stream: HeartbeatStream, mailbox: MailboxRef) {
         let capture_self = self.clone();
-        let retry_interval = self.retry_interval;
+        let retry_interval = Duration::from_millis(self.retry_interval);
 
         let _handle = common_runtime::spawn_hb(async move {
             loop {
@@ -110,13 +110,17 @@ impl HeartbeatTask {
                             HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        info!("The heartbeat response stream is closed by metasrv");
+                        HEARTBEAT_RECV_COUNT.with_label_values(&["closed"]).inc();
+                        capture_self.start_with_retry(retry_interval).await;
+
+                        break;
+                    }
                     Err(e) => {
                         HEARTBEAT_RECV_COUNT.with_label_values(&["error"]).inc();
                         error!(e; "Occur error while reading heartbeat response");
-                        capture_self
-                            .start_with_retry(Duration::from_millis(retry_interval))
-                            .await;
+                        capture_self.start_with_retry(retry_interval).await;
 
                         break;
                     }
