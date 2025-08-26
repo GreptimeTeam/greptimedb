@@ -278,7 +278,7 @@ impl<'a> InMemoryRowGroup<'a> {
         Ok(())
     }
 
-    /// Try to fetch data from the memory cach or the WriteCache,
+    /// Try to fetch data from the memory cache or the WriteCache,
     /// if not in WriteCache, fetch data from object store directly.
     async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         // Now fetch page timer includes the whole time to read pages.
