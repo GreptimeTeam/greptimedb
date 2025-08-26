@@ -373,7 +373,7 @@ impl BatchingEngine {
 
         // optionally set a eval interval for the flow
         if eval_interval.is_none()
-            && is_tql(query_ctx.clone().sql_dialect(), &sql)
+            && is_tql(query_ctx.sql_dialect(), &sql)
                 .map_err(BoxedError::new)
                 .context(CreateFlowSnafu { sql: &sql })?
         {
