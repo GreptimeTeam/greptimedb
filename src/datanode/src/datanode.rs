@@ -334,13 +334,12 @@ impl DatanodeBuilder {
     async fn initialize_region_server(
         &self,
         region_server: &RegionServer,
-        kv_backend: KvBackendRef,
         open_with_writable: bool,
     ) -> Result<()> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
-        let runtime_switch_manager = RuntimeSwitchManager::new(kv_backend.clone());
+        let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());
         let is_recovery_mode = runtime_switch_manager
             .recovery_mode()
             .await
@@ -757,15 +756,13 @@ mod tests {
                 ..Default::default()
             },
             Plugins::default(),
-            kv_backend,
+            kv_backend.clone(),
         );
         builder.with_cache_registry(layered_cache_registry);
-
-        let kv = Arc::new(MemoryKvBackend::default()) as _;
-        setup_table_datanode(&kv).await;
+        setup_table_datanode(&(kv_backend as _)).await;
 
         builder
-            .initialize_region_server(&mock_region_server, kv.clone(), false)
+            .initialize_region_server(&mock_region_server, false)
             .await
             .unwrap();
 
