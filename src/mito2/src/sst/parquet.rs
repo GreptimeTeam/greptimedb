@@ -88,7 +88,6 @@ pub struct SstInfo {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::ops::Range;
     use std::sync::Arc;
 
     use common_time::Timestamp;
@@ -281,40 +280,23 @@ mod tests {
         }
 
         let parquet_meta = sst_info.file_metadata.unwrap();
-        let (start, length) = parquet_meta.row_group(0).column(0).byte_range();
-        // Doesn't have compressed page cached.
-        let page_key = PageKey::new(
-            handle.file_id().file_id(),
-            0,
-            vec![Range {
-                start,
-                end: start + length,
-            }],
-        );
-        assert!(cache.get_pages(&page_key).is_none());
+        let get_ranges = |row_group_idx: usize| {
+            let row_group = parquet_meta.row_group(row_group_idx);
+            let mut ranges = Vec::with_capacity(row_group.num_columns());
+            for i in 0..row_group.num_columns() {
+                let (start, length) = row_group.column(i).byte_range();
+                ranges.push(start..start + length);
+            }
+
+            ranges
+        };
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let (start, length) = parquet_meta.row_group(i).column(0).byte_range();
-            let page_key = PageKey::new(
-                handle.file_id().file_id(),
-                i,
-                vec![Range {
-                    start,
-                    end: start + length,
-                }],
-            );
+            let page_key = PageKey::new(handle.file_id().file_id(), i, get_ranges(i));
             assert!(cache.get_pages(&page_key).is_some());
         }
-        let (start, length) = parquet_meta.row_group(5).column(0).byte_range();
-        let page_key = PageKey::new(
-            handle.file_id().file_id(),
-            5,
-            vec![Range {
-                start,
-                end: start + length,
-            }],
-        );
+        let page_key = PageKey::new(handle.file_id().file_id(), 5, vec![]);
         assert!(cache.get_pages(&page_key).is_none());
     }
 
