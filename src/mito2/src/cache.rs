@@ -709,11 +709,7 @@ impl PageValue {
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.page_size as usize
-            + self
-                .compressed
-                .iter()
-                .map(|b| mem::size_of_val(b))
-                .sum::<usize>()
+            + self.compressed.iter().map(mem::size_of_val).sum::<usize>()
     }
 }
 
@@ -789,7 +785,7 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::new(file_id.file_id(), 1, vec![(0..5)]);
+        let key = PageKey::new(file_id.file_id(), 1, vec![Range { start: 0, end: 5 }]);
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());

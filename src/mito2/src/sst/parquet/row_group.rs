@@ -363,7 +363,7 @@ fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
 // - https://github.com/apache/opendal/blob/v0.54.0/core/src/services/fs/reader.rs#L36-L46
 fn align_to_pooled_buf_size(size: u64) -> u64 {
     const POOLED_BUF_SIZE: u64 = 2 * 1024 * 1024;
-    (size + POOLED_BUF_SIZE - 1) / POOLED_BUF_SIZE * POOLED_BUF_SIZE
+    size.div_ceil(POOLED_BUF_SIZE) * POOLED_BUF_SIZE
 }
 
 impl RowGroups for InMemoryRowGroup<'_> {

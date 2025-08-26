@@ -88,6 +88,7 @@ pub struct SstInfo {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::ops::Range;
     use std::sync::Arc;
 
     use common_time::Timestamp;
@@ -285,7 +286,10 @@ mod tests {
         let page_key = PageKey::new(
             handle.file_id().file_id(),
             0,
-            vec![(start..(start + length))],
+            vec![Range {
+                start,
+                end: start + length,
+            }],
         );
         assert!(cache.get_pages(&page_key).is_none());
 
@@ -295,7 +299,10 @@ mod tests {
             let page_key = PageKey::new(
                 handle.file_id().file_id(),
                 i,
-                vec![(start..(start + length))],
+                vec![Range {
+                    start,
+                    end: start + length,
+                }],
             );
             assert!(cache.get_pages(&page_key).is_some());
         }
@@ -303,7 +310,10 @@ mod tests {
         let page_key = PageKey::new(
             handle.file_id().file_id(),
             5,
-            vec![(start..(start + length))],
+            vec![Range {
+                start,
+                end: start + length,
+            }],
         );
         assert!(cache.get_pages(&page_key).is_none());
     }
