@@ -94,5 +94,4 @@ common-procedure = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
-hyper = { version = "0.14", features = ["full"] }
 uuid.workspace = true

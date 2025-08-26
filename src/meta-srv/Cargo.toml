@@ -91,7 +91,6 @@ client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
-hyper = "0.14"
 session.workspace = true
 tracing = "0.1"
 tracing-subscriber.workspace = true
