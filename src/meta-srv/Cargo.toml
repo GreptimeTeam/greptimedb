@@ -59,7 +59,6 @@ humantime-serde.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
-log-store.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true

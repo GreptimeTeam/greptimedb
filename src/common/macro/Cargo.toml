@@ -21,8 +21,3 @@ syn = { version = "2.0", features = [
 ] }
 
 [dev-dependencies]
-arc-swap = "1.0"
-common-query.workspace = true
-datatypes.workspace = true
-snafu.workspace = true
-static_assertions = "1.1.0"
