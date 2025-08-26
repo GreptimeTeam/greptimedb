@@ -218,6 +218,7 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report)
                         } else {
+                            warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
@@ -259,7 +260,11 @@ impl HeartbeatTask {
                             error!(e; "Error while handling heartbeat response");
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        warn!("Heartbeat response stream closed");
+                        capture_self.start_with_retry(retry_interval).await;
+                        break;
+                    }
                     Err(e) => {
                         error!(e; "Occur error while reading heartbeat response");
                         capture_self.start_with_retry(retry_interval).await;
