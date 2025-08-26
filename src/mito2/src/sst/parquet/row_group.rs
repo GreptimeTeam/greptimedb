@@ -346,7 +346,8 @@ impl<'a> InMemoryRowGroup<'a> {
 //         .collect()
 // }
 
-/// Computes the total range size after merging with gap logic.
+/// Computes the max possible buffer size to read the given `ranges`.
+// See https://github.com/apache/opendal/blob/v0.54.0/core/src/types/read/reader.rs#L166-L192
 fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
     if ranges.is_empty() {
         return 0;
@@ -365,15 +366,22 @@ fn compute_total_range_size(ranges: &[Range<u64>]) -> u64 {
             cur.end = cur.end.max(range.end);
         } else {
             // No overlap and the gap is too large, add current range to total and start a new one
-            total_size += cur.end - cur.start;
+            total_size += align_to_pooled_buf_size(cur.end - cur.start);
             cur = range;
         }
     }
 
     // Add the last range
-    total_size += cur.end - cur.start;
+    total_size += align_to_pooled_buf_size(cur.end - cur.start);
 
     total_size
+}
+
+/// Aligns the given size to the multiple of the pooled buffer size (256 KB).
+// See https://github.com/apache/opendal/blob/v0.54.0/core/src/services/fs/backend.rs#L178
+fn align_to_pooled_buf_size(size: u64) -> u64 {
+    const POOLED_BUF_SIZE: u64 = 256 * 1024; // 256 KB
+    (size + POOLED_BUF_SIZE - 1) / POOLED_BUF_SIZE * POOLED_BUF_SIZE
 }
 
 impl RowGroups for InMemoryRowGroup<'_> {
