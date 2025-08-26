@@ -597,18 +597,51 @@ mod tests {
 
     use super::*;
 
-    fn create_test_tls_config(ca_cert_path: &str, cert_path: &str, key_path: &str) -> TlsOption {
-        TlsOption {
+    #[tokio::test]
+    async fn test_create_etcd_client_tls_without_certs() {
+        let tls_config = TlsOption {
             mode: TlsMode::Require,
-            ca_cert_path: ca_cert_path.to_string(),
-            cert_path: cert_path.to_string(),
-            key_path: key_path.to_string(),
+            ca_cert_path: String::new(),
+            cert_path: String::new(),
+            key_path: String::new(),
             watch: false,
+        };
+
+        let endpoints = vec!["https://localhost:2378".to_string()];
+        let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_etcd_client_tls_with_client_certs() {
+        let cert_dir = std::env::current_dir()
+            .unwrap()
+            .join("tests-integration")
+            .join("fixtures")
+            .join("etcd-tls-certs");
+
+        if cert_dir.join("client.crt").exists() && cert_dir.join("client-key.pem").exists() {
+            let tls_config = TlsOption {
+                mode: TlsMode::Require,
+                ca_cert_path: String::new(),
+                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
+                key_path: cert_dir
+                    .join("client-key.pem")
+                    .to_string_lossy()
+                    .to_string(),
+                watch: false,
+            };
+
+            let endpoints = vec!["https://localhost:2378".to_string()];
+            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
+                .await
+                .unwrap();
         }
     }
 
     #[tokio::test]
-    async fn test_create_etcd_client_with_tls() {
+    async fn test_create_etcd_client_tls_with_full_certs() {
         let cert_dir = std::env::current_dir()
             .unwrap()
             .join("tests-integration")
@@ -619,40 +652,21 @@ mod tests {
             && cert_dir.join("client.crt").exists()
             && cert_dir.join("client-key.pem").exists()
         {
-            let tls_config = create_test_tls_config(
-                &cert_dir.join("ca.crt").to_string_lossy(),
-                &cert_dir.join("client.crt").to_string_lossy(),
-                &cert_dir.join("client-key.pem").to_string_lossy(),
-            );
+            let tls_config = TlsOption {
+                mode: TlsMode::Require,
+                ca_cert_path: cert_dir.join("ca.crt").to_string_lossy().to_string(),
+                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
+                key_path: cert_dir
+                    .join("client-key.pem")
+                    .to_string_lossy()
+                    .to_string(),
+                watch: false,
+            };
 
             let endpoints = vec!["https://localhost:2378".to_string()];
-            let result = create_etcd_client_with_tls(&endpoints, Some(&tls_config)).await;
-
-            match result {
-                Ok(_) => {
-                    // Test passes - TLS client created successfully
-                }
-                Err(e) => {
-                    let error_msg = e.to_string().to_lowercase();
-                    let acceptable_errors = [
-                        "connection refused",
-                        "no route to host",
-                        "timeout",
-                        "dns",
-                        "network unreachable",
-                    ];
-
-                    let is_connection_error = acceptable_errors
-                        .iter()
-                        .any(|&err_type| error_msg.contains(err_type));
-
-                    assert!(
-                        is_connection_error,
-                        "TLS configuration error (not a network issue): {}",
-                        e
-                    );
-                }
-            }
+            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
+                .await
+                .unwrap();
         }
     }
 }

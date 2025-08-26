@@ -744,8 +744,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      - name: Generate etcd tls crets
-        run: ./scripts/generate-etcd-tls-certs.sh
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
@@ -800,8 +798,6 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate etcd tls crets
-        run: ./scripts/generate-etcd-tls-certs.sh
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
