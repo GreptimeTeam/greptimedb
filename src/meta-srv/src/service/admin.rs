@@ -27,26 +27,26 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::{routing, Router as AxumRouter};
 use tonic::body::Body;
 use tonic::codegen::{http, BoxFuture, Service};
 use tonic::server::NamedService;
 
 use crate::metasrv::Metasrv;
-use crate::service::admin::health::HealthHandler;
 use crate::service::admin::heartbeat::HeartBeatHandler;
 use crate::service::admin::leader::LeaderHandler;
 use crate::service::admin::maintenance::MaintenanceHandler;
 use crate::service::admin::node_lease::NodeLeaseHandler;
 use crate::service::admin::procedure::ProcedureManagerHandler;
-use crate::service::admin::recovery::{
-    get_recovery_mode, set_recovery_mode, unset_recovery_mode, RecoveryHandler,
-};
+use crate::service::admin::recovery::RecoveryHandler;
 use crate::service::admin::sequencer::TableIdSequenceHandler;
-use crate::service::admin::util::{to_axum_json_response, to_axum_not_found_response};
 
+/// Expose admin http service on rpc port(3002).
+///
+/// # Deprecated
+///
+/// This function is deprecated and will be removed in the future. Please use
+/// [`admin_axum_router`] instead.
 pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
 
@@ -231,257 +231,81 @@ fn check_path(path: &str) {
 
 /// Expose admin HTTP endpoints as an Axum router for the main HTTP server.
 pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
-    let node_lease_handler = Arc::new(NodeLeaseHandler {
+    let node_lease_handler = NodeLeaseHandler {
         meta_peer_client: metasrv.meta_peer_client().clone(),
-    });
-    let heartbeat_handler = Arc::new(HeartBeatHandler {
+    };
+    let heartbeat_handler = HeartBeatHandler {
         meta_peer_client: metasrv.meta_peer_client().clone(),
-    });
-    let leader_handler = Arc::new(LeaderHandler {
+    };
+    let leader_handler = LeaderHandler {
         election: metasrv.election().cloned(),
-    });
-    let maintenance_handler = Arc::new(MaintenanceHandler {
+    };
+    let maintenance_handler = MaintenanceHandler {
         manager: metasrv.runtime_switch_manager().clone(),
-    });
-    let procedure_handler = Arc::new(ProcedureManagerHandler {
+    };
+    let procedure_handler = ProcedureManagerHandler {
         manager: metasrv.runtime_switch_manager().clone(),
-    });
-    let recovery_handler = Arc::new(RecoveryHandler {
+    };
+    let recovery_handler = RecoveryHandler {
         manager: metasrv.runtime_switch_manager().clone(),
-    });
-    let table_id_sequence_handler = Arc::new(TableIdSequenceHandler {
+    };
+    let table_id_sequence_handler = TableIdSequenceHandler {
         table_id_sequence: metasrv.table_id_sequence().clone(),
         runtime_switch_manager: metasrv.runtime_switch_manager().clone(),
-    });
-    let sequence_router = AxumRouter::new().nest(
-        "/table",
-        AxumRouter::new()
-            .route("/next-id", routing::get(sequencer::get_next_table_id))
-            .route("/set-next-id", routing::post(sequencer::set_next_table_id))
-            .with_state(table_id_sequence_handler),
-    );
-
-    let health_router = AxumRouter::new().route(
-        "/",
-        routing::get({
-            move || {
-                let handler = HealthHandler;
-                async move {
-                    match handler
-                        .handle("/health", http::Method::GET, &Default::default())
-                        .await
-                    {
-                        Ok(status) => status.body().clone().into_response(),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Health handler failed");
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                        }
-                    }
-                }
-            }
-        }),
-    );
-
-    let node_lease_router = AxumRouter::new().route(
-        "/",
-        routing::get({
-            let handler = node_lease_handler.clone();
-            move || async move {
-                match handler
-                    .handle("/node-lease", http::Method::GET, &Default::default())
-                    .await
-                {
-                    Ok(resp) => resp.body().clone().into_response(),
-                    Err(e) => {
-                        common_telemetry::error!(e; "Node lease handler failed");
-                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                    }
-                }
-            }
-        }),
-    );
-
-    let leader_router = AxumRouter::new().route(
-        "/",
-        routing::get({
-            let handler = leader_handler.clone();
-            move || async move {
-                match handler
-                    .handle("/leader", http::Method::GET, &Default::default())
-                    .await
-                {
-                    Ok(resp) => resp.body().clone().into_response(),
-                    Err(e) => {
-                        common_telemetry::error!(e; "Leader handler failed");
-                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                    }
-                }
-            }
-        }),
-    );
-
-    let heartbeat_router = AxumRouter::new()
-        .route(
-            "/",
-            routing::get({
-                let handler = heartbeat_handler.clone();
-                move || async move {
-                    match handler
-                        .handle("/heartbeat", http::Method::GET, &Default::default())
-                        .await
-                    {
-                        Ok(resp) => resp.body().clone().into_response(),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Heartbeat handler failed");
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/help",
-            routing::get({
-                let handler = heartbeat_handler.clone();
-                move || async move {
-                    match handler
-                        .handle("/heartbeat/help", http::Method::GET, &Default::default())
-                        .await
-                    {
-                        Ok(resp) => resp.body().clone().into_response(),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Heartbeat help handler failed");
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                        }
-                    }
-                }
-            }),
-        );
-
-    let maintenance_router = AxumRouter::new()
-        .route(
-            "/",
-            routing::get({
-                let handler = maintenance_handler.clone();
-                move || async move {
-                    match handler.get_maintenance().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Maintenance handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/status",
-            routing::get({
-                let handler = maintenance_handler.clone();
-                move || async move {
-                    match handler.get_maintenance().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Maintenance status handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/enable",
-            routing::post({
-                let handler = maintenance_handler.clone();
-                move || async move {
-                    match handler.set_maintenance().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Maintenance enable handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/disable",
-            routing::post({
-                let handler = maintenance_handler.clone();
-                move || async move {
-                    match handler.unset_maintenance().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Maintenance disable handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        );
-
-    let procedure_router = AxumRouter::new()
-        .route(
-            "/status",
-            routing::get({
-                let handler = procedure_handler.clone();
-                move || async move {
-                    match handler.get_procedure_manager_status().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Procedure manager status handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/pause",
-            routing::post({
-                let handler = procedure_handler.clone();
-                move || async move {
-                    match handler.pause_procedure_manager().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Procedure manager pause handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/resume",
-            routing::post({
-                let handler = procedure_handler.clone();
-                move || async move {
-                    match handler.resume_procedure_manager().await {
-                        Ok(resp) => to_axum_json_response(resp),
-                        Err(e) => {
-                            common_telemetry::error!(e; "Procedure manager resume handler failed");
-                            to_axum_not_found_response()
-                        }
-                    }
-                }
-            }),
-        );
-
-    let recovery_router = AxumRouter::new()
-        .route("/enable", routing::post(set_recovery_mode))
-        .route("/disable", routing::post(unset_recovery_mode))
-        .route("/status", routing::get(get_recovery_mode))
-        .with_state(recovery_handler);
+    };
 
     let admin_router = AxumRouter::new()
-        .nest("/health", health_router)
-        .nest("/node-lease", node_lease_router)
-        .nest("/leader", leader_router)
-        .nest("/heartbeat", heartbeat_router)
-        .nest("/maintenance", maintenance_router)
-        .nest("/procedure-manager", procedure_router)
-        .nest("/recovery", recovery_router)
-        .nest("/sequence", sequence_router);
+        .route("/health", routing::get(health::health))
+        .route(
+            "/node-lease",
+            routing::get(node_lease::get).with_state(node_lease_handler),
+        )
+        .route(
+            "/leader",
+            routing::get(leader::get).with_state(leader_handler),
+        )
+        .nest(
+            "/heartbeat",
+            AxumRouter::new()
+                .route("/", routing::get(heartbeat::get))
+                .route("/help", routing::get(heartbeat::help))
+                .with_state(heartbeat_handler),
+        )
+        .nest(
+            "/maintenance",
+            AxumRouter::new()
+                .route("/", routing::get(maintenance::status))
+                .route("/status", routing::get(maintenance::status))
+                .route("/enable", routing::post(maintenance::set))
+                .route("/disable", routing::post(maintenance::unset))
+                .with_state(maintenance_handler),
+        )
+        .nest(
+            "/procedure-manager",
+            AxumRouter::new()
+                .route("/status", routing::get(procedure::status))
+                .route("/pause", routing::post(procedure::pause))
+                .route("/resume", routing::post(procedure::resume))
+                .with_state(procedure_handler),
+        )
+        .nest(
+            "/recovery",
+            AxumRouter::new()
+                .route("/status", routing::get(recovery::status))
+                .route("/enable", routing::post(recovery::set))
+                .route("/disable", routing::post(recovery::unset))
+                .with_state(recovery_handler),
+        )
+        .nest(
+            "/sequence",
+            AxumRouter::new().nest(
+                "/table",
+                AxumRouter::new()
+                    .route("/next-id", routing::get(sequencer::get_next_table_id))
+                    .route("/set-next-id", routing::post(sequencer::set_next_table_id))
+                    .with_state(table_id_sequence_handler.clone()),
+            ),
+        );
 
     AxumRouter::new().nest("/admin", admin_router)
 }
