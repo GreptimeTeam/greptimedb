@@ -325,7 +325,7 @@ impl RegionFlushTrigger {
         if let Some((_, min_entry_id)) = min_entry_id {
             let replay_size = (latest_entry_id.saturating_sub(*min_entry_id))
                 .saturating_mul(avg_record_size as u64);
-            metrics::METRIC_META_TOPIC_ESTIMISTED_REPLY_SIZE
+            metrics::METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE
                 .with_label_values(&[topic])
                 .set(replay_size as i64);
         }
@@ -426,7 +426,7 @@ fn filter_regions_by_replay_size<I: Iterator<Item = (RegionId, u64)>>(
             let replay_size = (latest_entry_id - entry_id).saturating_mul(avg_record_size);
             if replay_size > threshold.as_bytes() {
                 debug!(
-                    "Region {}: estimated replay size {} exceeds threshold {}, prunable entry id: {}, topic latest entry id: {}, topic: '{}'",
+                    "Region {}: estimated replay size {} exceeds threshold {}, entry id: {}, topic latest entry id: {}, topic: '{}'",
                     region_id, ReadableSize(replay_size), threshold, entry_id, latest_entry_id, topic
                 );
                 regions_to_flush.push(region_id);
