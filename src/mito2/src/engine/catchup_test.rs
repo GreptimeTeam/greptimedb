@@ -95,6 +95,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -216,6 +217,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -320,6 +322,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -425,6 +428,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
                 path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -532,6 +536,7 @@ async fn open_region(
                 options: HashMap::new(),
                 skip_wal_replay,
                 path_type: PathType::Bare,
+                checkpoint: None,
             }),
         )
         .await
@@ -626,6 +631,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
                 options: HashMap::new(),
                 skip_wal_replay: true,
                 path_type: PathType::Bare,
+                checkpoint: None,
             }),
         )
         .await

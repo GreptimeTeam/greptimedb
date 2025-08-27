@@ -59,7 +59,6 @@ humantime-serde.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
-log-store.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true
@@ -92,7 +91,6 @@ client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
-hyper = "0.14"
 session.workspace = true
 tracing = "0.1"
 tracing-subscriber.workspace = true

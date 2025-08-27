@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(duration_constructors_lite)]
 
 use std::net::SocketAddr;
 

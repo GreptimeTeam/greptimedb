@@ -683,6 +683,30 @@ jobs:
       - name: Run cargo clippy
         run: make clippy
 
+  check-udeps:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-udeps"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+      - name: Check unused dependencies
+        run: make check-udeps
+
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check for conflict
@@ -738,6 +762,7 @@ jobs:
           GT_MINIO_ACCESS_KEY: superpower_password
           GT_MINIO_REGION: us-west-2
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
           GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
@@ -792,6 +817,7 @@ jobs:
           GT_MINIO_ACCESS_KEY: superpower_password
           GT_MINIO_REGION: us-west-2
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
           GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres

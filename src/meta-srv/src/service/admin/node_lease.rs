@@ -15,6 +15,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
@@ -23,6 +26,7 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
+use crate::service::admin::util::ErrorHandler;
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
@@ -30,14 +34,8 @@ pub struct NodeLeaseHandler {
     pub meta_peer_client: MetaPeerClientRef,
 }
 
-#[async_trait::async_trait]
-impl HttpHandler for NodeLeaseHandler {
-    async fn handle(
-        &self,
-        _: &str,
-        _: http::Method,
-        _: &HashMap<String, String>,
-    ) -> Result<http::Response<String>> {
+impl NodeLeaseHandler {
+    async fn get_node_lease(&self) -> Result<LeaseValues> {
         let leases =
             lease::alive_datanodes(&self.meta_peer_client, Duration::from_secs(u64::MAX)).await?;
         let leases = leases
@@ -49,7 +47,30 @@ impl HttpHandler for NodeLeaseHandler {
                 lease: v,
             })
             .collect::<Vec<_>>();
-        let result = LeaseValues { leases }.try_into()?;
+        Ok(LeaseValues { leases })
+    }
+}
+
+/// Get the node lease handler.
+#[axum_macros::debug_handler]
+pub(crate) async fn get(State(handler): State<NodeLeaseHandler>) -> Response {
+    handler
+        .get_node_lease()
+        .await
+        .map_err(ErrorHandler::new)
+        .map(Json)
+        .into_response()
+}
+
+#[async_trait::async_trait]
+impl HttpHandler for NodeLeaseHandler {
+    async fn handle(
+        &self,
+        _: &str,
+        _: http::Method,
+        _: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
+        let result = self.get_node_lease().await?.try_into()?;
 
         http::Response::builder()
             .status(http::StatusCode::OK)

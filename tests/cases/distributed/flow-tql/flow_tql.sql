@@ -6,7 +6,7 @@ CREATE TABLE http_requests (
   PRIMARY KEY(host, idc),
 );
 
-CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
 
 SHOW CREATE TABLE cnt_reqs;
@@ -47,8 +47,20 @@ CREATE TABLE http_requests (
   PRIMARY KEY(host, idc),
 );
 
-CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);
+
+-- standalone&distributed have slightly different error message(distributed will print source error as well ("cannot convert float seconds to Duration: value is negative"))
+-- so duplicate test into two
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-(now()+'15s'::interval), '5s') count_values("status_code", http_requests);
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-now()+'15s'::interval, '5s') count_values("status_code", http_requests);
+
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - now(), now()-(now()-'15s'::interval), '5s') count_values("status_code", http_requests);
 
 SHOW CREATE TABLE cnt_reqs;
 

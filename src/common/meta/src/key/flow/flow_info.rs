@@ -135,6 +135,12 @@ pub struct FlowInfoValue {
     /// The expr of expire.
     /// Duration in seconds as `i64`.
     pub expire_after: Option<i64>,
+    /// The eval interval.
+    /// Duration in seconds as `i64`.
+    /// If `None`, will automatically decide when to evaluate the flow.
+    /// If `Some`, it will be evaluated every `eval_interval` seconds.
+    #[serde(default)]
+    pub eval_interval_secs: Option<i64>,
     /// The comment.
     pub comment: String,
     /// The options.
@@ -189,6 +195,10 @@ impl FlowInfoValue {
 
     pub fn expire_after(&self) -> Option<i64> {
         self.expire_after
+    }
+
+    pub fn eval_interval(&self) -> Option<i64> {
+        self.eval_interval_secs
     }
 
     pub fn comment(&self) -> &String {

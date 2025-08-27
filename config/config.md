@@ -245,6 +245,16 @@
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
+| `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend. |
+| `internal_grpc.bind_addr` | String | `127.0.0.1:4010` | The address to bind the gRPC server. |
+| `internal_grpc.server_addr` | String | `127.0.0.1:4010` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
+| `internal_grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `internal_grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
+| `internal_grpc.tls` | -- | -- | internal gRPC server TLS options, see `mysql.tls` section. |
+| `internal_grpc.tls.mode` | String | `disable` | TLS mode. |
+| `internal_grpc.tls.cert_path` | String | Unset | Certificate file path. |
+| `internal_grpc.tls.key_path` | String | Unset | Private key file path. |
+| `internal_grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `mysql` | -- | -- | MySQL server options. |
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
@@ -344,7 +354,7 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
-| `backend_tls` | -- | -- | TLS configuration for kv store backend (only applicable for PostgreSQL/MySQL backends)<br/>When using PostgreSQL or MySQL as metadata store, you can configure TLS here |
+| `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here |
 | `backend_tls.mode` | String | `prefer` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- "disable" - No TLS<br/>- "prefer" (default) - Try TLS, fallback to plain<br/>- "require" - Require TLS<br/>- "verify_ca" - Require TLS and verify CA<br/>- "verify_full" - Require TLS and verify hostname |
 | `backend_tls.cert_path` | String | `""` | Path to client certificate file (for client authentication)<br/>Like "/path/to/client.crt" |
 | `backend_tls.key_path` | String | `""` | Path to client private key file (for client authentication)<br/>Like "/path/to/client.key" |
@@ -379,8 +389,9 @@
 | `wal.provider` | String | `raft_engine` | -- |
 | `wal.broker_endpoints` | Array | -- | The broker endpoints of the Kafka cluster.<br/><br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_create_topics` | Bool | `true` | Automatically create topics for WAL.<br/>Set to `true` to automatically create topics for WAL.<br/>Otherwise, use topics named `topic_name_prefix_[0..num_topics)`<br/>**It's only used when the provider is `kafka`**. |
-| `wal.auto_prune_interval` | String | `10m` | Interval of automatically WAL pruning.<br/>Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.auto_prune_interval` | String | `30m` | Interval of automatically WAL pruning.<br/>Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.flush_trigger_size` | String | `512MB` | Estimated size threshold to trigger a flush when using Kafka remote WAL.<br/>Since multiple regions may share a Kafka topic, the estimated size is calculated as:<br/>  (latest_entry_id - flushed_entry_id) * avg_record_size<br/>MetaSrv triggers a flush for a region when this estimated size exceeds `flush_trigger_size`.<br/>- `latest_entry_id`: The latest entry ID in the topic.<br/>- `flushed_entry_id`: The last flushed entry ID for the region.<br/>Set to "0" to let the system decide the flush trigger size.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.checkpoint_trigger_size` | String | `128MB` | Estimated size threshold to trigger a checkpoint when using Kafka remote WAL.<br/>The estimated size is calculated as:<br/>  (latest_entry_id - last_checkpoint_entry_id) * avg_record_size<br/>MetaSrv triggers a checkpoint for a region when this estimated size exceeds `checkpoint_trigger_size`.<br/>Set to "0" to disable checkpoint trigger.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.auto_prune_parallelism` | Integer | `10` | Concurrent task limit for automatically WAL pruning.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.num_topics` | Integer | `64` | Number of topics used for remote WAL.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default)<br/>**It's only used when the provider is `kafka`**. |

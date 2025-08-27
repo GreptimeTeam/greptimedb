@@ -519,6 +519,7 @@ mod test {
             path_type: PathType::Bare, // Use Bare path type for engine regions
             options: physical_region_option,
             skip_wal_replay: false,
+            checkpoint: None,
         };
         engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))
@@ -542,6 +543,7 @@ mod test {
             path_type: PathType::Bare, // Use Bare path type for engine regions
             options: HashMap::new(),
             skip_wal_replay: false,
+            checkpoint: None,
         };
         engine
             .handle_request(
@@ -620,6 +622,7 @@ mod test {
             path_type: PathType::Bare,
             options: physical_region_option,
             skip_wal_replay: false,
+            checkpoint: None,
         };
         // Opening an already opened region should succeed.
         // Since the region is already open, no metadata recovery operations will be performed.
@@ -647,6 +650,7 @@ mod test {
             path_type: PathType::Bare,
             options: physical_region_option,
             skip_wal_replay: false,
+            checkpoint: None,
         };
         let err = metric_engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))

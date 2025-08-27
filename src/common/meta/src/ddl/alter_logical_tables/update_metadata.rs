@@ -28,9 +28,11 @@ use crate::rpc::router::region_distribution;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
+        self.fetch_physical_table_route_if_non_exist().await?;
         // Safety: must exist.
         let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
-        let physical_table_route = self.data.physical_table_route.as_ref().unwrap();
+        // Safety: fetched in `fetch_physical_table_route_if_non_exist`.
+        let physical_table_route = self.physical_table_route.as_ref().unwrap();
         let region_distribution = region_distribution(&physical_table_route.region_routes);
 
         // Updates physical table's metadata.

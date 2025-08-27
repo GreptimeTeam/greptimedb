@@ -34,6 +34,48 @@ services:
     networks:
       - greptimedb
 
+  etcd-tls:
+    <<: *etcd_common_settings
+    container_name: etcd-tls
+    ports:
+      - 2378:2378
+      - 2381:2381
+    command:
+      - --name=etcd-tls
+      - --data-dir=/var/lib/etcd
+      - --initial-advertise-peer-urls=https://etcd-tls:2381
+      - --listen-peer-urls=https://0.0.0.0:2381
+      - --listen-client-urls=https://0.0.0.0:2378
+      - --advertise-client-urls=https://etcd-tls:2378
+      - --heartbeat-interval=250
+      - --election-timeout=1250
+      - --initial-cluster=etcd-tls=https://etcd-tls:2381
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-tls-cluster
+      - --cert-file=/certs/server.crt
+      - --key-file=/certs/server-key.pem
+      - --peer-cert-file=/certs/server.crt
+      - --peer-key-file=/certs/server-key.pem
+      - --trusted-ca-file=/certs/ca.crt
+      - --peer-trusted-ca-file=/certs/ca.crt
+      - --client-cert-auth
+      - --peer-client-cert-auth
+    volumes:
+      - ./greptimedb-cluster-docker-compose/etcd-tls:/var/lib/etcd
+      - ./greptimedb-cluster-docker-compose/certs:/certs:ro
+    environment:
+      - ETCDCTL_API=3
+      - ETCDCTL_CACERT=/certs/ca.crt
+      - ETCDCTL_CERT=/certs/server.crt
+      - ETCDCTL_KEY=/certs/server-key.pem
+    healthcheck:
+      test: [ "CMD", "etcdctl", "--endpoints=https://etcd-tls:2378", "--cacert=/certs/ca.crt", "--cert=/certs/server.crt", "--key=/certs/server-key.pem", "endpoint", "health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - greptimedb
+
   metasrv:
     image: *greptimedb_image
     container_name: metasrv

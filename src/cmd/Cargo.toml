@@ -103,3 +103,6 @@ tempfile.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"
+
+[package.metadata.cargo-udeps.ignore]
+development = ["rexpect"]

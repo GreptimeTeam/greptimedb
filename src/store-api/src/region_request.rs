@@ -291,6 +291,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             path_type: PathType::Bare,
             options: open.options,
             skip_wal_replay: false,
+            checkpoint: None,
         }),
     )])
 }
@@ -503,6 +504,14 @@ pub struct RegionOpenRequest {
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
     pub skip_wal_replay: bool,
+    /// Replay checkpoint.
+    pub checkpoint: Option<ReplayCheckpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayCheckpoint {
+    pub entry_id: u64,
+    pub metadata_entry_id: Option<u64>,
 }
 
 impl RegionOpenRequest {

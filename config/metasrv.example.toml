@@ -73,8 +73,8 @@ node_max_idle_time = "24hours"
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
 
-## TLS configuration for kv store backend (only applicable for PostgreSQL/MySQL backends)
-## When using PostgreSQL or MySQL as metadata store, you can configure TLS here
+## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
+## When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here
 [backend_tls]
 ## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
 ## - "disable" - No TLS
@@ -198,7 +198,7 @@ auto_create_topics = true
 ## Interval of automatically WAL pruning.
 ## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
 ## **It's only used when the provider is `kafka`**.
-auto_prune_interval = "10m"
+auto_prune_interval = "30m"
 
 
 ## Estimated size threshold to trigger a flush when using Kafka remote WAL.
@@ -210,6 +210,14 @@ auto_prune_interval = "10m"
 ## Set to "0" to let the system decide the flush trigger size.
 ## **It's only used when the provider is `kafka`**.
 flush_trigger_size = "512MB"
+
+## Estimated size threshold to trigger a checkpoint when using Kafka remote WAL.
+## The estimated size is calculated as:
+##   (latest_entry_id - last_checkpoint_entry_id) * avg_record_size
+## MetaSrv triggers a checkpoint for a region when this estimated size exceeds `checkpoint_trigger_size`.
+## Set to "0" to disable checkpoint trigger.
+## **It's only used when the provider is `kafka`**.
+checkpoint_trigger_size = "128MB"
 
 ## Concurrent task limit for automatically WAL pruning.
 ## **It's only used when the provider is `kafka`**.

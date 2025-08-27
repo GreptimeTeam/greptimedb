@@ -209,7 +209,7 @@ pub async fn remote_read(
     state.prom_store_handler.read(request, query_ctx).await
 }
 
-fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
+pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
     Ok(Bytes::from(if is_zstd {
         zstd_decompress(body)?
     } else {

@@ -1019,6 +1019,7 @@ pub fn show_create_flow(
         or_replace: false,
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
+        eval_interval: flow_val.eval_interval(),
         comment,
         query,
     };

@@ -20,12 +20,14 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
+use datatypes::arrow::record_batch::RecordBatch;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
+use snafu::OptionExt;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{Result, UnexpectedSnafu};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -33,7 +35,7 @@ use crate::metrics::{
 };
 use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::{Batch, BoxedBatchStream, ScannerMetrics, Source};
+use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
@@ -646,6 +648,35 @@ pub(crate) fn scan_mem_ranges(
     }
 }
 
+/// Scans memtable ranges at `index` using flat format that returns RecordBatch.
+#[allow(dead_code)]
+pub(crate) fn scan_flat_mem_ranges(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    index: RowGroupIndex,
+) -> impl Stream<Item = Result<RecordBatch>> {
+    try_stream! {
+        let ranges = stream_ctx.input.build_mem_ranges(index);
+        part_metrics.inc_num_mem_ranges(ranges.len());
+        for range in ranges {
+            let build_reader_start = Instant::now();
+            let mem_scan_metrics = Some(MemScanMetrics::default());
+            let mut iter = range.build_record_batch_iter(mem_scan_metrics.clone())?;
+            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
+
+            while let Some(record_batch) = iter.next().transpose()? {
+                yield record_batch;
+            }
+
+            // Report the memtable scan metrics to partition metrics
+            if let Some(ref metrics) = mem_scan_metrics {
+                let data = metrics.data();
+                part_metrics.report_mem_scan_metrics(&data);
+            }
+        }
+    }
+}
+
 /// Scans file ranges at `index`.
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
@@ -662,6 +693,30 @@ pub(crate) async fn scan_file_ranges(
     part_metrics.merge_reader_metrics(&reader_metrics);
 
     Ok(build_file_range_scan_stream(
+        stream_ctx,
+        part_metrics,
+        read_type,
+        ranges,
+    ))
+}
+
+/// Scans file ranges at `index` using flat reader that returns RecordBatch.
+#[allow(dead_code)]
+pub(crate) async fn scan_flat_file_ranges(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    index: RowGroupIndex,
+    read_type: &'static str,
+    range_builder: Arc<RangeBuilderList>,
+) -> Result<impl Stream<Item = Result<RecordBatch>>> {
+    let mut reader_metrics = ReaderMetrics::default();
+    let ranges = range_builder
+        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+        .await?;
+    part_metrics.inc_num_file_ranges(ranges.len());
+    part_metrics.merge_reader_metrics(&reader_metrics);
+
+    Ok(build_flat_file_range_scan_stream(
         stream_ctx,
         part_metrics,
         read_type,
@@ -695,6 +750,49 @@ pub fn build_file_range_scan_stream(
                 let prune_metrics = reader.metrics();
                 reader_metrics.merge_from(&prune_metrics);
             }
+        }
+
+        // Reports metrics.
+        reader_metrics.observe_rows(read_type);
+        reader_metrics.filter_metrics.observe();
+        part_metrics.merge_reader_metrics(reader_metrics);
+    }
+}
+
+/// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
+pub fn build_flat_file_range_scan_stream(
+    _stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    read_type: &'static str,
+    ranges: SmallVec<[FileRange; 2]>,
+) -> impl Stream<Item = Result<RecordBatch>> {
+    try_stream! {
+        let reader_metrics = &mut ReaderMetrics::default();
+        for range in ranges {
+            let build_reader_start = Instant::now();
+            let mut reader = range.flat_reader().await?;
+            let build_cost = build_reader_start.elapsed();
+            part_metrics.inc_build_reader_cost(build_cost);
+
+            let may_compat = range
+                .compat_batch()
+                .map(|compat| {
+                    compat.as_flat().context(UnexpectedSnafu {
+                        reason: "Invalid compat for flat format",
+                    })
+                })
+                .transpose()?;
+            while let Some(record_batch) = reader.next_batch()? {
+                if let Some(flat_compat) = may_compat {
+                    let batch = flat_compat.compat(record_batch)?;
+                    yield batch;
+                } else {
+                    yield record_batch;
+                }
+            }
+
+            let prune_metrics = reader.metrics();
+            reader_metrics.merge_from(&prune_metrics);
         }
 
         // Reports metrics.
@@ -743,4 +841,20 @@ pub(crate) async fn maybe_scan_other_ranges(
         }
         .fail()
     }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn maybe_scan_flat_other_ranges(
+    context: &Arc<StreamContext>,
+    index: RowGroupIndex,
+    metrics: &PartitionMetrics,
+) -> Result<BoxedRecordBatchStream> {
+    let _ = context;
+    let _ = index;
+    let _ = metrics;
+
+    crate::error::UnexpectedSnafu {
+        reason: "no other ranges scannable in flat format",
+    }
+    .fail()
 }

@@ -56,6 +56,7 @@ use crate::tls::TlsOption;
 type TonicResult<T> = std::result::Result<T, Status>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GrpcOptions {
     /// The address to bind the gRPC server.
     pub bind_addr: String,
@@ -141,7 +142,7 @@ impl GrpcOptions {
         Self {
             bind_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
             // If hostname is not set, the server will use the local ip address as the hostname.
-            server_addr: String::new(),
+            server_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             flight_compression: FlightCompression::ArrowIpc,

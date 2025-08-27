@@ -34,8 +34,8 @@ use api::v1::meta::{
 };
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
-    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
-    Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
+    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, EvalInterval,
+    ExpireAfter, Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -1125,6 +1125,7 @@ pub struct CreateFlowTask {
     pub create_if_not_exists: bool,
     /// Duration in seconds. Data older than this duration will not be used.
     pub expire_after: Option<i64>,
+    pub eval_interval_secs: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -1142,6 +1143,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after,
+            eval_interval,
             comment,
             sql,
             flow_options,
@@ -1161,6 +1163,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after: expire_after.map(|e| e.value),
+            eval_interval_secs: eval_interval.map(|e| e.seconds),
             comment,
             sql,
             flow_options,
@@ -1178,6 +1181,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             or_replace,
             create_if_not_exists,
             expire_after,
+            eval_interval_secs: eval_interval,
             comment,
             sql,
             flow_options,
@@ -1192,6 +1196,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
                 or_replace,
                 create_if_not_exists,
                 expire_after: expire_after.map(|value| ExpireAfter { value }),
+                eval_interval: eval_interval.map(|seconds| EvalInterval { seconds }),
                 comment,
                 sql,
                 flow_options,
