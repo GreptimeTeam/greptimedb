@@ -317,10 +317,14 @@ where
             match record_batch {
                 Ok(batch) => {
                     stats.update_flat(&batch)?;
-
-                    // TODO: Indexer support is ignored for now, but left as todo for future implementation
-                    // The indexer would need to be updated to handle RecordBatch format
-
+                    let start = Instant::now();
+                    // safety: self.current_indexer must be set when first batch has been written.
+                    self.current_indexer
+                        .as_mut()
+                        .unwrap()
+                        .update_flat(&batch)
+                        .await;
+                    self.metrics.update_index += start.elapsed();
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size
                     {
