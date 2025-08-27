@@ -248,7 +248,9 @@ impl RegionFlushTrigger {
             })
             .collect::<Vec<_>>();
 
-        let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
+        let max_txn_ops = self
+            .table_metadata_manager
+            .batch_update_table_info_value_chunk_size();
         let batch_size = max_txn_ops.min(regions.len());
         for batch in regions.chunks(batch_size) {
             self.table_metadata_manager
@@ -380,7 +382,8 @@ impl RegionFlushTrigger {
         let flush_instructions = leader_to_region_ids
             .into_iter()
             .map(|(leader, region_ids)| {
-                let flush_instruction = Instruction::FlushRegions(FlushRegions { region_ids });
+                let flush_instruction =
+                    Instruction::FlushRegions(FlushRegions::async_batch(region_ids));
                 (leader, flush_instruction)
             });
 

@@ -101,8 +101,16 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
     }
 }
 
-/// Generates a [InstructionReply::FlushRegion] reply using SimpleReply format.
+/// Generates a [InstructionReply::FlushRegions] reply with a single region.
 pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    // Use RegionId(0, 0) as default for backward compatibility in tests
+    let region_id = RegionId::new(0, 0);
+    let flush_reply = if result {
+        FlushRegionReply::success_single(region_id)
+    } else {
+        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+    };
+
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -110,16 +118,12 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::FlushRegion(SimpleReply {
-                result,
-                error,
-            }))
-            .unwrap(),
+            serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
     }
 }
 
-/// Generates a [InstructionReply::FlushRegionsV2] reply for a specific region using the unified format.
+/// Generates a [InstructionReply::FlushRegions] reply for a specific region.
 pub fn new_flush_region_reply_for_region(
     id: u64,
     region_id: RegionId,
@@ -139,29 +143,7 @@ pub fn new_flush_region_reply_for_region(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::FlushRegionsV2(flush_reply)).unwrap(),
-        )),
-    }
-}
-
-/// Generates a legacy [InstructionReply::FlushRegionSimple] reply for backward compatibility testing.
-pub fn new_flush_region_simple_reply(
-    id: u64,
-    result: bool,
-    error: Option<String>,
-) -> MailboxMessage {
-    MailboxMessage {
-        id,
-        subject: "mock".to_string(),
-        from: "datanode".to_string(),
-        to: "meta".to_string(),
-        timestamp_millis: current_time_millis(),
-        payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::FlushRegionSimple(SimpleReply {
-                result,
-                error,
-            }))
-            .unwrap(),
+            serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
     }
 }
