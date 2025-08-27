@@ -11,17 +11,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write  # Add permissions to modify PRs
-      issues: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
       - name: Check Pull Request
         working-directory: cyborg

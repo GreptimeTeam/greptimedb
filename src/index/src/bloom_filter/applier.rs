@@ -42,7 +42,16 @@ impl BloomFilterApplier {
     ) -> Result<Vec<Range<usize>>> {
         let rows_per_segment = self.meta.rows_per_segment as usize;
         let start_seg = search_range.start / rows_per_segment;
-        let end_seg = search_range.end.div_ceil(rows_per_segment);
+        let mut end_seg = search_range.end.div_ceil(rows_per_segment);
+
+        if end_seg == self.meta.segment_loc_indices.len() + 1 {
+            // In a previous version, there was a bug where if the last segment was all null,
+            // this segment would not be written into the index. This caused the slice
+            // `self.meta.segment_loc_indices[start_seg..end_seg]` to go out of bounds due to
+            // the missing segment. Since the `search` function does not search for nulls,
+            // we can simply ignore the last segment in this buggy scenario.
+            end_seg -= 1;
+        }
 
         let locs = &self.meta.segment_loc_indices[start_seg..end_seg];
 
