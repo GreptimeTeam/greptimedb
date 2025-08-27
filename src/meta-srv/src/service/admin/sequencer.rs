@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use axum::extract::{self, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -27,8 +25,6 @@ use snafu::{ensure, ResultExt};
 use crate::error::{
     PeekSequenceSnafu, Result, RuntimeSwitchManagerSnafu, SetNextSequenceSnafu, UnexpectedSnafu,
 };
-
-pub type TableIdSequenceHandlerRef = Arc<TableIdSequenceHandler>;
 
 #[derive(Clone)]
 pub(crate) struct TableIdSequenceHandler {
@@ -77,7 +73,7 @@ pub(crate) struct ResetTableIdRequest {
 /// Set the next table id.
 #[axum_macros::debug_handler]
 pub(crate) async fn set_next_table_id(
-    State(handler): State<TableIdSequenceHandlerRef>,
+    State(handler): State<TableIdSequenceHandler>,
     extract::Json(ResetTableIdRequest { next_table_id }): extract::Json<ResetTableIdRequest>,
 ) -> Response {
     match handler.set_next_table_id(next_table_id).await {
@@ -88,9 +84,7 @@ pub(crate) async fn set_next_table_id(
 
 /// Get the next table id without incrementing the sequence.
 #[axum_macros::debug_handler]
-pub(crate) async fn get_next_table_id(
-    State(handler): State<TableIdSequenceHandlerRef>,
-) -> Response {
+pub(crate) async fn get_next_table_id(State(handler): State<TableIdSequenceHandler>) -> Response {
     match handler.peek_table_id().await {
         Ok(next_table_id) => {
             (StatusCode::OK, Json(NextTableIdResponse { next_table_id })).into_response()

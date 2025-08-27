@@ -14,16 +14,40 @@
 
 use std::collections::HashMap;
 
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::error::{self, Result};
 use crate::metasrv::ElectionRef;
+use crate::service::admin::util::ErrorHandler;
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
 pub struct LeaderHandler {
     pub election: Option<ElectionRef>,
+}
+
+impl LeaderHandler {
+    async fn get_leader(&self) -> Result<Option<String>> {
+        if let Some(election) = &self.election {
+            let leader_addr = election.leader().await?.0;
+            return Ok(Some(leader_addr));
+        }
+        Ok(None)
+    }
+}
+
+/// Get the leader handler.
+#[axum_macros::debug_handler]
+pub(crate) async fn get(State(handler): State<LeaderHandler>) -> Response {
+    handler
+        .get_leader()
+        .await
+        .map_err(ErrorHandler::new)
+        .map(|leader| leader.unwrap_or("election info is None".to_string()))
+        .into_response()
 }
 
 #[async_trait::async_trait]
@@ -34,8 +58,7 @@ impl HttpHandler for LeaderHandler {
         _: http::Method,
         _: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        if let Some(election) = &self.election {
-            let leader_addr = election.leader().await?.0;
+        if let Some(leader_addr) = self.get_leader().await? {
             return http::Response::builder()
                 .status(http::StatusCode::OK)
                 .body(leader_addr)
