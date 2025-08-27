@@ -55,12 +55,25 @@ async function main() {
         await client.rest.issues.addLabels({
             owner, repo, issue_number: number, labels: [labelDocsRequired],
         })
+
+        // Get available assignees for the docs repo
+        const assigneesResponse = await docsClient.rest.issues.listAssignees({
+            owner: 'GreptimeTeam',
+            repo: 'docs',
+        })
+        const validAssignees = assigneesResponse.data.map(assignee => assignee.login)
+        core.info(`Available assignees: ${validAssignees.join(', ')}`)
+
+        // Check if the actor is a valid assignee, otherwise fallback to fengjiachun
+        const assignee = validAssignees.includes(actor) ? actor : 'fengjiachun'
+        core.info(`Assigning issue to: ${assignee}`)
+
         await docsClient.rest.issues.create({
             owner: 'GreptimeTeam',
             repo: 'docs',
             title: `Update docs for ${title}`,
             body: `A document change request is generated from ${html_url}`,
-            assignee: actor,
+            assignee: assignee,
         }).then((res) => {
             core.info(`Created issue ${res.data}`)
         })
