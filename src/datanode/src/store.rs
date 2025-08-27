@@ -79,6 +79,10 @@ async fn build_cache_layer(
     store_config: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
+    if !store_config.enable_read_cache() {
+        return Ok(None);
+    }
+
     let (name, mut cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
             let path = s3_config.cache.cache_path.clone();
