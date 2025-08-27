@@ -1604,23 +1604,23 @@ mod tests {
 
     #[test]
     fn test_election_sql_with_schema() {
-        let f = ElectionSqlFactory::new(42, Some("greptime_schema"), "greptime_metakv");
+        let f = ElectionSqlFactory::new(42, Some("test_schema"), "greptime_metakv");
         let s = f.build();
         assert!(s.campaign.contains("pg_try_advisory_lock"));
         assert!(s
             .put_value_with_lease
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
         assert!(s
             .update_value_with_lease
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
         assert!(s
             .get_value_with_lease
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
         assert!(s
             .get_value_with_lease_by_prefix
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
         assert!(s
             .delete_value
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
     }
 }

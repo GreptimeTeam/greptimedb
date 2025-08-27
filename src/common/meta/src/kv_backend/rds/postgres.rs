@@ -1248,17 +1248,17 @@ mod tests {
 
     #[test]
     fn test_pg_template_with_schema() {
-        let factory = PgSqlTemplateFactory::new(Some("greptime_schema"), "greptime_metakv");
+        let factory = PgSqlTemplateFactory::new(Some("test_schema"), "greptime_metakv");
         let t = factory.build();
         assert!(t
             .create_table_statement
-            .contains("\"greptime_schema\".\"greptime_metakv\""));
+            .contains("\"test_schema\".\"greptime_metakv\""));
         let upsert = t.generate_batch_upsert_query(1);
-        assert!(upsert.contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(upsert.contains("\"test_schema\".\"greptime_metakv\""));
         let get = t.generate_batch_get_query(1);
-        assert!(get.contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(get.contains("\"test_schema\".\"greptime_metakv\""));
         let del = t.generate_batch_delete_query(1);
-        assert!(del.contains("\"greptime_schema\".\"greptime_metakv\""));
+        assert!(del.contains("\"test_schema\".\"greptime_metakv\""));
     }
 
     #[test]

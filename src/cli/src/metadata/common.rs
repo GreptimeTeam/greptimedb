@@ -57,7 +57,6 @@ pub(crate) struct StoreConfig {
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
     meta_table_name: String,
 
-
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if unset).
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
