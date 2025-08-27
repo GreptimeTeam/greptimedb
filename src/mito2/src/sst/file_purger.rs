@@ -202,16 +202,37 @@ pub const PURGER_REFS_PATH: &str = ".purger_refs";
 pub fn ref_file_path(table_dir: &str, node_id: u64, path_type: PathType) -> String {
     let path_type_postfix = match path_type {
         PathType::Bare => "",
-        PathType::Data => "data",
-        PathType::Metadata => "metadata",
+        PathType::Data => ".data",
+        PathType::Metadata => ".metadata",
     };
     format!(
         "{}/{}/{:020}{}.refs",
-        table_dir,
-        PURGER_REFS_PATH,
-        node_id,
-        format!(".{path_type_postfix}")
+        table_dir, PURGER_REFS_PATH, node_id, path_type_postfix
     )
+}
+
+pub fn ref_path_to_node_id_path_type(path: &str) -> Option<(u64, PathType)> {
+    let parts: Vec<&str> = path.rsplitn(2, '/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let file_name = parts[0];
+    let segments: Vec<&str> = file_name.split('.').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let node_id_str = segments[0];
+    let path_type = if segments.len() == 2 {
+        PathType::Bare
+    } else {
+        match segments[1] {
+            "data" => PathType::Data,
+            "metadata" => PathType::Metadata,
+            _ => return None,
+        }
+    };
+    let node_id = node_id_str.parse::<u64>().ok()?;
+    Some((node_id, path_type))
 }
 
 /// Returns the directory path to store all purger ref files.
@@ -246,7 +267,7 @@ pub struct TableFileRefsManifest {
 /// Returns a list of `TableFileRefsManifest`.
 pub async fn read_all_ref_files_for_table(
     access_layer: &AccessLayerRef,
-) -> Result<Vec<TableFileRefsManifest>> {
+) -> Result<Vec<(u64, TableFileRefsManifest)>> {
     let ref_dir = ref_dir(access_layer.table_dir());
     // list everything under the ref dir. And filter out by path type in `.<path-type>.refs` postfix.
     let entries = access_layer
@@ -260,17 +281,24 @@ pub async fn read_all_ref_files_for_table(
         if entry.metadata().mode() != EntryMode::FILE {
             continue;
         }
+        let Some((node_id, path_type)) = ref_path_to_node_id_path_type(entry.path()) else {
+            continue;
+        };
+        if path_type != access_layer.path_type() {
+            continue;
+        }
+
         // read file and parse as `TableFileRefsManifest`.
         let buf = access_layer
             .object_store()
-            .read(&entry.path())
+            .read(entry.path())
             .await
             .context(OpenDalSnafu)?
             .to_bytes();
 
         let manifest: TableFileRefsManifest =
             serde_json::from_slice(&buf).context(SerdeJsonSnafu)?;
-        manifests.push(manifest);
+        manifests.push((node_id, manifest));
     }
     Ok(manifests)
 }

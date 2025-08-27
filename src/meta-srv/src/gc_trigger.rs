@@ -166,12 +166,11 @@ impl GcTrigger {
             let peers_to_region_ids: HashMap<Peer, RegionId> = phy_table_val
                 .region_routes
                 .iter()
-                .map(|p| {
+                .filter_map(|p| {
                     p.leader_peer
                         .as_ref()
                         .map(|peer| (peer.clone(), p.region.id))
                 })
-                .flatten()
                 .collect::<HashMap<_, _>>();
 
             let now_millis = common_time::util::current_time_millis();

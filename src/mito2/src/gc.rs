@@ -44,6 +44,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, Rem
 use crate::manifest::storage::manifest_compress_type;
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file_purger::read_all_ref_files_for_table;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -138,7 +139,30 @@ impl LocalGcWorker {
 
     pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
         let _ = self.table_id;
-        todo!()
+        let table_ref_manifest = read_all_ref_files_for_table(&self.access_layer).await?;
+        let latest_manifest = table_ref_manifest
+            .into_iter()
+            .filter(|(node_id, refs)| {
+                if refs.ts >= self.ref_ts_millis {
+                    true
+                } else {
+                    warn!(
+                        "Skip ref manifest from node {} with ts {}, expect ts >= {}",
+                        node_id, refs.ts, self.ref_ts_millis
+                    );
+
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let all_ref_files = latest_manifest
+            .into_iter()
+            .flat_map(|(_, refs)| refs.file_refs.into_iter())
+            .map(|r| r.file_id)
+            .collect::<HashSet<_>>();
+
+        Ok(all_ref_files)
     }
 
     /// Run the GC worker in serial mode,
@@ -199,13 +223,17 @@ impl LocalGcWorker {
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_per_gc_job);
+
+        let tmp_ref_files = self.read_tmp_ref_files().await?;
+
+        let in_used = current_files
+            .keys()
+            .cloned()
+            .chain(tmp_ref_files.into_iter())
+            .collect();
+
         let unused_files = self
-            .list_unused_files(
-                region_id,
-                current_files.keys().cloned().collect(),
-                recently_removed_files,
-                concurrency,
-            )
+            .list_unused_files(region_id, in_used, recently_removed_files, concurrency)
             .await?;
 
         let unused_len = unused_files.len();
