@@ -34,10 +34,11 @@ use futures::future::join_all;
 use futures::StreamExt;
 use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::parser::token::{self};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
-    UnaryExpr, VectorSelector,
+    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
+    SubqueryExpr, UnaryExpr, VectorSelector,
 };
 use query::parser::{PromQuery, QueryLanguageParser, DEFAULT_LOOKBACK_STRING};
 use query::promql::planner::normalize_matcher;
@@ -47,7 +48,7 @@ use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
@@ -838,13 +839,36 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => {
+        PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
+            match modifier {
+                Some(LabelModifier::Include(labels)) => {
+                    if !labels.labels.contains(&METRIC_NAME.to_string()) {
+                        metric_names.clear();
+                        return;
+                    }
+                }
+                Some(LabelModifier::Exclude(labels)) => {
+                    if labels.labels.contains(&METRIC_NAME.to_string()) {
+                        metric_names.clear();
+                        return;
+                    }
+                }
+                _ => {}
+            }
             collect_metric_names(expr, metric_names)
         }
-        PromqlExpr::Unary(UnaryExpr { expr }) => collect_metric_names(expr, metric_names),
-        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
-            collect_metric_names(lhs, metric_names);
-            collect_metric_names(rhs, metric_names);
+        PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
+        PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
+            if matches!(
+                op.id(),
+                token::T_LAND // INTERSECT
+                    | token::T_LOR // UNION
+                    | token::T_LUNLESS // EXCEPT
+            ) {
+                collect_metric_names(lhs, metric_names)
+            } else {
+                metric_names.clear()
+            }
         }
         PromqlExpr::Paren(ParenExpr { expr }) => collect_metric_names(expr, metric_names),
         PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => collect_metric_names(expr, metric_names),
@@ -1002,30 +1026,11 @@ pub async fn label_values_query(
 
     if label_name == METRIC_NAME_LABEL {
         let catalog_manager = handler.catalog_manager();
-        let mut tables_stream = catalog_manager.tables(&catalog, &schema, Some(&query_ctx));
-        let mut table_names = Vec::new();
-        while let Some(table) = tables_stream.next().await {
-            // filter out physical tables
-            match table {
-                Ok(table) => {
-                    if table
-                        .table_info()
-                        .meta
-                        .options
-                        .extra_options
-                        .contains_key(PHYSICAL_TABLE_METADATA_KEY)
-                    {
-                        continue;
-                    }
 
-                    table_names.push(table.table_info().name.clone());
-                }
-                Err(e) => {
-                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-                }
-            }
-        }
-        table_names.sort_unstable();
+        let mut table_names = try_call_return_response!(
+            retrieve_table_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+
         truncate_results(&mut table_names, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
@@ -1040,17 +1045,11 @@ pub async fn label_values_query(
     } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
         let catalog_manager = handler.catalog_manager();
 
-        match retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await {
-            Ok(mut schema_names) => {
-                truncate_results(&mut schema_names, params.limit);
-                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
-                    schema_names,
-                ));
-            }
-            Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-            }
-        }
+        let mut schema_names = try_call_return_response!(
+            retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await
+        );
+        truncate_results(&mut schema_names, params.limit);
+        return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(schema_names));
     }
 
     let queries = params.matches.0;
@@ -1134,6 +1133,78 @@ fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
     selector.matchers.matchers.remove(pos);
 
     Some(name)
+}
+
+async fn retrieve_table_names(
+    query_ctx: &QueryContext,
+    catalog_manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<Vec<String>> {
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+
+    let mut tables_stream = catalog_manager.tables(catalog, &schema, Some(query_ctx));
+    let mut table_names = Vec::new();
+
+    // we only provide very limited support for matcher against __name__
+    let name_matcher = matches
+        .first()
+        .and_then(|matcher| promql_parser::parser::parse(matcher).ok())
+        .and_then(|expr| {
+            if let PromqlExpr::VectorSelector(vector_selector) = expr {
+                let matchers = vector_selector.matchers.matchers;
+                for matcher in matchers {
+                    if matcher.name == METRIC_NAME_LABEL {
+                        return Some(matcher);
+                    }
+                }
+
+                None
+            } else {
+                None
+            }
+        });
+
+    while let Some(table) = tables_stream.next().await {
+        let table = table.context(CatalogSnafu)?;
+        if !table
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            // skip non-prometheus (non-metricengine) tables for __name__ query
+            continue;
+        }
+
+        let table_name = &table.table_info().name;
+
+        if let Some(matcher) = &name_matcher {
+            match &matcher.op {
+                MatchOp::Equal => {
+                    if table_name == &matcher.value {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                MatchOp::Re(reg) => {
+                    if reg.is_match(table_name) {
+                        table_names.push(table_name.clone());
+                    }
+                }
+                _ => {
+                    // != and !~ are not supported:
+                    // vector must contains at least one non-empty matcher
+                    table_names.push(table_name.clone());
+                }
+            }
+        } else {
+            table_names.push(table_name.clone());
+        }
+    }
+
+    table_names.sort_unstable();
+    Ok(table_names)
 }
 
 async fn retrieve_field_names(
@@ -1389,7 +1460,7 @@ mod tests {
             TestCase {
                 name: "metric with unary operator",
                 promql: "-cpu_usage",
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -1404,6 +1475,20 @@ mod tests {
             TestCase {
                 name: "complex aggregation",
                 promql: r#"sum by (instance) (cpu_usage{job="node"})"#,
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "complex aggregation",
+                promql: r#"sum by (__name__) (cpu_usage{job="node"})"#,
+                expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "complex aggregation",
+                promql: r#"sum without (instance) (cpu_usage{job="node"})"#,
                 expected_metric: Some("cpu_usage"),
                 expected_type: ValueType::Vector,
                 should_error: false,
@@ -1412,14 +1497,14 @@ mod tests {
             TestCase {
                 name: "same metric addition",
                 promql: "cpu_usage + cpu_usage",
-                expected_metric: Some("cpu_usage"),
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
             TestCase {
                 name: "metric with scalar addition",
-                promql: r#"sum(rate(cpu_usage{job="node"}[5m])) by (instance) + 100"#,
-                expected_metric: Some("cpu_usage"),
+                promql: r#"sum(rate(cpu_usage{job="node"}[5m])) + 100"#,
+                expected_metric: None,
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -1442,7 +1527,7 @@ mod tests {
             TestCase {
                 name: "unless with different metrics",
                 promql: "cpu_usage unless memory_usage",
-                expected_metric: None,
+                expected_metric: Some("cpu_usage"),
                 expected_type: ValueType::Vector,
                 should_error: false,
             },

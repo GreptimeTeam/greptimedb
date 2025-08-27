@@ -2189,7 +2189,7 @@ dependencies = [
  "hyperloglogplus",
  "jsonb",
  "memchr",
- "nalgebra 0.33.2",
+ "nalgebra",
  "num",
  "num-traits",
  "once_cell",
@@ -2201,7 +2201,6 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "sql",
- "statrs",
  "store-api",
  "table",
  "tokio",
@@ -2283,15 +2282,10 @@ dependencies = [
 name = "common-macro"
 version = "0.17.0"
 dependencies = [
- "arc-swap",
- "common-query",
- "datatypes",
  "greptime-proto",
  "once_cell",
  "proc-macro2",
  "quote",
- "snafu 0.8.6",
- "static_assertions",
  "syn 2.0.104",
 ]
 
@@ -2352,7 +2346,6 @@ dependencies = [
  "greptime-proto",
  "hex",
  "humantime-serde",
- "hyper 0.14.32",
  "itertools 0.14.0",
  "lazy_static",
  "moka",
@@ -2469,7 +2462,6 @@ dependencies = [
  "snafu 0.8.6",
  "sqlparser 0.55.0-greptime",
  "sqlparser_derive 0.1.1",
- "statrs",
  "store-api",
  "tokio",
 ]
@@ -2512,7 +2504,6 @@ dependencies = [
  "paste",
  "pin-project",
  "prometheus",
- "rand 0.9.1",
  "ratelimit",
  "serde",
  "serde_json",
@@ -2538,7 +2529,6 @@ name = "common-sql"
 version = "0.17.0"
 dependencies = [
  "common-base",
- "common-datasource",
  "common-decimal",
  "common-error",
  "common-macro",
@@ -2650,7 +2640,6 @@ dependencies = [
 name = "common-workload"
 version = "0.17.0"
 dependencies = [
- "api",
  "common-telemetry",
  "serde",
 ]
@@ -2912,7 +2901,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap 3.2.25",
- "criterion-plot",
+ "criterion-plot 0.5.0",
  "futures",
  "itertools 0.10.5",
  "lazy_static",
@@ -2939,7 +2928,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap 4.5.40",
- "criterion-plot",
+ "criterion-plot 0.5.0",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -2956,6 +2945,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "criterion"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c047a62b0cc3e145fa84415a3191f628e980b194c2755aa12300a4e6cbd928"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap 4.5.40",
+ "criterion-plot 0.6.0",
+ "itertools 0.13.0",
+ "num-traits",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
 name = "criterion-plot"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2963,6 +2975,16 @@ checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
  "itertools 0.10.5",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b1bcc0dc7dfae599d84ad0b1a55f80cde8af3725da8313b528da95ef783e338"
+dependencies = [
+ "cast",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -7021,7 +7043,6 @@ dependencies = [
  "protobuf-build",
  "raft-engine",
  "rand 0.9.1",
- "rand_distr",
  "rskafka",
  "serde",
  "serde_json",
@@ -7369,12 +7390,10 @@ dependencies = [
  "http-body-util",
  "humantime",
  "humantime-serde",
- "hyper 0.14.32",
  "hyper-util",
  "itertools 0.14.0",
  "lazy_static",
  "local-ip-address",
- "log-store",
  "once_cell",
  "parking_lot 0.12.4",
  "prometheus",
@@ -7433,6 +7452,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "common-base",
  "common-error",
  "common-macro",
@@ -7529,6 +7549,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-time",
+ "criterion 0.7.0",
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
@@ -7869,47 +7890,18 @@ dependencies = [
 
 [[package]]
 name = "nalgebra"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d506eb7e08d6329505faa8a3a00a5dcc6de9f76e0c77e4b75763ae3c770831ff"
-dependencies = [
- "approx 0.5.1",
- "matrixmultiply",
- "nalgebra-macros 0.1.0",
- "num-complex",
- "num-rational",
- "num-traits",
- "rand 0.8.5",
- "rand_distr",
- "simba 0.6.0",
- "typenum",
-]
-
-[[package]]
-name = "nalgebra"
 version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
 dependencies = [
  "approx 0.5.1",
  "matrixmultiply",
- "nalgebra-macros 0.2.2",
+ "nalgebra-macros",
  "num-complex",
  "num-rational",
  "num-traits",
- "simba 0.9.0",
+ "simba",
  "typenum",
-]
-
-[[package]]
-name = "nalgebra-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01fcc0b8149b4632adc89ac3b7b31a12fb6099a0317a4eb2ebff574ef7de7218"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -9347,7 +9339,6 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "simd-json",
  "snafu 0.8.6",
  "sql",
  "table",
@@ -10122,7 +10113,7 @@ dependencies = [
  "log-query",
  "meter-core",
  "meter-macros",
- "nalgebra 0.33.2",
+ "nalgebra",
  "num",
  "num-traits",
  "object-store",
@@ -10142,7 +10133,6 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "sqlparser 0.55.0-greptime",
- "statrs",
  "store-api",
  "substrait 0.17.0",
  "table",
@@ -11528,7 +11518,6 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
- "common-config",
  "common-error",
  "common-frontend",
  "common-grpc",
@@ -11738,19 +11727,6 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "simba"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0b7840f121a46d63066ee7a99fc81dcabbc6105e437cae43528cea199b5a05f"
-dependencies = [
- "approx 0.5.1",
- "num-complex",
- "num-traits",
- "paste",
- "wide",
 ]
 
 [[package]]
@@ -12340,19 +12316,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "statrs"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35a062dbadac17a42e0fc64c27f419b25d6fae98572eb43c8814c9e873d7721"
-dependencies = [
- "approx 0.5.1",
- "lazy_static",
- "nalgebra 0.29.0",
- "num-traits",
- "rand 0.8.5",
-]
 
 [[package]]
 name = "store-api"

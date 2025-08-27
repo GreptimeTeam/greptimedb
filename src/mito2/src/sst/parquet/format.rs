@@ -152,7 +152,7 @@ impl ReadFormat {
         flat_format: bool,
     ) -> Self {
         if flat_format {
-            Self::new_flat(metadata, column_ids)
+            Self::new_flat(metadata, column_ids, false)
         } else {
             Self::new_primary_key(metadata, column_ids)
         }
@@ -170,8 +170,9 @@ impl ReadFormat {
     pub fn new_flat(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        convert_to_flat: bool,
     ) -> Self {
-        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids))
+        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids, convert_to_flat))
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -925,17 +926,25 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::OpType;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{
+        Int64Array, StringArray, TimestampMillisecondArray, UInt64Array, UInt8Array,
+    };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::value::ValueRef;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use mito_codec::row_converter::{
+        DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
+    };
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::sst::parquet::flat_format::FlatWriteFormat;
-    use crate::sst::FlatSchemaOptions;
+    use crate::sst::parquet::flat_format::{sequence_column_index, FlatWriteFormat};
+    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -1346,19 +1355,19 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), false);
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), false);
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), false);
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), false);
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
@@ -1368,6 +1377,7 @@ mod tests {
         let mut format = FlatReadFormat::new(
             metadata,
             std::iter::once(1), // Just read tag0
+            false,
         );
 
         let num_rows = 4;
@@ -1383,10 +1393,8 @@ mod tests {
             RecordBatch::try_new(format.arrow_schema().clone(), test_columns).unwrap();
 
         // Test without override sequence - should return clone
-        let result = format.convert_batch(&record_batch, None).unwrap();
-        let sequence_column = result.column(
-            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
-        );
+        let result = format.convert_batch(record_batch.clone(), None).unwrap();
+        let sequence_column = result.column(sequence_column_index(result.num_columns()));
         let sequence_array = sequence_column
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -1399,11 +1407,9 @@ mod tests {
         format.set_override_sequence(Some(override_sequence));
         let override_sequence_array = format.new_override_sequence_array(num_rows).unwrap();
         let result = format
-            .convert_batch(&record_batch, Some(&override_sequence_array))
+            .convert_batch(record_batch, Some(&override_sequence_array))
             .unwrap();
-        let sequence_column = result.column(
-            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
-        );
+        let sequence_column = result.column(sequence_column_index(result.num_columns()));
         let sequence_array = sequence_column
             .as_any()
             .downcast_ref::<UInt64Array>()
@@ -1411,5 +1417,334 @@ mod tests {
 
         let expected_override = UInt64Array::from(vec![override_sequence; num_rows]);
         assert_eq!(sequence_array, &expected_override);
+    }
+
+    #[test]
+    fn test_need_convert_to_flat() {
+        let metadata = build_test_region_metadata();
+
+        // Test case 1: Same number of columns, no conversion needed
+        // For flat format: all columns (5) + internal columns (3)
+        let expected_columns = metadata.column_metadatas.len() + 3;
+        let result =
+            FlatReadFormat::need_convert_to_flat("test.parquet", expected_columns, &metadata)
+                .unwrap();
+        assert!(
+            !result,
+            "Should not need conversion when column counts match"
+        );
+
+        // Test case 2: Different number of columns, need conversion
+        // Missing primary key columns (2 primary keys in test metadata)
+        let num_columns_without_pk = expected_columns - metadata.primary_key.len();
+        let result =
+            FlatReadFormat::need_convert_to_flat("test.parquet", num_columns_without_pk, &metadata)
+                .unwrap();
+        assert!(
+            result,
+            "Should need conversion when primary key columns are missing"
+        );
+
+        // Test case 3: Invalid case - actual columns more than expected
+        let too_many_columns = expected_columns + 1;
+        let err = FlatReadFormat::need_convert_to_flat("test.parquet", too_many_columns, &metadata)
+            .unwrap_err();
+        assert!(err.to_string().contains("Expected columns"), "{err:?}");
+
+        // Test case 4: Invalid case - column difference doesn't match primary key count
+        let wrong_diff_columns = expected_columns - 1; // Difference of 1, but we have 2 primary keys
+        let err =
+            FlatReadFormat::need_convert_to_flat("test.parquet", wrong_diff_columns, &metadata)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("Column number difference"),
+            "{err:?}"
+        );
+    }
+
+    fn build_test_dense_pk_array(
+        codec: &DensePrimaryKeyCodec,
+        pk_values_per_row: &[&[Option<i64>]],
+    ) -> Arc<PrimaryKeyArray> {
+        let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
+
+        for pk_values_row in pk_values_per_row {
+            let values: Vec<ValueRef> = pk_values_row
+                .iter()
+                .map(|opt| match opt {
+                    Some(val) => ValueRef::Int64(*val),
+                    None => ValueRef::Null,
+                })
+                .collect();
+
+            let encoded = codec.encode(values.into_iter()).unwrap();
+            builder.append_value(&encoded);
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    fn build_test_sparse_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__table_id",
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "__tsid",
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag1", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            })
+            .primary_key(vec![
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+                1,
+                3,
+            ])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn build_test_sparse_pk_array(
+        codec: &SparsePrimaryKeyCodec,
+        pk_values_per_row: &[SparseTestRow],
+    ) -> Arc<PrimaryKeyArray> {
+        let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
+        for row in pk_values_per_row {
+            let values = vec![
+                (ReservedColumnId::table_id(), ValueRef::UInt32(row.table_id)),
+                (ReservedColumnId::tsid(), ValueRef::UInt64(row.tsid)),
+                (1, ValueRef::String(&row.tag0)),
+                (3, ValueRef::String(&row.tag1)),
+            ];
+
+            let mut buffer = Vec::new();
+            codec.encode_value_refs(&values, &mut buffer).unwrap();
+            builder.append_value(&buffer);
+        }
+
+        Arc::new(builder.finish())
+    }
+
+    #[derive(Clone)]
+    struct SparseTestRow {
+        table_id: u32,
+        tsid: u64,
+        tag0: String,
+        tag1: String,
+    }
+
+    #[test]
+    fn test_flat_read_format_convert_format_with_dense_encoding() {
+        let metadata = build_test_region_metadata();
+
+        let column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+
+        let num_rows = 4;
+        let original_sequence = 100u64;
+
+        // Create primary key values for each row: tag0=1, tag1=1 for all rows
+        let pk_values_per_row = vec![
+                &[Some(1i64), Some(1i64)][..]; num_rows  // All rows have same primary key values
+            ];
+
+        // Create a test record batch in old format using dense encoding
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let dense_pk_array = build_test_dense_pk_array(&codec, &pk_values_per_row);
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            dense_pk_array.clone(),                        // __primary_key (dense encoding)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+
+        // Create schema for old format (without primary key columns)
+        let old_format_fields = vec![
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ];
+        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
+
+        // Test conversion with dense encoding
+        let result = format.convert_batch(record_batch, None).unwrap();
+
+        // Construct expected RecordBatch in flat format with decoded primary key columns
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag0 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag1 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            dense_pk_array,                                // __primary_key (preserved)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expected_record_batch =
+            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
+
+        // Compare the actual result with the expected record batch
+        assert_eq!(expected_record_batch, result);
+    }
+
+    #[test]
+    fn test_flat_read_format_convert_format_with_sparse_encoding() {
+        let metadata = build_test_sparse_region_metadata();
+
+        let column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+
+        let num_rows = 4;
+        let original_sequence = 100u64;
+
+        // Create sparse test data with table_id, tsid and string tags
+        let pk_test_rows = vec![
+            SparseTestRow {
+                table_id: 1,
+                tsid: 123,
+                tag0: "frontend".to_string(),
+                tag1: "pod1".to_string(),
+            };
+            num_rows
+        ];
+
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let sparse_pk_array = build_test_sparse_pk_array(&codec, &pk_test_rows);
+        // Create a test record batch in old format using sparse encoding
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            sparse_pk_array.clone(),                       // __primary_key (sparse encoding)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+
+        // Create schema for old format (without primary key columns)
+        let old_format_fields = vec![
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ];
+        let old_schema = Arc::new(Schema::new(old_format_fields));
+        let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
+
+        // Test conversion with sparse encoding
+        let result = format.convert_batch(record_batch, None).unwrap();
+
+        // Construct expected RecordBatch in flat format with decoded primary key columns
+        let tag0_array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0; num_rows]),
+            Arc::new(StringArray::from(vec!["frontend"])),
+        ));
+        let tag1_array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0; num_rows]),
+            Arc::new(StringArray::from(vec!["pod1"])),
+        ));
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(vec![1; num_rows])), // __table_id (decoded from primary key)
+            Arc::new(UInt64Array::from(vec![123; num_rows])), // __tsid (decoded from primary key)
+            tag0_array,                                     // tag0 (decoded from primary key)
+            tag1_array,                                     // tag1 (decoded from primary key)
+            Arc::new(Int64Array::from(vec![2; num_rows])),  // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])),  // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            sparse_pk_array,                                // __primary_key (preserved)
+            Arc::new(UInt64Array::from(vec![original_sequence; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expected_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let expected_record_batch =
+            RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        // Compare the actual result with the expected record batch
+        assert_eq!(expected_record_batch, result);
     }
 }

@@ -21,6 +21,7 @@ use common_base::readable_size::ReadableSize;
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
+use datatypes::prelude::ConcreteDataType;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
@@ -120,17 +121,13 @@ pub fn to_flat_sst_arrow_schema(
     if options.raw_pk_columns {
         for pk_id in &metadata.primary_key {
             let pk_index = metadata.column_index_by_id(*pk_id).unwrap();
-            if options.string_pk_use_dict
-                && metadata.column_metadatas[pk_index]
-                    .column_schema
-                    .data_type
-                    .is_string()
-            {
-                let field = &schema.fields[pk_index];
-                let field = Arc::new(to_dictionary_field(field));
-                fields.push(field);
-            } else {
-                fields.push(schema.fields[pk_index].clone());
+            if options.string_pk_use_dict {
+                let old_field = &schema.fields[pk_index];
+                let new_field = tag_maybe_to_dictionary_field(
+                    &metadata.column_metadatas[pk_index].column_schema.data_type,
+                    old_field,
+                );
+                fields.push(new_field);
             }
         }
     }
@@ -155,13 +152,25 @@ pub fn to_flat_sst_arrow_schema(
 }
 
 /// Helper function to create a dictionary field from a field.
-pub(crate) fn to_dictionary_field(field: &Field) -> Field {
+fn to_dictionary_field(field: &Field) -> Field {
     Field::new_dictionary(
         field.name(),
         datatypes::arrow::datatypes::DataType::UInt32,
         field.data_type().clone(),
         field.is_nullable(),
     )
+}
+
+/// Helper function to create a dictionary field from a field if it is a string column.
+pub(crate) fn tag_maybe_to_dictionary_field(
+    data_type: &ConcreteDataType,
+    field: &Arc<Field>,
+) -> Arc<Field> {
+    if data_type.is_string() {
+        Arc::new(to_dictionary_field(field))
+    } else {
+        field.clone()
+    }
 }
 
 /// Fields for internal columns.

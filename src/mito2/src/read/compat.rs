@@ -45,7 +45,7 @@ use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{FormatProjection, PrimaryKeyArray, INTERNAL_COLUMN_NUM};
-use crate::sst::{internal_fields, to_dictionary_field};
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -228,7 +228,10 @@ impl FlatCompatBatch {
             let column_field = &mapper.metadata().schema.arrow_schema().fields()[column_index];
             // For tag columns, we need to create a dictionary field.
             if expect_column.semantic_type == SemanticType::Tag {
-                fields.push(Arc::new(to_dictionary_field(column_field)));
+                fields.push(tag_maybe_to_dictionary_field(
+                    &expect_column.column_schema.data_type,
+                    column_field,
+                ));
             } else {
                 fields.push(column_field.clone());
             };
@@ -1437,7 +1440,8 @@ mod tests {
         ));
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1520,7 +1524,8 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
+        let read_format =
+            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
         let format_projection = read_format.format_projection();
 
         let compat_batch =

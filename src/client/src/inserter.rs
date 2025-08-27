@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use api::v1::RowInsertRequests;
 use humantime::format_duration;
-use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY, TWCS_TIME_WINDOW};
 
 use crate::error::Result;
 
@@ -35,15 +35,23 @@ pub struct InsertOptions {
     pub ttl: Duration,
     /// Whether to use append mode for the insert.
     pub append_mode: bool,
+    /// Time window for twcs compaction.
+    pub twcs_compaction_time_window: Option<Duration>,
 }
 
 impl InsertOptions {
     /// Converts the insert options to a list of key-value string hints.
     pub fn to_hints(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut hints = vec![
             (TTL_KEY, format_duration(self.ttl).to_string()),
             (APPEND_MODE_KEY, self.append_mode.to_string()),
-        ]
+        ];
+
+        if let Some(time_window) = self.twcs_compaction_time_window {
+            hints.push((TWCS_TIME_WINDOW, format_duration(time_window).to_string()));
+        }
+
+        hints
     }
 }
 
