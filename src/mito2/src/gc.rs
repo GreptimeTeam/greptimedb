@@ -139,7 +139,6 @@ impl LocalGcWorker {
     }
 
     pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
-        let _ = self.table_id;
         let table_ref_manifest = read_all_ref_files_for_table(&self.access_layer).await?;
         let latest_manifest = table_ref_manifest
             .into_iter()
@@ -173,9 +172,11 @@ impl LocalGcWorker {
     /// TODO(discord9): consider instead running in parallel mode
     pub async fn run(self) -> Result<()> {
         info!("LocalGcWorker started");
+
+        let tmp_ref_files = self.read_tmp_ref_files().await?;
         for region_id in self.manifest_mgrs.keys() {
             info!("Doing gc for region {}", region_id);
-            self.do_region_gc(*region_id).await?;
+            self.do_region_gc(*region_id, &tmp_ref_files).await?;
             info!("Gc for region {} finished", region_id);
         }
         info!("LocalGcWorker finished");
@@ -196,7 +197,11 @@ impl LocalGcWorker {
     ///
     /// Note that the files that are still in use or may still be kept for a while are not deleted
     /// to avoid deleting files that are still needed.
-    pub async fn do_region_gc(&self, region_id: RegionId) -> Result<()> {
+    pub async fn do_region_gc(
+        &self,
+        region_id: RegionId,
+        tmp_ref_files: &HashSet<FileId>,
+    ) -> Result<()> {
         info!("Doing gc for region {}", region_id);
         // TODO(discord9): impl gc worker
         let manifest = self
@@ -224,8 +229,6 @@ impl LocalGcWorker {
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_per_gc_job);
-
-        let tmp_ref_files = self.read_tmp_ref_files().await?;
 
         let in_used = current_files
             .keys()
