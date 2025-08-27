@@ -92,7 +92,14 @@ pub async fn check_auth(
         headers,
         &[AUTHORIZATION_HEADER, http::header::AUTHORIZATION.as_str()],
     )?
-    .map(|x| x.try_into())
+    .map(|x| {
+        if x.len() > 5 && x[0..5].eq_ignore_ascii_case("Basic") {
+            x.try_into()
+        } else {
+            // compatible with old version
+            format!("Basic {}", x).as_str().try_into()
+        }
+    })
     .transpose()?
     .map(|x: crate::http::authorize::AuthScheme| x.into());
 

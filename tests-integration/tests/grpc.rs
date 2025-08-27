@@ -316,11 +316,32 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
     }
     // test auth
     {
-        let stream = futures::stream::once(async { batch_arrow_records });
+        let records = batch_arrow_records.clone();
+        let stream = futures::stream::once(async { records });
         let mut request = Request::new(stream);
         request.metadata_mut().insert(
             "authorization",
             MetadataValue::from_static("Basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
+        );
+        let response = client.arrow_metrics(request).await;
+        assert!(response.is_ok());
+
+        let mut response_stream = response.unwrap().into_inner();
+        let resp = response_stream.message().await;
+        assert!(resp.is_err());
+        let error = resp.unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Failed to handle otel-arrow request, error message: Batch is empty"
+        );
+    }
+    // test old auth
+    {
+        let stream = futures::stream::once(async { batch_arrow_records });
+        let mut request = Request::new(stream);
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
         );
         let response = client.arrow_metrics(request).await;
         assert!(response.is_ok());
