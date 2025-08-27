@@ -242,6 +242,7 @@ mod tests {
                     flow_name: "my_flow".to_string(),
                     raw_sql: "sql".to_string(),
                     expire_after: Some(300),
+                    eval_interval_secs: None,
                     comment: "comment".to_string(),
                     options: Default::default(),
                     created_time: chrono::Utc::now(),

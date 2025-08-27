@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::flow::{DirtyWindowRequests, FlowResponse};
 use catalog::CatalogManagerRef;
@@ -30,6 +31,7 @@ use common_telemetry::{debug, info};
 use common_time::TimeToLive;
 use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::parsers::utils::is_tql;
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{oneshot, RwLock};
 
@@ -40,8 +42,8 @@ use crate::batching_mode::utils::sql_to_df_plan;
 use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
-    UnexpectedSnafu, UnsupportedSnafu,
+    CreateFlowSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, InvalidQuerySnafu,
+    TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -335,6 +337,7 @@ impl BatchingEngine {
             create_if_not_exists,
             or_replace,
             expire_after,
+            eval_interval,
             comment: _,
             sql,
             flow_options,
@@ -361,6 +364,25 @@ impl BatchingEngine {
             }
         }
 
+        let query_ctx = query_ctx.context({
+            UnexpectedSnafu {
+                reason: "Query context is None".to_string(),
+            }
+        })?;
+        let query_ctx = Arc::new(query_ctx);
+
+        // optionally set a eval interval for the flow
+        if eval_interval.is_none()
+            && is_tql(query_ctx.sql_dialect(), &sql)
+                .map_err(BoxedError::new)
+                .context(CreateFlowSnafu { sql: &sql })?
+        {
+            InvalidQuerySnafu {
+                reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
+            }
+            .fail()?;
+        }
+
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
@@ -374,13 +396,6 @@ impl BatchingEngine {
             }
         );
 
-        let Some(query_ctx) = query_ctx else {
-            UnexpectedSnafu {
-                reason: "Query context is None".to_string(),
-            }
-            .fail()?
-        };
-        let query_ctx = Arc::new(query_ctx);
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
@@ -442,6 +457,7 @@ impl BatchingEngine {
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
             batch_opts: self.batch_opts.clone(),
+            flow_eval_interval: eval_interval.map(|secs| Duration::from_secs(secs as u64)),
         };
 
         let task = BatchingTask::try_new(task_args)?;
