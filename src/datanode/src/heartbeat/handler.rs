@@ -102,12 +102,6 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_regions_instruction(flush_regions)
             })),
-            Instruction::FlushRegion(region_id) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_region_instruction(region_id)
-            })),
-            Instruction::FlushRegionsV2(flush_regions_v2) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_regions_v2_instruction(flush_regions_v2)
-            })),
         }
     }
 }
@@ -121,8 +115,6 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::CloseRegion { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
-                | Some((_, Instruction::FlushRegion { .. }))
-                | Some((_, Instruction::FlushRegionsV2 { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
         )
     }
