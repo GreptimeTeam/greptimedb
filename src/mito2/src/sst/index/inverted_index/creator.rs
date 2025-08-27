@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::vectors::Helper;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
@@ -73,6 +75,9 @@ pub struct InvertedIndexer {
 
     /// Ids of indexed columns and their names (`to_string` of the column id).
     indexed_column_ids: Vec<(ColumnId, String)>,
+
+    /// Region metadata for column lookups.
+    metadata: RegionMetadataRef,
 }
 
 impl InvertedIndexer {
@@ -121,6 +126,7 @@ impl InvertedIndexer {
             aborted: false,
             memory_usage,
             indexed_column_ids,
+            metadata: metadata.clone(),
         }
     }
 
@@ -143,6 +149,69 @@ impl InvertedIndexer {
                 }
             }
             return Err(update_err);
+        }
+
+        Ok(())
+    }
+
+    /// Updates the inverted index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        self.do_update_flat(batch).await
+    }
+
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+
+        let n = batch.num_rows();
+        guard.inc_row_count(n);
+
+        for (col_id, col_id_str) in &self.indexed_column_ids {
+            // Get the column name from metadata
+            if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
+                let column_name = &column_meta.column_schema.name;
+
+                // Find the column in the RecordBatch by name
+                if let Some(column_array) = batch.column_by_name(column_name) {
+                    // Convert Arrow array to VectorRef using Helper
+                    let vector = Helper::try_into_vector(column_array.clone())
+                        .context(crate::error::ConvertVectorSnafu)?;
+                    let sort_field = SortField::new(vector.data_type());
+
+                    for row in 0..n {
+                        self.value_buf.clear();
+                        let value_ref = vector.get_ref(row);
+
+                        if value_ref.is_null() {
+                            self.index_creator
+                                .push_with_name(col_id_str, None)
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                        } else {
+                            IndexValueCodec::encode_nonnull_value(
+                                value_ref,
+                                &sort_field,
+                                &mut self.value_buf,
+                            )
+                            .context(EncodeSnafu)?;
+                            self.index_creator
+                                .push_with_name(col_id_str, Some(&self.value_buf))
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                        }
+                    }
+                } else {
+                    debug!(
+                        "Column {} not found in the batch during building inverted index",
+                        column_name
+                    );
+                }
+            }
         }
 
         Ok(())

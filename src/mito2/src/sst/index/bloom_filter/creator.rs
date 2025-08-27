@@ -17,7 +17,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SkippingIndexType;
+use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::SortField;
@@ -63,6 +65,9 @@ pub struct BloomFilterIndexer {
 
     /// The global memory usage.
     global_memory_usage: Arc<AtomicUsize>,
+
+    /// Region metadata for column lookups.
+    metadata: RegionMetadataRef,
 }
 
 impl BloomFilterIndexer {
@@ -120,6 +125,7 @@ impl BloomFilterIndexer {
             aborted: false,
             stats: Statistics::new(TYPE_BLOOM_FILTER_INDEX),
             global_memory_usage,
+            metadata: metadata.clone(),
         };
         Ok(Some(indexer))
     }
@@ -136,6 +142,29 @@ impl BloomFilterIndexer {
         }
 
         if let Err(update_err) = self.do_update(batch).await {
+            // clean up garbage if failed to update
+            if let Err(err) = self.do_cleanup().await {
+                if cfg!(any(test, feature = "test")) {
+                    panic!("Failed to clean up index creator, err: {err:?}",);
+                } else {
+                    warn!(err; "Failed to clean up index creator");
+                }
+            }
+            return Err(update_err);
+        }
+
+        Ok(())
+    }
+
+    /// Updates the bloom filter index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if self.creators.is_empty() || batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if let Err(update_err) = self.do_update_flat(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
                 if cfg!(any(test, feature = "test")) {
@@ -244,6 +273,59 @@ impl BloomFilterIndexer {
 
                         creator
                             .push_row_elems(elems)
+                            .await
+                            .context(PushBloomFilterValueSnafu)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+
+        let n = batch.num_rows();
+        guard.inc_row_count(n);
+
+        for (col_id, creator) in &mut self.creators {
+            // Get the column name from metadata
+            if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
+                let column_name = &column_meta.column_schema.name;
+
+                // Find the column in the RecordBatch by name
+                if let Some(column_array) = batch.column_by_name(column_name) {
+                    // Convert Arrow array to VectorRef
+                    let vector = Helper::try_into_vector(column_array.clone())
+                        .context(crate::error::ConvertVectorSnafu)?;
+                    let sort_field = SortField::new(vector.data_type());
+
+                    for i in 0..n {
+                        let value = vector.get_ref(i);
+                        let elems = (!value.is_null())
+                            .then(|| {
+                                let mut buf = vec![];
+                                IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
+                                    .context(EncodeSnafu)?;
+                                Ok(buf)
+                            })
+                            .transpose()?;
+
+                        creator
+                            .push_row_elems(elems)
+                            .await
+                            .context(PushBloomFilterValueSnafu)?;
+                    }
+                } else {
+                    debug!(
+                        "Column {} not found in the batch during building bloom filter index",
+                        column_name
+                    );
+                    // Push empty elements to maintain alignment
+                    for _ in 0..n {
+                        creator
+                            .push_row_elems(None)
                             .await
                             .context(PushBloomFilterValueSnafu)?;
                     }

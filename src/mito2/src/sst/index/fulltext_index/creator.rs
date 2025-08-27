@@ -17,7 +17,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
+use datatypes::vectors::Helper;
 use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
@@ -119,6 +121,7 @@ impl FulltextIndexer {
                 column_id,
                 SingleCreator {
                     column_id,
+                    column_name: column.column_schema.name.clone(),
                     inner,
                     compress,
                 },
@@ -137,6 +140,28 @@ impl FulltextIndexer {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if let Err(update_err) = self.do_update(batch).await {
+            if let Err(err) = self.do_abort().await {
+                if cfg!(any(test, feature = "test")) {
+                    panic!("Failed to abort index creator, err: {err}");
+                } else {
+                    warn!(err; "Failed to abort index creator");
+                }
+            }
+            return Err(update_err);
+        }
+
+        Ok(())
+    }
+
+    /// Updates the fulltext index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if let Err(update_err) = self.do_update_flat(batch).await {
             if let Err(err) = self.do_abort().await {
                 if cfg!(any(test, feature = "test")) {
                     panic!("Failed to abort index creator, err: {err}");
@@ -204,6 +229,17 @@ impl FulltextIndexer {
         Ok(())
     }
 
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        let mut guard = self.stats.record_update();
+        guard.inc_row_count(batch.num_rows());
+
+        for creator in self.creators.values_mut() {
+            creator.update_flat(batch).await?;
+        }
+
+        Ok(())
+    }
+
     async fn do_finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<()> {
         let mut guard = self.stats.record_finish();
 
@@ -233,6 +269,8 @@ impl FulltextIndexer {
 struct SingleCreator {
     /// Column ID.
     column_id: ColumnId,
+    /// Column name.
+    column_name: String,
     /// Inner creator.
     inner: AltFulltextCreator,
     /// Whether the index should be compressed.
@@ -271,6 +309,41 @@ impl SingleCreator {
                 for _ in 0..batch.num_rows() {
                     self.inner.push_text("").await?;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        // Find the column in the RecordBatch by name
+        if let Some(column_array) = batch.column_by_name(&self.column_name) {
+            // Convert Arrow array to VectorRef
+            let vector = Helper::try_into_vector(column_array.clone())
+                .context(crate::error::ConvertVectorSnafu)?;
+            // Cast to string if needed
+            let string_vector =
+                vector
+                    .cast(&ConcreteDataType::string_datatype())
+                    .context(CastVectorSnafu {
+                        from: vector.data_type(),
+                        to: ConcreteDataType::string_datatype(),
+                    })?;
+
+            for i in 0..batch.num_rows() {
+                let data = string_vector.get_ref(i);
+                let text = data
+                    .as_string()
+                    .context(DataTypeMismatchSnafu)?
+                    .unwrap_or_default();
+                self.inner.push_text(text).await?;
+            }
+        } else {
+            // If the column is not found in the batch, push empty text.
+            // Ensure that the number of texts pushed is the same as the number of rows in the SST,
+            // so that the texts are aligned with the row ids.
+            for _ in 0..batch.num_rows() {
+                self.inner.push_text("").await?;
             }
         }
 
