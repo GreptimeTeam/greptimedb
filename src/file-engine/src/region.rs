@@ -178,6 +178,7 @@ mod tests {
             path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
+            checkpoint: None,
         };
 
         let region = FileRegion::open(region_id, request, &object_store)
@@ -230,6 +231,7 @@ mod tests {
             path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
+            checkpoint: None,
         };
         let err = FileRegion::open(region_id, request, &object_store)
             .await

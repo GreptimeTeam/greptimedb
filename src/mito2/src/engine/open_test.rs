@@ -50,6 +50,7 @@ async fn test_engine_open_empty() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -85,6 +86,7 @@ async fn test_engine_open_existing() {
                 path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -180,6 +182,7 @@ async fn test_engine_region_open_with_options() {
                 path_type: PathType::Bare,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -226,6 +229,7 @@ async fn test_engine_region_open_with_custom_store() {
                 path_type: PathType::Bare,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -298,6 +302,7 @@ async fn test_open_region_skip_wal_replay() {
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await
@@ -328,6 +333,7 @@ async fn test_open_region_skip_wal_replay() {
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: false,
+                checkpoint: None,
             }),
         )
         .await
@@ -370,6 +376,7 @@ async fn test_open_region_wait_for_opening_region_ok() {
                     path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
+                    checkpoint: None,
                 }),
             )
             .await
@@ -410,6 +417,7 @@ async fn test_open_region_wait_for_opening_region_err() {
                     path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
+                    checkpoint: None,
                 }),
             )
             .await

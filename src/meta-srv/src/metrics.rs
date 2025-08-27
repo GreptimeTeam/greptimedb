@@ -82,5 +82,12 @@ lazy_static! {
     .unwrap();
     /// The triggered region flush total counter.
     pub static ref METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL: IntCounterVec =
-        register_int_counter_vec!("meta_triggered_region_flushes_total", "meta triggered region flush total", &["topic_name", "region_type"]).unwrap();
+        register_int_counter_vec!("meta_triggered_region_flush_total", "meta triggered region flush total", &["topic_name", "region_type"]).unwrap();
+
+    /// The triggered region checkpoint total counter.
+    pub static ref METRIC_META_TRIGGERED_REGION_CHECKPOINT_TOTAL: IntCounterVec =
+        register_int_counter_vec!("meta_triggered_region_checkpoint_total", "meta triggered region checkpoint total", &["topic_name"]).unwrap();
+    /// The topic estimated replay size.
+    pub static ref METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE: IntGaugeVec =
+        register_int_gauge_vec!("meta_topic_estimated_replay_size", "meta topic estimated replay size", &["topic_name"]).unwrap();
 }

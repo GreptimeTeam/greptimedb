@@ -27,7 +27,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
-use crate::key::NAME_PATTERN_REGEX;
+use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 pub use crate::wal_options_allocator::topic_creator::{
@@ -109,7 +109,7 @@ pub async fn build_wal_options_allocator(
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
-                NAME_PATTERN_REGEX.is_match(prefix),
+                TOPIC_NAME_PATTERN_REGEX.is_match(prefix),
                 InvalidTopicNamePrefixSnafu { prefix }
             );
             let topic_creator =
@@ -147,6 +147,26 @@ pub fn prepare_wal_options(
     if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
         options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
     }
+}
+
+/// Extracts the topic from the wal options.
+pub fn extract_topic_from_wal_options(
+    region_id: RegionId,
+    region_options: &HashMap<RegionNumber, String>,
+) -> Option<String> {
+    region_options
+        .get(&region_id.region_number())
+        .and_then(|wal_options| {
+            serde_json::from_str::<WalOptions>(wal_options)
+                .ok()
+                .and_then(|wal_options| {
+                    if let WalOptions::Kafka(kafka_wal_option) = wal_options {
+                        Some(kafka_wal_option.topic)
+                    } else {
+                        None
+                    }
+                })
+        })
 }
 
 #[cfg(test)]

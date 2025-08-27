@@ -28,3 +28,4 @@ pub mod service;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod tests;
+pub mod utils;

@@ -38,6 +38,7 @@ use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
@@ -532,6 +533,20 @@ impl Context {
         }
 
         Ok(datanode_value.as_ref().unwrap())
+    }
+
+    /// Fetches the replay checkpoint for the given topic.
+    pub async fn fetch_replay_checkpoint(&self, topic: &str) -> Result<Option<ReplayCheckpoint>> {
+        let region_id = self.region_id();
+        let topic_region_key = TopicRegionKey::new(region_id, topic);
+        let value = self
+            .table_metadata_manager
+            .topic_region_manager()
+            .get(topic_region_key)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        Ok(value.and_then(|value| value.checkpoint))
     }
 
     /// Returns the [RegionId].

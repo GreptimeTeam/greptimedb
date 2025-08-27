@@ -85,6 +85,7 @@ pub(crate) struct RegionOpener {
     time_provider: TimeProviderRef,
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
+    replay_checkpoint: Option<u64>,
 }
 
 impl RegionOpener {
@@ -118,6 +119,7 @@ impl RegionOpener {
             time_provider,
             stats: Default::default(),
             wal_entry_reader: None,
+            replay_checkpoint: None,
         }
     }
 
@@ -147,6 +149,12 @@ impl RegionOpener {
     /// Parses and sets options for the region.
     pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
         self.options(RegionOptions::try_from(&options)?)
+    }
+
+    /// Sets the replay checkpoint for the region.
+    pub(crate) fn replay_checkpoint(mut self, replay_checkpoint: Option<u64>) -> Self {
+        self.replay_checkpoint = replay_checkpoint;
+        self
     }
 
     /// If a [WalEntryReader] is set, the [RegionOpener] will use [WalEntryReader] instead of
@@ -432,17 +440,22 @@ impl RegionOpener {
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
+            let replay_from_entry_id = self
+                .replay_checkpoint
+                .unwrap_or_default()
+                .max(flushed_entry_id);
             info!(
-                "Start replaying memtable at flushed_entry_id + 1: {} for region {}, manifest version: {}",
-                flushed_entry_id + 1,
+                "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
+                replay_from_entry_id,
                 region_id,
-                manifest.manifest_version
+                manifest.manifest_version,
+                flushed_entry_id
             );
             replay_memtable(
                 &provider,
                 wal_entry_reader,
                 region_id,
-                flushed_entry_id,
+                replay_from_entry_id,
                 &version_control,
                 config.allow_stale_entries,
                 on_region_opened,

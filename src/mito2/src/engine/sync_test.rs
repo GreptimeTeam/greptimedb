@@ -111,6 +111,7 @@ async fn test_sync_after_flush_region() {
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await
@@ -207,6 +208,7 @@ async fn test_sync_after_alter_region() {
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
+                checkpoint: None,
             }),
         )
         .await
