@@ -44,7 +44,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{utils, FlightCompression, TonicResult};
+use crate::grpc::{context_auth, FlightCompression, TonicResult};
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -213,8 +213,8 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, _, stream) = request.into_parts();
 
-        let query_ctx = utils::create_query_context_from_grpc_metadata(&headers)?;
-        utils::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);

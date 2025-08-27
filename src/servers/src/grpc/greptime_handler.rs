@@ -43,7 +43,7 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
-use crate::grpc::{utils, FlightCompression, TonicResult};
+use crate::grpc::{context_auth, FlightCompression, TonicResult};
 use crate::metrics;
 use crate::metrics::METRIC_SERVER_GRPC_DB_REQUEST_TIMER;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -83,7 +83,7 @@ impl GreptimeRequestHandler {
 
         let header = request.header.as_ref();
         let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
-        let user_info = utils::auth(self.user_provider.clone(), header, &query_ctx).await?;
+        let user_info = context_auth::auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
         let handler = self.handler.clone();

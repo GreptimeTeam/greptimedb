@@ -25,7 +25,7 @@ use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
-use crate::grpc::utils::{self};
+use crate::grpc::context_auth;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtelArrowServiceHandler<T> {
@@ -53,8 +53,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
 
         let (headers, _, mut incoming_requests) = request.into_parts();
 
-        let query_ctx = utils::create_query_context_from_grpc_metadata(&headers)?;
-        utils::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         let handler = self.handler.clone();
 
