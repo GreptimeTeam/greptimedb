@@ -953,9 +953,7 @@ mod tests {
     }
 
     async fn build_pg15_kv_backend(table_name: &str) -> Option<PgStore> {
-        let Some(pool) = build_pg15_pool().await else {
-            return None;
-        };
+        let pool = build_pg15_pool().await?;
         let client = pool.get().await.ok()?;
         let factory = PgSqlTemplateFactory::new(Some("test_schema"), table_name);
         let sql_templates = factory.build();
