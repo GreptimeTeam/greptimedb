@@ -25,7 +25,7 @@ const HTTP_OK: &str = "OK\n";
 #[derive(Clone)]
 pub struct HealthHandler;
 
-/// Get the next table id without incrementing the sequence.
+/// Health check endpoint that returns HTTP 200 OK if the service is healthy.
 #[axum_macros::debug_handler]
 pub(crate) async fn health() -> Response {
     http::Response::builder()
