@@ -42,6 +42,7 @@ use crate::error::{
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::metrics::{GC_FILE_CNT_PER_TABLE, GC_TMP_REF_FILE_CNT_PER_TABLE};
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::file_purger::read_all_ref_files_for_table;
@@ -229,8 +230,17 @@ impl LocalGcWorker {
         let in_used = current_files
             .keys()
             .cloned()
-            .chain(tmp_ref_files.into_iter())
+            .chain(tmp_ref_files.clone().into_iter())
             .collect();
+
+        let true_tmp_ref_files = tmp_ref_files
+            .into_iter()
+            .filter(|f| !current_files.contains_key(f))
+            .collect::<HashSet<_>>();
+
+        GC_TMP_REF_FILE_CNT_PER_TABLE
+            .with_label_values(&[&self.table_id.to_string()])
+            .set(true_tmp_ref_files.len() as i64);
 
         let unused_files = self
             .list_unused_files(region_id, in_used, recently_removed_files, concurrency)
@@ -304,7 +314,11 @@ impl LocalGcWorker {
             }
         }
 
-        todo!()
+        GC_FILE_CNT_PER_TABLE
+            .with_label_values(&[&self.table_id.to_string()])
+            .add(file_ids.len() as i64);
+
+        Ok(())
     }
 
     /// Get the manifest manager for the region.
