@@ -901,7 +901,7 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
-    use crate::maybe_skip_postgres_integration_test;
+    use crate::{maybe_skip_postgres15_integration_test, maybe_skip_postgres_integration_test};
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -936,6 +936,84 @@ mod tests {
             executor_factory: PgExecutorFactory { pool },
             _phantom: PhantomData,
         })
+    }
+
+    async fn build_pg15_pool() -> Option<Pool> {
+        let url = std::env::var("GT_POSTGRES15_ENDPOINTS").unwrap_or_default();
+        if url.is_empty() {
+            return None;
+        }
+        let mut cfg = Config::new();
+        cfg.url = Some(url);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .ok()?;
+        Some(pool)
+    }
+
+    async fn build_pg15_kv_backend(table_name: &str) -> Option<PgStore> {
+        let Some(pool) = build_pg15_pool().await else {
+            return None;
+        };
+        let client = pool.get().await.ok()?;
+        let factory = PgSqlTemplateFactory::new(Some("test_schema"), table_name);
+        let sql_templates = factory.build();
+        // Ensure table exists in test_schema
+        if client
+            .execute(&sql_templates.create_table_statement, &[])
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        Some(PgStore {
+            max_txn_ops: 128,
+            sql_template_set: sql_templates,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: PgExecutorFactory { pool },
+            _phantom: PhantomData,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_pg15_create_table_in_public_should_fail() {
+        maybe_skip_postgres15_integration_test!();
+        let Some(pool) = build_pg15_pool().await else {
+            return;
+        };
+        let res = PgStore::with_pg_pool(pool, None, "pg15_public_should_fail", 128).await;
+        assert!(
+            res.is_err(),
+            "creating table in public should fail for test_user"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pg15_create_table_in_test_schema_and_crud_should_succeed() {
+        maybe_skip_postgres15_integration_test!();
+        let Some(pool) = build_pg15_pool().await else {
+            return;
+        };
+        let client = pool.get().await.unwrap();
+        let factory = PgSqlTemplateFactory::new(Some("test_schema"), "pg15_ok");
+        let templates = factory.build();
+        client
+            .execute(&templates.create_table_statement, &[])
+            .await
+            .unwrap();
+        let kv = PgStore {
+            max_txn_ops: 128,
+            sql_template_set: templates,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: PgExecutorFactory { pool },
+            _phantom: PhantomData,
+        };
+        let prefix = b"pg15_crud/";
+        prepare_kv_with_prefix(&kv, prefix.to_vec()).await;
+        test_kv_put_with_prefix(&kv, prefix.to_vec()).await;
+        test_kv_batch_get_with_prefix(&kv, prefix.to_vec()).await;
+        unprepare_kv(&kv, prefix).await;
     }
 
     #[tokio::test]
@@ -1032,6 +1110,136 @@ mod tests {
     async fn test_pg_txn() {
         maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("txn_test").await.unwrap();
+        test_txn_one_compare_op(&kv_backend).await;
+        text_txn_multi_compare_op(&kv_backend).await;
+        test_txn_compare_equal(&kv_backend).await;
+        test_txn_compare_greater(&kv_backend).await;
+        test_txn_compare_less(&kv_backend).await;
+        test_txn_compare_not_equal(&kv_backend).await;
+    }
+
+    // --- New: Mirror full CRUD/txn tests for PG15 ---
+    #[tokio::test]
+    async fn test_pg15_put() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_put_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_put/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_range() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_range_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_range/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_range_2() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_range2_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_range2/";
+        test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_all_range() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_simple_range_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_simple_kv_range(&kv_backend).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_batch_get() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_batch_get_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_batch_get/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_batch_delete() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_batch_delete_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_batch_delete/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_batch_delete_with_prefix() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_batch_delete_with_prefix_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_batch_delete/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_batch_delete_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_delete_range() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_delete_range_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
+        let prefix = b"pg15_delete_range/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_compare_and_put() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_compare_and_put_test").await {
+            Some(kv) => Arc::new(kv),
+            None => return,
+        };
+        let prefix = b"pg15_compare_and_put/";
+        test_kv_compare_and_put_with_prefix(kv_backend.clone(), prefix.to_vec()).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg15_txn() {
+        maybe_skip_postgres15_integration_test!();
+        let kv_backend = match build_pg15_kv_backend("pg15_txn_test").await {
+            Some(kv) => kv,
+            None => return,
+        };
         test_txn_one_compare_op(&kv_backend).await;
         text_txn_multi_compare_op(&kv_backend).await;
         test_txn_compare_equal(&kv_backend).await;
