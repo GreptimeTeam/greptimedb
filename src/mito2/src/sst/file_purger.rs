@@ -35,6 +35,7 @@ use crate::sst::file::{FileId, FileMeta};
 pub struct PurgeRequest {
     /// File meta.
     pub file_meta: FileMeta,
+    pub deleted: bool,
 }
 
 /// A worker to delete files in background.
@@ -162,13 +163,22 @@ impl LocalFilePurger {
 impl FilePurger for LocalFilePurger {
     fn send_request(&self, request: PurgeRequest) {
         if self.is_local_fs {
-            self.delete_file(request.file_meta);
+            if request.deleted {
+                self.delete_file(request.file_meta);
+            }
         } else {
-            // TODO(discord9): instead inform the global file purger to delete the file.
+            // if not on local file system, instead inform the global file purger to remove the file reference.
+            // notice that no matter whether the file is deleted or not, we need to remove the reference
+            // because the file is no longer in use nonetheless.
+            self.file_ref_manager.remove_file(&request.file_meta);
         }
     }
 
     fn add_new_file(&self, file_meta: &FileMeta) {
+        if self.is_local_fs {
+            // If the access layer is local file system, we don't need to track the file reference.
+            return;
+        }
         self.file_ref_manager
             .add_file(file_meta, self.sst_layer.clone());
     }
@@ -190,7 +200,8 @@ impl FileRef {
 /// It contains all files referenced by the table.
 #[derive(Debug, Clone)]
 pub struct TableFileRefs {
-    pub files: HashSet<FileRef>,
+    /// (FileRef, Ref Count) meaning how many FileHandleInner is opened for this file.
+    pub files: HashMap<FileRef, usize>,
     /// Access layer per table. Will be used to upload tmp file for recording references
     /// to the object storage.
     pub access_layer: AccessLayerRef,
@@ -308,26 +319,50 @@ impl FileReferenceManager {
         Self::default()
     }
 
-    pub async fn upload_ref_file_for_table(&self, table_id: TableId, now: i64) -> Result<()> {
-        let Some(file_refs) = self.files_per_table.lock().unwrap().get(&table_id).cloned() else {
-            return Ok(());
-        };
+    fn ref_file_manifest(
+        &self,
+        table_id: TableId,
+        now: i64,
+    ) -> Option<(TableFileRefsManifest, AccessLayerRef)> {
+        let file_refs = self
+            .files_per_table
+            .lock()
+            .unwrap()
+            .get(&table_id)
+            .cloned()?;
 
         if file_refs.files.is_empty() {
-            return Ok(());
+            return None;
         }
+
+        let ref_manifest = TableFileRefsManifest {
+            file_refs: file_refs.files.keys().cloned().collect(),
+            ts: now,
+        };
         let access_layer = &file_refs.access_layer;
+
+        info!(
+            "Preparing to upload ref file for table {}, node {}, path_type {:?}, {} files: {:?}",
+            table_id,
+            self.node_id,
+            access_layer.path_type(),
+            ref_manifest.file_refs.len(),
+            ref_manifest.file_refs,
+        );
+
+        Some((ref_manifest, access_layer.clone()))
+    }
+
+    pub async fn upload_ref_file_for_table(&self, table_id: TableId, now: i64) -> Result<()> {
+        let Some((ref_manifest, access_layer)) = self.ref_file_manifest(table_id, now) else {
+            return Ok(());
+        };
 
         let path = ref_file_path(
             access_layer.table_dir(),
             self.node_id,
             access_layer.path_type(),
         );
-
-        let ref_manifest = TableFileRefsManifest {
-            file_refs: file_refs.files.clone(),
-            ts: now,
-        };
 
         let content = serde_json::to_string(&ref_manifest).context(SerdeJsonSnafu)?;
 
@@ -347,13 +382,7 @@ impl FileReferenceManager {
     /// Adds a new file reference.
     /// Also records the access layer for the table if not exists.
     /// The access layer will be used to upload ref file to object storage.
-    /// If access layer is local file system, the file will be ignored and later when deleted
-    /// will be deleted directly.
     pub fn add_file(&self, file_meta: &FileMeta, table_access_layer: AccessLayerRef) {
-        if is_local_fs(&table_access_layer) {
-            // If the access layer is local file system, we don't need to track the file reference.
-            return;
-        }
         let table_id = file_meta.region_id.table_id();
         {
             let mut guard = self.files_per_table.lock().unwrap();
@@ -361,10 +390,13 @@ impl FileReferenceManager {
             guard
                 .entry(table_id)
                 .and_modify(|refs| {
-                    refs.files.insert(file_ref.clone());
+                    refs.files
+                        .entry(file_ref.clone())
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
                 })
                 .or_insert_with(|| TableFileRefs {
-                    files: HashSet::from([file_ref]),
+                    files: HashMap::from_iter([(file_ref, 1)]),
                     access_layer: table_access_layer.clone(),
                 });
         }
@@ -375,9 +407,25 @@ impl FileReferenceManager {
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
         let mut guard = self.files_per_table.lock().unwrap();
         guard.entry(table_id).and_modify(|refs| {
-            refs.files.remove(&file_ref);
+            refs.files.entry(file_ref.clone()).and_modify(|count| {
+                if *count > 0 {
+                    *count -= 1;
+                }
+            });
         });
 
+        // if the ref count is 0, meaning no existing FileHandleInner, remove the file ref from table.
+        if guard
+            .get(&table_id)
+            .map(|table_refs| table_refs.files.get(&file_ref))
+            == Some(Some(&0))
+        {
+            if let Some(table_refs) = guard.get_mut(&table_id) {
+                table_refs.files.remove(&file_ref);
+            }
+        }
+
+        // if no more files for the table, remove the table entry.
         if let Some(refs) = guard.get(&table_id) {
             if refs.files.is_empty() {
                 guard.remove(&table_id);
@@ -538,5 +586,100 @@ mod tests {
 
         assert!(!object_store.exists(&path).await.unwrap());
         assert!(!object_store.exists(&index_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_file_ref_mgr() {
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("file_ref_mgr");
+        let dir_path = dir.path().display().to_string();
+        let builder = Fs::default().root(&dir_path);
+        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
+        let sst_dir = "table1";
+
+        let index_aux_path = dir.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let layer = Arc::new(AccessLayer::new(
+            sst_dir,
+            PathType::Bare,
+            object_store.clone(),
+            puffin_mgr,
+            intm_mgr,
+        ));
+
+        let file_ref_mgr = FileReferenceManager::new();
+
+        let file_meta = FileMeta {
+            region_id: sst_file_id.region_id(),
+            file_id: sst_file_id.file_id(),
+            time_range: FileTimeRange::default(),
+            level: 0,
+            file_size: 4096,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            index_file_size: 4096,
+            num_rows: 1024,
+            num_row_groups: 1,
+            sequence: NonZeroU64::new(4096),
+        };
+
+        file_ref_mgr.add_file(&file_meta, layer.clone());
+
+        assert_eq!(
+            file_ref_mgr
+                .files_per_table
+                .lock()
+                .unwrap()
+                .get(&0)
+                .unwrap()
+                .files,
+            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
+        );
+
+        file_ref_mgr.add_file(&file_meta, layer.clone());
+
+        assert_eq!(
+            file_ref_mgr
+                .files_per_table
+                .lock()
+                .unwrap()
+                .get(&0)
+                .unwrap()
+                .files,
+            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 2)])
+        );
+
+        file_ref_mgr.remove_file(&file_meta);
+        assert_eq!(
+            file_ref_mgr
+                .files_per_table
+                .lock()
+                .unwrap()
+                .get(&0)
+                .unwrap()
+                .files,
+            HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
+        );
+
+        file_ref_mgr.remove_file(&file_meta);
+
+        assert!(
+            file_ref_mgr
+                .files_per_table
+                .lock()
+                .unwrap()
+                .get(&0)
+                .is_none(),
+            "{:?}",
+            file_ref_mgr.files_per_table.lock().unwrap()
+        );
     }
 }

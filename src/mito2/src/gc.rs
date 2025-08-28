@@ -237,16 +237,18 @@ impl LocalGcWorker {
             .collect();
 
         let true_tmp_ref_files = tmp_ref_files
-            .into_iter()
+            .iter()
             .filter(|f| !current_files.contains_key(f))
             .collect::<HashSet<_>>();
+
+        info!("True tmp ref files: {:?}", true_tmp_ref_files);
 
         GC_TMP_REF_FILE_CNT_PER_TABLE
             .with_label_values(&[&self.table_id.to_string()])
             .set(true_tmp_ref_files.len() as i64);
 
         let unused_files = self
-            .list_unused_files(region_id, in_used, recently_removed_files, concurrency)
+            .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
             .await?;
 
         let unused_len = unused_files.len();
@@ -273,18 +275,27 @@ impl LocalGcWorker {
                 cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
             }
         }
+        let mut deleted_files = Vec::with_capacity(file_ids.len());
 
         for file_id in file_ids {
             let region_file_id = RegionFileId::new(region_id, *file_id);
             match self.access_layer.delete_sst(&region_file_id).await {
                 Ok(_) => {
-                    info!("Deleted sst and index file for {}", region_file_id);
+                    deleted_files.push(*file_id);
                 }
                 Err(e) => {
                     error!(e; "Failed to delete sst and index file for {}", region_file_id);
                 }
             }
         }
+
+        info!(
+            "Deleted {} files for region {}: {:?}",
+            deleted_files.len(),
+            region_id,
+            deleted_files
+        );
+
         for file_id in file_ids {
             let region_file_id = RegionFileId::new(region_id, *file_id);
 
@@ -382,7 +393,7 @@ impl LocalGcWorker {
     /// Concurrently list unused files in the region dir
     /// because there may be a lot of files in the region dir
     /// and listing them may take a long time.
-    pub async fn list_unused_files(
+    pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
         in_used: HashSet<FileId>,
@@ -469,7 +480,18 @@ impl LocalGcWorker {
                         true
                     }
                 });
-                let stream = stream.collect::<Vec<_>>().await;
+                let stream = stream
+                    .filter(|e| {
+                        if let Ok(e) = &e {
+                            // notice that we only care about files, skip dirs
+                            e.metadata().is_file()
+                        } else {
+                            // error entry, take for further logging
+                            true
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .await;
                 // ordering of files doesn't matter here, so we can send them directly
                 tx.send(stream).await.expect("Failed to send entries");
             });
