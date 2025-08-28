@@ -43,7 +43,14 @@ pub fn new_file_handle_with_sequence(
     level: Level,
     sequence: u64,
 ) -> FileHandle {
-    new_file_handle_with_size_and_sequence(file_id, start_ts_millis, end_ts_millis, level, sequence, 0)
+    new_file_handle_with_size_and_sequence(
+        file_id,
+        start_ts_millis,
+        end_ts_millis,
+        level,
+        sequence,
+        0,
+    )
 }
 
 /// Test util to create file handles with custom size.
