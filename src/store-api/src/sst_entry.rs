@@ -111,12 +111,16 @@ impl ManifestSstEntry {
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
         let num_row_groups = entries.iter().map(|e| e.num_row_groups);
-        let min_ts = entries
-            .iter()
-            .map(|e| e.min_ts.convert_to(TimeUnit::Nanosecond).unwrap().value());
-        let max_ts = entries
-            .iter()
-            .map(|e| e.max_ts.convert_to(TimeUnit::Nanosecond).unwrap().value());
+        let min_ts = entries.iter().map(|e| {
+            e.min_ts
+                .convert_to(TimeUnit::Nanosecond)
+                .map(|ts| ts.value())
+        });
+        let max_ts = entries.iter().map(|e| {
+            e.max_ts
+                .convert_to(TimeUnit::Nanosecond)
+                .map(|ts| ts.value())
+        });
         let sequences = entries.iter().map(|e| e.sequence);
 
         let columns: Vec<ArrayRef> = vec![
@@ -134,8 +138,8 @@ impl ManifestSstEntry {
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
             Arc::new(UInt64Array::from_iter_values(num_row_groups)),
-            Arc::new(TimestampNanosecondArray::from_iter_values(min_ts)),
-            Arc::new(TimestampNanosecondArray::from_iter_values(max_ts)),
+            Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
+            Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
         ];
 
@@ -194,7 +198,7 @@ impl StorageSstEntry {
         let file_sizes = entries.iter().map(|e| e.file_size);
         let last_modified_ms = entries.iter().map(|e| {
             e.last_modified_ms
-                .map(|ts| ts.convert_to(TimeUnit::Millisecond).unwrap().value())
+                .and_then(|ts| ts.convert_to(TimeUnit::Millisecond).map(|ts| ts.value()))
         });
 
         let columns: Vec<ArrayRef> = vec![
