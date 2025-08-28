@@ -664,7 +664,7 @@ impl ManifestObjectStore {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct CheckpointMetadata {
+pub(crate) struct CheckpointMetadata {
     pub size: usize,
     /// The latest version this checkpoint contains.
     pub version: ManifestVersion,
