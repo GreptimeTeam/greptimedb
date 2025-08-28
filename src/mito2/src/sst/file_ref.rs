@@ -49,7 +49,7 @@ pub struct TableFileRefs {
     pub access_layer: AccessLayerRef,
 }
 
-pub const PURGER_REFS_PATH: &str = ".purger_refs";
+pub const REFS_PATH: &str = ".refs";
 
 /// Returns the path of the tmp ref file for given table id and datanode id.
 pub fn ref_file_path(table_dir: &str, node_id: u64, path_type: PathType) -> String {
@@ -60,7 +60,7 @@ pub fn ref_file_path(table_dir: &str, node_id: u64, path_type: PathType) -> Stri
     };
     format!(
         "{}/{}/{:020}{}.refs",
-        table_dir, PURGER_REFS_PATH, node_id, path_type_postfix
+        table_dir, REFS_PATH, node_id, path_type_postfix
     )
 }
 
@@ -90,7 +90,7 @@ pub fn ref_path_to_node_id_path_type(path: &str) -> Option<(u64, PathType)> {
 
 /// Returns the directory path to store all purger ref files.
 pub fn ref_dir(table_dir: &str) -> String {
-    object_store::util::join_dir(table_dir, PURGER_REFS_PATH)
+    object_store::util::join_dir(table_dir, REFS_PATH)
 }
 
 /// Manages all file references in one datanode.
