@@ -89,15 +89,28 @@ impl SortField {
         serializer: &mut Serializer<&mut Vec<u8>>,
         value: &ValueRef,
     ) -> Result<()> {
+        match self.data_type() {
+            ConcreteDataType::Dictionary(dict_type) => {
+                Self::serialize_by_type(dict_type.value_type(), serializer, value)
+            }
+            data_type => Self::serialize_by_type(data_type, serializer, value),
+        }
+    }
+
+    fn serialize_by_type(
+        data_type: &ConcreteDataType,
+        serializer: &mut Serializer<&mut Vec<u8>>,
+        value: &ValueRef,
+    ) -> Result<()> {
         macro_rules! cast_value_and_serialize {
             (
-                $self: ident;
+                $data_type: ident;
                 $serializer: ident;
                 $(
                     $ty: ident, $f: ident
                 ),*
             ) => {
-                match &$self.data_type {
+                match $data_type {
                 $(
                     ConcreteDataType::$ty(_) => {
                         paste!{
@@ -139,13 +152,13 @@ impl SortField {
                     ConcreteDataType::Dictionary(_) |
                     ConcreteDataType::Null(_) => {
                         return error::NotSupportedFieldSnafu {
-                            data_type: $self.data_type.clone()
+                            data_type: $data_type.clone()
                         }.fail()
                     }
                 }
             };
         }
-        cast_value_and_serialize!(self; serializer;
+        cast_value_and_serialize!(data_type; serializer;
             Boolean, boolean,
             Binary, binary,
             Int8, i8,
