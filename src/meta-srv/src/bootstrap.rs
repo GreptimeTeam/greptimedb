@@ -332,7 +332,7 @@ pub async fn metasrv_builder(
                 opts.store_key_prefix.clone(),
                 candidate_lease_ttl,
                 meta_lease_ttl,
-                opts.schema.as_deref(),
+                opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
@@ -341,7 +341,7 @@ pub async fn metasrv_builder(
             let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
             let kv_backend = PgStore::with_pg_pool(
                 pool,
-                opts.schema.as_deref(),
+                opts.meta_schema_name.as_deref(),
                 &opts.meta_table_name,
                 opts.max_txn_ops,
             )

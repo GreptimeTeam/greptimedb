@@ -29,7 +29,7 @@ meta_table_name = "greptime_metakv"
 ## GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.
 ## **Only used when backend is `postgres_store`.**
 
-# schema = "greptime_schema"
+meta_schema_name = "greptime_schema"
 
 ## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
 ## Only used when backend is `postgres_store`.

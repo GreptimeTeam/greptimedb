@@ -202,7 +202,7 @@ pub struct MetasrvOptions {
     pub meta_election_lock_id: u64,
     #[cfg(feature = "pg_kvbackend")]
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if empty).
-    pub schema: Option<String>,
+    pub meta_schema_name: Option<String>,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
     /// The event recorder options.
@@ -248,7 +248,7 @@ impl fmt::Debug for MetasrvOptions {
         #[cfg(feature = "pg_kvbackend")]
         debug_struct.field("meta_election_lock_id", &self.meta_election_lock_id);
         #[cfg(feature = "pg_kvbackend")]
-        debug_struct.field("schema", &self.schema);
+        debug_struct.field("meta_schema_name", &self.meta_schema_name);
 
         debug_struct
             .field("node_max_idle_time", &self.node_max_idle_time)
@@ -303,7 +303,7 @@ impl Default for MetasrvOptions {
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             #[cfg(feature = "pg_kvbackend")]
-            schema: None,
+            meta_schema_name: None,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
