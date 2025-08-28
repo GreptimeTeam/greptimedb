@@ -39,7 +39,7 @@ use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
-use mito2::sst::file_purger::{FileReferenceManager, FileReferenceManagerRef};
+use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
