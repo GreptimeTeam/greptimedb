@@ -23,12 +23,11 @@ backend = "etcd_store"
 ## **Only used when backend is `postgres_store`.**
 meta_table_name = "greptime_metakv"
 
-## Optional PostgreSQL schema for metadata table and election table name qualification.
-## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
-## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
-## GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.
+## Optional: The schema for metadata table and election table name.
+## In PostgreSQL 15 and later, the default public schema is restricted by default,
+## and non-superusers are no longer allowed to create tables in the public schema.
+## When encountering permission restrictions, use this parameter to specify a writable schema.
 ## **Only used when backend is `postgres_store`.**
-
 meta_schema_name = "greptime_schema"
 
 ## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
