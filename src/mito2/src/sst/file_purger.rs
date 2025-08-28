@@ -371,8 +371,10 @@ impl FileReferenceManager {
             return Err(e).context(OpenDalSnafu);
         } else {
             info!(
-                "Successfully uploaded ref file to {}, table {}",
-                path, table_id
+                "Successfully uploaded ref files with {} refs to {}, table {}",
+                ref_manifest.file_refs.len(),
+                path,
+                table_id
             );
         }
 
