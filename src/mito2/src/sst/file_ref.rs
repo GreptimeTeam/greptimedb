@@ -416,4 +416,36 @@ mod tests {
             file_ref_mgr.files_per_table.lock().unwrap()
         );
     }
+
+    #[test]
+    fn test_ref_file_path() {
+        let testcases = vec![
+            (
+                "/path/to/table",
+                1,
+                PathType::Bare,
+                "/path/to/table/.refs/00000000000000000001.refs",
+            ),
+            (
+                "/path/to/table",
+                42,
+                PathType::Data,
+                "/path/to/table/.refs/00000000000000000042.data.refs",
+            ),
+            (
+                "/path/to/table",
+                100,
+                PathType::Metadata,
+                "/path/to/table/.refs/00000000000000000100.metadata.refs",
+            ),
+        ];
+
+        for (table_dir, node_id, path_type, expected) in testcases {
+            let path = ref_file_path(table_dir, node_id, path_type);
+            assert_eq!(path, expected);
+            let (parsed_node_id, parsed_path_type) = ref_path_to_node_id_path_type(&path).unwrap();
+            assert_eq!(parsed_node_id, node_id);
+            assert_eq!(parsed_path_type, path_type);
+        }
+    }
 }
