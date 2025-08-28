@@ -60,7 +60,7 @@ pub(crate) struct StoreConfig {
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if unset).
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
-    meta_schema_schema: Option<String>,
+    meta_schema_name: Option<String>,
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
     #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
     backend_tls_mode: TlsMode,
@@ -114,7 +114,7 @@ impl StoreConfig {
                     let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, None)
                         .await
                         .map_err(BoxedError::new)?;
-                    let schema_name = self.meta_schema_schema.as_deref();
+                    let schema_name = self.meta_schema_name.as_deref();
                     Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
                         pool,
                         schema_name,

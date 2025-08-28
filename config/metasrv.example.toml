@@ -25,7 +25,7 @@ meta_table_name = "greptime_metakv"
 
 ## Optional PostgreSQL schema for metadata table and election table name qualification.
 ## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
-## set this to a writable schema. GreptimeDB will use "schema"."meta_table_name".
+## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
 ## GreptimeDB will NOT create the schema automatically; please ensure it exists or the user has permission.
 ## **Only used when backend is `postgres_store`.**
 
