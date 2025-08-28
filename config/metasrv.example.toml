@@ -207,7 +207,7 @@ flush_trigger_size = "512MB"
 ## The estimated size is calculated as:
 ##   (latest_entry_id - last_checkpoint_entry_id) * avg_record_size
 ## MetaSrv triggers a checkpoint for a region when this estimated size exceeds `checkpoint_trigger_size`.
-## Set to "0" to disable checkpoint trigger.
+## Set to "0" to let the system decide the checkpoint trigger size.
 ## **It's only used when the provider is `kafka`**.
 checkpoint_trigger_size = "128MB"
 
