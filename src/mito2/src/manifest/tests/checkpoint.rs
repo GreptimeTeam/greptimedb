@@ -261,6 +261,7 @@ async fn checkpoint_with_different_compression_types() {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
@@ -324,6 +325,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],

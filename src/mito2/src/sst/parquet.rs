@@ -747,6 +747,7 @@ mod tests {
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
+                partition_expr: metadata.partition_expr.clone(),
             },
             Arc::new(NoopFilePurger),
         );

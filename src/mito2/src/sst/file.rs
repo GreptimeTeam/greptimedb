@@ -167,6 +167,14 @@ pub struct FileMeta {
     /// This sequence is the only sequence in this file. And it's retrieved from the max
     /// sequence of the rows on generating this file.
     pub sequence: Option<NonZeroU64>,
+    /// Partition expression serialized as a JSON string.
+    ///
+    /// This is copied from the region metadata when the file is created.
+    /// Compatibility behavior:
+    /// - None: no partition expr was set when the file was created (legacy files).
+    /// - Some(""): an explicit "single-region/no-partition" designation.
+    /// - Some(json): actual partition expression from region metadata.
+    pub partition_expr: Option<String>,
 }
 
 impl Debug for FileMeta {
@@ -201,6 +209,7 @@ impl Debug for FileMeta {
                     write!(f, "{}", seq)
                 }
             })
+            .field("partition_expr", &self.partition_expr)
             .finish()
     }
 }
@@ -390,6 +399,7 @@ mod tests {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         }
     }
 
@@ -412,5 +422,49 @@ mod tests {
         );
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
         assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_file_meta_with_partition_expr() {
+        let file_id = FileId::random();
+        let partition_expr =
+            r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+
+        let file_meta_with_partition = FileMeta {
+            region_id: 0.into(),
+            file_id,
+            time_range: FileTimeRange::default(),
+            level: 0,
+            file_size: 0,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            index_file_size: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: Some(partition_expr.to_string()),
+        };
+
+        // Test serialization/deserialization
+        let serialized = serde_json::to_string(&file_meta_with_partition).unwrap();
+        let deserialized: FileMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(file_meta_with_partition, deserialized);
+
+        // Test with empty string (explicit single-region designation)
+        let file_meta_empty_expr = FileMeta {
+            partition_expr: Some("".to_string()),
+            ..file_meta_with_partition.clone()
+        };
+        let serialized_empty = serde_json::to_string(&file_meta_empty_expr).unwrap();
+        let deserialized_empty: FileMeta = serde_json::from_str(&serialized_empty).unwrap();
+        assert_eq!(file_meta_empty_expr, deserialized_empty);
+
+        // Test with None (legacy files)
+        let file_meta_none = FileMeta {
+            partition_expr: None,
+            ..file_meta_with_partition.clone()
+        };
+        let serialized_none = serde_json::to_string(&file_meta_none).unwrap();
+        let deserialized_none: FileMeta = serde_json::from_str(&serialized_none).unwrap();
+        assert_eq!(file_meta_none, deserialized_none);
     }
 }

@@ -59,6 +59,7 @@ pub fn new_file_handle_with_sequence(
             num_rows: 0,
             num_row_groups: 0,
             sequence: NonZeroU64::new(sequence),
+            partition_expr: None,
         },
         file_purger,
     )

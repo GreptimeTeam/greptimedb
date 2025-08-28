@@ -339,6 +339,7 @@ impl Compactor for DefaultCompactor {
                 .map(|f| f.meta_ref().sequence)
                 .max()
                 .flatten();
+            let region_metadata_for_filemeta = region_metadata.clone();
             futs.push(async move {
                 let input_file_names = output
                     .inputs
@@ -388,6 +389,7 @@ impl Compactor for DefaultCompactor {
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
                         sequence: max_sequence,
+                        partition_expr: region_metadata_for_filemeta.partition_expr.clone(),
                     })
                     .collect::<Vec<_>>();
                 let output_file_names =
