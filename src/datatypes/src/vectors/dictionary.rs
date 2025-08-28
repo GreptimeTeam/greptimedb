@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::Array;
-use arrow::datatypes::Int64Type;
-use arrow_array::{ArrayRef, DictionaryArray, Int64Array};
+use arrow::array::{Array, ArrayRef, DictionaryArray, PrimitiveArray, PrimitiveBuilder};
+use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
@@ -30,18 +30,32 @@ use crate::vectors::operations::VectorOp;
 use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 
 /// Vector of dictionaries, basically backed by Arrow's `DictionaryArray`.
-#[derive(Debug, PartialEq)]
-pub struct DictionaryVector {
-    array: DictionaryArray<Int64Type>,
+pub struct DictionaryVector<K: ArrowDictionaryKeyType> {
+    array: DictionaryArray<K>,
     /// The datatype of the items in the dictionary.
     item_type: ConcreteDataType,
     /// The vector of items in the dictionary.
     item_vector: VectorRef,
 }
 
-impl DictionaryVector {
+impl<K: ArrowDictionaryKeyType> fmt::Debug for DictionaryVector<K> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("DictionaryVector")
+            .field("array", &self.array)
+            .field("item_type", &self.item_type)
+            .finish()
+    }
+}
+
+impl<K: ArrowDictionaryKeyType> PartialEq for DictionaryVector<K> {
+    fn eq(&self, other: &DictionaryVector<K>) -> bool {
+        self.array == other.array && self.item_type == other.item_type
+    }
+}
+
+impl<K: ArrowDictionaryKeyType> DictionaryVector<K> {
     /// Create a new instance of `DictionaryVector` from a dictionary array and item type
-    pub fn new(array: DictionaryArray<Int64Type>, item_type: ConcreteDataType) -> Result<Self> {
+    pub fn new(array: DictionaryArray<K>, item_type: ConcreteDataType) -> Result<Self> {
         let item_vector = Helper::try_into_vector(array.values())?;
 
         Ok(Self {
@@ -52,12 +66,12 @@ impl DictionaryVector {
     }
 
     /// Returns the underlying Arrow dictionary array
-    pub fn array(&self) -> &DictionaryArray<Int64Type> {
+    pub fn array(&self) -> &DictionaryArray<K> {
         &self.array
     }
 
     /// Returns the keys array of this dictionary
-    pub fn keys(&self) -> &arrow_array::PrimitiveArray<Int64Type> {
+    pub fn keys(&self) -> &arrow_array::PrimitiveArray<K> {
         self.array.keys()
     }
 
@@ -71,7 +85,7 @@ impl DictionaryVector {
     }
 }
 
-impl Vector for DictionaryVector {
+impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::Dictionary(DictionaryType::new(
             ConcreteDataType::int64_datatype(),
@@ -129,7 +143,7 @@ impl Vector for DictionaryVector {
         }
 
         let key = self.array.keys().value(index);
-        self.item_vector.get(key as usize)
+        self.item_vector.get(key.as_usize())
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -138,11 +152,11 @@ impl Vector for DictionaryVector {
         }
 
         let key = self.array.keys().value(index);
-        self.item_vector.get_ref(key as usize)
+        self.item_vector.get_ref(key.as_usize())
     }
 }
 
-impl Serializable for DictionaryVector {
+impl<K: ArrowDictionaryKeyType> Serializable for DictionaryVector<K> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
         // Convert the dictionary array to JSON, where each element is either null or
         // the value it refers to in the dictionary
@@ -153,7 +167,7 @@ impl Serializable for DictionaryVector {
                 result.push(JsonValue::Null);
             } else {
                 let key = self.array.keys().value(i);
-                let value = self.item_vector.get(key as usize);
+                let value = self.item_vector.get(key.as_usize());
                 let json_value = serde_json::to_value(value).context(error::SerializeSnafu)?;
                 result.push(json_value);
             }
@@ -163,10 +177,10 @@ impl Serializable for DictionaryVector {
     }
 }
 
-impl TryFrom<DictionaryArray<Int64Type>> for DictionaryVector {
+impl<K: ArrowDictionaryKeyType> TryFrom<DictionaryArray<K>> for DictionaryVector<K> {
     type Error = crate::error::Error;
 
-    fn try_from(array: DictionaryArray<Int64Type>) -> Result<Self> {
+    fn try_from(array: DictionaryArray<K>) -> Result<Self> {
         let item_type = ConcreteDataType::from_arrow_type(array.values().data_type());
         let item_vector = Helper::try_into_vector(array.values())?;
 
@@ -178,18 +192,18 @@ impl TryFrom<DictionaryArray<Int64Type>> for DictionaryVector {
     }
 }
 
-pub struct DictionaryIter<'a> {
-    vector: &'a DictionaryVector,
+pub struct DictionaryIter<'a, K: ArrowDictionaryKeyType> {
+    vector: &'a DictionaryVector<K>,
     idx: usize,
 }
 
-impl<'a> DictionaryIter<'a> {
-    pub fn new(vector: &'a DictionaryVector) -> DictionaryIter<'a> {
+impl<'a, K: ArrowDictionaryKeyType> DictionaryIter<'a, K> {
+    pub fn new(vector: &'a DictionaryVector<K>) -> DictionaryIter<'a, K> {
         DictionaryIter { vector, idx: 0 }
     }
 }
 
-impl<'a> Iterator for DictionaryIter<'a> {
+impl<'a, K: ArrowDictionaryKeyType> Iterator for DictionaryIter<'a, K> {
     type Item = Option<ValueRef<'a>>;
 
     #[inline]
@@ -205,7 +219,7 @@ impl<'a> Iterator for DictionaryIter<'a> {
             return Some(None);
         }
 
-        Some(Some(self.vector.item_vector.get_ref(self.idx)))
+        Some(Some(self.vector.get_ref(idx)))
     }
 
     #[inline]
@@ -217,10 +231,10 @@ impl<'a> Iterator for DictionaryIter<'a> {
     }
 }
 
-impl VectorOp for DictionaryVector {
+impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         let keys = self.array.keys();
-        let mut replicated_keys = Vec::with_capacity(offsets.len());
+        let mut replicated_keys = PrimitiveBuilder::new();
 
         let mut previous_offset = 0;
         for (i, &offset) in offsets.iter().enumerate() {
@@ -236,14 +250,14 @@ impl VectorOp for DictionaryVector {
 
             // repeat this key (offset - previous_offset) times
             let repeat_count = offset - previous_offset;
-            if repeat_count > 0 {
-                replicated_keys.resize(replicated_keys.len() + repeat_count, key);
+            for _ in 0..repeat_count {
+                replicated_keys.append_option(key);
             }
 
             previous_offset = offset;
         }
 
-        let new_keys = Int64Array::from(replicated_keys);
+        let new_keys = replicated_keys.finish();
         let new_array = DictionaryArray::try_new(new_keys, self.values().clone())
             .expect("Failed to create replicated dictionary array");
 
@@ -261,7 +275,7 @@ impl VectorOp for DictionaryVector {
         let filtered_key_array = filtered_key_vector.to_arrow_array();
         let filtered_key_array = filtered_key_array
             .as_any()
-            .downcast_ref::<Int64Array>()
+            .downcast_ref::<PrimitiveArray<K>>()
             .unwrap();
 
         let new_array = DictionaryArray::try_new(filtered_key_array.clone(), self.values().clone())
@@ -291,7 +305,10 @@ impl VectorOp for DictionaryVector {
         let key_vector = Helper::try_into_vector(&key_array)?;
         let new_key_vector = key_vector.take(indices)?;
         let new_key_array = new_key_vector.to_arrow_array();
-        let new_key_array = new_key_array.as_any().downcast_ref::<Int64Array>().unwrap();
+        let new_key_array = new_key_array
+            .as_any()
+            .downcast_ref::<PrimitiveArray<K>>()
+            .unwrap();
 
         let new_array = DictionaryArray::try_new(new_key_array.clone(), self.values().clone())
             .expect("Failed to create filtered dictionary array");
@@ -308,19 +325,20 @@ impl VectorOp for DictionaryVector {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::StringArray;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::Int64Type;
 
     use super::*;
 
     // Helper function to create a test dictionary vector with string values
-    fn create_test_dictionary() -> DictionaryVector {
+    fn create_test_dictionary() -> DictionaryVector<Int64Type> {
         // Dictionary values: ["a", "b", "c", "d"]
         // Keys: [0, 1, 2, null, 1, 3]
         // Resulting in: ["a", "b", "c", null, "b", "d"]
         let values = StringArray::from(vec!["a", "b", "c", "d"]);
         let keys = Int64Array::from(vec![Some(0), Some(1), Some(2), None, Some(1), Some(3)]);
         let dict_array = DictionaryArray::new(keys, Arc::new(values));
-        DictionaryVector::try_from(dict_array).unwrap()
+        DictionaryVector::<Int64Type>::try_from(dict_array).unwrap()
     }
 
     #[test]
