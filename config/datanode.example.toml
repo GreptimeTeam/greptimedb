@@ -409,8 +409,11 @@ worker_request_batch_size = 64
 ## Number of meta action updated to trigger a new checkpoint for the manifest.
 manifest_checkpoint_distance = 10
 
+
 ## Number of removed files to keep in manifest's `removed_files` field before also
 ## remove them from `removed_files`. Mostly for debugging purpose.
+## If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+## from `removed_files` field.
 experimental_manifest_keep_removed_file_count = 256
 
 ## How long to keep removed files in the `removed_files` field of manifest

@@ -67,6 +67,8 @@ pub struct MitoConfig {
     pub manifest_checkpoint_distance: u64,
     /// Number of removed files to keep in manifest's `removed_files` field before also
     /// remove them from `removed_files`. Mostly for debugging purpose.
+    /// If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+    /// from `removed_files` field.
     pub experimental_manifest_keep_removed_file_count: usize,
     /// How long to keep removed files in the `removed_files` field of manifest
     /// after they are removed from manifest.

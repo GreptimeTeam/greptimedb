@@ -290,7 +290,7 @@ impl RemovedFilesRecord {
 
     pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
         let total_removed_files: usize = self.removed_files.iter().map(|s| s.file_ids.len()).sum();
-        if total_removed_files <= opt.keep_count {
+        if opt.keep_count > 0 && total_removed_files <= opt.keep_count {
             return Ok(());
         }
 
@@ -306,7 +306,7 @@ impl RemovedFilesRecord {
             .into_iter()
             .filter_map(|f| {
                 if f.removed_at < can_evict_until.timestamp_millis()
-                    && cur_file_cnt >= opt.keep_count
+                    && (opt.keep_count == 0 || cur_file_cnt >= opt.keep_count)
                 {
                     // can evict all files
                     // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
