@@ -247,6 +247,7 @@ impl GrpcQueryHandler for Instance {
         table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
+        ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let table = if let Some(table) = table_ref {
             table.clone()
@@ -267,6 +268,18 @@ impl GrpcQueryHandler for Instance {
             *table_ref = Some(table.clone());
             table
         };
+
+        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+        let interceptor = interceptor_ref.as_ref();
+        interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
+
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+            .context(PermissionSnafu)?;
+
+        // do we check limit for bulk insert?
 
         self.inserter
             .handle_bulk_insert(table, decoder, data)

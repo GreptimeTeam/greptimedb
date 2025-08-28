@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod authorize;
 pub mod builder;
 mod cancellation;
+pub mod context_auth;
 mod database;
 pub mod flight;
 pub mod frontend_grpc_handler;

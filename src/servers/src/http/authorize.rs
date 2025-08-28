@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use ::auth::UserProviderRef;
+use api::v1::Basic;
 use axum::extract::{Request, State};
 use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use common_base::secrets::SecretString;
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -236,6 +237,19 @@ impl TryFrom<&str> for AuthScheme {
             "basic" => decode_basic(encoded_credentials)
                 .map(|(username, password)| AuthScheme::Basic(username, password)),
             other => UnsupportedAuthSchemeSnafu { name: other }.fail(),
+        }
+    }
+}
+
+impl From<AuthScheme> for api::v1::auth_header::AuthScheme {
+    fn from(value: AuthScheme) -> Self {
+        match value {
+            AuthScheme::Basic(username, password) => {
+                api::v1::auth_header::AuthScheme::Basic(Basic {
+                    username,
+                    password: password.expose_secret().to_string(),
+                })
+            }
         }
     }
 }
