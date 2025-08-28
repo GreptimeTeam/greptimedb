@@ -982,6 +982,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid partition expression: {}", expr))]
+    InvalidPartitionExpr {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
     #[snafu(display("Failed to decode bulk wal entry"))]
     ConvertBulkWalEntry {
         #[snafu(implicit)]
@@ -1155,6 +1163,7 @@ impl ErrorExt for Error {
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
             ApplyBloomFilterIndex { source, .. } => source.status_code(),
+            InvalidPartitionExpr { source, .. } => source.status_code(),
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }

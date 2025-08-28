@@ -747,7 +747,11 @@ mod tests {
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
-                partition_expr: metadata.partition_expr.clone(),
+                partition_expr: match &metadata.partition_expr {
+                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                        .expect("partition expression should be valid JSON"),
+                    None => None,
+                },
             },
             Arc::new(NoopFilePurger),
         );

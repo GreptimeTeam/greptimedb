@@ -23,6 +23,7 @@ use common_time::TimeToLive;
 use either::Either;
 use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
+use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -34,7 +35,9 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
 use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
+use crate::error::{
+    EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
+};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
@@ -376,6 +379,19 @@ impl Compactor for DefaultCompactor {
                         WriteType::Compaction,
                     )
                     .await?;
+                // Convert partition expression once outside the map
+                let partition_expr = match &region_metadata_for_filemeta.partition_expr {
+                    None => None,
+                    Some(json_str) if json_str.is_empty() => None,
+                    Some(json_str) => {
+                        PartitionExpr::from_json_str(json_str).with_context(|_| {
+                            InvalidPartitionExprSnafu {
+                                expr: json_str.clone(),
+                            }
+                        })?
+                    }
+                };
+
                 let output_files = sst_infos
                     .into_iter()
                     .map(|sst_info| FileMeta {
@@ -389,7 +405,7 @@ impl Compactor for DefaultCompactor {
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
                         sequence: max_sequence,
-                        partition_expr: region_metadata_for_filemeta.partition_expr.clone(),
+                        partition_expr: partition_expr.clone(),
                     })
                     .collect::<Vec<_>>();
                 let output_file_names =
