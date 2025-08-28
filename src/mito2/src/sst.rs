@@ -30,6 +30,7 @@ use store_api::storage::consts::{
 
 pub mod file;
 pub mod file_purger;
+pub mod file_ref;
 pub mod index;
 pub mod location;
 pub mod parquet;
