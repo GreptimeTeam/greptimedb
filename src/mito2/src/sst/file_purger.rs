@@ -646,6 +646,16 @@ mod tests {
 
         file_ref_mgr.add_file(&file_meta, layer.clone());
 
+        let expected_table_ref_manifest = TableFileRefsManifest {
+            file_refs: HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]),
+            ts: 0,
+        };
+
+        assert_eq!(
+            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            expected_table_ref_manifest
+        );
+
         assert_eq!(
             file_ref_mgr
                 .files_per_table
@@ -657,7 +667,13 @@ mod tests {
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 2)])
         );
 
+        assert_eq!(
+            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            expected_table_ref_manifest
+        );
+
         file_ref_mgr.remove_file(&file_meta);
+
         assert_eq!(
             file_ref_mgr
                 .files_per_table
@@ -669,6 +685,11 @@ mod tests {
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
         );
 
+        assert_eq!(
+            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            expected_table_ref_manifest
+        );
+
         file_ref_mgr.remove_file(&file_meta);
 
         assert!(
@@ -678,6 +699,12 @@ mod tests {
                 .unwrap()
                 .get(&0)
                 .is_none(),
+            "{:?}",
+            file_ref_mgr.files_per_table.lock().unwrap()
+        );
+
+        assert!(
+            file_ref_mgr.ref_file_manifest(0, 0).is_none(),
             "{:?}",
             file_ref_mgr.files_per_table.lock().unwrap()
         );
