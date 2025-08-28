@@ -17,6 +17,8 @@ use std::sync::Arc;
 use common_recordbatch::DfRecordBatch;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datafusion_common::DataFusionError;
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
 use datatypes::arrow::array::{
     ArrayRef, TimestampMillisecondArray, TimestampNanosecondArray, UInt32Array, UInt64Array,
     UInt8Array,
@@ -26,7 +28,7 @@ use datatypes::arrow_array::StringArray;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, TableId};
+use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, ScanRequest, TableId};
 
 /// An entry describing a SST file known by the engine's manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,6 +141,24 @@ impl ManifestSstEntry {
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
     }
+
+    /// Reserved internal inspect table name.
+    ///
+    /// This table name is used only for building logical plans on the
+    /// frontend -> datanode path. It is not user-visible and cannot be
+    /// referenced by user queries.
+    pub fn reserved_table_name_for_inspection() -> &'static str {
+        "__inspect/__mito/__sst_manifest"
+    }
+
+    /// Builds a logical plan for scanning the manifest sst entries.
+    pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
+        build_plan_helper(
+            scan_request,
+            Self::reserved_table_name_for_inspection(),
+            Self::schema(),
+        )
+    }
 }
 
 /// An entry describing a SST file listed from storage layer directly.
@@ -185,11 +205,54 @@ impl StorageSstEntry {
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
     }
+
+    /// Reserved internal inspect table name.
+    ///
+    /// This table name is used only for building logical plans on the
+    /// frontend -> datanode path. It is not user-visible and cannot be
+    /// referenced by user queries.
+    pub fn reserved_table_name_for_inspection() -> &'static str {
+        "__inspect/__mito/__sst_storage"
+    }
+
+    /// Builds a logical plan for scanning the storage sst entries.
+    pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
+        build_plan_helper(
+            scan_request,
+            Self::reserved_table_name_for_inspection(),
+            Self::schema(),
+        )
+    }
+}
+
+fn build_plan_helper(
+    scan_request: ScanRequest,
+    table_name: &str,
+    schema: SchemaRef,
+) -> Result<LogicalPlan, DataFusionError> {
+    let table_source = LogicalTableSource::new(schema.arrow_schema().clone());
+
+    let mut builder = LogicalPlanBuilder::scan(
+        table_name,
+        Arc::new(table_source),
+        scan_request.projection.clone(),
+    )?;
+
+    for filter in scan_request.filters {
+        builder = builder.filter(filter)?;
+    }
+
+    if let Some(limit) = scan_request.limit {
+        builder = builder.limit(0, Some(limit))?;
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]
 mod tests {
-
+    use datafusion_common::TableReference;
+    use datafusion_expr::{binary_expr, col, lit, LogicalPlan, Operator};
     use datatypes::arrow::array::{
         Array, TimestampMillisecondArray, TimestampNanosecondArray, UInt32Array, UInt64Array,
         UInt8Array,
@@ -448,5 +511,80 @@ mod tests {
             .unwrap();
         assert!(last_modified.is_null(0));
         assert_eq!(456, last_modified.value(1));
+    }
+
+    #[test]
+    fn test_manifest_build_plan() {
+        // Note: filter must reference a column in the projected schema
+        let request = ScanRequest {
+            projection: Some(vec![0, 1, 2]),
+            filters: vec![binary_expr(col("table_id"), Operator::Gt, lit(0))],
+            limit: Some(5),
+            ..Default::default()
+        };
+
+        let plan = ManifestSstEntry::build_plan(request).unwrap();
+
+        // Expect plan to be Filter -> Limit -> TableScan or Filter+Limit wrapped.
+        // We'll pattern match to reach TableScan and verify key fields.
+        let (scan, has_filter, has_limit) = extract_scan(&plan);
+
+        assert!(has_filter);
+        assert!(has_limit);
+        assert_eq!(
+            scan.table_name,
+            TableReference::bare(ManifestSstEntry::reserved_table_name_for_inspection())
+        );
+        assert_eq!(scan.projection, Some(vec![0, 1, 2]));
+
+        // projected schema should match projection
+        let fields = scan.projected_schema.fields();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name(), "table_dir");
+        assert_eq!(fields[1].name(), "region_id");
+        assert_eq!(fields[2].name(), "table_id");
+    }
+
+    #[test]
+    fn test_storage_build_plan() {
+        let request = ScanRequest {
+            projection: Some(vec![0, 2]),
+            filters: vec![binary_expr(col("file_path"), Operator::Eq, lit("/a"))],
+            limit: Some(1),
+            ..Default::default()
+        };
+
+        let plan = StorageSstEntry::build_plan(request).unwrap();
+        let (scan, has_filter, has_limit) = extract_scan(&plan);
+        assert!(has_filter);
+        assert!(has_limit);
+        assert_eq!(
+            scan.table_name,
+            TableReference::bare(StorageSstEntry::reserved_table_name_for_inspection())
+        );
+        assert_eq!(scan.projection, Some(vec![0, 2]));
+
+        let fields = scan.projected_schema.fields();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name(), "file_path");
+        assert_eq!(fields[1].name(), "last_modified_ms");
+    }
+
+    // Helper to reach TableScan and detect presence of Filter/Limit in plan
+    fn extract_scan(plan: &LogicalPlan) -> (&datafusion_expr::logical_plan::TableScan, bool, bool) {
+        use datafusion_expr::logical_plan::Limit;
+
+        match plan {
+            LogicalPlan::Filter(f) => {
+                let (scan, _, has_limit) = extract_scan(&f.input);
+                (scan, true, has_limit)
+            }
+            LogicalPlan::Limit(Limit { input, .. }) => {
+                let (scan, has_filter, _) = extract_scan(input);
+                (scan, has_filter, true)
+            }
+            LogicalPlan::TableScan(scan) => (scan, false, false),
+            other => panic!("unexpected plan: {other:?}"),
+        }
     }
 }
