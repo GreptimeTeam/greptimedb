@@ -68,7 +68,17 @@ impl TwcsPicker {
             // Filter out large files in append mode - they won't benefit from compaction
             if self.append_mode {
                 if let Some(max_size) = self.max_output_file_size {
-                    files_to_merge.retain(|fg| fg.size() <= max_size as usize);
+                    let (kept_files, ignored_files) = files_to_merge
+                        .into_iter()
+                        .partition(|fg| fg.size() <= max_size as usize);
+                    files_to_merge = kept_files;
+                    info!(
+                        "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
+                        ignored_files.len(),
+                        region_id,
+                        window,
+                        max_size
+                    );
                 }
             }
 
@@ -207,7 +217,6 @@ impl Picker for TwcsPicker {
     }
 }
 
-#[derive(Clone)]
 struct Window {
     start: Timestamp,
     end: Timestamp,
