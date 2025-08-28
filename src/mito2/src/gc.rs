@@ -541,9 +541,9 @@ impl LocalGcWorker {
                             }
                         };
                     if should_delete {
-                        None
-                    } else {
                         Some(file_id)
+                    } else {
+                        None
                     }
                 }),
             );
