@@ -43,6 +43,18 @@ pub fn new_file_handle_with_sequence(
     level: Level,
     sequence: u64,
 ) -> FileHandle {
+    new_file_handle_with_size_and_sequence(file_id, start_ts_millis, end_ts_millis, level, sequence, 0)
+}
+
+/// Test util to create file handles with custom size.
+pub fn new_file_handle_with_size_and_sequence(
+    file_id: FileId,
+    start_ts_millis: i64,
+    end_ts_millis: i64,
+    level: Level,
+    sequence: u64,
+    file_size: u64,
+) -> FileHandle {
     let file_purger = new_noop_file_purger();
     FileHandle::new(
         FileMeta {
@@ -53,7 +65,7 @@ pub fn new_file_handle_with_sequence(
                 Timestamp::new_millisecond(end_ts_millis),
             ),
             level,
-            file_size: 0,
+            file_size,
             available_indexes: Default::default(),
             index_file_size: 0,
             num_rows: 0,
