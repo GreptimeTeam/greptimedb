@@ -2,7 +2,7 @@ CREATE TABLE http_requests (
   ts timestamp(3) time index,
   host STRING,
   idc STRING,
-  val BIGINT,
+  val DOUBLE,
   PRIMARY KEY(host, idc),
 );
 
@@ -43,7 +43,7 @@ CREATE TABLE http_requests (
   ts timestamp(3) time index,
   host STRING,
   idc STRING,
-  val BIGINT,
+  val DOUBLE,
   PRIMARY KEY(host, idc),
 );
 
@@ -85,7 +85,7 @@ INSERT INTO TABLE http_requests VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_reqs');
 
-SELECT "count(http_requests.val)", ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
+SELECT val, ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
 
 DROP FLOW calc_reqs;
 DROP TABLE http_requests;

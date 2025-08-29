@@ -102,7 +102,7 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryType {
     /// query is a tql query
     Tql,
@@ -589,7 +589,7 @@ impl BatchingTask {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let plan =
             sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, true).await?;
-        create_table_with_expr(&plan, &self.config.sink_table_name)
+        create_table_with_expr(&plan, &self.config.sink_table_name, &self.config.query_type)
     }
 
     /// will merge and use the first ten time window in query
@@ -731,6 +731,7 @@ impl BatchingTask {
 fn create_table_with_expr(
     plan: &LogicalPlan,
     sink_table_name: &[String; 3],
+    query_type: &QueryType,
 ) -> Result<CreateTableExpr, Error> {
     let fields = plan.schema().fields();
     let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan, fields)?;
@@ -744,15 +745,40 @@ fn create_table_with_expr(
         } else {
             ColumnSchema::new(name, ty, true)
         };
-        column_schemas.push(col_schema);
+
+        match query_type {
+            QueryType::Sql => {
+                column_schemas.push(col_schema);
+            }
+            QueryType::Tql => {
+                // if is val column, need to rename as val DOUBLE NULL
+                // if is tag column, need to cast type as STRING NULL
+                let is_tag_column = primary_keys.contains(name);
+                let is_val_column = !is_tag_column && first_time_stamp.as_ref() != Some(name);
+                if is_val_column {
+                    let col_schema =
+                        ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true);
+                    column_schemas.push(col_schema);
+                } else if is_tag_column {
+                    let col_schema =
+                        ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
+                    column_schemas.push(col_schema);
+                } else {
+                    // time index column
+                    column_schemas.push(col_schema);
+                }
+            }
+        }
     }
 
-    let update_at_schema = ColumnSchema::new(
-        AUTO_CREATED_UPDATE_AT_TS_COL,
-        ConcreteDataType::timestamp_millisecond_datatype(),
-        true,
-    );
-    column_schemas.push(update_at_schema);
+    if query_type == &QueryType::Sql {
+        let update_at_schema = ColumnSchema::new(
+            AUTO_CREATED_UPDATE_AT_TS_COL,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        );
+        column_schemas.push(update_at_schema);
+    }
 
     let time_index = if let Some(time_index) = first_time_stamp {
         time_index
@@ -946,6 +972,7 @@ mod test {
                     "public".to_string(),
                     tc.sink_table_name.clone(),
                 ],
+                &QueryType::Sql,
             )
             .unwrap();
             // TODO(discord9): assert expr
