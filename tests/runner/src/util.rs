@@ -363,9 +363,9 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
     }
 
     let mysql_image = if let Some(mysql_version) = mysql_version {
-        format!("bitnami/mysql:{mysql_version}")
+        format!("public.ecr.aws/i8k6a5e1/bitnami/mysql:{mysql_version}")
     } else {
-        "bitnami/mysql:5.7".to_string()
+        "public.ecr.aws/i8k6a5e1/bitnami/mysql:5.7".to_string()
     };
     let mysql_password = "admin";
     let mysql_user = "greptimedb";
