@@ -319,6 +319,10 @@ impl FileHandle {
     pub fn num_rows(&self) -> usize {
         self.inner.meta.num_rows as usize
     }
+
+    pub fn level(&self) -> Level {
+        self.inner.meta.level
+    }
 }
 
 /// Inner data of [FileHandle].
