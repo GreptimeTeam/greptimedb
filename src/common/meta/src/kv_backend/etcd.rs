@@ -33,7 +33,6 @@ use crate::rpc::store::{
 use crate::rpc::KeyValue;
 
 const DEFAULT_MAX_DECODING_SIZE: usize = 32 * 1024 * 1024; // 32MB
-const DEFAULT_MAX_ENCODING_SIZE: usize = 32 * 1024 * 1024; // 32MB
 
 pub struct EtcdStore {
     client: Client,
@@ -44,8 +43,6 @@ pub struct EtcdStore {
     max_txn_ops: usize,
     // Maximum decoding message size in bytes. Default 32MB.
     max_decoding_size: usize,
-    // Maximum encoding message size in bytes. Default 32MB.
-    max_encoding_size: usize,
 }
 
 impl EtcdStore {
@@ -67,7 +64,6 @@ impl EtcdStore {
             client,
             max_txn_ops,
             max_decoding_size: DEFAULT_MAX_DECODING_SIZE,
-            max_encoding_size: DEFAULT_MAX_ENCODING_SIZE,
         })
     }
 
@@ -75,15 +71,10 @@ impl EtcdStore {
         self.max_decoding_size = max_decoding_size;
     }
 
-    pub fn set_max_encoding_size(&mut self, max_encoding_size: usize) {
-        self.max_encoding_size = max_encoding_size;
-    }
-
     fn kv_client(&self) -> etcd_client::KvClient {
         self.client
             .kv_client()
             .max_decoding_message_size(self.max_decoding_size)
-            .max_encoding_message_size(self.max_encoding_size)
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
@@ -584,7 +575,6 @@ mod tests {
             client,
             max_txn_ops: 128,
             max_decoding_size: DEFAULT_MAX_DECODING_SIZE,
-            max_encoding_size: DEFAULT_MAX_ENCODING_SIZE,
         })
     }
 
