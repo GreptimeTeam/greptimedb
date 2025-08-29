@@ -90,4 +90,7 @@ lazy_static! {
     /// The topic estimated replay size.
     pub static ref METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE: IntGaugeVec =
         register_int_gauge_vec!("meta_topic_estimated_replay_size", "meta topic estimated replay size", &["topic_name"]).unwrap();
+    /// The triggered gc total counter.
+    pub static ref METRIC_META_TRIGGERED_GC_TOTAL: IntCounter =
+        register_int_counter!("meta_triggered_gc_total", "meta triggered gc total").unwrap();
 }

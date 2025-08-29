@@ -26,6 +26,7 @@ pub mod error;
 pub mod events;
 mod failure_detector;
 pub mod flow_meta_alloc;
+pub mod gc_trigger;
 pub mod handler;
 pub mod key;
 pub mod lease;

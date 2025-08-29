@@ -16,6 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
+use futures::stream::BoxStream;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
@@ -33,8 +35,9 @@ use crate::key::{
 };
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::router::{region_distribution, RegionRoute};
-use crate::rpc::store::BatchGetRequest;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 
 /// The key stores table routes
 ///
@@ -554,9 +557,41 @@ impl TableRouteManager {
     pub fn table_route_storage(&self) -> &TableRouteStorage {
         &self.storage
     }
+
+    /// Returns a stream of all physical table ids.
+    pub fn physical_table_values(
+        &self,
+    ) -> BoxStream<'static, Result<(TableId, PhysicalTableRouteValue)>> {
+        let key = TableRouteKey::range_prefix();
+        let req = RangeRequest::new().with_prefix(key);
+
+        let stream = PaginationStream::new(
+            self.storage.kv_backend().clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            |kv| {
+                let key = TableRouteKey::from_bytes(&kv.key)?;
+                Ok(key.table_id)
+            },
+        )
+        .into_stream();
+        let storage = self.storage.clone();
+
+        Box::pin(stream.try_filter_map(move |table_id| {
+            let storage = storage.clone();
+            async move {
+                let table_route = storage.get_inner(table_id).await?;
+                match table_route {
+                    Some(TableRouteValue::Physical(val)) => Ok(Some((table_id, val))),
+                    _ => Ok(None),
+                }
+            }
+        }))
+    }
 }
 
 /// Low-level operations of [TableRouteValue].
+#[derive(Clone)]
 pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
 }
@@ -566,6 +601,10 @@ pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
     }
 
     /// Builds a create table route transaction,

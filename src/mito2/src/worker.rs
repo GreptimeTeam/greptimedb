@@ -66,6 +66,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::FileId;
+use crate::sst::file_purger::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -130,6 +131,8 @@ pub(crate) struct WorkerGroup {
     purge_scheduler: SchedulerRef,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// File reference manager.
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl WorkerGroup {
@@ -141,6 +144,7 @@ impl WorkerGroup {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -204,6 +208,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    file_ref_manager: file_ref_manager.clone(),
                 }
                 .start()
             })
@@ -215,6 +220,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 
@@ -266,6 +272,10 @@ impl WorkerGroup {
         self.cache_manager.clone()
     }
 
+    pub(crate) fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.file_ref_manager.clone()
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
@@ -286,6 +296,7 @@ impl WorkerGroup {
     /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
     /// The number of workers should be power of two.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_for_test<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
@@ -293,6 +304,7 @@ impl WorkerGroup {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -350,6 +362,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    file_ref_manager: file_ref_manager.clone(),
                 }
                 .start()
             })
@@ -361,6 +374,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 
@@ -428,6 +442,7 @@ struct WorkerStarter<S> {
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -480,6 +495,7 @@ impl<S: LogStore> WorkerStarter<S> {
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
+            file_ref_manager: self.file_ref_manager.clone(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -729,6 +745,8 @@ struct RegionWorkerLoop<S> {
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Datanode level file references manager.
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

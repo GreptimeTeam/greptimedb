@@ -204,6 +204,10 @@ impl MitoRegion {
         self.access_layer.table_dir()
     }
 
+    pub fn access_layer(&self) -> &AccessLayerRef {
+        &self.access_layer
+    }
+
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
         matches!(
