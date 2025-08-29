@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use api::v1::CreateTableExpr;
 use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
@@ -55,6 +56,14 @@ pub enum Error {
     #[snafu(display("Error encountered while creating flow: {sql}"))]
     CreateFlow {
         sql: String,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Error encountered while creating sink table for flow: {create:?}"))]
+    CreateSinkTable {
+        create: CreateTableExpr,
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -331,9 +340,10 @@ impl ErrorExt for Error {
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            Self::CreateFlow { .. }
+            | Self::CreateSinkTable { .. }
+            | Self::Arrow { .. }
+            | Self::Time { .. } => StatusCode::EngineExecuteQuery,
             Self::Unexpected { .. }
             | Self::SyncCheckTask { .. }
             | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,

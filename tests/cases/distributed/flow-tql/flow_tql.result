@@ -2,7 +2,7 @@ CREATE TABLE http_requests (
   ts timestamp(3) time index,
   host STRING,
   idc STRING,
-  val BIGINT,
+  val DOUBLE,
   PRIMARY KEY(host, idc),
 );
 
@@ -15,21 +15,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-------------------------------------------+
-| Table    | Create Table                              |
-+----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" BIGINT NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" BIGINT NULL,              |
-|          |   "update_at" TIMESTAMP(3) NULL,          |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
-|          | )                                         |
-|          |                                           |
-|          | ENGINE=mito                               |
-|          |                                           |
-+----------+-------------------------------------------+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" ( |
+|          |   "val" DOUBLE NULL,                    |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "status_code" STRING NULL,            |
+|          |   TIME INDEX ("ts"),                    |
+|          |   PRIMARY KEY ("status_code")           |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          |                                         |
++----------+-----------------------------------------+
 
 INSERT INTO TABLE http_requests VALUES
     (now() - '17s'::interval, 'host1', 'idc1', 200),
@@ -85,7 +84,7 @@ CREATE TABLE http_requests (
   ts timestamp(3) time index,
   host STRING,
   idc STRING,
-  val BIGINT,
+  val DOUBLE,
   PRIMARY KEY(host, idc),
 );
 
@@ -115,21 +114,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-------------------------------------------+
-| Table    | Create Table                              |
-+----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" BIGINT NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" BIGINT NULL,              |
-|          |   "update_at" TIMESTAMP(3) NULL,          |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
-|          | )                                         |
-|          |                                           |
-|          | ENGINE=mito                               |
-|          |                                           |
-+----------+-------------------------------------------+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" ( |
+|          |   "val" DOUBLE NULL,                    |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "status_code" STRING NULL,            |
+|          |   TIME INDEX ("ts"),                    |
+|          |   PRIMARY KEY ("status_code")           |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          |                                         |
++----------+-----------------------------------------+
 
 INSERT INTO TABLE http_requests VALUES
     (0::Timestamp, 'host1', 'idc1', 200),
@@ -160,20 +158,20 @@ ADMIN FLUSH_FLOW('calc_reqs');
 |  FLOW_FLUSHED  |
 +-------------------------------+
 
-SELECT "count(http_requests.val)", ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
+SELECT val, ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
 
-+--------------------------+---------------------+-------------+
-| count(http_requests.val) | ts                  | status_code |
-+--------------------------+---------------------+-------------+
-| 3                        | 1970-01-01T00:00:00 | 200         |
-| 1                        | 1970-01-01T00:00:00 | 401         |
-| 1                        | 1970-01-01T00:00:05 | 401         |
-| 2                        | 1970-01-01T00:00:05 | 404         |
-| 1                        | 1970-01-01T00:00:05 | 500         |
-| 2                        | 1970-01-01T00:00:10 | 200         |
-| 2                        | 1970-01-01T00:00:10 | 201         |
-| 4                        | 1970-01-01T00:00:15 | 500         |
-+--------------------------+---------------------+-------------+
++-----+---------------------+-------------+
+| val | ts                  | status_code |
++-----+---------------------+-------------+
+| 3.0 | 1970-01-01T00:00:00 | 200.0       |
+| 1.0 | 1970-01-01T00:00:00 | 401.0       |
+| 1.0 | 1970-01-01T00:00:05 | 401.0       |
+| 2.0 | 1970-01-01T00:00:05 | 404.0       |
+| 1.0 | 1970-01-01T00:00:05 | 500.0       |
+| 2.0 | 1970-01-01T00:00:10 | 200.0       |
+| 2.0 | 1970-01-01T00:00:10 | 201.0       |
+| 4.0 | 1970-01-01T00:00:15 | 500.0       |
++-----+---------------------+-------------+
 
 DROP FLOW calc_reqs;
 
@@ -184,6 +182,69 @@ DROP TABLE http_requests;
 Affected Rows: 0
 
 DROP TABLE cnt_reqs;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_rate SINK TO rate_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests[5m]);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE rate_reqs;
+
++-----------+------------------------------------------+
+| Table     | Create Table                             |
++-----------+------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" ( |
+|           |   "ts" TIMESTAMP(3) NOT NULL,            |
+|           |   "val" DOUBLE NULL,                     |
+|           |   TIME INDEX ("ts")                      |
+|           | )                                        |
+|           |                                          |
+|           | ENGINE=mito                              |
+|           |                                          |
++-----------+------------------------------------------+
+
+INSERT INTO TABLE http_requests VALUES
+    (now() - '1m'::interval, 0),
+    (now() - '30s'::interval, 1),
+    (now(), 2);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_rate') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT count(*) > 0 FROM rate_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_rate;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE rate_reqs;
 
 Affected Rows: 0
 
