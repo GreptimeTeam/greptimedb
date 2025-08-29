@@ -337,12 +337,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
-    InFlightWriteBytesExceeded {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to decode logical plan from substrait"))]
     SubstraitDecodeLogicalPlan {
         #[snafu(implicit)]
@@ -451,8 +445,6 @@ impl ErrorExt for Error {
             Error::FindRegionPeer { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
-
-            Error::InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
 
             Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
