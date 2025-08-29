@@ -79,7 +79,7 @@ impl LocalFilePurger {
     }
 
     /// Stop the scheduler of the file purger.
-    pub async fn stop(&self) -> Result<()> {
+    pub async fn stop_scheduler(&self) -> Result<()> {
         self.scheduler.stop(true).await
     }
 }
