@@ -23,6 +23,7 @@ pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
 use std::mem;
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -32,7 +33,6 @@ use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef}
 use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
 use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
@@ -656,49 +656,33 @@ pub struct ColumnPagePath {
     column_idx: usize,
 }
 
-/// Cache key for pages of a SST row group.
+/// Cache key to pages in a row group (after projection).
+///
+/// Different projections will have different cache keys.
+/// We cache all ranges together because they may refer to the same `Bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PageKey {
-    /// Cache key for a compressed page in a row group.
-    Compressed(ColumnPagePath),
-    /// Cache key for all uncompressed pages in a row group.
-    Uncompressed(ColumnPagePath),
+pub struct PageKey {
+    /// Id of the SST file to cache.
+    file_id: FileId,
+    /// Index of the row group.
+    row_group_idx: usize,
+    /// Byte ranges of the pages to cache.
+    ranges: Vec<Range<u64>>,
 }
 
 impl PageKey {
-    /// Creates a key for a compressed page.
-    pub fn new_compressed(
-        region_id: RegionId,
-        file_id: FileId,
-        row_group_idx: usize,
-        column_idx: usize,
-    ) -> PageKey {
-        PageKey::Compressed(ColumnPagePath {
-            region_id,
+    /// Creates a key for a list of pages.
+    pub fn new(file_id: FileId, row_group_idx: usize, ranges: Vec<Range<u64>>) -> PageKey {
+        PageKey {
             file_id,
             row_group_idx,
-            column_idx,
-        })
-    }
-
-    /// Creates a key for all uncompressed pages in a row group.
-    pub fn new_uncompressed(
-        region_id: RegionId,
-        file_id: FileId,
-        row_group_idx: usize,
-        column_idx: usize,
-    ) -> PageKey {
-        PageKey::Uncompressed(ColumnPagePath {
-            region_id,
-            file_id,
-            row_group_idx,
-            column_idx,
-        })
+            ranges,
+        }
     }
 
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
-        mem::size_of::<Self>()
+        mem::size_of::<Self>() + mem::size_of_val(self.ranges.as_slice())
     }
 }
 
@@ -706,38 +690,26 @@ impl PageKey {
 // We don't use enum here to make it easier to mock and use the struct.
 #[derive(Default)]
 pub struct PageValue {
-    /// Compressed page of the column in the row group.
-    pub compressed: Bytes,
-    /// All pages of the column in the row group.
-    pub row_group: Vec<Page>,
+    /// Compressed page in the row group.
+    pub compressed: Vec<Bytes>,
+    /// Total size of the pages (may be larger than sum of compressed bytes due to gaps).
+    pub page_size: u64,
 }
 
 impl PageValue {
-    /// Creates a new value from a compressed page.
-    pub fn new_compressed(bytes: Bytes) -> PageValue {
+    /// Creates a new value from a range of compressed pages.
+    pub fn new(bytes: Vec<Bytes>, page_size: u64) -> PageValue {
         PageValue {
             compressed: bytes,
-            row_group: vec![],
-        }
-    }
-
-    /// Creates a new value from all pages in a row group.
-    pub fn new_row_group(pages: Vec<Page>) -> PageValue {
-        PageValue {
-            compressed: Bytes::new(),
-            row_group: pages,
+            page_size,
         }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
-            + self.compressed.len()
-            + self
-                .row_group
-                .iter()
-                .map(|page| page.buffer().len())
-                .sum::<usize>()
+            + self.page_size as usize
+            + self.compressed.iter().map(mem::size_of_val).sum::<usize>()
     }
 }
 
@@ -813,7 +785,7 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::new_uncompressed(region_id, file_id.file_id(), 0, 0);
+        let key = PageKey::new(file_id.file_id(), 1, vec![Range { start: 0, end: 5 }]);
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
@@ -852,9 +824,8 @@ mod tests {
     #[test]
     fn test_page_cache() {
         let cache = CacheManager::builder().page_cache_size(1000).build();
-        let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        let key = PageKey::new_compressed(region_id, file_id, 0, 0);
+        let key = PageKey::new(file_id, 0, vec![(0..10), (10..20)]);
         assert!(cache.get_pages(&key).is_none());
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);

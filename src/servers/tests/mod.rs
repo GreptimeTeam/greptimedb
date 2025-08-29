@@ -168,6 +168,7 @@ impl GrpcQueryHandler for DummyInstance {
         _table_ref: &mut Option<TableRef>,
         _decoder: &mut FlightDecoder,
         _data: FlightData,
+        _ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error> {
         unimplemented!()
     }

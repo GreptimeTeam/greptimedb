@@ -20,6 +20,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
