@@ -54,6 +54,7 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
+use crate::gc_trigger::GcTrigger;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -431,6 +432,16 @@ impl MetasrvBuilder {
             None
         };
 
+        let gc_ticker = {
+            let (gc_trigger, gc_ticker) = GcTrigger::new(
+                table_metadata_manager.clone(),
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+            );
+            gc_trigger.try_start()?;
+            Some(Arc::new(gc_ticker))
+        };
+
         // remote WAL prune ticker and manager
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
             let (tx, rx) = WalPruneManager::channel();
@@ -558,6 +569,7 @@ impl MetasrvBuilder {
             leader_region_registry,
             wal_prune_ticker,
             region_flush_ticker,
+            gc_ticker,
             table_id_sequence,
             reconciliation_manager,
             topic_stats_registry,
