@@ -12,7 +12,7 @@ runs:
   steps:
   - name: Install Kafka cluster
     shell: bash
-    run: | 
+    run: |
       helm upgrade \
         --install kafka oci://registry-1.docker.io/bitnamicharts/kafka \
         --set controller.replicaCount=${{ inputs.controller-replicas }} \
@@ -23,4 +23,8 @@ runs:
         --set listeners.controller.protocol=PLAINTEXT \
         --set listeners.client.protocol=PLAINTEXT \
         --create-namespace \
+        --set image.registry=public.ecr.aws/i8k6a5e1 \
+        --set image.repository=bitnami/kafka \
+        --set image.tag=3.9.0-debian-12-r1 \
+        --version 31.0.0 \
         -n ${{ inputs.namespace }}
