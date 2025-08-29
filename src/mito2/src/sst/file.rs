@@ -583,5 +583,25 @@ mod tests {
 
         let file_meta_null: FileMeta = serde_json::from_str(json_with_null_expr).unwrap();
         assert!(file_meta_null.partition_expr.is_none());
+
+        // Test partition expression doesn't exist
+        let json_with_empty_expr = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 0,
+            "available_indexes": [],
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0,
+            "sequence": null
+        }"#;
+
+        let file_meta_empty: FileMeta = serde_json::from_str(json_with_empty_expr).unwrap();
+        assert!(file_meta_empty.partition_expr.is_none());
     }
 }
