@@ -197,7 +197,7 @@ pub async fn open_compaction_region(
             purge_scheduler.clone(),
             access_layer.clone(),
             None,
-            Arc::new(FileReferenceManager::default()),
+            Arc::new(FileReferenceManager::new(0)),
         ))
     };
 

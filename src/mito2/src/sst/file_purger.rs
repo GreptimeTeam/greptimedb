@@ -193,6 +193,7 @@ mod tests {
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file_ref::FileReferenceManager;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -233,7 +234,7 @@ mod tests {
             scheduler.clone(),
             layer,
             None,
-            Arc::new(Default::default()),
+            Arc::new(FileReferenceManager::new(0)),
         ));
 
         {
@@ -303,7 +304,7 @@ mod tests {
             scheduler.clone(),
             layer,
             None,
-            Arc::new(Default::default()),
+            Arc::new(FileReferenceManager::new(0)),
         ));
 
         {

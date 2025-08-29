@@ -74,7 +74,7 @@ use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
-use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -245,7 +245,7 @@ impl TestEnv {
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
-            file_ref_manager: Arc::new(Default::default()),
+            file_ref_manager: Arc::new(FileReferenceManager::new(0)),
             kv_backend,
         }
     }
