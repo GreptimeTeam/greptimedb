@@ -32,6 +32,8 @@ use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 /// Vector of dictionaries, basically backed by Arrow's `DictionaryArray`.
 pub struct DictionaryVector<K: ArrowDictionaryKeyType> {
     array: DictionaryArray<K>,
+    /// The datatype of the keys in the dictionary.
+    key_type: ConcreteDataType,
     /// The datatype of the items in the dictionary.
     item_type: ConcreteDataType,
     /// The vector of items in the dictionary.
@@ -42,6 +44,7 @@ impl<K: ArrowDictionaryKeyType> fmt::Debug for DictionaryVector<K> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("DictionaryVector")
             .field("array", &self.array)
+            .field("key_type", &self.key_type)
             .field("item_type", &self.item_type)
             .finish()
     }
@@ -49,17 +52,21 @@ impl<K: ArrowDictionaryKeyType> fmt::Debug for DictionaryVector<K> {
 
 impl<K: ArrowDictionaryKeyType> PartialEq for DictionaryVector<K> {
     fn eq(&self, other: &DictionaryVector<K>) -> bool {
-        self.array == other.array && self.item_type == other.item_type
+        self.array == other.array
+            && self.key_type == other.key_type
+            && self.item_type == other.item_type
     }
 }
 
 impl<K: ArrowDictionaryKeyType> DictionaryVector<K> {
     /// Create a new instance of `DictionaryVector` from a dictionary array and item type
     pub fn new(array: DictionaryArray<K>, item_type: ConcreteDataType) -> Result<Self> {
+        let key_type = ConcreteDataType::try_from(&K::DATA_TYPE)?;
         let item_vector = Helper::try_into_vector(array.values())?;
 
         Ok(Self {
             array,
+            key_type,
             item_type,
             item_vector,
         })
@@ -88,7 +95,7 @@ impl<K: ArrowDictionaryKeyType> DictionaryVector<K> {
 impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::Dictionary(DictionaryType::new(
-            ConcreteDataType::int64_datatype(),
+            self.key_type.clone(),
             self.item_type.clone(),
         ))
     }
@@ -132,6 +139,7 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(Self {
             array: self.array.slice(offset, length),
+            key_type: self.key_type.clone(),
             item_type: self.item_type.clone(),
             item_vector: self.item_vector.clone(),
         })
@@ -181,11 +189,13 @@ impl<K: ArrowDictionaryKeyType> TryFrom<DictionaryArray<K>> for DictionaryVector
     type Error = crate::error::Error;
 
     fn try_from(array: DictionaryArray<K>) -> Result<Self> {
-        let item_type = ConcreteDataType::from_arrow_type(array.values().data_type());
+        let key_type = ConcreteDataType::try_from(array.keys().data_type())?;
+        let item_type = ConcreteDataType::try_from(array.values().data_type())?;
         let item_vector = Helper::try_into_vector(array.values())?;
 
         Ok(Self {
             array,
+            key_type,
             item_type,
             item_vector,
         })
@@ -263,6 +273,7 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
 
         Arc::new(Self {
             array: new_array,
+            key_type: self.key_type.clone(),
             item_type: self.item_type.clone(),
             item_vector: self.item_vector.clone(),
         })
@@ -283,6 +294,7 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
 
         Ok(Arc::new(Self {
             array: new_array,
+            key_type: self.key_type.clone(),
             item_type: self.item_type.clone(),
             item_vector: self.item_vector.clone(),
         }))
@@ -295,6 +307,7 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
                 .expect("Failed to create casted dictionary array");
         Ok(Arc::new(Self {
             array: new_array,
+            key_type: self.key_type.clone(),
             item_type: to_type.clone(),
             item_vector: self.item_vector.clone(),
         }))
@@ -315,6 +328,7 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
 
         Ok(Arc::new(Self {
             array: new_array,
+            key_type: self.key_type.clone(),
             item_type: self.item_type.clone(),
             item_vector: self.item_vector.clone(),
         }))
@@ -325,8 +339,8 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Int64Array, StringArray};
-    use arrow::datatypes::Int64Type;
+    use arrow::array::{Int64Array, StringArray, UInt32Array};
+    use arrow::datatypes::{Int64Type, UInt32Type};
 
     use super::*;
 
@@ -452,5 +466,20 @@ mod tests {
         assert_eq!(taken.get(0), Value::String("c".to_string().into()));
         assert_eq!(taken.get(1), Value::String("a".to_string().into()));
         assert_eq!(taken.get(2), Value::String("b".to_string().into()));
+    }
+
+    #[test]
+    fn test_other_type() {
+        let values = StringArray::from(vec!["a", "b", "c", "d"]);
+        let keys = UInt32Array::from(vec![Some(0), Some(1), Some(2), None, Some(1), Some(3)]);
+        let dict_array = DictionaryArray::new(keys, Arc::new(values));
+        let dict_vec = DictionaryVector::<UInt32Type>::try_from(dict_array).unwrap();
+        assert_eq!(
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::string_datatype()
+            ),
+            dict_vec.data_type()
+        );
     }
 }
