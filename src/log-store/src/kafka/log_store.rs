@@ -302,6 +302,10 @@ impl LogStore for KafkaLogStore {
                 },
             ))
             .await?;
+        debug!(
+            "Appended batch to Kafka, region_grouped_max_offset: {:?}",
+            region_grouped_max_offset
+        );
 
         Ok(AppendBatchResponse {
             last_entry_ids: region_grouped_max_offset.into_iter().collect(),

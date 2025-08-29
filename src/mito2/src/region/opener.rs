@@ -726,8 +726,8 @@ where
 
     let series_count = version_control.current().series_count();
     info!(
-        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
-        region_id, rows_replayed, last_entry_id, series_count, now.elapsed()
+        "Replay WAL for region: {}, provider: {:?}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
+        region_id, provider, rows_replayed, last_entry_id, series_count, now.elapsed()
     );
     Ok(last_entry_id)
 }

@@ -65,7 +65,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if region.provider.is_remote_wal() {
             let flushed_entry_id = region.version_control.current().last_entry_id;
-            info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");
+            info!("Trying to replay memtable for region: {region_id}, provider: {:?}, flushed entry id: {flushed_entry_id}", region.provider);
             let timer = Instant::now();
             let wal_entry_reader =
                 self.wal
@@ -82,8 +82,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             )
             .await?;
             info!(
-                "Elapsed: {:?}, region: {region_id} catchup finished. last entry id: {last_entry_id}, expected: {:?}.",
+                "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. last entry id: {last_entry_id}, expected: {:?}.",
                 timer.elapsed(),
+                region.provider,
                 request.entry_id
             );
             if let Some(expected_last_entry_id) = request.entry_id {
