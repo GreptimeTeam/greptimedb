@@ -90,3 +90,27 @@ SELECT val, ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
 DROP FLOW calc_reqs;
 DROP TABLE http_requests;
 DROP TABLE cnt_reqs;
+
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  val DOUBLE,
+);
+
+CREATE FLOW calc_rate SINK TO rate_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests[5m]);
+
+SHOW CREATE TABLE rate_reqs;
+
+INSERT INTO TABLE http_requests VALUES
+    (now() - '1m'::interval, 0),
+    (now() - '30s'::interval, 1),
+    (now(), 2);
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
+SELECT count(*) > 0 FROM rate_reqs;
+
+DROP FLOW calc_rate;
+DROP TABLE http_requests;
+DROP TABLE rate_reqs;

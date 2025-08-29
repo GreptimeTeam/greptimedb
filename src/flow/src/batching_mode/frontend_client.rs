@@ -41,8 +41,8 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::error::{
-    ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu,
-    UnexpectedSnafu,
+    CreateSinkTableSnafu, ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu,
+    NoAvailableFrontendSnafu, UnexpectedSnafu,
 };
 use crate::{Error, FlowAuthHeader};
 
@@ -290,13 +290,17 @@ impl FrontendClient {
     ) -> Result<u32, Error> {
         self.handle(
             Request::Ddl(api::v1::DdlRequest {
-                expr: Some(api::v1::ddl_request::Expr::CreateTable(create)),
+                expr: Some(api::v1::ddl_request::Expr::CreateTable(create.clone())),
             }),
             catalog,
             schema,
             &mut None,
         )
         .await
+        .map_err(BoxedError::new)
+        .with_context(|_| CreateSinkTableSnafu {
+            create: create.clone(),
+        })
     }
 
     /// Execute a SQL statement on the frontend.

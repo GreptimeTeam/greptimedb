@@ -17,7 +17,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
-use arrow_schema::Fields;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
@@ -733,11 +732,10 @@ fn create_table_with_expr(
     sink_table_name: &[String; 3],
     query_type: &QueryType,
 ) -> Result<CreateTableExpr, Error> {
-    let fields = plan.schema().fields();
-    let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan, fields)?;
+    let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan)?;
 
     let mut column_schemas = Vec::new();
-    for field in fields {
+    for field in plan.schema().fields() {
         let name = field.name();
         let ty = ConcreteDataType::from_arrow_type(field.data_type());
         let col_schema = if first_time_stamp == Some(name.clone()) {
@@ -819,8 +817,8 @@ fn create_table_with_expr(
 /// * `Vec<String>` - other columns which are also in group by clause
 fn build_primary_key_constraint(
     plan: &LogicalPlan,
-    schema: &Fields,
 ) -> Result<(Option<String>, Vec<String>), Error> {
+    let fields = plan.schema().fields();
     let mut pk_names = FindGroupByFinalName::default();
 
     plan.visit(&mut pk_names)
@@ -828,19 +826,23 @@ fn build_primary_key_constraint(
             context: format!("Can't find aggr expr in plan {plan:?}"),
         })?;
 
-    // if no group by clause, return empty
+    // if no group by clause, return empty with first timestamp column found in output schema
     let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
     if pk_final_names.is_empty() {
-        return Ok((None, Vec::new()));
+        let first_ts_col = fields
+            .iter()
+            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
+            .map(|f| f.name().clone());
+        return Ok((first_ts_col, Vec::new()));
     }
 
-    let all_pk_cols: Vec<_> = schema
+    let all_pk_cols: Vec<_> = fields
         .iter()
         .filter(|f| pk_final_names.contains(f.name()))
         .map(|f| f.name().clone())
         .collect();
     // auto create table use first timestamp column in group by clause as time index
-    let first_time_stamp = schema
+    let first_time_stamp = fields
         .iter()
         .find(|f| {
             all_pk_cols.contains(&f.name().clone())
