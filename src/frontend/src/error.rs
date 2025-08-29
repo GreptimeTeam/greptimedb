@@ -369,6 +369,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to acquire more permits from limiter"))]
+    AcquireLimiter {
+        #[snafu(source)]
+        error: tokio::sync::AcquireError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -451,6 +459,8 @@ impl ErrorExt for Error {
             Error::Cancelled { .. } => StatusCode::Cancelled,
 
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
+
+            Error::AcquireLimiter { .. } => StatusCode::Internal,
         }
     }
 
