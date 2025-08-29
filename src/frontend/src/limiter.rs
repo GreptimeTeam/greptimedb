@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use api::v1::column::Values;
@@ -21,61 +20,30 @@ use api::v1::value::ValueData;
 use api::v1::{
     Decimal128, InsertRequests, IntervalMonthDayNano, RowInsertRequest, RowInsertRequests,
 };
-use common_telemetry::{debug, warn};
 use pipeline::ContextReq;
+use snafu::ResultExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::error::{AcquireLimiterSnafu, Result};
 
 pub(crate) type LimiterRef = Arc<Limiter>;
 
-/// A frontend request limiter that controls the total size of in-flight write requests.
+/// A frontend request limiter that controls the total size of in-flight write
+/// requests.
 pub(crate) struct Limiter {
-    // The maximum number of bytes that can be in flight.
-    max_in_flight_write_bytes: u64,
-
-    // The current in-flight write bytes.
-    in_flight_write_bytes: Arc<AtomicU64>,
-}
-
-/// A counter for the in-flight write bytes.
-pub(crate) struct InFlightWriteBytesCounter {
-    // The current in-flight write bytes.
-    in_flight_write_bytes: Arc<AtomicU64>,
-
-    // The write bytes that are being processed.
-    processing_write_bytes: u64,
-}
-
-impl InFlightWriteBytesCounter {
-    /// Creates a new InFlightWriteBytesCounter. It will decrease the in-flight write bytes when dropped.
-    pub fn new(in_flight_write_bytes: Arc<AtomicU64>, processing_write_bytes: u64) -> Self {
-        debug!(
-            "processing write bytes: {}, current in-flight write bytes: {}",
-            processing_write_bytes,
-            in_flight_write_bytes.load(Ordering::Relaxed)
-        );
-        Self {
-            in_flight_write_bytes,
-            processing_write_bytes,
-        }
-    }
-}
-
-impl Drop for InFlightWriteBytesCounter {
-    // When the request is finished, the in-flight write bytes should be decreased.
-    fn drop(&mut self) {
-        self.in_flight_write_bytes
-            .fetch_sub(self.processing_write_bytes, Ordering::Relaxed);
-    }
+    max_in_flight_write_bytes: usize,
+    byte_counter: Arc<Semaphore>,
 }
 
 impl Limiter {
-    pub fn new(max_in_flight_write_bytes: u64) -> Self {
+    pub fn new(max_in_flight_write_bytes: usize) -> Self {
         Self {
+            byte_counter: Arc::new(Semaphore::new(max_in_flight_write_bytes)),
             max_in_flight_write_bytes,
-            in_flight_write_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub fn limit_request(&self, request: &Request) -> Option<InFlightWriteBytesCounter> {
+    pub async fn limit_request(&self, request: &Request) -> Result<OwnedSemaphorePermit> {
         let size = match request {
             Request::Inserts(requests) => self.insert_requests_data_size(requests),
             Request::RowInserts(requests) => {
@@ -83,56 +51,35 @@ impl Limiter {
             }
             _ => 0,
         };
-        self.limit_in_flight_write_bytes(size as u64)
+        self.limit_in_flight_write_bytes(size).await
     }
 
-    pub fn limit_row_inserts(
+    pub async fn limit_row_inserts(
         &self,
         requests: &RowInsertRequests,
-    ) -> Option<InFlightWriteBytesCounter> {
+    ) -> Result<OwnedSemaphorePermit> {
         let size = self.rows_insert_requests_data_size(requests.inserts.iter());
-        self.limit_in_flight_write_bytes(size as u64)
+        self.limit_in_flight_write_bytes(size).await
     }
 
-    pub fn limit_ctx_req(&self, opt_req: &ContextReq) -> Option<InFlightWriteBytesCounter> {
+    pub async fn limit_ctx_req(&self, opt_req: &ContextReq) -> Result<OwnedSemaphorePermit> {
         let size = self.rows_insert_requests_data_size(opt_req.ref_all_req());
-        self.limit_in_flight_write_bytes(size as u64)
+        self.limit_in_flight_write_bytes(size).await
     }
 
-    /// Returns None if the in-flight write bytes exceed the maximum limit.
-    /// Otherwise, returns Some(InFlightWriteBytesCounter) and the in-flight write bytes will be increased.
-    pub fn limit_in_flight_write_bytes(&self, bytes: u64) -> Option<InFlightWriteBytesCounter> {
-        let result = self.in_flight_write_bytes.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| {
-                if current + bytes > self.max_in_flight_write_bytes {
-                    warn!(
-                        "in-flight write bytes exceed the maximum limit {}, request with {} bytes will be limited",
-                        self.max_in_flight_write_bytes,
-                        bytes
-                    );
-                    return None;
-                }
-                Some(current + bytes)
-            },
-        );
-
-        match result {
-            // Update the in-flight write bytes successfully.
-            Ok(_) => Some(InFlightWriteBytesCounter::new(
-                self.in_flight_write_bytes.clone(),
-                bytes,
-            )),
-            // It means the in-flight write bytes exceed the maximum limit.
-            Err(_) => None,
-        }
+    /// Await until more inflight bytes are available
+    pub async fn limit_in_flight_write_bytes(&self, bytes: usize) -> Result<OwnedSemaphorePermit> {
+        self.byte_counter
+            .clone()
+            .acquire_many_owned(bytes as u32)
+            .await
+            .context(AcquireLimiterSnafu)
     }
 
     /// Returns the current in-flight write bytes.
     #[allow(dead_code)]
-    pub fn in_flight_write_bytes(&self) -> u64 {
-        self.in_flight_write_bytes.load(Ordering::Relaxed)
+    pub fn in_flight_write_bytes(&self) -> usize {
+        self.max_in_flight_write_bytes - self.byte_counter.available_permits()
     }
 
     fn insert_requests_data_size(&self, request: &InsertRequests) -> usize {
@@ -270,8 +217,10 @@ mod tests {
         for _ in 0..tasks_count {
             let limiter = limiter_ref.clone();
             let handle = tokio::spawn(async move {
-                let result = limiter.limit_request(&generate_request(request_data_size));
-                assert!(result.is_some());
+                let result = limiter
+                    .limit_request(&generate_request(request_data_size))
+                    .await;
+                assert!(result.is_ok());
             });
             handles.push(handle);
         }
@@ -282,23 +231,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_in_flight_write_bytes() {
+    #[tokio::test]
+    async fn test_in_flight_write_bytes() {
         let limiter_ref: LimiterRef = Arc::new(Limiter::new(1024));
         let req1 = generate_request(100);
-        let result1 = limiter_ref.limit_request(&req1);
-        assert!(result1.is_some());
+        let result1 = limiter_ref
+            .limit_request(&req1)
+            .await
+            .expect("failed to acquire permits");
         assert_eq!(limiter_ref.in_flight_write_bytes(), 100);
 
         let req2 = generate_request(200);
-        let result2 = limiter_ref.limit_request(&req2);
-        assert!(result2.is_some());
+        let result2 = limiter_ref
+            .limit_request(&req2)
+            .await
+            .expect("failed to acquire permits");
         assert_eq!(limiter_ref.in_flight_write_bytes(), 300);
 
-        drop(result1.unwrap());
+        drop(result1);
         assert_eq!(limiter_ref.in_flight_write_bytes(), 200);
 
-        drop(result2.unwrap());
+        drop(result2);
         assert_eq!(limiter_ref.in_flight_write_bytes(), 0);
     }
 }

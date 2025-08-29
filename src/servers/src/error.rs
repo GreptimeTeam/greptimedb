@@ -594,12 +594,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
-    InFlightWriteBytesExceeded {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
     InvalidElasticsearchInput {
         reason: String,
@@ -758,8 +752,6 @@ impl ErrorExt for Error {
             ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
-
-            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
 
             DurationOverflow { .. } => StatusCode::InvalidArguments,
 

@@ -16,8 +16,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use servers::error as server_error;
-use servers::error::{AuthSnafu, InFlightWriteBytesExceededSnafu};
+use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu, OtherSnafu};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -43,11 +42,13 @@ impl OpentsdbProtocolHandler for Instance {
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_row_inserts(&requests)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(OtherSnafu)?,
+            )
         } else {
             None
         };
@@ -57,7 +58,7 @@ impl OpentsdbProtocolHandler for Instance {
             .handle_row_inserts(requests, ctx, true, true)
             .await
             .map_err(BoxedError::new)
-            .context(servers::error::ExecuteGrpcQuerySnafu)?;
+            .context(ExecuteGrpcQuerySnafu)?;
 
         Ok(match output.data {
             common_query::OutputData::AffectedRows(rows) => rows,
