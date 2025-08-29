@@ -69,6 +69,19 @@ impl ObjectStoreConfig {
 
         name
     }
+
+    /// Returns whether to enable read cache. If not set, the read cache will be enabled by default.
+    pub fn enable_read_cache(&self) -> bool {
+        let enable_read_cache = match self {
+            Self::File(_) => Some(false),
+            Self::S3(s3) => s3.cache.enable_read_cache,
+            Self::Oss(oss) => oss.cache.enable_read_cache,
+            Self::Azblob(az) => az.cache.enable_read_cache,
+            Self::Gcs(gcs) => gcs.cache.enable_read_cache,
+        };
+
+        enable_read_cache.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize, Eq, PartialEq)]
@@ -304,6 +317,8 @@ impl Default for HttpClientConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct ObjectStorageCacheConfig {
+    /// Whether to enable read cache. If not set, the read cache will be enabled by default.
+    pub enable_read_cache: Option<bool>,
     /// The local file cache directory
     pub cache_path: Option<String>,
     /// The cache capacity in bytes
