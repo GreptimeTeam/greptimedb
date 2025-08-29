@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AsyncRecordBatchStreamAdapterState","Metrics"],"fn":["convert_map_to_json_binary","custom_cast","one_line"],"struct":["AsyncRecordBatchStreamAdapter","DfRecordBatchStreamAdapter","MetricCollector","PlanMetrics","RecordBatchMetrics","RecordBatchStreamAdapter","RecordBatchStreamTypeAdapter"],"type":["FutureStream"]};

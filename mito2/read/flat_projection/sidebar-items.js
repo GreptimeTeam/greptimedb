@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["flat_projected_columns"],"struct":["FlatProjectionMapper"]};

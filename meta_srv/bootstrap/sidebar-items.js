@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bootstrap_metasrv_with_router","build_connection_options","convert_tls_option","create_etcd_client","create_etcd_client_with_tls","create_mysql_pool","create_postgres_pool","create_postgres_pool_with","metasrv_builder","router","setup_mysql_options"],"struct":["MetasrvInstance"]};

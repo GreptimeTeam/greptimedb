@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_next_table_id","set_next_table_id"],"struct":["NextTableIdResponse","ResetTableIdRequest","TableIdSequenceHandler"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_OBJECT_STORE_CACHE_SIZE"],"enum":["ObjectStoreConfig","RegionEngineConfig"],"struct":["DatanodeOptions","ProcedureConfig","StorageConfig"]};
