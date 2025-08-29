@@ -2,7 +2,7 @@
 version: '3.8'
 services:
   kafka:
-    image: bitnami/kafka:3.6.0
+    image: public.ecr.aws/i8k6a5e1/bitnami/kafka:3.9.0-debian-12-r1
     container_name: kafka
     ports:
       - 9092:9092
