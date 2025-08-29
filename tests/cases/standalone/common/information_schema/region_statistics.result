@@ -22,15 +22,17 @@ INSERT INTO test VALUES
 Affected Rows: 3
 
 -- SQLNESS SLEEP 3s
-SELECT SUM(region_rows), SUM(disk_size), SUM(sst_size), SUM(index_size)
+-- For regions using different WAL implementations, the manifest size may vary.
+-- The remote WAL implementation additionally stores a flushed entry ID when creating the manifest.
+SELECT SUM(region_rows), SUM(memtable_size), SUM(sst_size), SUM(index_size)
        FROM INFORMATION_SCHEMA.REGION_STATISTICS WHERE table_id
        IN (SELECT TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test' and table_schema = 'public');
 
-+-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
-| sum(information_schema.region_statistics.region_rows) | sum(information_schema.region_statistics.disk_size) | sum(information_schema.region_statistics.sst_size) | sum(information_schema.region_statistics.index_size) |
-+-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
-| 3                                                     | 2699                                                | 0                                                  | 0                                                    |
-+-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
++-------------------------------------------------------+---------------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
+| sum(information_schema.region_statistics.region_rows) | sum(information_schema.region_statistics.memtable_size) | sum(information_schema.region_statistics.sst_size) | sum(information_schema.region_statistics.index_size) |
++-------------------------------------------------------+---------------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
+| 3                                                     | 78                                                      | 0                                                  | 0                                                    |
++-------------------------------------------------------+---------------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
 
 SELECT data_length, index_length, avg_row_length, table_rows FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test';
 

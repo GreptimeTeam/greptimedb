@@ -116,6 +116,7 @@ impl SchedulerEnv {
         Arc::new(ManifestContext::new(
             RegionManifestManager::new(
                 metadata,
+                0,
                 RegionManifestOptions {
                     manifest_dir: "".to_string(),
                     object_store: self.access_layer.object_store().clone(),

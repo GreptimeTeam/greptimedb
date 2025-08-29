@@ -112,11 +112,11 @@ mod tests {
         let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
         assert_eq!(current_latest_offset, 0);
 
-        let record = vec![record()];
+        let record = vec![record(), record()];
         let region = RegionId::new(1, 1);
         producer.produce(region, record.clone()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
-        assert_eq!(current_latest_offset, record.len() as u64);
+        assert_eq!(current_latest_offset, record.len() as u64 - 1);
     }
 }

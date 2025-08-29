@@ -33,30 +33,34 @@ impl BackgroundProducerWorker {
             .context(error::GetOffsetSnafu {
                 topic: &self.provider.topic,
             }) {
-            Ok(offset) => match self.topic_stats.entry(self.provider.clone()) {
-                dashmap::Entry::Occupied(mut occupied_entry) => {
-                    let offset = offset as u64;
-                    let stat = occupied_entry.get_mut();
-                    if stat.latest_offset < offset {
-                        stat.latest_offset = offset;
+            Ok(highwatermark) => {
+                // The highwatermark is the offset of the last record plus one.
+                let offset = (highwatermark as u64).saturating_sub(1);
+
+                match self.topic_stats.entry(self.provider.clone()) {
+                    dashmap::Entry::Occupied(mut occupied_entry) => {
+                        let stat = occupied_entry.get_mut();
+                        if stat.latest_offset < offset {
+                            stat.latest_offset = offset;
+                            debug!(
+                                "Updated latest offset for topic {} to {}",
+                                self.provider.topic, offset
+                            );
+                        }
+                    }
+                    dashmap::Entry::Vacant(vacant_entry) => {
+                        vacant_entry.insert(TopicStat {
+                            latest_offset: offset,
+                            record_size: 0,
+                            record_num: 0,
+                        });
                         debug!(
-                            "Updated latest offset for topic {} to {}",
+                            "Inserted latest offset for topic {} to {}",
                             self.provider.topic, offset
                         );
                     }
                 }
-                dashmap::Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(TopicStat {
-                        latest_offset: offset as u64,
-                        record_size: 0,
-                        record_num: 0,
-                    });
-                    debug!(
-                        "Inserted latest offset for topic {} to {}",
-                        self.provider.topic, offset
-                    );
-                }
-            },
+            }
             Err(err) => {
                 error!(err; "Failed to get latest offset for topic {}", self.provider.topic);
             }

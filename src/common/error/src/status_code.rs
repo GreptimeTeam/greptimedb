@@ -251,7 +251,6 @@ macro_rules! define_from_tonic_status {
                         .get(key)
                         .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
                 }
-
                 let code = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_CODE)
                     .and_then(|s| {
                         if let Ok(code) = s.parse::<u32>() {

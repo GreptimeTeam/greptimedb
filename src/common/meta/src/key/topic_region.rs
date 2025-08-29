@@ -46,7 +46,7 @@ pub struct TopicRegionValue {
     pub checkpoint: Option<ReplayCheckpoint>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReplayCheckpoint {
     #[serde(default)]
     pub entry_id: u64,

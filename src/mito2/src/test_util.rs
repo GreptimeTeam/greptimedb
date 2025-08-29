@@ -563,6 +563,7 @@ impl TestEnv {
         if let Some(metadata) = initial_metadata {
             RegionManifestManager::new(
                 metadata,
+                0,
                 manifest_opts,
                 Default::default(),
                 Default::default(),

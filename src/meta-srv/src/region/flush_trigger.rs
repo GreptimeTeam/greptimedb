@@ -29,7 +29,6 @@ use common_time::util::current_time_millis;
 use common_wal::config::kafka::common::{
     DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
 };
-use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -223,6 +222,7 @@ impl RegionFlushTrigger {
         &self,
         topic: &str,
         region_ids: &[RegionId],
+        topic_regions: &HashMap<RegionId, TopicRegionValue>,
         leader_regions: &HashMap<RegionId, LeaderRegion>,
     ) -> Result<()> {
         if region_ids.is_empty() {
@@ -232,18 +232,19 @@ impl RegionFlushTrigger {
         let regions = region_ids
             .iter()
             .flat_map(|region_id| match leader_regions.get(region_id) {
-                Some(leader_region) => {
-                    let entry_id = leader_region.manifest.replay_entry_id();
-                    let metadata_entry_id = leader_region.manifest.metadata_replay_entry_id();
-
-                    Some((
+                Some(leader_region) => should_persist_region_checkpoint(
+                    leader_region,
+                    topic_regions
+                        .get(region_id)
+                        .cloned()
+                        .and_then(|value| value.checkpoint),
+                )
+                .map(|checkpoint| {
+                    (
                         TopicRegionKey::new(*region_id, topic),
-                        Some(TopicRegionValue::new(Some(ReplayCheckpoint::new(
-                            entry_id,
-                            metadata_entry_id,
-                        )))),
-                    ))
-                }
+                        Some(TopicRegionValue::new(Some(checkpoint))),
+                    )
+                }),
                 None => None,
             })
             .collect::<Vec<_>>();
@@ -271,14 +272,14 @@ impl RegionFlushTrigger {
         latest_entry_id: u64,
         avg_record_size: usize,
     ) -> Result<()> {
-        let region_ids = self
+        let topic_regions = self
             .table_metadata_manager
             .topic_region_manager()
             .regions(topic)
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
-        if region_ids.is_empty() {
+        if topic_regions.is_empty() {
             debug!("No regions found for topic: {}", topic);
             return Ok(());
         }
@@ -286,7 +287,7 @@ impl RegionFlushTrigger {
         // Filters regions need to persist checkpoints.
         let regions_to_persist = filter_regions_by_replay_size(
             topic,
-            region_ids
+            topic_regions
                 .iter()
                 .map(|(region_id, value)| (*region_id, value.min_entry_id().unwrap_or_default())),
             avg_record_size as u64,
@@ -295,33 +296,25 @@ impl RegionFlushTrigger {
         );
         let region_manifests = self
             .leader_region_registry
-            .batch_get(region_ids.keys().cloned());
+            .batch_get(topic_regions.keys().cloned());
 
         if let Err(err) = self
-            .persist_region_checkpoints(topic, &regions_to_persist, &region_manifests)
+            .persist_region_checkpoints(
+                topic,
+                &regions_to_persist,
+                &topic_regions,
+                &region_manifests,
+            )
             .await
         {
             error!(err; "Failed to persist region checkpoints for topic: {}", topic);
         }
 
-        let (inactive_regions, active_regions): (Vec<_>, Vec<_>) = region_manifests
+        let regions = region_manifests
             .into_iter()
-            .partition_map(|(region_id, region)| {
-                if !region.manifest.is_inactive() {
-                    itertools::Either::Left((region_id, region.manifest.prunable_entry_id()))
-                } else {
-                    itertools::Either::Right((region_id, region.manifest.prunable_entry_id()))
-                }
-            });
-
-        let min_entry_id = inactive_regions
-            .iter()
-            .min_by_key(|(_, entry_id)| *entry_id);
-        let min_entry_id = active_regions
-            .iter()
-            .min_by_key(|(_, entry_id)| *entry_id)
-            .or(min_entry_id);
-
+            .map(|(region_id, region)| (region_id, region.manifest.prunable_entry_id()))
+            .collect::<Vec<_>>();
+        let min_entry_id = regions.iter().min_by_key(|(_, entry_id)| *entry_id);
         if let Some((_, min_entry_id)) = min_entry_id {
             let replay_size = (latest_entry_id.saturating_sub(*min_entry_id))
                 .saturating_mul(avg_record_size as u64);
@@ -331,45 +324,28 @@ impl RegionFlushTrigger {
         }
 
         // Selects regions to flush from the set of active regions.
-        let mut regions_to_flush = filter_regions_by_replay_size(
+        let regions_to_flush = filter_regions_by_replay_size(
             topic,
-            active_regions.into_iter(),
+            regions.into_iter(),
             avg_record_size as u64,
             latest_entry_id,
             self.flush_trigger_size,
         );
 
-        let active_regions_num = regions_to_flush.len();
-        // Selects regions to flush from the set of inactive regions.
-        // For inactive regions, we use a lower flush trigger size (half of the normal size)
-        // to encourage more aggressive flushing to update the region's topic latest entry id.
-        let inactive_regions_to_flush = filter_regions_by_replay_size(
-            topic,
-            inactive_regions.into_iter(),
-            avg_record_size as u64,
-            latest_entry_id,
-            self.flush_trigger_size / 2,
-        );
-        let inactive_regions_num = inactive_regions_to_flush.len();
-        regions_to_flush.extend(inactive_regions_to_flush);
-
         // Sends flush instructions to datanodes.
         if !regions_to_flush.is_empty() {
             self.send_flush_instructions(&regions_to_flush).await?;
             debug!(
-                "Sent {} flush instructions to datanodes for topic: '{}' ({} inactive regions)",
+                "Sent {} flush instructions to datanodes for topic: '{}', regions: {:?}",
                 regions_to_flush.len(),
                 topic,
-                inactive_regions_num,
+                regions_to_flush,
             );
         }
 
         metrics::METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL
-            .with_label_values(&[topic, "active"])
-            .inc_by(active_regions_num as u64);
-        metrics::METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL
-            .with_label_values(&[topic, "inactive"])
-            .inc_by(inactive_regions_num as u64);
+            .with_label_values(&[topic])
+            .inc_by(regions_to_flush.len() as u64);
 
         Ok(())
     }
@@ -406,6 +382,26 @@ impl RegionFlushTrigger {
 
         Ok(())
     }
+}
+
+/// Determines whether a region checkpoint should be persisted based on current and persisted state.
+fn should_persist_region_checkpoint(
+    current: &LeaderRegion,
+    persisted: Option<ReplayCheckpoint>,
+) -> Option<ReplayCheckpoint> {
+    let new_checkpoint = ReplayCheckpoint::new(
+        current.manifest.replay_entry_id(),
+        current.manifest.metadata_replay_entry_id(),
+    );
+
+    let Some(persisted) = persisted else {
+        return Some(new_checkpoint);
+    };
+
+    if new_checkpoint > persisted {
+        return Some(new_checkpoint);
+    }
+    None
 }
 
 /// Filter regions based on the estimated replay size.
@@ -496,6 +492,7 @@ fn is_recent(timestamp: i64, now: i64, duration: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use common_base::readable_size::ReadableSize;
+    use common_meta::region_registry::LeaderRegionManifestInfo;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -625,5 +622,93 @@ mod tests {
         );
         // Only regions 1,1 and 1,2 should be flushed
         assert_eq!(result, vec![region_id(1, 1), region_id(1, 2)]);
+    }
+
+    fn metric_leader_region(replay_entry_id: u64, metadata_replay_entry_id: u64) -> LeaderRegion {
+        LeaderRegion {
+            datanode_id: 1,
+            manifest: LeaderRegionManifestInfo::Metric {
+                data_manifest_version: 1,
+                data_flushed_entry_id: replay_entry_id,
+                data_topic_latest_entry_id: 0,
+                metadata_manifest_version: 1,
+                metadata_flushed_entry_id: metadata_replay_entry_id,
+                metadata_topic_latest_entry_id: 0,
+            },
+        }
+    }
+
+    fn mito_leader_region(replay_entry_id: u64) -> LeaderRegion {
+        LeaderRegion {
+            datanode_id: 1,
+            manifest: LeaderRegionManifestInfo::Mito {
+                manifest_version: 1,
+                flushed_entry_id: replay_entry_id,
+                topic_latest_entry_id: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_should_persist_region_checkpoint() {
+        // `persisted` is none
+        let current = metric_leader_region(100, 10);
+        let result = should_persist_region_checkpoint(&current, None).unwrap();
+        assert_eq!(result, ReplayCheckpoint::new(100, Some(10)));
+
+        // `persisted.entry_id` is less than `current.manifest.replay_entry_id()`
+        let current = mito_leader_region(100);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, None)))
+                .unwrap();
+        assert_eq!(result, ReplayCheckpoint::new(100, None));
+
+        let current = metric_leader_region(100, 10);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, Some(10))))
+                .unwrap();
+        assert_eq!(result, ReplayCheckpoint::new(100, Some(10)));
+
+        // `persisted.metadata_entry_id` is less than `current.manifest.metadata_replay_entry_id()`
+        let current = metric_leader_region(100, 10);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(100, Some(8))))
+                .unwrap();
+        assert_eq!(result, ReplayCheckpoint::new(100, Some(10)));
+
+        // `persisted.metadata_entry_id` is none
+        let current = metric_leader_region(100, 10);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(100, None)))
+                .unwrap();
+        assert_eq!(result, ReplayCheckpoint::new(100, Some(10)));
+
+        // `current.manifest.metadata_replay_entry_id()` is none
+        let current = mito_leader_region(100);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(100, Some(8))))
+                .is_none();
+        assert!(result);
+
+        // `persisted.entry_id` is equal to `current.manifest.replay_entry_id()`
+        let current = metric_leader_region(100, 10);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(100, Some(10))));
+        assert!(result.is_none());
+        let current = mito_leader_region(100);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(100, None)));
+        assert!(result.is_none());
+
+        // `persisted.entry_id` is less than `current.manifest.replay_entry_id()`
+        // `persisted.metadata_entry_id` is greater than `current.manifest.metadata_replay_entry_id()`
+        let current = metric_leader_region(80, 11);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, Some(10))));
+        assert!(result.is_none());
+        let current = mito_leader_region(80);
+        let result =
+            should_persist_region_checkpoint(&current, Some(ReplayCheckpoint::new(90, Some(10))));
+        assert!(result.is_none());
     }
 }
