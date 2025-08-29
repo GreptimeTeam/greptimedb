@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{FlushRegions, Instruction, InstructionReply};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ impl PreFlushRegion {
     fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        Instruction::FlushRegion(region_id)
+        Instruction::FlushRegions(FlushRegions::sync_single(region_id))
     }
 
     /// Tries to flush a leader region.
@@ -117,13 +117,37 @@ impl PreFlushRegion {
                         now.elapsed()
                     );
 
-                    let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply else {
-                        return error::UnexpectedInstructionReplySnafu {
-                            mailbox_message: msg.to_string(),
-                            reason: "expect flush region reply",
+                    let reply_result = match reply {
+                        InstructionReply::FlushRegions(flush_reply) => {
+                            if flush_reply.results.len() != 1 {
+                                return error::UnexpectedInstructionReplySnafu {
+                                    mailbox_message: msg.to_string(),
+                                    reason: "expect single region flush result",
+                                }
+                                .fail();
+                            }
+                            let (reply_region_id, result) = &flush_reply.results[0];
+                            if *reply_region_id != region_id {
+                                return error::UnexpectedInstructionReplySnafu {
+                                    mailbox_message: msg.to_string(),
+                                    reason: "flush reply region ID mismatch",
+                                }
+                                .fail();
+                            }
+                            match result {
+                                Ok(()) => (true, None),
+                                Err(err) => (false, Some(err.clone())),
+                            }
                         }
-                        .fail();
+                        _ => {
+                            return error::UnexpectedInstructionReplySnafu {
+                                mailbox_message: msg.to_string(),
+                                reason: "expect flush region reply",
+                            }
+                            .fail();
+                        }
                     };
+                    let (result, error) = reply_result;
 
                     if error.is_some() {
                         warn!(
@@ -170,7 +194,7 @@ mod tests {
     use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
-        new_close_region_reply, new_flush_region_reply, send_mock_reply,
+        new_close_region_reply, new_flush_region_reply_for_region, send_mock_reply,
     };
 
     fn new_persistent_context() -> PersistentContext {
@@ -245,6 +269,7 @@ mod tests {
         // to_peer: 2
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
+        let region_id = persistent_context.region_id;
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
@@ -253,9 +278,10 @@ mod tests {
         mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
-        send_mock_reply(mailbox, rx, |id| {
-            Ok(new_flush_region_reply(
+        send_mock_reply(mailbox, rx, move |id| {
+            Ok(new_flush_region_reply_for_region(
                 id,
+                region_id,
                 false,
                 Some("test mocked".to_string()),
             ))
@@ -272,6 +298,7 @@ mod tests {
         // to_peer: 2
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
+        let region_id = persistent_context.region_id;
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
@@ -280,7 +307,9 @@ mod tests {
         mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
-        send_mock_reply(mailbox, rx, |id| Ok(new_flush_region_reply(id, true, None)));
+        send_mock_reply(mailbox, rx, move |id| {
+            Ok(new_flush_region_reply_for_region(id, region_id, true, None))
+        });
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
