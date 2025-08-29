@@ -901,13 +901,13 @@ mod test {
                     ColumnSchema::new(
                         "ts",
                         ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    ),
+                        false,
+                    )
+                    .with_time_index(true),
                     update_at_schema.clone(),
-                    ts_placeholder_schema.clone(),
                 ],
                 primary_keys: vec![],
-                time_index: AUTO_CREATED_PLACEHOLDER_TS_COL.to_string(),
+                time_index: "ts".to_string(),
             },
             TestCase {
                 sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
@@ -983,9 +983,9 @@ mod test {
                 .iter()
                 .map(|c| try_as_column_schema(c).unwrap())
                 .collect::<Vec<_>>();
-            assert_eq!(tc.column_schemas, column_schemas);
-            assert_eq!(tc.primary_keys, expr.primary_keys);
-            assert_eq!(tc.time_index, expr.time_index);
+            assert_eq!(tc.column_schemas, column_schemas, "{:?}", tc.sql);
+            assert_eq!(tc.primary_keys, expr.primary_keys, "{:?}", tc.sql);
+            assert_eq!(tc.time_index, expr.time_index, "{:?}", tc.sql);
         }
     }
 }
