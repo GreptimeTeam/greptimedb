@@ -32,6 +32,9 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+const DEFAULT_MAX_DECODING_SIZE: usize = 32 * 1024 * 1024; // 32MB
+const DEFAULT_MAX_ENCODING_SIZE: usize = 32 * 1024 * 1024; // 32MB
+
 pub struct EtcdStore {
     client: Client,
     // Maximum number of operations permitted in a transaction.
@@ -39,6 +42,10 @@ pub struct EtcdStore {
     //
     // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
     max_txn_ops: usize,
+    // Maximum decoding message size in bytes. Default 32MB.
+    max_decoding_size: usize,
+    // Maximum encoding message size in bytes. Default 32MB.
+    max_encoding_size: usize,
 }
 
 impl EtcdStore {
@@ -59,7 +66,24 @@ impl EtcdStore {
         Arc::new(Self {
             client,
             max_txn_ops,
+            max_decoding_size: DEFAULT_MAX_DECODING_SIZE,
+            max_encoding_size: DEFAULT_MAX_ENCODING_SIZE,
         })
+    }
+
+    pub fn set_max_decoding_size(&mut self, max_decoding_size: usize) {
+        self.max_decoding_size = max_decoding_size;
+    }
+
+    pub fn set_max_encoding_size(&mut self, max_encoding_size: usize) {
+        self.max_encoding_size = max_encoding_size;
+    }
+
+    fn kv_client(&self) -> etcd_client::KvClient {
+        self.client
+            .kv_client()
+            .max_decoding_message_size(self.max_decoding_size)
+            .max_encoding_message_size(self.max_encoding_size)
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
@@ -71,7 +95,6 @@ impl EtcdStore {
                 .start_timer();
             let txn = Txn::new().and_then(txn_ops);
             let txn_res = self
-                .client
                 .kv_client()
                 .txn(txn)
                 .await
@@ -110,7 +133,6 @@ impl KvBackend for EtcdStore {
         let Get { key, options } = req.try_into()?;
 
         let mut res = self
-            .client
             .kv_client()
             .get(key, options)
             .await
@@ -136,7 +158,6 @@ impl KvBackend for EtcdStore {
         } = req.try_into()?;
 
         let mut res = self
-            .client
             .kv_client()
             .put(key, value, options)
             .await
@@ -201,7 +222,6 @@ impl KvBackend for EtcdStore {
         let Delete { key, options } = req.try_into()?;
 
         let mut res = self
-            .client
             .kv_client()
             .delete(key, options)
             .await
@@ -265,7 +285,6 @@ impl TxnService for EtcdStore {
 
         let etcd_txn: Txn = txn.into();
         let txn_res = self
-            .client
             .kv_client()
             .txn(etcd_txn)
             .await
@@ -564,6 +583,8 @@ mod tests {
         Some(EtcdStore {
             client,
             max_txn_ops: 128,
+            max_decoding_size: DEFAULT_MAX_DECODING_SIZE,
+            max_encoding_size: DEFAULT_MAX_ENCODING_SIZE,
         })
     }
 
