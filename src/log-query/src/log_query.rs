@@ -183,6 +183,10 @@ impl TimeFilter {
     /// This function will try to fill the missing fields and convert all dates to timestamps
     #[allow(unused_assignments)] // false positive
     pub fn canonicalize(&mut self) -> Result<()> {
+        // If all fields are None, do nothing
+        if self.is_empty() {
+            return Ok(());
+        }
         let mut start_dt = None;
         let mut end_dt = None;
 
@@ -231,12 +235,6 @@ impl TimeFilter {
             let (end, _) = Self::parse_datetime(self.end.as_ref().unwrap())?;
             start_dt = Some(start);
             end_dt = Some(end);
-        } else {
-            // Exception
-            return Err(InvalidTimeFilterSnafu {
-                filter: self.clone(),
-            }
-            .build());
         }
 
         // Validate that end is after start
@@ -316,6 +314,11 @@ impl TimeFilter {
             }
             .build())
         }
+    }
+
+    /// Check if the time filter is empty (all fields are None).
+    pub fn is_empty(&self) -> bool {
+        self.start.is_none() && self.end.is_none() && self.span.is_none()
     }
 }
 

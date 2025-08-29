@@ -29,9 +29,9 @@ use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::log_query::error::{
-    CatalogSnafu, DataFusionPlanningSnafu, Result, TimeIndexNotFoundSnafu, UnexpectedLogExprSnafu,
-    UnimplementedSnafu, UnknownAggregateFunctionSnafu, UnknownScalarFunctionSnafu,
-    UnknownTableSnafu,
+    CatalogSnafu, DataFusionPlanningSnafu, Result, TimeFilterNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedLogExprSnafu, UnimplementedSnafu, UnknownAggregateFunctionSnafu,
+    UnknownScalarFunctionSnafu, UnknownTableSnafu,
 };
 
 const DEFAULT_LIMIT: usize = 1000;
@@ -77,10 +77,19 @@ impl LogQueryPlanner {
         let mut filters = Vec::new();
 
         // Time filter
-        filters.push(self.build_time_filter(&query.time_filter, &schema)?);
+        if let Some(time_filter) = self.build_time_filter(&query.time_filter, &schema)? {
+            filters.push(time_filter);
+        }
 
         if let Some(filters_expr) = self.build_filters(&query.filters, df_schema.as_arrow())? {
             filters.push(filters_expr);
+        }
+
+        if !filters.iter().any(|f| {
+            self.check_filter_must_have_time_filter(f, &schema)
+                .unwrap_or(false)
+        }) {
+            return TimeFilterNotFoundSnafu {}.fail();
         }
 
         // Apply filters
@@ -118,7 +127,10 @@ impl LogQueryPlanner {
         Ok(plan)
     }
 
-    fn build_time_filter(&self, time_filter: &TimeFilter, schema: &Schema) -> Result<Expr> {
+    fn build_time_filter(&self, time_filter: &TimeFilter, schema: &Schema) -> Result<Option<Expr>> {
+        if time_filter.is_empty() {
+            return Ok(None);
+        }
         let timestamp_col = schema
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {})?
@@ -136,7 +148,41 @@ impl LogQueryPlanner {
             .gt_eq(lit(start_time))
             .and(col(timestamp_col).lt_eq(lit(end_time)));
 
-        Ok(expr)
+        Ok(Some(expr))
+    }
+    /// Ensure that the filter expression contains a ts filter on the timestamp column.
+    fn check_filter_must_have_time_filter(&self, expr: &Expr, schema: &Schema) -> Result<bool> {
+        let timestamp_col = schema
+            .timestamp_column()
+            .with_context(|| TimeIndexNotFoundSnafu {})?
+            .name
+            .as_str();
+        match expr {
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                match op {
+                    Operator::And | Operator::Or => Ok(self
+                        .check_filter_must_have_time_filter(left, schema)?
+                        || self.check_filter_must_have_time_filter(right, schema)?),
+                    Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::LtEq
+                    | Operator::Gt
+                    | Operator::GtEq => {
+                        // Check if either side is the timestamp column
+                        let left_is_time_col = matches!(
+                            &**left,
+                            Expr::Column(ref c) if c.name == timestamp_col
+                        );
+                        Ok(left_is_time_col)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            Expr::Not(inner) => self.check_filter_must_have_time_filter(inner, schema),
+            Expr::Column(c) => Ok(c.name == timestamp_col),
+            _ => Ok(false),
+        }
     }
     //disjunction
     fn build_filters(

@@ -52,6 +52,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Time filter not found."))]
+    TimeFilterNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unimplemented feature: {}", feature))]
     Unimplemented {
         #[snafu(implicit)]
@@ -92,7 +98,8 @@ impl ErrorExt for Error {
             Unimplemented { .. } => StatusCode::Unsupported,
             UnknownAggregateFunction { .. }
             | UnknownScalarFunction { .. }
-            | UnexpectedLogExpr { .. } => StatusCode::InvalidArguments,
+            | UnexpectedLogExpr { .. }
+            | TimeFilterNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
 
