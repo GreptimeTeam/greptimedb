@@ -366,13 +366,14 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
             })?;
+        let latest_offset = (end_offset as u64).saturating_sub(1);
         self.topic_stats
             .entry(provider.clone())
             .and_modify(|stat| {
-                stat.latest_offset = stat.latest_offset.max(end_offset as u64);
+                stat.latest_offset = stat.latest_offset.max(latest_offset);
             })
             .or_insert(TopicStat {
-                latest_offset: end_offset as u64,
+                latest_offset,
                 record_size: 0,
                 record_num: 0,
             });
@@ -564,6 +565,7 @@ mod tests {
     use futures::TryStreamExt;
     use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rskafka::client::partition::OffsetAt;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
     use store_api::logstore::LogStore;
@@ -727,8 +729,16 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.latest_entry_id(&provider).unwrap();
-        assert_eq!(high_wathermark, 99);
+        let latest_entry_id = logstore.latest_entry_id(&provider).unwrap();
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(latest_entry_id, 99);
+        // The latest offset is the offset of the last record plus one.
+        let latest = client.client().get_offset(OffsetAt::Latest).await.unwrap();
+        assert_eq!(latest, 100);
     }
 
     #[tokio::test]

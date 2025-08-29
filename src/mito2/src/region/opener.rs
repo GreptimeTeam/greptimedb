@@ -446,7 +446,7 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        if !self.skip_wal_replay {
+        let topic_latest_entry_id = if !self.skip_wal_replay {
             let replay_from_entry_id = self
                 .replay_checkpoint
                 .unwrap_or_default()
@@ -468,20 +468,26 @@ impl RegionOpener {
                 on_region_opened,
             )
             .await?;
-        } else {
-            info!(
-                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
-                region_id, manifest.manifest_version, flushed_entry_id
-            );
-        }
-        let now = self.time_provider.current_time_millis();
-        let topic_latest_entry_id =
-            if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
+            // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
+            // Only set after the WAL replay is completed.
+            let topic_latest_entry_id = if provider.is_remote_wal()
+                && version_control.current().version.memtables.is_empty()
+            {
                 wal.store().latest_entry_id(&provider).unwrap_or(0)
             } else {
                 0
             };
 
+            topic_latest_entry_id
+        } else {
+            info!(
+                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
+                region_id, manifest.manifest_version, flushed_entry_id
+            );
+
+            0
+        };
+        let now = self.time_provider.current_time_millis();
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
