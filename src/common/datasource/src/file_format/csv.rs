@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use arrow::csv;
 use arrow::csv::reader::Format;
+use arrow::csv::{self, WriterBuilder};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
@@ -33,12 +33,15 @@ use crate::error::{self, Result};
 use crate::file_format::{self, stream_to_file, FileFormat};
 use crate::share_buffer::SharedBuffer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvFormat {
     pub has_header: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
+    pub date_format: Option<String>,
+    pub datetime_format: Option<String>,
+    pub timestamp_format: Option<String>,
 }
 
 impl TryFrom<&HashMap<String, String>> for CsvFormat {
@@ -80,6 +83,22 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                 .build()
             })?;
         }
+
+        if let Some(date_format) = value.get(file_format::FORMAT_DATE) {
+            // TODO: Implement date_format, datetime_format, timestamp_format validation
+            format.date_format = Some(date_format.clone());
+        }
+
+        if let Some(datetime_format) = value.get(file_format::FORMAT_DATETIME) {
+            // TODO: Implement date_format, datetime_format, timestamp_format validation
+            format.datetime_format = Some(datetime_format.clone());
+        }
+
+        if let Some(timestamp_format) = value.get(file_format::FORMAT_TIMESTAMP) {
+            // TODO: Implement date_format, datetime_format, timestamp_format validation
+            format.timestamp_format = Some(timestamp_format.clone());
+        }
+
         Ok(format)
     }
 }
@@ -91,6 +110,9 @@ impl Default for CsvFormat {
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
+            date_format: None,
+            datetime_format: None,
+            timestamp_format: None,
         }
     }
 }
@@ -138,11 +160,27 @@ pub async fn stream_to_csv(
     stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: &str,
+    format: &CsvFormat,
     threshold: usize,
     concurrency: usize,
 ) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, concurrency, |buffer| {
-        csv::Writer::new(buffer)
+        // csv::Writer::new(buffer)
+        let mut builder = WriterBuilder::new();
+
+        if let Some(date_format) = format.date_format.clone() {
+            builder = builder.with_date_format(date_format);
+        }
+
+        if let Some(datetime_format) = format.datetime_format.clone() {
+            builder = builder.with_datetime_format(datetime_format);
+        }
+
+        if let Some(timestamp_format) = format.timestamp_format.clone() {
+            builder = builder.with_timestamp_format(timestamp_format);
+        }
+
+        builder.build(buffer)
     })
     .await
 }
@@ -265,6 +303,9 @@ mod tests {
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
+                date_format: None,
+                datetime_format: None,
+                timestamp_format: None
             }
         );
     }

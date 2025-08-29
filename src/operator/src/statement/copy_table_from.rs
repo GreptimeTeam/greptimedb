@@ -386,7 +386,7 @@ impl StatementExecutor {
             }
             let path = entry.path();
             let file_metadata = self
-                .collect_metadata(&object_store, format, path.to_string())
+                .collect_metadata(&object_store, format.clone(), path.to_string())
                 .await?;
 
             let file_schema = file_metadata.schema();

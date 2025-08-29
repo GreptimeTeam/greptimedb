@@ -27,7 +27,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 
-use crate::file_format::csv::stream_to_csv;
+use crate::file_format::csv::{stream_to_csv, CsvFormat};
 use crate::file_format::json::stream_to_json;
 use crate::test_util;
 
@@ -152,6 +152,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
         Box::pin(stream),
         tmp_store.clone(),
         &output_path,
+        &CsvFormat::default(),
         threshold(size),
         8
     )
