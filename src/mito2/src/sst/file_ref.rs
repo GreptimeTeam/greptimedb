@@ -98,7 +98,7 @@ pub fn ref_dir(table_dir: &str) -> String {
 /// And periodically update the references to tmp file in object storage.
 /// This is useful for ensuring that files are not deleted while they are still in use by any
 /// query.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
     node_id: u64,
@@ -157,8 +157,11 @@ pub async fn read_all_ref_files_for_table(
 }
 
 impl FileReferenceManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(node_id: u64) -> Self {
+        Self {
+            node_id,
+            files_per_table: Default::default(),
+        }
     }
 
     fn ref_file_manifest(
@@ -174,7 +177,15 @@ impl FileReferenceManager {
             .cloned()?;
 
         if file_refs.files.is_empty() {
-            return None;
+            // still return an empty manifest to indicate no files are referenced.
+            // and differentiate from error case where table_id not found.
+            return Some((
+                TableFileRefsManifest {
+                    file_refs: HashSet::new(),
+                    ts: now,
+                },
+                file_refs.access_layer.clone(),
+            ));
         }
 
         let ref_manifest = TableFileRefsManifest {
@@ -195,6 +206,7 @@ impl FileReferenceManager {
         Some((ref_manifest, access_layer.clone()))
     }
 
+    /// Uploads the ref file for the given table id to object storage.
     pub async fn upload_ref_file_for_table(&self, table_id: TableId, now: i64) -> Result<()> {
         let Some((ref_manifest, access_layer)) = self.ref_file_manifest(table_id, now) else {
             return Ok(());
@@ -246,6 +258,8 @@ impl FileReferenceManager {
         }
     }
 
+    /// Removes a file reference.
+    /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
         let table_id = file_meta.region_id.table_id();
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
@@ -323,7 +337,7 @@ mod tests {
             intm_mgr,
         ));
 
-        let file_ref_mgr = FileReferenceManager::new();
+        let file_ref_mgr = FileReferenceManager::new(0);
 
         let file_meta = FileMeta {
             region_id: sst_file_id.region_id(),
