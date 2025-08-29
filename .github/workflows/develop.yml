@@ -719,6 +719,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+
+      - name: Pull test dependencies images
+        run: ./.github/scripts/pull-test-deps-images.sh
+
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait

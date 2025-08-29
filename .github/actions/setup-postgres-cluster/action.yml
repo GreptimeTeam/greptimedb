@@ -6,9 +6,7 @@ inputs:
     description: "Number of PostgreSQL replicas"
   namespace:
     default: "postgres-namespace"
-  postgres-version:
-    default: "14.2"
-    description: "PostgreSQL version"
+    description: "The PostgreSQL namespace"
   storage-size:
     default: "1Gi"
     description: "Storage size for PostgreSQL"
@@ -22,7 +20,11 @@ runs:
       helm upgrade \
         --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
         --set replicaCount=${{ inputs.postgres-replicas }} \
-        --set image.tag=${{ inputs.postgres-version }} \
+        --set global.security.allowInsecureImages=true \
+        --set image.registry=public.ecr.aws/i8k6a5e1 \
+        --set image.repository=bitnami/postgresql \
+        --set image.tag=17.5.0-debian-12-r3 \
+        --version 16.7.4 \
         --set persistence.size=${{ inputs.storage-size }} \
         --set postgresql.username=greptimedb \
         --set postgresql.password=admin \
