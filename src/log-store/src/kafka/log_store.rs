@@ -362,6 +362,16 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
             })?;
+        self.topic_stats
+            .entry(provider.clone())
+            .and_modify(|stat| {
+                stat.latest_offset = stat.latest_offset.max(end_offset as u64);
+            })
+            .or_insert(TopicStat {
+                latest_offset: end_offset as u64,
+                record_size: 0,
+                record_num: 0,
+            });
 
         let region_indexes = if let (Some(index), Some(collector)) =
             (index, self.client_manager.global_index_collector())

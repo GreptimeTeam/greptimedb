@@ -238,8 +238,15 @@ impl RegionOpener {
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
+        // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
+        let flushed_entry_id = if provider.is_remote_wal() {
+            wal.store().latest_entry_id(&provider).unwrap_or(0)
+        } else {
+            0
+        };
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
+            flushed_entry_id,
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
@@ -468,6 +475,12 @@ impl RegionOpener {
             );
         }
         let now = self.time_provider.current_time_millis();
+        let topic_latest_entry_id =
+            if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
+                wal.store().latest_entry_id(&provider).unwrap_or(0)
+            } else {
+                0
+            };
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -483,7 +496,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
-            topic_latest_entry_id: AtomicU64::new(0),
+            topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
             stats: self.stats.clone(),
