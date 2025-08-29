@@ -11635,6 +11635,7 @@ dependencies = [
  "common-session",
  "common-telemetry",
  "common-time",
+ "datafusion-common",
  "derive_builder 0.20.2",
  "derive_more",
  "snafu 0.8.6",

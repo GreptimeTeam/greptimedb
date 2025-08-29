@@ -19,6 +19,7 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::Error as QueryResult;
 use datafusion::parquet;
 use datafusion_common::DataFusionError;
 use datatypes::arrow::error::ArrowError;
@@ -32,6 +33,14 @@ pub enum Error {
     #[snafu(display("Table already exists: `{}`", table))]
     TableAlreadyExists {
         table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast result: `{}`", source))]
+    Cast {
+        #[snafu(source)]
+        source: QueryResult,
         #[snafu(implicit)]
         location: Location,
     },
@@ -870,6 +879,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::Cast { source, .. } => source.status_code(),
             Error::InvalidSql { .. }
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }

@@ -714,7 +714,7 @@ impl BatchingTask {
             })?
             .data;
         // only apply optimize after complex rewrite is done
-        let new_plan = apply_df_optimizer(rewrite).await?;
+        let new_plan = apply_df_optimizer(rewrite, &query_ctx).await?;
 
         let info = PlanInfo {
             plan: new_plan.clone(),

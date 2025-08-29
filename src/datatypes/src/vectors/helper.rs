@@ -128,6 +128,10 @@ impl Helper {
             ScalarValue::Boolean(v) => {
                 ConstantVector::new(Arc::new(BooleanVector::from(vec![v])), length)
             }
+            ScalarValue::Float16(v) => ConstantVector::new(
+                Arc::new(Float32Vector::from(vec![v.map(f32::from)])),
+                length,
+            ),
             ScalarValue::Float32(v) => {
                 ConstantVector::new(Arc::new(Float32Vector::from(vec![v])), length)
             }
@@ -243,7 +247,6 @@ impl Helper {
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
-            | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
