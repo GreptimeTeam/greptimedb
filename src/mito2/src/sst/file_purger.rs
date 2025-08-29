@@ -22,18 +22,24 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
+use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// Request to remove a file.
 #[derive(Debug)]
 pub struct PurgeRequest {
     /// File meta.
     pub file_meta: FileMeta,
+    pub deleted: bool,
 }
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Send a purge request to the background worker.
     fn send_request(&self, request: PurgeRequest);
+
+    fn add_new_file(&self, _: &FileMeta) {
+        // noop
+    }
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
@@ -53,6 +59,11 @@ pub struct LocalFilePurger {
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
+    file_ref_manager: FileReferenceManagerRef,
+    /// Whether the underlying object store is local filesystem.
+    /// if it is, we can delete the file directly.
+    /// Otherwise, we should inform the global file ref manager to delete the file.
+    is_local_fs: bool,
 }
 
 impl fmt::Debug for LocalFilePurger {
@@ -63,24 +74,30 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
+pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
+    sst_layer.object_store().info().scheme() == object_store::Scheme::Fs
+}
+
 impl LocalFilePurger {
     /// Creates a new purger.
     pub fn new(
         scheduler: SchedulerRef,
         sst_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Self {
+        let is_local_fs = is_local_fs(&sst_layer);
         Self {
             scheduler,
             sst_layer,
             cache_manager,
+            file_ref_manager,
+            is_local_fs,
         }
     }
-}
 
-impl FilePurger for LocalFilePurger {
-    fn send_request(&self, request: PurgeRequest) {
-        let file_meta = request.file_meta;
+    /// Deletes the file(and it's index, if any) from cache and storage.
+    fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
 
         // Remove meta of the file from cache.
@@ -90,7 +107,7 @@ impl FilePurger for LocalFilePurger {
 
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(&file_meta).await {
+            if let Err(e) = sst_layer.delete_sst(&file_meta.file_id()).await {
                 error!(e; "Failed to delete SST file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             } else {
@@ -137,6 +154,30 @@ impl FilePurger for LocalFilePurger {
     }
 }
 
+impl FilePurger for LocalFilePurger {
+    fn send_request(&self, request: PurgeRequest) {
+        if self.is_local_fs {
+            if request.deleted {
+                self.delete_file(request.file_meta);
+            }
+        } else {
+            // if not on local file system, instead inform the global file purger to remove the file reference.
+            // notice that no matter whether the file is deleted or not, we need to remove the reference
+            // because the file is no longer in use nonetheless.
+            self.file_ref_manager.remove_file(&request.file_meta);
+        }
+    }
+
+    fn add_new_file(&self, file_meta: &FileMeta) {
+        if self.is_local_fs {
+            // If the access layer is local file system, we don't need to track the file reference.
+            return;
+        }
+        self.file_ref_manager
+            .add_file(file_meta, self.sst_layer.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
@@ -152,6 +193,7 @@ mod tests {
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file_ref::FileReferenceManager;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -188,7 +230,12 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+        let file_purger = Arc::new(LocalFilePurger::new(
+            scheduler.clone(),
+            layer,
+            None,
+            Arc::new(FileReferenceManager::new(0)),
+        ));
 
         {
             let handle = FileHandle::new(
@@ -253,7 +300,12 @@ mod tests {
 
         let scheduler = Arc::new(LocalScheduler::new(3));
 
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+        let file_purger = Arc::new(LocalFilePurger::new(
+            scheduler.clone(),
+            layer,
+            None,
+            Arc::new(FileReferenceManager::new(0)),
+        ));
 
         {
             let handle = FileHandle::new(

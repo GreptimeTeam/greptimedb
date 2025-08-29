@@ -61,6 +61,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
@@ -86,6 +87,7 @@ pub(crate) struct RegionOpener {
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
     replay_checkpoint: Option<u64>,
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl RegionOpener {
@@ -102,6 +104,7 @@ impl RegionOpener {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
         time_provider: TimeProviderRef,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -120,6 +123,7 @@ impl RegionOpener {
             stats: Default::default(),
             wal_entry_reader: None,
             replay_checkpoint: None,
+            file_ref_manager,
         }
     }
 
@@ -288,6 +292,7 @@ impl RegionOpener {
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
+                self.file_ref_manager,
             )),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -410,6 +415,7 @@ impl RegionOpener {
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
+            self.file_ref_manager.clone(),
         ));
         let memtable_builder = self.memtable_builder_provider.builder_for_options(
             region_options.memtable.as_ref(),

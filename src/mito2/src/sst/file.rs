@@ -333,16 +333,16 @@ struct FileHandleInner {
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        if self.deleted.load(Ordering::Relaxed) {
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: self.meta.clone(),
-            });
-        }
+        self.file_purger.send_request(PurgeRequest {
+            file_meta: self.meta.clone(),
+            deleted: self.deleted.load(Ordering::Relaxed),
+        });
     }
 }
 
 impl FileHandleInner {
     fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandleInner {
+        file_purger.add_new_file(&meta);
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),

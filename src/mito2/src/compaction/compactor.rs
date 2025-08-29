@@ -47,6 +47,7 @@ use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::file_ref::FileReferenceManager;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
@@ -196,6 +197,7 @@ pub async fn open_compaction_region(
             purge_scheduler.clone(),
             access_layer.clone(),
             None,
+            Arc::new(FileReferenceManager::new(0)),
         ))
     };
 
