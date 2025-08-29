@@ -473,8 +473,8 @@ impl Database {
         }) = &self.ctx.auth_header
         {
             let encoded = BASE64_STANDARD.encode(format!("{username}:{password}"));
-            let value =
-                MetadataValue::from_str(&encoded).context(InvalidTonicMetadataValueSnafu)?;
+            let value = MetadataValue::from_str(&format!("Basic {encoded}"))
+                .context(InvalidTonicMetadataValueSnafu)?;
             request.metadata_mut().insert("x-greptime-auth", value);
         }
 

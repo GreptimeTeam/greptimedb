@@ -49,6 +49,7 @@ pub trait GrpcQueryHandler {
         table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         flight_data: FlightData,
+        ctx: QueryContextRef,
     ) -> std::result::Result<AffectedRows, Self::Error>;
 }
 
@@ -81,9 +82,10 @@ where
         table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
+        ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         self.0
-            .put_record_batch(table_name, table_ref, decoder, data)
+            .put_record_batch(table_name, table_ref, decoder, data, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcRequestSnafu)

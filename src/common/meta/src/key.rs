@@ -628,7 +628,6 @@ impl TableMetadataManager {
         &self.topic_region_manager
     }
 
-    #[cfg(feature = "testing")]
     pub fn kv_backend(&self) -> &KvBackendRef {
         &self.kv_backend
     }

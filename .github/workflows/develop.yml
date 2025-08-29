@@ -766,6 +766,8 @@ jobs:
           GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
@@ -819,6 +821,8 @@ jobs:
           GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
           GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
@@ -850,4 +854,3 @@ jobs:
   #         mkdir -p ./bins/current
   #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
   #     - run: ./tests/compat/test-compat.sh 0.6.0
-  

@@ -26,8 +26,6 @@ use arrow_flight::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
@@ -46,9 +44,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{FlightCompression, TonicResult};
-use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
-use crate::http::AUTHORIZATION_HEADER;
+use crate::grpc::{context_auth, FlightCompression, TonicResult};
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -189,7 +185,6 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let query_ctx = QueryContext::arc();
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -204,7 +199,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
-                query_ctx,
+                QueryContext::arc(),
             );
             Ok(Response::new(stream))
         }
@@ -218,34 +213,20 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, _, stream) = request.into_parts();
 
-        let header = |key: &str| -> TonicResult<Option<&str>> {
-            let Some(v) = headers.get(key) else {
-                return Ok(None);
-            };
-            let Ok(v) = std::str::from_utf8(v.as_bytes()) else {
-                return Err(InvalidParameterSnafu {
-                    reason: "expect valid UTF-8 value",
-                }
-                .build()
-                .into());
-            };
-            Ok(Some(v))
-        };
-
-        let username_and_password = header(AUTHORIZATION_HEADER)?;
-        let db = header(GREPTIME_DB_HEADER_NAME)?;
-        if !self.validate_auth(username_and_password, db).await? {
-            return Err(Status::unauthenticated("auth failed"));
-        }
+        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);
 
         let stream = PutRecordBatchRequestStream {
             flight_data_stream: stream,
-            state: PutRecordBatchRequestStreamState::Init(db.map(ToString::to_string)),
+            state: PutRecordBatchRequestStreamState::Init(
+                query_ctx.current_catalog().to_string(),
+                query_ctx.current_schema(),
+            ),
         };
-        self.put_record_batches(stream, tx).await;
+        self.put_record_batches(stream, tx, query_ctx).await;
 
         let response = ReceiverStream::new(rx)
             .and_then(|response| {
@@ -292,7 +273,7 @@ pub(crate) struct PutRecordBatchRequestStream {
 }
 
 enum PutRecordBatchRequestStreamState {
-    Init(Option<String>),
+    Init(String, String),
     Started(TableName),
 }
 
@@ -319,21 +300,12 @@ impl Stream for PutRecordBatchRequestStream {
         let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
 
         let result = match &mut self.state {
-            PutRecordBatchRequestStreamState::Init(db) => match poll {
+            PutRecordBatchRequestStreamState::Init(catalog, schema) => match poll {
                 Some(Ok(mut flight_data)) => {
                     let flight_descriptor = flight_data.flight_descriptor.take();
                     let result = if let Some(descriptor) = flight_descriptor {
-                        let table_name = extract_table_name(descriptor).map(|x| {
-                            let (catalog, schema) = if let Some(db) = db {
-                                parse_catalog_and_schema_from_db_string(db)
-                            } else {
-                                (
-                                    DEFAULT_CATALOG_NAME.to_string(),
-                                    DEFAULT_SCHEMA_NAME.to_string(),
-                                )
-                            };
-                            TableName::new(catalog, schema, x)
-                        });
+                        let table_name = extract_table_name(descriptor)
+                            .map(|x| TableName::new(catalog.clone(), schema.clone(), x));
                         let table_name = match table_name {
                             Ok(table_name) => table_name,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),

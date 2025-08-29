@@ -38,6 +38,7 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
 struct ElectionSqlFactory<'a> {
     lock_id: u64,
+    schema_name: Option<&'a str>,
     table_name: &'a str,
 }
 
@@ -88,10 +89,18 @@ struct ElectionSqlSet {
 }
 
 impl<'a> ElectionSqlFactory<'a> {
-    fn new(lock_id: u64, table_name: &'a str) -> Self {
+    fn new(lock_id: u64, schema_name: Option<&'a str>, table_name: &'a str) -> Self {
         Self {
             lock_id,
+            schema_name,
             table_name,
+        }
+    }
+
+    fn table_ident(&self) -> String {
+        match self.schema_name {
+            Some(s) if !s.is_empty() => format!("\"{}\".\"{}\"", s, self.table_name),
+            _ => format!("\"{}\"", self.table_name),
         }
     }
 
@@ -116,47 +125,54 @@ impl<'a> ElectionSqlFactory<'a> {
     }
 
     fn put_value_with_lease_sql(&self) -> String {
+        let table = self.table_ident();
         format!(
             r#"WITH prev AS (
-                SELECT k, v FROM "{}" WHERE k = $1
+                SELECT k, v FROM {table} WHERE k = $1
             ), insert AS (
-                INSERT INTO "{}"
-                VALUES($1, convert_to($2 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
+                INSERT INTO {table}
+                VALUES($1, convert_to($2 || '{lease_sep}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
                 ON CONFLICT (k) DO NOTHING
             )
             SELECT k, v FROM prev;
             "#,
-            self.table_name, self.table_name, LEASE_SEP
+            table = table,
+            lease_sep = LEASE_SEP
         )
     }
 
     fn update_value_with_lease_sql(&self) -> String {
+        let table = self.table_ident();
         format!(
-            r#"UPDATE "{}"
-               SET v = convert_to($3 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
+            r#"UPDATE {table}
+               SET v = convert_to($3 || '{lease_sep}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
                WHERE k = $1 AND v = $2"#,
-            self.table_name, LEASE_SEP
+            table = table,
+            lease_sep = LEASE_SEP
         )
     }
 
     fn get_value_with_lease_sql(&self) -> String {
+        let table = self.table_ident();
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM "{}" WHERE k = $1"#,
-            self.table_name
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {table} WHERE k = $1"#,
+            table = table
         )
     }
 
     fn get_value_with_lease_by_prefix_sql(&self) -> String {
+        let table = self.table_ident();
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM "{}" WHERE k LIKE $1"#,
-            self.table_name
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {table} WHERE k LIKE $1"#,
+            table = table
         )
     }
 
     fn delete_value_sql(&self) -> String {
+        let table = self.table_ident();
         format!(
-            "DELETE FROM \"{}\" WHERE k = $1 RETURNING k,v;",
-            self.table_name
+            "DELETE FROM {table} WHERE k = $1 RETURNING k,v;",
+            table = table
         )
     }
 }
@@ -299,16 +315,23 @@ impl PgElection {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_pg_client(
         leader_value: String,
         pg_client: ElectionPgClient,
         store_key_prefix: String,
         candidate_lease_ttl: Duration,
         meta_lease_ttl: Duration,
+        schema_name: Option<&str>,
         table_name: &str,
         lock_id: u64,
     ) -> Result<ElectionRef> {
-        let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
+        if let Some(s) = schema_name {
+            common_telemetry::info!("PgElection uses schema: {}", s);
+        } else {
+            common_telemetry::info!("PgElection uses default search_path (no schema provided)");
+        }
+        let sql_factory = ElectionSqlFactory::new(lock_id, schema_name, table_name);
 
         let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
@@ -638,8 +661,8 @@ impl PgElection {
     ///     after a period of time during which other leaders have been elected and stepped down.
     ///   - **Case 1.4**: If no lease information is found, it also steps down and re-initiates the campaign.
     ///
-    /// - **Case 2**: If the current instance is not leader previously, it calls the
-    ///   `elected` method as a newly elected leader.
+    /// - **Case 2**: If the current instance is not leader previously, it calls the `elected` method
+    ///   as a newly elected leader.
     async fn leader_action(&self) -> Result<()> {
         let key = self.election_key();
         // Case 1
@@ -881,7 +904,7 @@ mod tests {
             store_key_prefix: uuid,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28319, None, table_name).build(),
         };
 
         let res = pg_election
@@ -969,7 +992,7 @@ mod tests {
             store_key_prefix,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28319, &table_name).build(),
+            sql_set: ElectionSqlFactory::new(28319, None, &table_name).build(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -1026,7 +1049,7 @@ mod tests {
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28319, None, table_name).build(),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -1081,7 +1104,7 @@ mod tests {
             store_key_prefix: uuid,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28320, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28320, None, table_name).build(),
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -1206,7 +1229,7 @@ mod tests {
             store_key_prefix: uuid,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28321, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28321, None, table_name).build(),
         };
 
         // Step 1: No leader exists, campaign and elected.
@@ -1473,7 +1496,7 @@ mod tests {
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28322, None, table_name).build(),
         };
 
         let leader_client = create_postgres_client(
@@ -1494,7 +1517,7 @@ mod tests {
             store_key_prefix: uuid,
             candidate_lease_ttl,
             meta_lease_ttl,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            sql_set: ElectionSqlFactory::new(28322, None, table_name).build(),
         };
 
         leader_pg_election
@@ -1577,5 +1600,27 @@ mod tests {
         // Reset the client and try again.
         client.reset_client().await.unwrap();
         let _ = client.query("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[test]
+    fn test_election_sql_with_schema() {
+        let f = ElectionSqlFactory::new(42, Some("test_schema"), "greptime_metakv");
+        let s = f.build();
+        assert!(s.campaign.contains("pg_try_advisory_lock"));
+        assert!(s
+            .put_value_with_lease
+            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(s
+            .update_value_with_lease
+            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(s
+            .get_value_with_lease
+            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(s
+            .get_value_with_lease_by_prefix
+            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(s
+            .delete_value
+            .contains("\"test_schema\".\"greptime_metakv\""));
     }
 }

@@ -28,6 +28,8 @@ use common_recordbatch::RecordBatches;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
 use common_test_util::find_workspace_path;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::BatchArrowRecords;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{
@@ -39,6 +41,8 @@ use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };
+use tonic::metadata::MetadataValue;
+use tonic::Request;
 
 #[macro_export]
 macro_rules! grpc_test {
@@ -73,6 +77,7 @@ macro_rules! grpc_tests {
                 test_invalid_dbname,
                 test_auto_create_table,
                 test_auto_create_table_with_hints,
+                test_otel_arrow_auth,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -272,6 +277,84 @@ pub async fn test_grpc_auth(store_type: StorageType) {
     }));
     let re = db.sql("show tables;").await;
     assert!(re.is_ok());
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_otel_arrow_auth(store_type: StorageType) {
+    let user_provider = user_provider_from_option(
+        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+    )
+    .unwrap();
+    let (_db, fe_grpc_server) = setup_grpc_server_with_user_provider(
+        store_type,
+        "test_otel_arrow_auth",
+        Some(user_provider),
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{}", addr))
+        .await
+        .unwrap();
+
+    let batch_arrow_records = BatchArrowRecords {
+        batch_id: 1,
+        arrow_payloads: vec![],
+        headers: vec![],
+    };
+
+    // test without auth
+    {
+        let records = batch_arrow_records.clone();
+        let stream = futures::stream::once(async { records });
+        let request = Request::new(stream);
+        let response = client.arrow_metrics(request).await;
+        assert!(response.is_err());
+        let error = response.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    }
+    // test auth
+    {
+        let records = batch_arrow_records.clone();
+        let stream = futures::stream::once(async { records });
+        let mut request = Request::new(stream);
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Basic Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
+        );
+        let response = client.arrow_metrics(request).await;
+        assert!(response.is_ok());
+
+        let mut response_stream = response.unwrap().into_inner();
+        let resp = response_stream.message().await;
+        assert!(resp.is_err());
+        let error = resp.unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Failed to handle otel-arrow request, error message: Batch is empty"
+        );
+    }
+    // test old auth
+    {
+        let stream = futures::stream::once(async { batch_arrow_records });
+        let mut request = Request::new(stream);
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::from_static("Z3JlcHRpbWVfdXNlcjpncmVwdGltZV9wd2Q="), // greptime_user:greptime_pwd base64 encoded
+        );
+        let response = client.arrow_metrics(request).await;
+        assert!(response.is_ok());
+
+        let mut response_stream = response.unwrap().into_inner();
+        let resp = response_stream.message().await;
+        assert!(resp.is_err());
+        let error = resp.unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Failed to handle otel-arrow request, error message: Batch is empty"
+        );
+    }
 
     let _ = fe_grpc_server.shutdown().await;
 }

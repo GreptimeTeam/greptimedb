@@ -41,7 +41,7 @@ pub struct PersistStatsHandler {
 }
 
 /// The name of the table to persist region stats.
-const META_REGION_STATS_TABLE_NAME: &str = "region_statistics";
+const META_REGION_STATS_HISTORY_TABLE_NAME: &str = "region_statistics_history";
 /// The default context to persist region stats.
 const DEFAULT_CONTEXT: InserterContext = InserterContext {
     catalog: DEFAULT_CATALOG_NAME,
@@ -207,7 +207,7 @@ impl PersistStatsHandler {
                 &DEFAULT_CONTEXT,
                 RowInsertRequests {
                     inserts: vec![RowInsertRequest {
-                        table_name: META_REGION_STATS_TABLE_NAME.to_string(),
+                        table_name: META_REGION_STATS_HISTORY_TABLE_NAME.to_string(),
                         rows: Some(Rows {
                             schema: PersistRegionStat::schema(),
                             rows,
@@ -532,7 +532,10 @@ mod tests {
             assert_eq!(requests.len(), 1);
             requests.pop().unwrap()
         };
-        assert_eq!(request.table_name, META_REGION_STATS_TABLE_NAME.to_string());
+        assert_eq!(
+            request.table_name,
+            META_REGION_STATS_HISTORY_TABLE_NAME.to_string()
+        );
         assert_eq!(request.rows.unwrap().rows, vec![expected_row]);
 
         // Check last persisted time

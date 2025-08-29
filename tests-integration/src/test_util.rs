@@ -44,6 +44,7 @@ use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig
 use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
@@ -592,7 +593,8 @@ pub async fn setup_grpc_server_with(
     let grpc_builder = GrpcServerBuilder::new(grpc_config.clone(), runtime)
         .database_handler(greptime_request_handler)
         .flight_handler(flight_handler)
-        .prometheus_handler(fe_instance_ref.clone(), user_provider)
+        .prometheus_handler(fe_instance_ref.clone(), user_provider.clone())
+        .otel_arrow_handler(OtelArrowServiceHandler::new(fe_instance_ref, user_provider))
         .with_tls_config(grpc_config.tls)
         .unwrap();
 

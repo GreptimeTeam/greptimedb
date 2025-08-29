@@ -65,6 +65,17 @@ pub struct MitoConfig {
     /// Number of meta action updated to trigger a new checkpoint
     /// for the manifest (default 10).
     pub manifest_checkpoint_distance: u64,
+    /// Number of removed files to keep in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Mostly for debugging purpose.
+    /// If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+    /// from `removed_files` field.
+    pub experimental_manifest_keep_removed_file_count: usize,
+    /// How long to keep removed files in the `removed_files` field of manifest
+    /// after they are removed from manifest.
+    /// files will only be removed from `removed_files` field
+    /// if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached.
+    #[serde(with = "humantime_serde")]
+    pub experimental_manifest_keep_removed_file_ttl: Duration,
     /// Whether to compress manifest and checkpoint file by gzip (default false).
     pub compress_manifest: bool,
 
@@ -139,6 +150,8 @@ impl Default for MitoConfig {
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
+            experimental_manifest_keep_removed_file_count: 256,
+            experimental_manifest_keep_removed_file_ttl: Duration::from_secs(60 * 60),
             compress_manifest: false,
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),

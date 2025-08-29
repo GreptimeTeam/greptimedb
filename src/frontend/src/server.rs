@@ -170,10 +170,13 @@ where
             .name(name)
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
-            .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
+            .otel_arrow_handler(OtelArrowServiceHandler::new(
+                self.instance.clone(),
+                user_provider.clone(),
+            ))
             .flight_handler(Arc::new(greptime_request_handler));
 
-        let grpc_server = if external {
+        let grpc_server = if !external {
             let frontend_grpc_handler =
                 FrontendGrpcHandler::new(self.instance.process_manager().clone());
             grpc_server.frontend_grpc_handler(frontend_grpc_handler)
