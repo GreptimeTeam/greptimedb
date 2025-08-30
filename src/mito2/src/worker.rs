@@ -59,6 +59,7 @@ use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
+use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
@@ -142,6 +143,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = Arc::new(
@@ -204,6 +206,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
             })
@@ -286,6 +289,7 @@ impl WorkerGroup {
     /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
     /// The number of workers should be power of two.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_for_test<S: LogStore>(
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
@@ -294,6 +298,7 @@ impl WorkerGroup {
         listener: Option<crate::engine::listener::EventListenerRef>,
         schema_metadata_manager: SchemaMetadataManagerRef,
         time_provider: TimeProviderRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
@@ -350,6 +355,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
             })
@@ -428,6 +434,7 @@ struct WorkerStarter<S> {
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -480,6 +487,7 @@ impl<S: LogStore> WorkerStarter<S> {
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
+            partition_expr_fetcher: self.partition_expr_fetcher,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -729,6 +737,8 @@ struct RegionWorkerLoop<S> {
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Partition expr fetcher used to backfill partition expr on open for compatibility.
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

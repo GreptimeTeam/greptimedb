@@ -38,7 +38,7 @@ async fn test_engine_drop_region() {
     let mut env = TestEnv::with_prefix("drop").await;
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);

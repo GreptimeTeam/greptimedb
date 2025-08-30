@@ -46,7 +46,9 @@ use crate::error::{
     EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
     Result, StaleLogEntrySnafu,
 };
-use crate::manifest::action::RegionManifest;
+use crate::manifest::action::{
+    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::bulk::part::BulkPart;
@@ -68,6 +70,18 @@ use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
 
+/// A fetcher to retrieve partition expr for a region.
+///
+/// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
+/// while newer ones do. On open, we backfill it via this fetcher and persist it
+/// to the manifest so future opens don't need refetching.
+#[async_trait::async_trait]
+pub trait PartitionExprFetcher {
+    async fn fetch_expr(&self, region_id: RegionId) -> Option<String>;
+}
+
+pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
+
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
@@ -86,6 +100,7 @@ pub(crate) struct RegionOpener {
     stats: ManifestStats,
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
     replay_checkpoint: Option<u64>,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl RegionOpener {
@@ -102,6 +117,7 @@ impl RegionOpener {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
         time_provider: TimeProviderRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -120,6 +136,7 @@ impl RegionOpener {
             stats: Default::default(),
             wal_entry_reader: None,
             replay_checkpoint: None,
+            partition_expr_fetcher,
         }
     }
 
@@ -372,7 +389,7 @@ impl RegionOpener {
             &self.region_dir(),
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) = RegionManifestManager::open(
+        let Some(mut manifest_manager) = RegionManifestManager::open(
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
@@ -382,6 +399,30 @@ impl RegionOpener {
             return Ok(None);
         };
 
+        // Backfill partition_expr if missing.
+        {
+            let manifest = manifest_manager.manifest();
+            let metadata = manifest.metadata.clone();
+            if metadata.partition_expr.is_none() {
+                if let Some(expr_json) =
+                    self.partition_expr_fetcher.fetch_expr(self.region_id).await
+                {
+                    let mut builder = RegionMetadataBuilder::from_existing((*metadata).clone());
+                    builder.partition_expr_json(Some(expr_json));
+                    let new_meta = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
+                    let actions =
+                        RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                            metadata: new_meta,
+                        }));
+                    // Use follower state during open.
+                    let _ = manifest_manager
+                        .update(actions, RegionRoleState::Follower)
+                        .await?;
+                }
+            }
+        }
+
+        // Re-fetch manifest after potential update.
         let manifest = manifest_manager.manifest();
         let metadata = manifest.metadata.clone();
 

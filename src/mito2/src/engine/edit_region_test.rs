@@ -147,6 +147,7 @@ async fn test_edit_region_fill_cache() {
             Some(Arc::new(EditRegionListener {
                 tx: Mutex::new(Some(tx)),
             })),
+            None,
         )
         .await;
 

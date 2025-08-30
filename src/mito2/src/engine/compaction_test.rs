@@ -517,6 +517,7 @@ async fn test_readonly_during_compaction() {
             },
             None,
             Some(listener.clone()),
+            None,
         )
         .await;
 

@@ -110,6 +110,7 @@ use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
+use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
@@ -128,6 +129,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
     plugins: Plugins,
+    partition_expr_fetcher: PartitionExprFetcherRef,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -140,6 +142,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Self {
         Self {
             data_home,
@@ -148,6 +151,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             object_store_manager,
             schema_metadata_manager,
             plugins,
+            partition_expr_fetcher,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -174,7 +178,8 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.log_store.clone(),
             self.object_store_manager,
             self.schema_metadata_manager,
-            self.plugins,
+            self.plugins.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
@@ -210,6 +215,7 @@ impl MitoEngine {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let builder = MitoEngineBuilder::new(
@@ -219,6 +225,7 @@ impl MitoEngine {
             object_store_manager,
             schema_metadata_manager,
             plugins,
+            partition_expr_fetcher,
         );
         builder.try_build().await
     }
@@ -923,6 +930,7 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -938,6 +946,7 @@ impl MitoEngine {
                     listener,
                     schema_metadata_manager,
                     time_provider,
+                    partition_expr_fetcher,
                 )
                 .await?,
                 config,

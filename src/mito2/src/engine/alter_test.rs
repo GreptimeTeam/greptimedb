@@ -402,7 +402,7 @@ async fn test_alter_on_flushing() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -506,7 +506,7 @@ async fn test_alter_column_fulltext_options() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -629,7 +629,7 @@ async fn test_alter_column_set_inverted_index() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -741,7 +741,7 @@ async fn test_alter_region_ttl_options() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(AlterFlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);
@@ -791,7 +791,7 @@ async fn test_write_stall_on_altering() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(NotifyRegionChangeResultListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
 
     let region_id = RegionId::new(1, 1);

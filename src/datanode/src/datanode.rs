@@ -39,6 +39,7 @@ use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
+use mito2::region::opener::PartitionExprFetcherRef;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
@@ -63,6 +64,7 @@ use crate::event_listener::{
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
+use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
 use crate::utils::{build_region_open_requests, RegionOpenRequests};
@@ -439,12 +441,15 @@ impl DatanodeBuilder {
             }
         }
 
+        // Build a fetcher to backfill partition_expr on open.
+        let fetcher = Arc::new(MetaPartitionExprFetcher::new(self.kv_backend.clone()));
         let mito_engine = self
             .build_mito_engine(
                 object_store_manager.clone(),
                 mito_engine_config,
                 schema_metadata_manager.clone(),
                 plugins.clone(),
+                fetcher.clone(),
             )
             .await?;
 
@@ -470,6 +475,7 @@ impl DatanodeBuilder {
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<MitoEngine> {
         let opts = &self.opts;
         if opts.storage.is_object_storage() {
@@ -491,6 +497,7 @@ impl DatanodeBuilder {
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
+                    partition_expr_fetcher.clone(),
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -531,6 +538,7 @@ impl DatanodeBuilder {
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
+                    partition_expr_fetcher,
                 );
 
                 #[cfg(feature = "enterprise")]
