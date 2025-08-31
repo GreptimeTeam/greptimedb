@@ -14,8 +14,10 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
+use common_telemetry::debug;
 use object_store::ObjectStore;
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
@@ -100,7 +102,10 @@ pub async fn fetch_byte_ranges(
     object_store: ObjectStore,
     ranges: &[Range<u64>],
 ) -> object_store::Result<Vec<Bytes>> {
-    Ok(object_store
+    let total_size = ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+    let start = Instant::now();
+
+    let result = object_store
         .reader_with(file_path)
         .concurrent(FETCH_PARALLELISM)
         .gap(MERGE_GAP)
@@ -109,5 +114,14 @@ pub async fn fetch_byte_ranges(
         .await?
         .into_iter()
         .map(|buf| buf.to_bytes())
-        .collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+
+    debug!(
+        "Fetch {} bytes from {}, cost: {:?}",
+        total_size,
+        file_path,
+        start.elapsed()
+    );
+
+    Ok(result)
 }
