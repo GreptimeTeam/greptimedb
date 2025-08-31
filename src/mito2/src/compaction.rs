@@ -1082,6 +1082,7 @@ mod tests {
                     object_store: env.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
+                    remove_file_options: Default::default(),
                 },
                 Default::default(),
                 Default::default(),

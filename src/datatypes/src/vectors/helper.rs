@@ -20,7 +20,10 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, Int64Type, TimeUnit};
+use arrow::datatypes::{
+    DataType as ArrowDataType, Int16Type, Int32Type, Int64Type, Int8Type, TimeUnit, UInt16Type,
+    UInt32Type, UInt64Type, UInt8Type,
+};
 use arrow_array::{DictionaryArray, StructArray};
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
@@ -351,16 +354,37 @@ impl Helper {
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
             }
-            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int64) => {
-                let array = array
-                    .as_ref()
-                    .as_any()
-                    .downcast_ref::<DictionaryArray<Int64Type>>()
-                    .unwrap(); // Safety: the type is guarded by match arm condition
-                Arc::new(DictionaryVector::new(
-                    array.clone(),
-                    ConcreteDataType::try_from(value.as_ref())?,
-                )?)
+            ArrowDataType::Dictionary(key, value) => {
+                macro_rules! handle_dictionary_key_type {
+                    ($key_type:ident) => {{
+                        let array = array
+                            .as_ref()
+                            .as_any()
+                            .downcast_ref::<DictionaryArray<$key_type>>()
+                            .unwrap(); // Safety: the type is guarded by match arm condition
+                        Arc::new(DictionaryVector::new(
+                            array.clone(),
+                            ConcreteDataType::try_from(value.as_ref())?,
+                        )?)
+                    }};
+                }
+
+                match key.as_ref() {
+                    ArrowDataType::Int8 => handle_dictionary_key_type!(Int8Type),
+                    ArrowDataType::Int16 => handle_dictionary_key_type!(Int16Type),
+                    ArrowDataType::Int32 => handle_dictionary_key_type!(Int32Type),
+                    ArrowDataType::Int64 => handle_dictionary_key_type!(Int64Type),
+                    ArrowDataType::UInt8 => handle_dictionary_key_type!(UInt8Type),
+                    ArrowDataType::UInt16 => handle_dictionary_key_type!(UInt16Type),
+                    ArrowDataType::UInt32 => handle_dictionary_key_type!(UInt32Type),
+                    ArrowDataType::UInt64 => handle_dictionary_key_type!(UInt64Type),
+                    _ => {
+                        return error::UnsupportedArrowTypeSnafu {
+                            arrow_type: array.as_ref().data_type().clone(),
+                        }
+                        .fail()
+                    }
+                }
             }
 
             ArrowDataType::Struct(_fields) => {
@@ -375,7 +399,6 @@ impl Helper {
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Union(_, _)
-            | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _)
@@ -629,10 +652,55 @@ mod tests {
         check_try_into_vector(Time64MicrosecondArray::from(vec![1, 2, 3]));
         check_try_into_vector(Time64NanosecondArray::from(vec![1, 2, 3]));
 
+        // Test dictionary arrays with different key types
         let values = StringArray::from_iter_values(["a", "b", "c"]);
+
+        // Test Int8 keys
         let keys = Int8Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int16 keys
+        let keys = Int16Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int32 keys
+        let keys = Int32Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test Int64 keys
+        let keys = Int64Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt8 keys
+        let keys = UInt8Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt16 keys
+        let keys = UInt16Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt32 keys
+        let keys = UInt32Array::from_iter_values([0, 0, 1, 2]);
+        let array: ArrayRef =
+            Arc::new(DictionaryArray::try_new(keys, Arc::new(values.clone())).unwrap());
+        Helper::try_into_vector(array).unwrap();
+
+        // Test UInt64 keys
+        let keys = UInt64Array::from_iter_values([0, 0, 1, 2]);
         let array: ArrayRef = Arc::new(DictionaryArray::try_new(keys, Arc::new(values)).unwrap());
-        Helper::try_into_vector(array).unwrap_err();
+        Helper::try_into_vector(array).unwrap();
     }
 
     #[test]

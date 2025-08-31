@@ -20,6 +20,7 @@ use common_telemetry::{error, info};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
 
@@ -75,6 +76,11 @@ impl LocalFilePurger {
             sst_layer,
             cache_manager,
         }
+    }
+
+    /// Stop the scheduler of the file purger.
+    pub async fn stop_scheduler(&self) -> Result<()> {
+        self.scheduler.stop(true).await
     }
 }
 

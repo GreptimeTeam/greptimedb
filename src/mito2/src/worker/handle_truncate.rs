@@ -56,6 +56,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         truncated_entry_id,
                         truncated_sequence,
                     },
+                    timestamp_ms: None,
                 };
 
                 self.handle_manifest_truncate_action(region, truncate, sender);
@@ -100,6 +101,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     kind: TruncateKind::Partial {
                         files_to_remove: files_to_truncate,
                     },
+                    timestamp_ms: None,
                 };
                 self.handle_manifest_truncate_action(region, truncate, sender);
             }

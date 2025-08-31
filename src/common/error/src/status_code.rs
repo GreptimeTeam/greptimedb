@@ -290,6 +290,8 @@ macro_rules! define_into_tonic_status {
                 use tonic::metadata::MetadataMap;
                 use $crate::GREPTIME_DB_HEADER_ERROR_CODE;
 
+                common_telemetry::error!(err; "Failed to handle request");
+
                 let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
 
                 // If either of the status_code or error msg cannot convert to valid HTTP header value
