@@ -215,6 +215,8 @@ impl<C: Access> ReadCache<C> {
 
         let read_key = read_cache_key(path, &args);
 
+        debug!("Read '{}' from cache '{}'", path, read_key);
+
         let read_result = self
             .mem_cache
             .try_get_with(
@@ -289,6 +291,11 @@ impl<C: Access> ReadCache<C> {
 
         let (_, reader) = inner.read(path, args).await?;
         let result = self.try_write_cache::<I>(reader, read_key).await;
+
+        debug!(
+            "Miss the read cache and read from remote '{}' and write to cache '{}'",
+            path, read_key
+        );
 
         match result {
             Ok(read_bytes) => {
