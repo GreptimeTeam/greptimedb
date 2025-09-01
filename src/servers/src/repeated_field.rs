@@ -38,6 +38,10 @@ pub trait Clear {
     fn clear(&mut self);
 }
 
+impl Clear for &[u8] {
+    fn clear(&mut self) {}
+}
+
 impl<T> Clear for Option<T> {
     fn clear(&mut self) {
         self.take();
