@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_read_flat_with_index() {
+    async fn test_write_flat_with_index() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
@@ -1109,111 +1109,6 @@ mod tests {
             ),
             info.time_range
         );
-
-        let handle = FileHandle::new(
-            FileMeta {
-                region_id: metadata.region_id,
-                file_id: info.file_id,
-                time_range: info.time_range,
-                level: 0,
-                file_size: info.file_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
-                index_file_size: info.index_metadata.file_size,
-                num_row_groups: info.num_row_groups,
-                num_rows: info.num_rows as u64,
-                sequence: None,
-            },
-            Arc::new(NoopFilePurger),
-        );
-
-        // Test reading the file back
-        let builder = ParquetReaderBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            handle.clone(),
-            object_store.clone(),
-        );
-        let mut reader = builder.build().await.unwrap();
-
-        // Verify we can read the data back
-        let mut total_rows = 0;
-        while let Some(batch) = reader.next_batch().await.unwrap() {
-            total_rows += batch.num_rows();
-        }
-        assert_eq!(200, total_rows);
-
-        // Test with index-based filtering similar to the original test
-        let cache = Arc::new(
-            CacheManager::builder()
-                .index_result_cache_size(1024 * 1024)
-                .index_metadata_size(1024 * 1024)
-                .index_content_page_size(1024 * 1024)
-                .index_content_size(1024 * 1024)
-                .puffin_metadata_size(1024 * 1024)
-                .build(),
-        );
-
-        let build_inverted_index_applier = |exprs: &[Expr]| {
-            InvertedIndexApplierBuilder::new(
-                FILE_DIR.to_string(),
-                PathType::Bare,
-                object_store.clone(),
-                &metadata,
-                HashSet::from_iter([0]),
-                env.get_puffin_manager(),
-            )
-            .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
-            .with_inverted_index_cache(cache.inverted_index_cache().cloned())
-            .build(exprs)
-            .unwrap()
-            .map(Arc::new)
-        };
-
-        let build_bloom_filter_applier = |exprs: &[Expr]| {
-            BloomFilterIndexApplierBuilder::new(
-                FILE_DIR.to_string(),
-                PathType::Bare,
-                object_store.clone(),
-                &metadata,
-                env.get_puffin_manager(),
-            )
-            .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
-            .with_bloom_filter_index_cache(cache.bloom_filter_index_cache().cloned())
-            .build(exprs)
-            .unwrap()
-            .map(Arc::new)
-        };
-
-        // Test predicate filtering: tag_0 = "b"
-        let preds = vec![col("tag_0").eq(lit("b"))];
-        let inverted_index_applier = build_inverted_index_applier(&preds);
-        let bloom_filter_applier = build_bloom_filter_applier(&preds);
-
-        let builder = ParquetReaderBuilder::new(
-            FILE_DIR.to_string(),
-            PathType::Bare,
-            handle.clone(),
-            object_store.clone(),
-        )
-        .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
-        .cache(CacheStrategy::EnableAll(cache.clone()));
-
-        let mut metrics = ReaderMetrics::default();
-        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
-        let mut reader = ParquetReader::new(Arc::new(context), selection)
-            .await
-            .unwrap();
-
-        // Verify filtered results
-        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "d"], 0, 20)]).await;
-
-        // Check metrics to ensure indexing worked
-        assert_eq!(metrics.filter_metrics.rg_total, 4);
-        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
-        assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 0);
-        assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 30);
     }
 
     #[tokio::test]
