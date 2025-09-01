@@ -39,6 +39,27 @@ DROP FLOW calc_reqs;
 DROP TABLE http_requests;
 DROP TABLE cnt_reqs;
 
+CREATE TABLE http_requests_two_vals (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val DOUBLE,
+  valb DOUBLE,
+  PRIMARY KEY(host, idc),
+);
+
+-- should failed with two value columns error
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests_two_vals);
+
+-- should failed with two value columns error
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') rate(http_requests_two_vals[5m]);
+
+SHOW TABLES;
+
+DROP TABLE http_requests_two_vals;
+
 CREATE TABLE http_requests (
   ts timestamp(3) time index,
   host STRING,
