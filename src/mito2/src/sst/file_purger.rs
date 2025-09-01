@@ -20,6 +20,7 @@ use common_telemetry::{error, info};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
 use crate::sst::file_ref::FileReferenceManagerRef;
