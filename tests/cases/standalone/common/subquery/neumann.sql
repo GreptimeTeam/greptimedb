@@ -24,6 +24,7 @@ WHERE s."id"=e.sid AND e.grade=(SELECT MAX(e2.grade) FROM exams e2 WHERE s."id"=
 ORDER BY "name", course;
 
 -- Test 2: Complex subquery with AVG and conditions
+-- TODO: It raise an error right now: Physical plan does not support logical expression ScalarSubquery(<subquery>)
 SELECT s."name", e.course, e.grade 
 FROM students s, exams e 
 WHERE s."id"=e.sid 
