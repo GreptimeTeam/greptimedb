@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use common_telemetry::{error, info};
+use common_telemetry::info;
 use object_store::EntryMode;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -24,6 +24,7 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::region::RegionMapRef;
 use crate::sst::file::{FileId, FileMeta};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -206,33 +207,44 @@ impl FileReferenceManager {
         Some((ref_manifest, access_layer.clone()))
     }
 
-    /// Uploads the ref file for the given table id to object storage.
-    pub async fn upload_ref_file_for_table(&self, table_id: TableId, now: i64) -> Result<()> {
-        let Some((ref_manifest, access_layer)) = self.ref_file_manifest(table_id, now) else {
-            return Ok(());
+    /// Gets all ref files for the given table id, excluding those already in region manifest.
+    #[allow(unused)]
+    pub(crate) async fn get_ref_files_excluding_in_manifest(
+        &self,
+        table_id: TableId,
+        region_map: &RegionMapRef,
+    ) -> Result<HashSet<FileRef>> {
+        let Some((ref_files, _)) = self.ref_file_manifest(table_id, 0) else {
+            return Ok(Default::default());
         };
+        let region_list = region_map.list_regions();
+        let table_regions = region_list
+            .iter()
+            .filter(|r| r.region_id().table_id() == table_id)
+            .collect::<Vec<_>>();
 
-        let path = ref_file_path(
-            access_layer.table_dir(),
-            self.node_id,
-            access_layer.path_type(),
-        );
+        let mut in_manifest_files = HashSet::new();
 
-        let content = serde_json::to_string(&ref_manifest).context(SerdeJsonSnafu)?;
-
-        if let Err(e) = access_layer.object_store().write(&path, content).await {
-            error!(e; "Failed to upload ref file to {}, table {}", path, table_id);
-            return Err(e).context(OpenDalSnafu);
-        } else {
-            info!(
-                "Successfully uploaded ref files with {} refs to {}, table {}",
-                ref_manifest.file_refs.len(),
-                path,
-                table_id
-            );
+        for r in &table_regions {
+            let files = r
+                .manifest_ctx
+                .manifest()
+                .await
+                .files
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            in_manifest_files.extend(files);
         }
 
-        Ok(())
+        let ref_files_excluding_in_manifest = ref_files
+            .file_refs
+            .iter()
+            .filter(|f| !in_manifest_files.contains(&f.file_id))
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        Ok(ref_files_excluding_in_manifest)
     }
 
     /// Adds a new file reference.
