@@ -402,21 +402,21 @@ impl RegionOpener {
         // Backfill partition_expr if missing.
         {
             let manifest = manifest_manager.manifest();
-            let metadata = manifest.metadata.clone();
-            if metadata.partition_expr.is_none() {
-                if let Some(expr_json) =
-                    self.partition_expr_fetcher.fetch_expr(self.region_id).await
-                {
-                    let mut builder = RegionMetadataBuilder::from_existing((*metadata).clone());
+            if manifest.metadata.partition_expr.is_none() {
+                let expr_json = self.partition_expr_fetcher.fetch_expr(self.region_id).await;
+                if let Some(expr_json) = expr_json {
+                    let metadata = manifest.metadata.as_ref().clone();
+                    let mut builder = RegionMetadataBuilder::from_existing(metadata);
                     builder.partition_expr_json(Some(expr_json));
                     let new_meta = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
-                    let actions =
-                        RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
-                            metadata: new_meta,
-                        }));
+
+                    let action = RegionMetaAction::Change(RegionChange { metadata: new_meta });
                     // Use follower state during open.
                     let _ = manifest_manager
-                        .update(actions, RegionRoleState::Follower)
+                        .update(
+                            RegionMetaActionList::with_action(action),
+                            RegionRoleState::Follower,
+                        )
                         .await?;
                 }
             }
