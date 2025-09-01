@@ -1,14 +1,14 @@
 services:
 
   zookeeper:
-    image: public.ecr.aws/i8k6a5e1/bitnami/zookeeper:3.7
+    image: greptime/zookeeper:3.7
     ports:
       - '2181:2181'
     environment:
       - ALLOW_ANONYMOUS_LOGIN=yes
 
   kafka:
-    image: public.ecr.aws/i8k6a5e1/bitnami/kafka:3.9.0-debian-12-r1
+    image: greptime/kafka:3.9.0-debian-12-r1
     container_name: kafka
     ports:
       - 9092:9092
@@ -32,7 +32,7 @@ services:
         condition: service_started
 
   etcd:
-    image: public.ecr.aws/i8k6a5e1/bitnami/etcd:3.6.1-debian-12-r3
+    image: greptime/etcd:3.6.1-debian-12-r3
     ports:
       - "2379:2379"
       - "2380:2380"
@@ -44,7 +44,7 @@ services:
       ETCD_MAX_REQUEST_BYTES: 10485760
 
   minio:
-    image: public.ecr.aws/i8k6a5e1/bitnami/minio:2024
+    image: greptime/minio:2024
     ports:
       - '9000:9000'
       - '9001:9001'
@@ -68,7 +68,7 @@ services:
       - POSTGRES_PASSWORD=admin
 
   mysql:
-    image: public.ecr.aws/i8k6a5e1/bitnami/mysql:5.7
+    image: greptime/mysql:5.7
     ports:
       - 3306:3306
     volumes:
