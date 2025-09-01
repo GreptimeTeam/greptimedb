@@ -248,3 +248,78 @@ DROP TABLE rate_reqs;
 
 Affected Rows: 0
 
+CREATE TABLE http_requests_total (
+    host STRING,
+    job STRING,
+    instance STRING,
+    byte DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (host, job, instance)
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_rate 
+SINK TO rate_reqs 
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests_total{job="my_service"}[1m]);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE rate_reqs;
+
++-----------+-------------------------------------------+
+| Table     | Create Table                              |
++-----------+-------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (  |
+|           |   "ts" TIMESTAMP(3) NOT NULL,             |
+|           |   "val" DOUBLE NULL,                      |
+|           |   "host" STRING NULL,                     |
+|           |   "job" STRING NULL,                      |
+|           |   "instance" STRING NULL,                 |
+|           |   TIME INDEX ("ts"),                      |
+|           |   PRIMARY KEY ("host", "job", "instance") |
+|           | )                                         |
+|           |                                           |
+|           | ENGINE=mito                               |
+|           |                                           |
++-----------+-------------------------------------------+
+
+INSERT INTO TABLE http_requests_total VALUES
+    ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),
+    ('localhost', 'my_service', 'instance1', 200, now() - '45s'::interval),
+    ('remotehost', 'my_service', 'instance1', 300, now() - '30s'::interval),
+    ('remotehost', 'their_service', 'instance1', 300, now() - '15s'::interval),
+    ('localhost', 'my_service', 'instance1', 400, now());
+
+Affected Rows: 5
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_rate') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT count(*)>0 FROM rate_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_rate;
+
+Affected Rows: 0
+
+DROP TABLE http_requests_total;
+
+Affected Rows: 0
+
+DROP TABLE rate_reqs;
+
+Affected Rows: 0
+

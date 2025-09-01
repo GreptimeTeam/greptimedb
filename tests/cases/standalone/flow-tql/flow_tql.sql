@@ -114,3 +114,35 @@ SELECT count(*) > 0 FROM rate_reqs;
 DROP FLOW calc_rate;
 DROP TABLE http_requests;
 DROP TABLE rate_reqs;
+
+CREATE TABLE http_requests_total (
+    host STRING,
+    job STRING,
+    instance STRING,
+    byte DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (host, job, instance)
+);
+
+CREATE FLOW calc_rate 
+SINK TO rate_reqs 
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests_total{job="my_service"}[1m]);
+
+SHOW CREATE TABLE rate_reqs;
+
+INSERT INTO TABLE http_requests_total VALUES
+    ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),
+    ('localhost', 'my_service', 'instance1', 200, now() - '45s'::interval),
+    ('remotehost', 'my_service', 'instance1', 300, now() - '30s'::interval),
+    ('remotehost', 'their_service', 'instance1', 300, now() - '15s'::interval),
+    ('localhost', 'my_service', 'instance1', 400, now());
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_rate');
+
+SELECT count(*)>0 FROM rate_reqs;
+
+DROP FLOW calc_rate;
+DROP TABLE http_requests_total;
+DROP TABLE rate_reqs;
