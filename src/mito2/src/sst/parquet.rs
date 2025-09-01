@@ -28,7 +28,6 @@ pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
-pub(crate) mod page_reader;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -246,7 +245,7 @@ mod tests {
         )
         .await;
 
-        writer
+        let sst_info = writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
@@ -280,19 +279,24 @@ mod tests {
             .await;
         }
 
-        // Doesn't have compressed page cached.
-        let page_key =
-            PageKey::new_compressed(metadata.region_id, handle.file_id().file_id(), 0, 0);
-        assert!(cache.get_pages(&page_key).is_none());
+        let parquet_meta = sst_info.file_metadata.unwrap();
+        let get_ranges = |row_group_idx: usize| {
+            let row_group = parquet_meta.row_group(row_group_idx);
+            let mut ranges = Vec::with_capacity(row_group.num_columns());
+            for i in 0..row_group.num_columns() {
+                let (start, length) = row_group.column(i).byte_range();
+                ranges.push(start..start + length);
+            }
+
+            ranges
+        };
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key =
-                PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), i, 0);
+            let page_key = PageKey::new(handle.file_id().file_id(), i, get_ranges(i));
             assert!(cache.get_pages(&page_key).is_some());
         }
-        let page_key =
-            PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), 5, 0);
+        let page_key = PageKey::new(handle.file_id().file_id(), 5, vec![]);
         assert!(cache.get_pages(&page_key).is_none());
     }
 

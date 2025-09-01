@@ -20,6 +20,7 @@ use common_telemetry::{error, info};
 use store_api::storage::RegionId;
 use store_api::{ManifestVersion, MIN_VERSION};
 
+use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
 use crate::manifest::manager::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
@@ -116,6 +117,19 @@ impl Checkpointer {
 
     pub(crate) fn last_checkpoint_version(&self) -> ManifestVersion {
         self.inner.last_checkpoint_version.load(Ordering::Relaxed)
+    }
+
+    /// Update the `removed_files` field in the manifest by the options in `manifest_options`.
+    /// This should be called before maybe do checkpoint to update the manifest.
+    pub(crate) fn update_manifest_removed_files(
+        &self,
+        mut manifest: RegionManifest,
+    ) -> Result<RegionManifest> {
+        let opt = &self.manifest_options.remove_file_options;
+
+        manifest.removed_files.evict_old_removed_files(opt)?;
+
+        Ok(manifest)
     }
 
     /// Check if it's needed to do checkpoint for the region by the checkpoint distance.

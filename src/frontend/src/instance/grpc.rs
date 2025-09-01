@@ -43,9 +43,9 @@ use table::table_name::TableName;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, Error, ExternalSnafu, InFlightWriteBytesExceededSnafu,
-    IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
-    SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
+    CatalogSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SubstraitDecodeLogicalPlanSnafu,
+    TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
 use crate::metrics::{
@@ -68,11 +68,7 @@ impl GrpcQueryHandler for Instance {
             .context(PermissionSnafu)?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_request(&request);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(limiter.limit_request(&request).await?)
         } else {
             None
         };
@@ -247,6 +243,7 @@ impl GrpcQueryHandler for Instance {
         table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
+        ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let table = if let Some(table) = table_ref {
             table.clone()
@@ -267,6 +264,18 @@ impl GrpcQueryHandler for Instance {
             *table_ref = Some(table.clone());
             table
         };
+
+        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+        let interceptor = interceptor_ref.as_ref();
+        interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
+
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+            .context(PermissionSnafu)?;
+
+        // do we check limit for bulk insert?
 
         self.inserter
             .handle_bulk_insert(table, decoder, data)

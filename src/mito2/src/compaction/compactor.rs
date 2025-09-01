@@ -36,7 +36,7 @@ use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics;
 use crate::read::Source;
@@ -165,6 +165,10 @@ pub async fn open_compaction_region(
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
+                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
+            },
         };
 
         RegionManifestManager::open(
@@ -238,8 +242,18 @@ pub async fn open_compaction_region(
 }
 
 impl CompactionRegion {
+    /// Get the file purger of the compaction region.
     pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
         self.file_purger.clone()
+    }
+
+    /// Stop the file purger scheduler of the compaction region.
+    pub async fn stop_purger_scheduler(&self) -> Result<()> {
+        if let Some(file_purger) = &self.file_purger {
+            file_purger.stop_scheduler().await
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -436,6 +450,8 @@ impl Compactor for DefaultCompactor {
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
             files_to_remove: merge_output.files_to_remove,
+            // Use current timestamp as the edit timestamp.
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             compaction_time_window: merge_output
                 .compaction_time_window
                 .map(|seconds| Duration::from_secs(seconds as u64)),

@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, OtherSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -84,11 +84,13 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_row_inserts(&requests)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(OtherSnafu)?,
+            )
         } else {
             None
         };
@@ -190,11 +192,13 @@ impl OpenTelemetryProtocolHandler for Instance {
         .await?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_ctx_req(&opt_req);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_ctx_req(&opt_req)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(OtherSnafu)?,
+            )
         } else {
             None
         };

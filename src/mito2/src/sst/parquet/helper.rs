@@ -89,7 +89,7 @@ fn parse_column_orders(
 }
 
 const FETCH_PARALLELISM: usize = 8;
-const MERGE_GAP: usize = 512 * 1024;
+pub(crate) const MERGE_GAP: usize = 512 * 1024;
 
 /// Asynchronously fetches byte ranges from an object store.
 ///
