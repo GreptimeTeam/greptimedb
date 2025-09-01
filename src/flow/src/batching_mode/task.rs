@@ -732,19 +732,21 @@ fn create_table_with_expr(
     sink_table_name: &[String; 3],
     query_type: &QueryType,
 ) -> Result<CreateTableExpr, Error> {
-    let (first_time_stamp, primary_keys) = match query_type {
+    let table_def = match query_type {
         &QueryType::Sql => build_pk_from_aggr(plan)?.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found aggregation in plan: {plan:?}"),
         })?,
         QueryType::Tql => {
             // first try build from aggr, then from tql schema because tql query might not have aggr node
-            if let Some((ts, pks)) = build_pk_from_aggr(plan)? {
-                (ts, pks)
+            if let Some(table_def) = build_pk_from_aggr(plan)? {
+                table_def
             } else {
                 build_by_tql_schema(plan)?
             }
         }
     };
+    let first_time_stamp = table_def.ts_col;
+    let primary_keys = table_def.pks;
 
     let mut column_schemas = Vec::new();
     for field in plan.schema().fields() {
@@ -767,7 +769,7 @@ fn create_table_with_expr(
                 let is_val_column = !is_tag_column && first_time_stamp.as_ref() != Some(name);
                 if is_val_column {
                     let col_schema =
-                        ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true);
+                        ColumnSchema::new(name, ConcreteDataType::float64_datatype(), true);
                     column_schemas.push(col_schema);
                 } else if is_tag_column {
                     let col_schema =
@@ -822,7 +824,7 @@ fn create_table_with_expr(
 }
 
 /// Return first timestamp column found in output schema and all string columns
-fn build_by_tql_schema(plan: &LogicalPlan) -> Result<(Option<String>, Vec<String>), Error> {
+fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
     let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
         if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
             Some(f.name().clone())
@@ -842,7 +844,16 @@ fn build_by_tql_schema(plan: &LogicalPlan) -> Result<(Option<String>, Vec<String
             }
         })
         .collect::<Vec<_>>();
-    Ok((first_time_stamp, string_columns))
+
+    Ok(TableDef {
+        ts_col: first_time_stamp,
+        pks: string_columns,
+    })
+}
+
+struct TableDef {
+    ts_col: Option<String>,
+    pks: Vec<String>,
 }
 
 /// Return first timestamp column which is in group by clause and other columns which are also in group by clause
@@ -853,7 +864,7 @@ fn build_by_tql_schema(plan: &LogicalPlan) -> Result<(Option<String>, Vec<String
 /// * `Vec<String>` - other columns which are also in group by clause
 ///
 /// if no aggregation found, return None
-fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<(Option<String>, Vec<String>)>, Error> {
+fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
     let fields = plan.schema().fields();
     let mut pk_names = FindGroupByFinalName::default();
 
@@ -871,7 +882,10 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<(Option<String>, Vec<
             .iter()
             .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
             .map(|f| f.name().clone());
-        return Ok(Some((first_ts_col, Vec::new())));
+        return Ok(Some(TableDef {
+            ts_col: first_ts_col,
+            pks: vec![],
+        }));
     }
 
     let all_pk_cols: Vec<_> = fields
@@ -893,7 +907,10 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<(Option<String>, Vec<
         .filter(|col| first_time_stamp != Some(col.to_string()))
         .collect();
 
-    Ok(Some((first_time_stamp, all_pk_cols)))
+    Ok(Some(TableDef {
+        ts_col: first_time_stamp,
+        pks: all_pk_cols,
+    }))
 }
 
 #[cfg(test)]

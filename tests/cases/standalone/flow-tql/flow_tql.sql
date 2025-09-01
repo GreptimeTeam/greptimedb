@@ -85,7 +85,7 @@ INSERT INTO TABLE http_requests VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_reqs');
 
-SELECT val, ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
+SELECT * FROM cnt_reqs ORDER BY ts, status_code;
 
 DROP FLOW calc_reqs;
 DROP TABLE http_requests;

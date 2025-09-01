@@ -15,20 +15,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-----------------------------------------+
-| Table    | Create Table                            |
-+----------+-----------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" ( |
-|          |   "val" DOUBLE NULL,                    |
-|          |   "ts" TIMESTAMP(3) NOT NULL,           |
-|          |   "status_code" STRING NULL,            |
-|          |   TIME INDEX ("ts"),                    |
-|          |   PRIMARY KEY ("status_code")           |
-|          | )                                       |
-|          |                                         |
-|          | ENGINE=mito                             |
-|          |                                         |
-+----------+-----------------------------------------+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" DOUBLE NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" STRING NULL,              |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
 
 INSERT INTO TABLE http_requests VALUES
     (now() - '17s'::interval, 'host1', 'idc1', 200),
@@ -114,20 +114,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE cnt_reqs;
 
-+----------+-----------------------------------------+
-| Table    | Create Table                            |
-+----------+-----------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" ( |
-|          |   "val" DOUBLE NULL,                    |
-|          |   "ts" TIMESTAMP(3) NOT NULL,           |
-|          |   "status_code" STRING NULL,            |
-|          |   TIME INDEX ("ts"),                    |
-|          |   PRIMARY KEY ("status_code")           |
-|          | )                                       |
-|          |                                         |
-|          | ENGINE=mito                             |
-|          |                                         |
-+----------+-----------------------------------------+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" DOUBLE NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" STRING NULL,              |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
 
 INSERT INTO TABLE http_requests VALUES
     (0::Timestamp, 'host1', 'idc1', 200),
@@ -158,20 +158,20 @@ ADMIN FLUSH_FLOW('calc_reqs');
 |  FLOW_FLUSHED  |
 +-------------------------------+
 
-SELECT val, ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
+SELECT * FROM cnt_reqs ORDER BY ts, status_code;
 
-+-----+---------------------+-------------+
-| val | ts                  | status_code |
-+-----+---------------------+-------------+
-| 3.0 | 1970-01-01T00:00:00 | 200.0       |
-| 1.0 | 1970-01-01T00:00:00 | 401.0       |
-| 1.0 | 1970-01-01T00:00:05 | 401.0       |
-| 2.0 | 1970-01-01T00:00:05 | 404.0       |
-| 1.0 | 1970-01-01T00:00:05 | 500.0       |
-| 2.0 | 1970-01-01T00:00:10 | 200.0       |
-| 2.0 | 1970-01-01T00:00:10 | 201.0       |
-| 4.0 | 1970-01-01T00:00:15 | 500.0       |
-+-----+---------------------+-------------+
++--------------------------+---------------------+-------------+
+| count(http_requests.val) | ts                  | status_code |
++--------------------------+---------------------+-------------+
+| 3.0                      | 1970-01-01T00:00:00 | 200.0       |
+| 1.0                      | 1970-01-01T00:00:00 | 401.0       |
+| 1.0                      | 1970-01-01T00:00:05 | 401.0       |
+| 2.0                      | 1970-01-01T00:00:05 | 404.0       |
+| 1.0                      | 1970-01-01T00:00:05 | 500.0       |
+| 2.0                      | 1970-01-01T00:00:10 | 200.0       |
+| 2.0                      | 1970-01-01T00:00:10 | 201.0       |
+| 4.0                      | 1970-01-01T00:00:15 | 500.0       |
++--------------------------+---------------------+-------------+
 
 DROP FLOW calc_reqs;
 
@@ -199,18 +199,18 @@ Affected Rows: 0
 
 SHOW CREATE TABLE rate_reqs;
 
-+-----------+------------------------------------------+
-| Table     | Create Table                             |
-+-----------+------------------------------------------+
-| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" ( |
-|           |   "ts" TIMESTAMP(3) NOT NULL,            |
-|           |   "val" DOUBLE NULL,                     |
-|           |   TIME INDEX ("ts")                      |
-|           | )                                        |
-|           |                                          |
-|           | ENGINE=mito                              |
-|           |                                          |
-+-----------+------------------------------------------+
++-----------+-----------------------------------------------------------+
+| Table     | Create Table                                              |
++-----------+-----------------------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (                  |
+|           |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|           |   "prom_rate(ts_range,val,ts,Int64(300000))" DOUBLE NULL, |
+|           |   TIME INDEX ("ts")                                       |
+|           | )                                                         |
+|           |                                                           |
+|           | ENGINE=mito                                               |
+|           |                                                           |
++-----------+-----------------------------------------------------------+
 
 INSERT INTO TABLE http_requests VALUES
     (now() - '1m'::interval, 0),
@@ -268,22 +268,22 @@ Affected Rows: 0
 
 SHOW CREATE TABLE rate_reqs;
 
-+-----------+-------------------------------------------+
-| Table     | Create Table                              |
-+-----------+-------------------------------------------+
-| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (  |
-|           |   "ts" TIMESTAMP(3) NOT NULL,             |
-|           |   "val" DOUBLE NULL,                      |
-|           |   "host" STRING NULL,                     |
-|           |   "job" STRING NULL,                      |
-|           |   "instance" STRING NULL,                 |
-|           |   TIME INDEX ("ts"),                      |
-|           |   PRIMARY KEY ("host", "job", "instance") |
-|           | )                                         |
-|           |                                           |
-|           | ENGINE=mito                               |
-|           |                                           |
-+-----------+-------------------------------------------+
++-----------+-----------------------------------------------------------+
+| Table     | Create Table                                              |
++-----------+-----------------------------------------------------------+
+| rate_reqs | CREATE TABLE IF NOT EXISTS "rate_reqs" (                  |
+|           |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|           |   "prom_rate(ts_range,byte,ts,Int64(60000))" DOUBLE NULL, |
+|           |   "host" STRING NULL,                                     |
+|           |   "job" STRING NULL,                                      |
+|           |   "instance" STRING NULL,                                 |
+|           |   TIME INDEX ("ts"),                                      |
+|           |   PRIMARY KEY ("host", "job", "instance")                 |
+|           | )                                                         |
+|           |                                                           |
+|           | ENGINE=mito                                               |
+|           |                                                           |
++-----------+-----------------------------------------------------------+
 
 INSERT INTO TABLE http_requests_total VALUES
     ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),
