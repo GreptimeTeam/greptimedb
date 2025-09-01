@@ -19,6 +19,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use store_api::region_request::PathType;
 use store_api::storage::{RegionId, TableId};
+use store_api::ManifestVersion;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
@@ -108,11 +109,11 @@ pub struct FileReferenceManager {
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
 
 /// The tmp file uploaded to object storage to record one table's file references.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableFileRefsManifest {
     pub file_refs: HashSet<FileRef>,
-    /// Unix timestamp in milliseconds sent by metasrv to indicate when the manifest is created. Used for gc worker to make sure it gets the latest version of the manifest.
-    pub ts: i64,
+    /// Manifest version when this manifest is read for it's files
+    pub manifest_version: HashMap<RegionId, ManifestVersion>,
 }
 
 impl FileReferenceManager {
@@ -123,11 +124,7 @@ impl FileReferenceManager {
         }
     }
 
-    fn ref_file_manifest(
-        &self,
-        table_id: TableId,
-        now: i64,
-    ) -> Option<(TableFileRefsManifest, AccessLayerRef)> {
+    fn ref_file_set(&self, table_id: TableId) -> Option<HashSet<FileRef>> {
         let file_refs = self
             .files_per_table
             .lock()
@@ -138,31 +135,20 @@ impl FileReferenceManager {
         if file_refs.files.is_empty() {
             // still return an empty manifest to indicate no files are referenced.
             // and differentiate from error case where table_id not found.
-            return Some((
-                TableFileRefsManifest {
-                    file_refs: HashSet::new(),
-                    ts: now,
-                },
-                file_refs.access_layer.clone(),
-            ));
+            return Some(HashSet::new());
         }
 
-        let ref_manifest = TableFileRefsManifest {
-            file_refs: file_refs.files.keys().cloned().collect(),
-            ts: now,
-        };
-        let access_layer = &file_refs.access_layer;
+        let ref_file_set: HashSet<FileRef> = file_refs.files.keys().cloned().collect();
 
         info!(
-            "Preparing to upload ref file for table {}, node {}, path_type {:?}, {} files: {:?}",
+            "Preparing to upload ref file for table {}, node {}, {} files: {:?}",
             table_id,
             self.node_id,
-            access_layer.path_type(),
-            ref_manifest.file_refs.len(),
-            ref_manifest.file_refs,
+            ref_file_set.len(),
+            ref_file_set,
         );
 
-        Some((ref_manifest, access_layer.clone()))
+        Some(ref_file_set)
     }
 
     /// Gets all ref files for the given table id, excluding those already in region manifest.
@@ -170,15 +156,17 @@ impl FileReferenceManager {
     /// It's safe if manifest version became outdated when gc worker is called, because:
     /// 1. if new files are added, they wouldn't be deleted
     /// 2. if files are removed from manifest, but still being referred, they will appear to be unused.
-    ///   But since their linger time wouldn't pass for a while, so they wouldn't be deleted until next gc round, which will use the latest manifest and hence a correct tmp ref file set.
-    /// 3. if files are removed from manifest, and not being referred, they will still linger until next gc round and be deleted then.
+    ///    But since their linger time wouldn't pass for a while(assuming reading the whole region manifest wouldn't surpass linger time), so they wouldn't be deleted until next gc round, which will use the latest manifest and hence a correct tmp ref file set.
+    /// 3. if files are removed from manifest, and not being referred, they will still linger for a while until a gc round and be deleted then.
+    ///
+    /// TODO(discord9): consider adding region manifest version for more precise gc.
     #[allow(unused)]
     pub(crate) async fn get_ref_files_excluding_in_manifest(
         &self,
         table_id: TableId,
         region_map: &RegionMapRef,
-    ) -> Result<HashSet<FileRef>> {
-        let Some((ref_files, _)) = self.ref_file_manifest(table_id, 0) else {
+    ) -> Result<TableFileRefsManifest> {
+        let Some(ref_files) = self.ref_file_set(table_id) else {
             return Ok(Default::default());
         };
         let region_list = region_map.list_regions();
@@ -188,27 +176,25 @@ impl FileReferenceManager {
             .collect::<Vec<_>>();
 
         let mut in_manifest_files = HashSet::new();
+        let mut manifest_version = HashMap::new();
 
         for r in &table_regions {
-            let files = r
-                .manifest_ctx
-                .manifest()
-                .await
-                .files
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
+            let manifest = r.manifest_ctx.manifest().await;
+            let files = manifest.files.keys().cloned().collect::<Vec<_>>();
             in_manifest_files.extend(files);
+            manifest_version.insert(r.region_id(), manifest.manifest_version);
         }
 
         let ref_files_excluding_in_manifest = ref_files
-            .file_refs
             .iter()
             .filter(|f| !in_manifest_files.contains(&f.file_id))
             .cloned()
             .collect::<HashSet<_>>();
 
-        Ok(ref_files_excluding_in_manifest)
+        Ok(TableFileRefsManifest {
+            file_refs: ref_files_excluding_in_manifest,
+            manifest_version,
+        })
     }
 
     /// Adds a new file reference.
@@ -343,13 +329,11 @@ mod tests {
 
         file_ref_mgr.add_file(&file_meta, layer.clone());
 
-        let expected_table_ref_manifest = TableFileRefsManifest {
-            file_refs: HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]),
-            ts: 0,
-        };
+        let expected_table_ref_manifest =
+            HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]);
 
         assert_eq!(
-            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            file_ref_mgr.ref_file_set(0).unwrap(),
             expected_table_ref_manifest
         );
 
@@ -365,7 +349,7 @@ mod tests {
         );
 
         assert_eq!(
-            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            file_ref_mgr.ref_file_set(0).unwrap(),
             expected_table_ref_manifest
         );
 
@@ -383,7 +367,7 @@ mod tests {
         );
 
         assert_eq!(
-            file_ref_mgr.ref_file_manifest(0, 0).unwrap().0,
+            file_ref_mgr.ref_file_set(0).unwrap(),
             expected_table_ref_manifest
         );
 
@@ -401,7 +385,7 @@ mod tests {
         );
 
         assert!(
-            file_ref_mgr.ref_file_manifest(0, 0).is_none(),
+            file_ref_mgr.ref_file_set(0).is_none(),
             "{:?}",
             file_ref_mgr.files_per_table.lock().unwrap()
         );
