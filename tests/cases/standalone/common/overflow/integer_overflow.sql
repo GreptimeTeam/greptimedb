@@ -9,13 +9,13 @@ SELECT 100::TINYINT + 50::TINYINT;
 
 SELECT 0::TINYINT + (-127)::TINYINT;
 
-  -- underflow: wraps to 127
+-- underflow: wraps to 127
 SELECT (-2)::TINYINT + (-127)::TINYINT;
 
 -- SMALLINT addition tests
 SELECT 30000::SMALLINT + 1::SMALLINT;
 
- -- overflow: wraps to -30536
+-- overflow: wraps to -30536
 SELECT 30000::SMALLINT + 5000::SMALLINT;
 
 SELECT 0::SMALLINT + (-32767)::SMALLINT;
