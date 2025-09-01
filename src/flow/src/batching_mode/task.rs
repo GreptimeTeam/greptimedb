@@ -733,9 +733,13 @@ fn create_table_with_expr(
     query_type: &QueryType,
 ) -> Result<CreateTableExpr, Error> {
     let table_def = match query_type {
-        &QueryType::Sql => build_pk_from_aggr(plan)?.with_context(|| UnexpectedSnafu {
-            reason: format!("Can't found aggregation in plan: {plan:?}"),
-        })?,
+        &QueryType::Sql => {
+            if let Some(def) = build_pk_from_aggr(plan)? {
+                def
+            } else {
+                build_by_sql_schema(plan)?
+            }
+        }
         QueryType::Tql => {
             // first try build from aggr, then from tql schema because tql query might not have aggr node
             if let Some(table_def) = build_pk_from_aggr(plan)? {
@@ -820,6 +824,21 @@ fn create_table_with_expr(
         table_options: Default::default(),
         table_id: None,
         engine: "mito".to_string(),
+    })
+}
+
+/// simply build by schema, return first timestamp column and no primary key
+fn build_by_sql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
+    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
+        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
+            Some(f.name().clone())
+        } else {
+            None
+        }
+    });
+    Ok(TableDef {
+        ts_col: first_time_stamp,
+        pks: vec![],
     })
 }
 
