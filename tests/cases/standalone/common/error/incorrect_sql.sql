@@ -46,6 +46,6 @@ SELECT ts FROM chickens, integers;
 -- Clean up
 DROP TABLE chickens;
 
-DROP TABLE strings;  
+DROP TABLE strings;
 
 DROP TABLE integers;

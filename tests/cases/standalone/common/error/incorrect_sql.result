@@ -82,8 +82,11 @@ DROP TABLE chickens;
 
 Affected Rows: 0
 
-DROP TABLE strings;  
+DROP TABLE strings;
+
+Affected Rows: 0
+
 DROP TABLE integers;
 
-Error: 1001(Unsupported), Not supported: execute multiple statements in SQL query string through GRPC interface
+Affected Rows: 0
 
