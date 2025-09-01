@@ -1,0 +1,85 @@
+-- Migrated from DuckDB test: test/sql/keywords/keywords_in_expressions.test
+-- Description: Test keywords in expressions
+-- Note: Adapted for GreptimeDB - simplified from ENUM/ROW to basic types
+-- Create schema with quoted keywords
+CREATE SCHEMA "SCHEMA";
+
+Affected Rows: 1
+
+-- Create table with quoted keyword names
+CREATE TABLE "SCHEMA"."TABLE"("COLUMN" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO "SCHEMA"."TABLE" VALUES ('ALL', 1000);
+
+Affected Rows: 1
+
+-- Test 1: Column references with quoted keywords
+SELECT "COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+-- Test 2: Table-qualified column reference
+SELECT "TABLE"."COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+-- Test 3: Schema-qualified column reference
+SELECT "SCHEMA"."TABLE"."COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+-- Clean up
+DROP TABLE "SCHEMA"."TABLE";
+
+Affected Rows: 0
+
+DROP SCHEMA "SCHEMA";
+
+Affected Rows: 0
+
+-- Test with common reserved keywords
+CREATE TABLE "SELECT"("WHERE" INTEGER, "FROM" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO "SELECT" VALUES (1, 'test', 2000);
+
+Affected Rows: 1
+
+-- Test 4: References to table/columns with reserved keywords
+SELECT "WHERE", "FROM" FROM "SELECT";
+
++-------+------+
+| WHERE | FROM |
++-------+------+
+| 1     | test |
++-------+------+
+
+-- Test 5: Qualified references with reserved keywords
+SELECT "SELECT"."WHERE", "SELECT"."FROM" FROM "SELECT";
+
++-------+------+
+| WHERE | FROM |
++-------+------+
+| 1     | test |
++-------+------+
+
+-- Clean up
+DROP TABLE "SELECT";
+
+Affected Rows: 0
+

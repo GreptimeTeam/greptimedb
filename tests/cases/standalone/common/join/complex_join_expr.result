@@ -1,0 +1,67 @@
+-- Migrated from DuckDB test: test/sql/join/test_complex_join_expr.test
+-- Description: Test joins with comparisons involving both sides of the join
+-- Note: Adapted for GreptimeDB
+-- Create test tables
+CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (4, 1, 1000), (2, 2, 2000);
+
+Affected Rows: 2
+
+CREATE TABLE test2 (b INTEGER, c INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test2 VALUES (1, 2, 3000), (3, 0, 4000);
+
+Affected Rows: 2
+
+-- Test 1: INNER JOIN with complex expression
+SELECT * FROM test JOIN test2 ON test.a+test2.c=test.b+test2.b ORDER BY test.a;
+
++---+---+---------------------+---+---+---------------------+
+| a | b | ts                  | b | c | ts                  |
++---+---+---------------------+---+---+---------------------+
+| 4 | 1 | 1970-01-01T00:00:01 | 3 | 0 | 1970-01-01T00:00:04 |
++---+---+---------------------+---+---+---------------------+
+
+-- Test 2: LEFT JOIN with complex expression
+SELECT * FROM test LEFT JOIN test2 ON test.a+test2.c=test.b+test2.b ORDER BY test.a;
+
++---+---+---------------------+---+---+---------------------+
+| a | b | ts                  | b | c | ts                  |
++---+---+---------------------+---+---+---------------------+
+| 2 | 2 | 1970-01-01T00:00:02 |   |   |                     |
+| 4 | 1 | 1970-01-01T00:00:01 | 3 | 0 | 1970-01-01T00:00:04 |
++---+---+---------------------+---+---+---------------------+
+
+-- Test 3: RIGHT JOIN with complex expression  
+SELECT * FROM test RIGHT JOIN test2 ON test.a+test2.c=test.b+test2.b ORDER BY test.a NULLS FIRST;
+
++---+---+---------------------+---+---+---------------------+
+| a | b | ts                  | b | c | ts                  |
++---+---+---------------------+---+---+---------------------+
+|   |   |                     | 1 | 2 | 1970-01-01T00:00:03 |
+| 4 | 1 | 1970-01-01T00:00:01 | 3 | 0 | 1970-01-01T00:00:04 |
++---+---+---------------------+---+---+---------------------+
+
+-- Test 4: Basic equi-join for comparison
+SELECT * FROM test JOIN test2 ON test.b = test2.b ORDER BY test.a;
+
++---+---+---------------------+---+---+---------------------+
+| a | b | ts                  | b | c | ts                  |
++---+---+---------------------+---+---+---------------------+
+| 4 | 1 | 1970-01-01T00:00:01 | 1 | 2 | 1970-01-01T00:00:03 |
++---+---+---------------------+---+---+---------------------+
+
+-- Clean up
+DROP TABLE test2;
+
+Affected Rows: 0
+
+DROP TABLE test;
+
+Affected Rows: 0
+
