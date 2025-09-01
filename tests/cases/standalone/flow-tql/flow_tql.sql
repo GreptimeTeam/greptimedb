@@ -11,6 +11,9 @@ TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_
 
 SHOW CREATE TABLE cnt_reqs;
 
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
+
 INSERT INTO TABLE http_requests VALUES
     (now() - '17s'::interval, 'host1', 'idc1', 200),
     (now() - '17s'::interval, 'host2', 'idc1', 200),
@@ -85,6 +88,9 @@ TQL EVAL (now() - now(), now()-(now()-'15s'::interval), '5s') count_values("stat
 
 SHOW CREATE TABLE cnt_reqs;
 
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", cnt_reqs);
+
 INSERT INTO TABLE http_requests VALUES
     (0::Timestamp, 'host1', 'idc1', 200),
     (0::Timestamp, 'host2', 'idc1', 200),
@@ -122,6 +128,9 @@ TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests[5m]);
 
 SHOW CREATE TABLE rate_reqs;
 
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
+
 INSERT INTO TABLE http_requests VALUES
     (now() - '1m'::interval, 0),
     (now() - '30s'::interval, 1),
@@ -151,6 +160,9 @@ EVAL INTERVAL '1m' AS
 TQL EVAL (now() - '1m'::interval, now(), '30s') rate(http_requests_total{job="my_service"}[1m]);
 
 SHOW CREATE TABLE rate_reqs;
+
+-- test if sink table is tql queryable
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", rate_reqs);
 
 INSERT INTO TABLE http_requests_total VALUES
     ('localhost', 'my_service', 'instance1', 100, now() - '1min'::interval),
