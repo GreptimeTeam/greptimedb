@@ -239,11 +239,7 @@ impl RegionOpener {
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
-        let flushed_entry_id = if provider.is_remote_wal() {
-            wal.store().latest_entry_id(&provider).unwrap_or(0)
-        } else {
-            0
-        };
+        let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             flushed_entry_id,
