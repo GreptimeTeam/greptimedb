@@ -80,9 +80,9 @@ SELECT a FROM test WHERE a < 13 UNION ALL SELECT a FROM test WHERE a = 13;
 +----+
 | a  |
 +----+
-| 13 |
 | 11 |
 | 12 |
+| 13 |
 +----+
 
 SELECT b FROM test WHERE a < 13 UNION ALL SELECT b FROM test WHERE a > 11;
@@ -91,9 +91,9 @@ SELECT b FROM test WHERE a < 13 UNION ALL SELECT b FROM test WHERE a > 11;
 | b |
 +---+
 | 1 |
+| 1 |
+| 1 |
 | 2 |
-| 1 |
-| 1 |
 +---+
 
 -- Test type mixing (should still work)
