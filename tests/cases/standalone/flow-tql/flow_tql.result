@@ -104,10 +104,11 @@ TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_
 Error: 3001(EngineExecuteQuery), Unsupported expr type: count_values on multi-value input
 
 -- should failed with two value columns error
+-- SQLNESS REPLACE id=[0-9]+ id=[REDACTED]
 CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - '1m'::interval, now(), '5s') rate(http_requests_two_vals[5m]);
 
-Error: 3001(EngineExecuteQuery), Invalid query: TQL query only supports one f64 value column, table `greptime.public.http_requests_two_vals`(id=1026) has 2 f64 value columns, columns are: [val Float64 null, valb Float64 null]
+Error: 3001(EngineExecuteQuery), Invalid query: TQL query only supports one f64 value column, table `greptime.public.http_requests_two_vals`(id=[REDACTED]) has 2 f64 value columns, columns are: [val Float64 null, valb Float64 null]
 
 SHOW TABLES;
 
