@@ -122,13 +122,13 @@ pub async fn sql_to_df_plan(
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx)
+        .plan(&query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
     let plan = if optimize {
-        apply_df_optimizer(plan).await?
+        apply_df_optimizer(plan, &query_ctx).await?
     } else {
         plan
     };
@@ -258,56 +258,9 @@ impl AddAutoColumnRewriter {
             is_rewritten: false,
         }
     }
-}
 
-impl TreeNodeRewriter for AddAutoColumnRewriter {
-    type Node = LogicalPlan;
-    fn f_down(&mut self, mut node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        if self.is_rewritten {
-            return Ok(Transformed::no(node));
-        }
-
-        // if is distinct all, wrap it in a projection
-        if let LogicalPlan::Distinct(Distinct::All(_)) = &node {
-            let mut exprs = vec![];
-
-            for field in node.schema().fields().iter() {
-                exprs.push(Expr::Column(datafusion::common::Column::new_unqualified(
-                    field.name(),
-                )));
-            }
-
-            let projection =
-                LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
-
-            node = projection;
-        }
-        // handle table_scan by wrap it in a projection
-        else if let LogicalPlan::TableScan(table_scan) = node {
-            let mut exprs = vec![];
-
-            for field in table_scan.projected_schema.fields().iter() {
-                exprs.push(Expr::Column(datafusion::common::Column::new(
-                    Some(table_scan.table_name.clone()),
-                    field.name(),
-                )));
-            }
-
-            let projection = LogicalPlan::Projection(Projection::try_new(
-                exprs,
-                Arc::new(LogicalPlan::TableScan(table_scan)),
-            )?);
-
-            node = projection;
-        }
-
-        // only do rewrite if found the outermost projection
-        let mut exprs = if let LogicalPlan::Projection(project) = &node {
-            project.expr.clone()
-        } else {
-            return Ok(Transformed::no(node));
-        };
-
+    /// modify the exprs in place so that it matches the schema and some auto columns are added
+    fn modify_project_exprs(&mut self, mut exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
         let all_names = self
             .schema
             .column_schemas()
@@ -391,10 +344,76 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
                     query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas()
                 )));
         }
+        Ok(exprs)
+    }
+}
 
-        self.is_rewritten = true;
-        let new_plan = node.with_new_exprs(exprs, node.inputs().into_iter().cloned().collect())?;
-        Ok(Transformed::yes(new_plan))
+impl TreeNodeRewriter for AddAutoColumnRewriter {
+    type Node = LogicalPlan;
+    fn f_down(&mut self, mut node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        if self.is_rewritten {
+            return Ok(Transformed::no(node));
+        }
+
+        // if is distinct all, wrap it in a projection
+        if let LogicalPlan::Distinct(Distinct::All(_)) = &node {
+            let mut exprs = vec![];
+
+            for field in node.schema().fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new_unqualified(
+                    field.name(),
+                )));
+            }
+
+            let projection =
+                LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
+
+            node = projection;
+        }
+        // handle table_scan by wrap it in a projection
+        else if let LogicalPlan::TableScan(table_scan) = node {
+            let mut exprs = vec![];
+
+            for field in table_scan.projected_schema.fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new(
+                    Some(table_scan.table_name.clone()),
+                    field.name(),
+                )));
+            }
+
+            let projection = LogicalPlan::Projection(Projection::try_new(
+                exprs,
+                Arc::new(LogicalPlan::TableScan(table_scan)),
+            )?);
+
+            node = projection;
+        }
+
+        // only do rewrite if found the outermost projection
+        // if the outermost node is projection, can rewrite the exprs
+        // if not, wrap it in a projection
+        if let LogicalPlan::Projection(project) = &node {
+            let exprs = project.expr.clone();
+            let exprs = self.modify_project_exprs(exprs)?;
+
+            self.is_rewritten = true;
+            let new_plan =
+                node.with_new_exprs(exprs, node.inputs().into_iter().cloned().collect())?;
+            Ok(Transformed::yes(new_plan))
+        } else {
+            // wrap the logical plan in a projection
+            let mut exprs = vec![];
+            for field in node.schema().fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new_unqualified(
+                    field.name(),
+                )));
+            }
+            let exprs = self.modify_project_exprs(exprs)?;
+            self.is_rewritten = true;
+            let new_plan =
+                LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
+            Ok(Transformed::yes(new_plan))
+        }
     }
 
     /// We might add new columns, so we need to recompute the schema

@@ -207,7 +207,7 @@ impl FrontendBuilder {
             .options
             .max_in_flight_write_bytes
             .map(|max_in_flight_write_bytes| {
-                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes()))
+                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes() as usize))
             });
 
         Ok(Instance {

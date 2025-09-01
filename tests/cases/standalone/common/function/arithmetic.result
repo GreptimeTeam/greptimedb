@@ -76,7 +76,13 @@ SELECT CLAMP(0.5, 0, 1);
 
 SELECT CLAMP(10, 1, 0);
 
-Error: 3001(EngineExecuteQuery), Invalid function args: The second arg should be less than or equal to the third arg, have: ConstantVector([Int64(1); 1]), ConstantVector([Int64(0); 1])
+Error: 3001(EngineExecuteQuery), Invalid function args: The second arg should be less than or equal to the third arg, have: PrimitiveVector { array: PrimitiveArray<Int64>
+[
+  1,
+] }, PrimitiveVector { array: PrimitiveArray<Int64>
+[
+  0,
+] }
 
 SELECT CLAMP_MIN(10, 12);
 
