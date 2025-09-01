@@ -7,11 +7,11 @@ set -e
 MAX_RETRIES=3
 
 IMAGES=(
-  "public.ecr.aws/i8k6a5e1/bitnami/zookeeper:3.7"
-  "public.ecr.aws/i8k6a5e1/bitnami/kafka:3.9.0-debian-12-r1"
-  "public.ecr.aws/i8k6a5e1/bitnami/etcd:3.6.1-debian-12-r3"
-  "public.ecr.aws/i8k6a5e1/bitnami/minio:2024"
-  "public.ecr.aws/i8k6a5e1/bitnami/mysql:5.7"
+  "greptime/zookeeper:3.7"
+  "greptime/kafka:3.9.0-debian-12-r1"
+  "greptime/etcd:3.6.1-debian-12-r3"
+  "greptime/minio:2024"
+  "greptime/mysql:5.7"
 )
 
 for image in "${IMAGES[@]}"; do
