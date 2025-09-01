@@ -15,7 +15,7 @@
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::{info, warn};
 use futures_util::future::BoxFuture;
-use store_api::region_request::{RegionCatchupRequest, RegionRequest};
+use store_api::region_request::{RegionCatchupRequest, RegionRequest, ReplayCheckpoint};
 
 use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
@@ -29,6 +29,8 @@ impl HandlerContext {
             metadata_last_entry_id,
             replay_timeout,
             location_id,
+            replay_entry_id,
+            metadata_replay_entry_id,
         }: UpgradeRegion,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
@@ -50,6 +52,18 @@ impl HandlerContext {
 
             let region_server_moved = self.region_server.clone();
 
+            let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
+                (Some(entry_id), Some(metadata_entry_id)) => Some(ReplayCheckpoint {
+                    entry_id,
+                    metadata_entry_id: Some(metadata_entry_id),
+                }),
+                (Some(entry_id), None) => Some(ReplayCheckpoint {
+                    entry_id,
+                    metadata_entry_id: None,
+                }),
+                _ => None,
+            };
+
             // The catchup task is almost zero cost if the inside region is writable.
             // Therefore, it always registers a new catchup task.
             let register_result = self
@@ -66,6 +80,7 @@ impl HandlerContext {
                                     entry_id: last_entry_id,
                                     metadata_entry_id: metadata_last_entry_id,
                                     location_id,
+                                    checkpoint,
                                 }),
                             )
                             .await?;
@@ -148,10 +163,8 @@ mod tests {
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
-                    last_entry_id: None,
-                    metadata_last_entry_id: None,
                     replay_timeout,
-                    location_id: None,
+                    ..Default::default()
                 })
                 .await;
             assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -187,10 +200,8 @@ mod tests {
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
-                    last_entry_id: None,
-                    metadata_last_entry_id: None,
                     replay_timeout,
-                    location_id: None,
+                    ..Default::default()
                 })
                 .await;
             assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -227,10 +238,8 @@ mod tests {
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
-                    last_entry_id: None,
-                    metadata_last_entry_id: None,
                     replay_timeout,
-                    location_id: None,
+                    ..Default::default()
                 })
                 .await;
             assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -271,9 +280,7 @@ mod tests {
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     replay_timeout,
-                    last_entry_id: None,
-                    metadata_last_entry_id: None,
-                    location_id: None,
+                    ..Default::default()
                 })
                 .await;
             assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -289,10 +296,8 @@ mod tests {
         let reply = handler_context
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
-                last_entry_id: None,
-                metadata_last_entry_id: None,
                 replay_timeout: Some(Duration::from_millis(500)),
-                location_id: None,
+                ..Default::default()
             })
             .await;
         assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -332,10 +337,7 @@ mod tests {
             .clone()
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
-                last_entry_id: None,
-                metadata_last_entry_id: None,
-                replay_timeout: None,
-                location_id: None,
+                ..Default::default()
             })
             .await;
         assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
@@ -351,10 +353,8 @@ mod tests {
             .clone()
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
-                last_entry_id: None,
-                metadata_last_entry_id: None,
                 replay_timeout: Some(Duration::from_millis(200)),
-                location_id: None,
+                ..Default::default()
             })
             .await;
         assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));

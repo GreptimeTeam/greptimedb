@@ -108,10 +108,6 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_entry_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata_replay_entry_id: Option<u64>,
 }
 
 impl OpenRegion {
@@ -128,21 +124,7 @@ impl OpenRegion {
             region_options,
             region_wal_options,
             skip_wal_replay,
-            replay_entry_id: None,
-            metadata_replay_entry_id: None,
         }
-    }
-
-    /// Sets the replay entry id.
-    pub fn with_replay_entry_id(mut self, replay_entry_id: Option<u64>) -> Self {
-        self.replay_entry_id = replay_entry_id;
-        self
-    }
-
-    /// Sets the metadata replay entry id.
-    pub fn with_metadata_replay_entry_id(mut self, metadata_replay_entry_id: Option<u64>) -> Self {
-        self.metadata_replay_entry_id = metadata_replay_entry_id;
-        self
     }
 }
 
@@ -169,7 +151,7 @@ impl Display for DowngradeRegion {
 }
 
 /// Upgrades a follower region to leader region.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpgradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
@@ -186,6 +168,24 @@ pub struct UpgradeRegion {
     /// The hint for replaying memtable.
     #[serde(default)]
     pub location_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_entry_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_replay_entry_id: Option<u64>,
+}
+
+impl UpgradeRegion {
+    /// Sets the replay entry id.
+    pub fn with_replay_entry_id(mut self, replay_entry_id: Option<u64>) -> Self {
+        self.replay_entry_id = replay_entry_id;
+        self
+    }
+
+    /// Sets the metadata replay entry id.
+    pub fn with_metadata_replay_entry_id(mut self, metadata_replay_entry_id: Option<u64>) -> Self {
+        self.metadata_replay_entry_id = metadata_replay_entry_id;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -370,8 +370,6 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
-            replay_entry_id: None,
-            metadata_replay_entry_id: None,
         };
         assert_eq!(expected, deserialized);
     }
