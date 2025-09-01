@@ -309,4 +309,33 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_try_from_with_date_formats() {
+        let format_options = HashMap::from([
+            (file_format::FORMAT_DATE.to_string(), "%Y-%m-%d".to_string()),
+            (
+                file_format::FORMAT_DATETIME.to_string(),
+                "%Y-%m-%d %H:%M:%S".to_string(),
+            ),
+            (
+                file_format::FORMAT_TIMESTAMP.to_string(),
+                "%Y-%m-%d %H:%M:%S%.3f".to_string(),
+            ),
+        ]);
+        let format: CsvFormat = CsvFormat::try_from(&format_options).unwrap();
+
+        assert_eq!(
+            format,
+            CsvFormat {
+                has_header: true,
+                delimiter: b',',
+                schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
+                compression_type: CompressionType::Uncompressed,
+                date_format: Some("%Y-%m-%d".to_string()),
+                datetime_format: Some("%Y-%m-%d %H:%M:%S".to_string()),
+                timestamp_format: Some("%Y-%m-%d %H:%M:%S%.3f".to_string()),
+            }
+        );
+    }
 }
