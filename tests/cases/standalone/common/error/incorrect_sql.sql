@@ -1,59 +1,46 @@
 -- Migrated from DuckDB test: test/sql/error/incorrect_sql.test
--- Description: Test various incorrect SQL strings
--- Note: Adapted for GreptimeDB error handling validation
 
--- Test 1: Typo in SELECT keyword
--- ERROR
+-- Typo in SELECT
 SELEC 42;
 
--- Test 2: Unrecognized column  
--- ERROR
+-- Unrecognized column
 SELECT x FROM (SELECT 1 as y);
 
--- Test 3: Unrecognized scalar function
--- ERROR
+-- Unrecognized function
 SELECT FUNFUNFUN();
 
--- Test 4: Incorrect aggregate parameters
--- ERROR
+-- Wrong aggregate parameters
 SELECT SUM(42, 84, 11, 'hello');
 
--- Test 5: No matching function signature
--- ERROR  
+-- No matching function signature
 SELECT cos(0, 1, 2, 3);
 
--- Test 6: Multiple WHERE clauses
--- ERROR
+-- Multiple WHERE clauses
 SELECT 42 WHERE 1=1 WHERE 1=0;
 
--- Test 7: Multiple statements without semicolon
--- ERROR
+-- Multiple statements without semicolon
 SELECT 42
 SELECT 42;
 
--- Test 8: Non-existent table
--- ERROR
+-- Non-existent table
 SELECT * FROM integers2;
 
--- Test 9: Non-existent schema
--- ERROR
+-- Non-existent schema
 SELECT * FROM bla.integers2;
 
--- Create test tables for column error tests
 CREATE TABLE integers(integ INTEGER, ts TIMESTAMP TIME INDEX);
+
 CREATE TABLE strings(str VARCHAR, ts TIMESTAMP TIME INDEX);
+
 CREATE TABLE chickens(feather INTEGER, beak INTEGER, ts TIMESTAMP TIME INDEX);
 
--- Test 10: Non-existent column
--- ERROR
+-- Non-existent column
 SELECT feathe FROM chickens;
 
--- Test 11: Non-existent column with multiple tables
--- ERROR
+-- Non-existent column with multiple tables
 SELECT feathe FROM chickens, integers, strings;
 
--- Test 12: Ambiguous column reference without qualifier
--- ERROR
+-- Ambiguous column reference
 SELECT ts FROM chickens, integers;
 
 -- Clean up

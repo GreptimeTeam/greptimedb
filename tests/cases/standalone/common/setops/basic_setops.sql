@@ -1,50 +1,41 @@
 -- Migrated from DuckDB test: test/sql/setops/test_setops.test
--- Description: Test UNION/EXCEPT/INTERSECT
 
--- Basic UNION ALL
 SELECT 1 UNION ALL SELECT 2;
 
--- UNION ALL with multiple columns
 SELECT 1, 'a' UNION ALL SELECT 2, 'b';
 
--- UNION ALL with multiple clauses
 SELECT 1, 'a' UNION ALL SELECT 2, 'b' UNION ALL SELECT 3, 'c' ORDER BY 1;
 
--- UNION ALL with four clauses
 SELECT 1, 'a' UNION ALL SELECT 2, 'b' UNION ALL SELECT 3, 'c' UNION ALL SELECT 4, 'd' ORDER BY 1;
 
--- UNION/EXCEPT/INTERSECT with NULL values
+-- NULL values
 SELECT NULL UNION SELECT NULL;
 
 SELECT NULL EXCEPT SELECT NULL;
 
 SELECT NULL INTERSECT SELECT NULL;
 
--- Create test table
 CREATE TABLE test (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO test VALUES (11, 1, 1000), (12, 1, 2000), (13, 2, 3000);
 
--- UNION ALL with table data
+-- Table data
 SELECT a FROM test WHERE a < 13 UNION ALL SELECT a FROM test WHERE a = 13 ORDER BY a;
 
 SELECT b FROM test WHERE a < 13 UNION ALL SELECT b FROM test WHERE a > 11 ORDER BY b;
 
--- Test type mixing (should still work)
+-- Type mixing
 SELECT 1 UNION ALL SELECT 'asdf';
 
--- UNION (deduplication)
+-- UNION deduplication
 SELECT 1 UNION SELECT 1;
 
--- EXCEPT
 SELECT 1 EXCEPT SELECT 2;
 
 SELECT 1 EXCEPT SELECT 1;
 
--- INTERSECT
 SELECT 1 INTERSECT SELECT 1;
 
 SELECT 1 INTERSECT SELECT 2;
 
--- Clean up
 DROP TABLE test;
