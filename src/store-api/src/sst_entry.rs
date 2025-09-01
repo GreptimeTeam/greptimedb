@@ -88,8 +88,8 @@ impl ManifestSstEntry {
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
             ColumnSchema::new("num_row_groups", Ty::uint64_datatype(), false),
-            ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), false),
-            ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), false),
+            ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
+            ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
         ]))
     }
