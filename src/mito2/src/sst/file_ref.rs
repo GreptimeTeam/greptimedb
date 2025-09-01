@@ -16,14 +16,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use common_telemetry::info;
-use object_store::EntryMode;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 use store_api::region_request::PathType;
 use store_api::storage::{RegionId, TableId};
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::error::Result;
 use crate::region::RegionMapRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -117,46 +115,6 @@ pub struct TableFileRefsManifest {
     pub ts: i64,
 }
 
-/// Reads all ref files for a table from the given access layer.
-/// Returns a list of `TableFileRefsManifest`.
-pub async fn read_all_ref_files_for_table(
-    access_layer: &AccessLayerRef,
-) -> Result<Vec<(u64, TableFileRefsManifest)>> {
-    let ref_dir = ref_dir(access_layer.table_dir());
-    // list everything under the ref dir. And filter out by path type in `.<path-type>.refs` postfix.
-    let entries = access_layer
-        .object_store()
-        .list(&ref_dir)
-        .await
-        .context(OpenDalSnafu)?;
-    let mut manifests = Vec::new();
-
-    for entry in entries {
-        if entry.metadata().mode() != EntryMode::FILE {
-            continue;
-        }
-        let Some((node_id, path_type)) = ref_path_to_node_id_path_type(entry.path()) else {
-            continue;
-        };
-        if path_type != access_layer.path_type() {
-            continue;
-        }
-
-        // read file and parse as `TableFileRefsManifest`.
-        let buf = access_layer
-            .object_store()
-            .read(entry.path())
-            .await
-            .context(OpenDalSnafu)?
-            .to_bytes();
-
-        let manifest: TableFileRefsManifest =
-            serde_json::from_slice(&buf).context(SerdeJsonSnafu)?;
-        manifests.push((node_id, manifest));
-    }
-    Ok(manifests)
-}
-
 impl FileReferenceManager {
     pub fn new(node_id: u64) -> Self {
         Self {
@@ -208,6 +166,12 @@ impl FileReferenceManager {
     }
 
     /// Gets all ref files for the given table id, excluding those already in region manifest.
+    ///
+    /// It's safe if manifest version became outdated when gc worker is called, because:
+    /// 1. if new files are added, they wouldn't be deleted
+    /// 2. if files are removed from manifest, but still being referred, they will appear to be unused.
+    ///   But since their linger time wouldn't pass for a while, so they wouldn't be deleted until next gc round, which will use the latest manifest and hence a correct tmp ref file set.
+    /// 3. if files are removed from manifest, and not being referred, they will still linger until next gc round and be deleted then.
     #[allow(unused)]
     pub(crate) async fn get_ref_files_excluding_in_manifest(
         &self,
