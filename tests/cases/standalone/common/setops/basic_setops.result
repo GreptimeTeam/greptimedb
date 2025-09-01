@@ -75,17 +75,17 @@ INSERT INTO test VALUES (11, 1, 1000), (12, 1, 2000), (13, 2, 3000);
 Affected Rows: 3
 
 -- UNION ALL with table data
-SELECT a FROM test WHERE a < 13 UNION ALL SELECT a FROM test WHERE a = 13;
+SELECT a FROM test WHERE a < 13 UNION ALL SELECT a FROM test WHERE a = 13 ORDER BY a;
 
 +----+
 | a  |
 +----+
-| 13 |
 | 11 |
 | 12 |
+| 13 |
 +----+
 
-SELECT b FROM test WHERE a < 13 UNION ALL SELECT b FROM test WHERE a > 11;
+SELECT b FROM test WHERE a < 13 UNION ALL SELECT b FROM test WHERE a > 11 ORDER BY b;
 
 +---+
 | b |
