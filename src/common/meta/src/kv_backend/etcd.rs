@@ -71,6 +71,8 @@ impl EtcdStore {
         self.max_decoding_size = max_decoding_size;
     }
 
+    /// Should always use `self.kv_client()` to get the kv client,
+    /// otherwise the client options will be overwritten by the default options.
     fn kv_client(&self) -> etcd_client::KvClient {
         self.client
             .kv_client()
