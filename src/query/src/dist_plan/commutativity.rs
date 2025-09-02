@@ -121,6 +121,15 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
+    fn is_simple_table_alias(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::TableScan(_) => true,
+            LogicalPlan::Filter(filter) => Self::is_simple_table_alias(filter.input.as_ref()),
+            LogicalPlan::Projection(proj) => Self::is_simple_table_alias(proj.input.as_ref()),
+            _ => false,
+        }
+    }
+
     pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<AliasMapping>) -> Commutativity {
         let partition_cols = partition_cols.unwrap_or_default();
 
@@ -187,7 +196,13 @@ impl Categorizer {
             LogicalPlan::TableScan(_) => Commutativity::Commutative,
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
-            LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
+            LogicalPlan::SubqueryAlias(alias) => {
+                if Self::is_simple_table_alias(alias.input.as_ref()) {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::NonCommutative
+                }
+            }
             LogicalPlan::Limit(limit) => {
                 // Only execute `fetch` on remote nodes.
                 // wait for https://github.com/apache/arrow-datafusion/pull/7669
