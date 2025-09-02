@@ -369,6 +369,8 @@ impl<H> BoundedStager<H> {
     /// Note: It can't recover the mapping between puffin files and keys, so TTL
     ///       is configured to purge the dangling files and directories.
     async fn recover(&self) -> Result<()> {
+        common_telemetry::info!("Recovering the staging area, base_dir: {:?}", self.base_dir);
+
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
         let mut elems = HashMap::new();
