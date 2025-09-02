@@ -804,7 +804,7 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]'
     - title: Remote WAL
       panels:
-        - title: Meta triggered region flush total
+        - title: Triggered region flush total
           type: timeseries
           unit: none
           queries:
@@ -813,7 +813,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{pod}}-{{topic_name}}'
-        - title: Meta triggered region checkpoint total
+        - title: Triggered region checkpoint total
           type: timeseries
           unit: none
           queries:
@@ -831,7 +831,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '{{pod}}-{{topic_name}}'
-        - title: kafka logstore's bytes traffic
+        - title: Kafka logstore's bytes traffic
           type: timeseries
           unit: bytes
           queries:

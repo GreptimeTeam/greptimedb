@@ -90,10 +90,10 @@
 # Remote WAL
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
-| Meta triggered region flush total | `meta_triggered_region_flush_total` | `timeseries` |  | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
-| Meta triggered region checkpoint total | `meta_triggered_region_checkpoint_total` | `timeseries` |  | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Triggered region flush total | `meta_triggered_region_flush_total` | `timeseries` |  | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Triggered region checkpoint total | `meta_triggered_region_checkpoint_total` | `timeseries` |  | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
 | Topic estimated replay size | `meta_topic_estimated_replay_size` | `timeseries` |  | `prometheus` | `bytes` | `{{pod}}-{{topic_name}}` |
-| kafka logstore's bytes traffic | `rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])` | `timeseries` |  | `prometheus` | `bytes` | `{{pod}}-{{logstore}}` |
+| Kafka logstore's bytes traffic | `rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])` | `timeseries` |  | `prometheus` | `bytes` | `{{pod}}-{{logstore}}` |
 # Metasrv
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
