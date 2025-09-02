@@ -369,6 +369,9 @@ impl<H> BoundedStager<H> {
     /// Note: It can't recover the mapping between puffin files and keys, so TTL
     ///       is configured to purge the dangling files and directories.
     async fn recover(&self) -> Result<()> {
+        let timer = std::time::Instant::now();
+        common_telemetry::info!("Recovering the staging area, base_dir: {:?}", self.base_dir);
+
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
         let mut elems = HashMap::new();
@@ -430,6 +433,7 @@ impl<H> BoundedStager<H> {
         }
 
         let mut size = 0;
+        let num_elems = elems.len();
         for (key, value) in elems {
             size += value.size();
             self.cache.insert(key, value).await;
@@ -440,6 +444,12 @@ impl<H> BoundedStager<H> {
 
         self.cache.run_pending_tasks().await;
 
+        info!(
+            "Recovered the staging area, num_entries: {}, num_bytes: {}, cost: {:?}",
+            num_elems,
+            size,
+            timer.elapsed()
+        );
         Ok(())
     }
 
