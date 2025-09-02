@@ -49,9 +49,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 +-+-+
 | logical_plan_| Sort: i1.i ASC NULLS LAST_|
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
-|_|_SubqueryAlias: i1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
 |_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: integers.i_|
