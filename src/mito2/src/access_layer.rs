@@ -189,6 +189,11 @@ impl AccessLayer {
         &self.puffin_manager_factory
     }
 
+    /// Returns the intermediate manager.
+    pub fn intermediate_manager(&self) -> &IntermediateManager {
+        &self.intermediate_manager
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
         let path = location::sst_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
