@@ -87,7 +87,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             )
             .await?;
             info!(
-                "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, last entry id: {last_entry_id}, expected: {:?}.",
+                "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}.",
                 timer.elapsed(),
                 region.provider,
                 request.entry_id
