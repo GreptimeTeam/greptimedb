@@ -25,6 +25,7 @@ use std::num::NonZeroUsize;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
@@ -116,6 +117,13 @@ impl Indexer {
     /// Updates the index with the given batch.
     pub async fn update(&mut self, batch: &mut Batch) {
         self.do_update(batch).await;
+
+        self.flush_mem_metrics();
+    }
+
+    /// Updates the index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) {
+        self.do_update_flat(batch).await;
 
         self.flush_mem_metrics();
     }
