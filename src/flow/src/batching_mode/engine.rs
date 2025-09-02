@@ -154,6 +154,7 @@ impl BatchingEngine {
                 for src_table_name in src_table_names {
                     if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
+                            task.state.write().unwrap().dirty_time_windows.set_dirty();
                             continue;
                         };
                         for timestamp in timestamps {
@@ -272,6 +273,7 @@ impl BatchingEngine {
                 for src_table_name in src_table_names {
                     if let Some(entry) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
+                            task.state.write().unwrap().dirty_time_windows.set_dirty();
                             continue;
                         };
                         let involved_time_windows = expr.handle_rows(entry.clone()).await?;
