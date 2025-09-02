@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, trace};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
@@ -215,8 +215,6 @@ impl<C: Access> ReadCache<C> {
 
         let read_key = read_cache_key(path, &args);
 
-        debug!("Read '{}' from cache '{}'", path, read_key);
-
         let read_result = self
             .mem_cache
             .try_get_with(
@@ -292,9 +290,9 @@ impl<C: Access> ReadCache<C> {
         let (_, reader) = inner.read(path, args).await?;
         let result = self.try_write_cache::<I>(reader, read_key).await;
 
-        debug!(
-            "Miss the read cache and read from remote '{}' and write to cache '{}'",
-            path, read_key
+        trace!(
+            "Read cache miss for key '{}' and fetch file '{}' from object store",
+            read_key, path,
         );
 
         match result {

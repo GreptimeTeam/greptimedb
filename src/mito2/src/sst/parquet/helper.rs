@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use common_telemetry::debug;
+use common_telemetry::trace;
 use object_store::ObjectStore;
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
@@ -116,8 +116,8 @@ pub async fn fetch_byte_ranges(
         .map(|buf| buf.to_bytes())
         .collect::<Vec<_>>();
 
-    debug!(
-        "Fetch {} bytes from {}, cost: {:?}",
+    trace!(
+        "Fetch {} bytes from '{}' in object store, cost: {:?}",
         total_size,
         file_path,
         start.elapsed()
