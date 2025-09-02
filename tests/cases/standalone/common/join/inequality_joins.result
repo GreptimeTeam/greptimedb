@@ -1,0 +1,163 @@
+-- Migrated from DuckDB test: test/sql/join/iejoin/ inequality join tests
+-- Tests inequality join conditions
+CREATE TABLE time_events(event_id INTEGER, event_time TIMESTAMP, event_type VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE time_windows(window_id INTEGER, start_time TIMESTAMP, end_time TIMESTAMP, window_name VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO time_events VALUES 
+(1, '2023-01-01 10:15:00', 'login', 1000),
+(2, '2023-01-01 10:30:00', 'purchase', 2000),
+(3, '2023-01-01 10:45:00', 'logout', 3000),
+(4, '2023-01-01 11:05:00', 'login', 4000),
+(5, '2023-01-01 11:20:00', 'view', 5000),
+(6, '2023-01-01 11:35:00', 'purchase', 6000);
+
+Affected Rows: 6
+
+INSERT INTO time_windows VALUES 
+(1, '2023-01-01 10:00:00', '2023-01-01 10:30:00', 'Morning Early', 1000),
+(2, '2023-01-01 10:30:00', '2023-01-01 11:00:00', 'Morning Late', 2000),
+(3, '2023-01-01 11:00:00', '2023-01-01 11:30:00', 'Noon Early', 3000),
+(4, '2023-01-01 11:30:00', '2023-01-01 12:00:00', 'Noon Late', 4000);
+
+Affected Rows: 4
+
+-- Range join: events within time windows
+SELECT 
+  e.event_id, e.event_time, e.event_type, w.window_name
+FROM time_events e
+INNER JOIN time_windows w 
+  ON e.event_time >= w.start_time AND e.event_time < w.end_time
+ORDER BY e.event_time;
+
++----------+---------------------+------------+---------------+
+| event_id | event_time          | event_type | window_name   |
++----------+---------------------+------------+---------------+
+| 1        | 2023-01-01T10:15:00 | login      | Morning Early |
+| 2        | 2023-01-01T10:30:00 | purchase   | Morning Late  |
+| 3        | 2023-01-01T10:45:00 | logout     | Morning Late  |
+| 4        | 2023-01-01T11:05:00 | login      | Noon Early    |
+| 5        | 2023-01-01T11:20:00 | view       | Noon Early    |
+| 6        | 2023-01-01T11:35:00 | purchase   | Noon Late     |
++----------+---------------------+------------+---------------+
+
+-- Inequality join with additional conditions
+SELECT 
+  e.event_id, e.event_type, w.window_name
+FROM time_events e
+INNER JOIN time_windows w 
+  ON e.event_time >= w.start_time 
+  AND e.event_time < w.end_time
+  AND e.event_type = 'purchase'
+ORDER BY e.event_time;
+
++----------+------------+--------------+
+| event_id | event_type | window_name  |
++----------+------------+--------------+
+| 2        | purchase   | Morning Late |
+| 6        | purchase   | Noon Late    |
++----------+------------+--------------+
+
+-- Cross-time analysis with inequality joins
+SELECT 
+  e1.event_id as first_event, e2.event_id as second_event,
+  e1.event_type as first_type, e2.event_type as second_type,
+  e2.event_time - e1.event_time as time_diff
+FROM time_events e1
+INNER JOIN time_events e2 
+  ON e1.event_time < e2.event_time 
+  AND e2.event_time - e1.event_time <= INTERVAL '30 minutes'
+ORDER BY e1.event_time, e2.event_time;
+
++-------------+--------------+------------+-------------+-----------+
+| first_event | second_event | first_type | second_type | time_diff |
++-------------+--------------+------------+-------------+-----------+
+| 1           | 2            | login      | purchase    | PT900S    |
+| 1           | 3            | login      | logout      | PT1800S   |
+| 2           | 3            | purchase   | logout      | PT900S    |
+| 3           | 4            | logout     | login       | PT1200S   |
+| 4           | 5            | login      | view        | PT900S    |
+| 4           | 6            | login      | purchase    | PT1800S   |
+| 5           | 6            | view       | purchase    | PT900S    |
++-------------+--------------+------------+-------------+-----------+
+
+CREATE TABLE price_history(item_id INTEGER, price DOUBLE, effective_date DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE orders_ineq(order_id INTEGER, item_id INTEGER, order_date DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO price_history VALUES 
+(1, 100.00, '2023-01-01', 1000), (1, 110.00, '2023-01-15', 2000),
+(2, 50.00, '2023-01-01', 3000), (2, 55.00, '2023-01-20', 4000);
+
+Affected Rows: 4
+
+INSERT INTO orders_ineq VALUES 
+(1, 1, '2023-01-10', 1000), (2, 1, '2023-01-20', 2000),
+(3, 2, '2023-01-05', 3000), (4, 2, '2023-01-25', 4000);
+
+Affected Rows: 4
+
+-- Historical price lookup with inequality join
+SELECT 
+  o.order_id, o.order_date, p.price, p.effective_date
+FROM orders_ineq o
+INNER JOIN price_history p 
+  ON o.item_id = p.item_id 
+  AND o.order_date >= p.effective_date
+ORDER BY o.order_id;
+
++----------+------------+-------+----------------+
+| order_id | order_date | price | effective_date |
++----------+------------+-------+----------------+
+| 1        | 2023-01-10 | 100.0 | 2023-01-01     |
+| 2        | 2023-01-20 | 100.0 | 2023-01-01     |
+| 2        | 2023-01-20 | 110.0 | 2023-01-15     |
+| 3        | 2023-01-05 | 50.0  | 2023-01-01     |
+| 4        | 2023-01-25 | 50.0  | 2023-01-01     |
+| 4        | 2023-01-25 | 55.0  | 2023-01-20     |
++----------+------------+-------+----------------+
+
+-- Latest price before order date
+SELECT 
+  o.order_id, o.order_date, latest_price.price
+FROM orders_ineq o
+INNER JOIN (
+  SELECT 
+    item_id, 
+    price,
+    effective_date,
+    ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY effective_date DESC) as rn
+  FROM price_history
+) latest_price 
+  ON o.item_id = latest_price.item_id 
+  AND o.order_date >= latest_price.effective_date
+  AND latest_price.rn = 1
+ORDER BY o.order_id;
+
+++
+++
+
+DROP TABLE time_events;
+
+Affected Rows: 0
+
+DROP TABLE time_windows;
+
+Affected Rows: 0
+
+DROP TABLE price_history;
+
+Affected Rows: 0
+
+DROP TABLE orders_ineq;
+
+Affected Rows: 0
+

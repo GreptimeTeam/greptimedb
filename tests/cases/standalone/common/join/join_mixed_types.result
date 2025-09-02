@@ -1,0 +1,44 @@
+-- Tests joins with mixed data types and conversions
+CREATE TABLE numeric_keys(int_key INTEGER, float_key DOUBLE, str_val VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE string_keys(str_key VARCHAR, int_val INTEGER, desc_val VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO numeric_keys VALUES (1, 1.0, 'first', 1000), (2, 2.0, 'second', 2000), (3, 3.0, 'third', 3000);
+
+Affected Rows: 3
+
+INSERT INTO string_keys VALUES ('1', 100, 'hundred', 1000), ('2', 200, 'two_hundred', 2000), ('4', 400, 'four_hundred', 3000);
+
+Affected Rows: 3
+
+SELECT n.int_key, n.str_val, s.int_val, s.desc_val FROM numeric_keys n INNER JOIN string_keys s ON CAST(n.int_key AS VARCHAR) = s.str_key ORDER BY n.int_key;
+
++---------+---------+---------+-------------+
+| int_key | str_val | int_val | desc_val    |
++---------+---------+---------+-------------+
+| 1       | first   | 100     | hundred     |
+| 2       | second  | 200     | two_hundred |
++---------+---------+---------+-------------+
+
+SELECT n.float_key, s.str_key, s.int_val FROM numeric_keys n LEFT JOIN string_keys s ON n.float_key = CAST(s.str_key AS DOUBLE) ORDER BY n.float_key;
+
++-----------+---------+---------+
+| float_key | str_key | int_val |
++-----------+---------+---------+
+| 1.0       | 1       | 100     |
+| 2.0       | 2       | 200     |
+| 3.0       |         |         |
++-----------+---------+---------+
+
+DROP TABLE numeric_keys;
+
+Affected Rows: 0
+
+DROP TABLE string_keys;
+
+Affected Rows: 0
+

@@ -1,0 +1,67 @@
+-- Migrated from DuckDB test: test/sql/join/left_outer/test_left_outer.test
+-- Tests LEFT OUTER JOIN functionality
+CREATE TABLE left_t (a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE right_t (a INTEGER, c INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO left_t VALUES (1, 10, 1000), (2, 20, 2000), (3, 30, 3000);
+
+Affected Rows: 3
+
+INSERT INTO right_t VALUES (1, 100, 4000), (2, 200, 5000), (4, 400, 6000);
+
+Affected Rows: 3
+
+-- Basic LEFT JOIN
+SELECT * FROM left_t LEFT JOIN right_t ON left_t.a = right_t.a ORDER BY left_t.a;
+
++---+----+---------------------+---+-----+---------------------+
+| a | b  | ts                  | a | c   | ts                  |
++---+----+---------------------+---+-----+---------------------+
+| 1 | 10 | 1970-01-01T00:00:01 | 1 | 100 | 1970-01-01T00:00:04 |
+| 2 | 20 | 1970-01-01T00:00:02 | 2 | 200 | 1970-01-01T00:00:05 |
+| 3 | 30 | 1970-01-01T00:00:03 |   |     |                     |
++---+----+---------------------+---+-----+---------------------+
+
+-- LEFT JOIN with WHERE on left table
+SELECT * FROM left_t LEFT JOIN right_t ON left_t.a = right_t.a WHERE left_t.b > 15 ORDER BY left_t.a;
+
++---+----+---------------------+---+-----+---------------------+
+| a | b  | ts                  | a | c   | ts                  |
++---+----+---------------------+---+-----+---------------------+
+| 2 | 20 | 1970-01-01T00:00:02 | 2 | 200 | 1970-01-01T00:00:05 |
+| 3 | 30 | 1970-01-01T00:00:03 |   |     |                     |
++---+----+---------------------+---+-----+---------------------+
+
+-- LEFT JOIN with WHERE on joined result
+SELECT * FROM left_t LEFT JOIN right_t ON left_t.a = right_t.a WHERE right_t.c IS NULL ORDER BY left_t.a;
+
++---+----+---------------------+---+---+----+
+| a | b  | ts                  | a | c | ts |
++---+----+---------------------+---+---+----+
+| 3 | 30 | 1970-01-01T00:00:03 |   |   |    |
++---+----+---------------------+---+---+----+
+
+-- LEFT JOIN with complex condition
+SELECT * FROM left_t LEFT JOIN right_t ON left_t.a = right_t.a AND left_t.b < 25 ORDER BY left_t.a;
+
++---+----+---------------------+---+-----+---------------------+
+| a | b  | ts                  | a | c   | ts                  |
++---+----+---------------------+---+-----+---------------------+
+| 1 | 10 | 1970-01-01T00:00:01 | 1 | 100 | 1970-01-01T00:00:04 |
+| 2 | 20 | 1970-01-01T00:00:02 | 2 | 200 | 1970-01-01T00:00:05 |
+| 3 | 30 | 1970-01-01T00:00:03 |   |     |                     |
++---+----+---------------------+---+-----+---------------------+
+
+DROP TABLE right_t;
+
+Affected Rows: 0
+
+DROP TABLE left_t;
+
+Affected Rows: 0
+
