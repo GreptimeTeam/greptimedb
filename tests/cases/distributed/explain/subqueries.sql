@@ -37,3 +37,16 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 drop table other;
 
 drop table integers;
+
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (i) (
+  i < 1000,
+  i >= 1000 AND i < 2000,
+  i >= 2000
+);
+
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
+DROP TABLE integers;

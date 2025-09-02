@@ -49,9 +49,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 +-+-+
 | logical_plan_| Sort: i1.i ASC NULLS LAST_|
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
-|_|_SubqueryAlias: i1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
 |_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: integers.i_|
@@ -152,6 +152,77 @@ drop table other;
 Affected Rows: 0
 
 drop table integers;
+
+Affected Rows: 0
+
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (i) (
+  i < 1000,
+  i >= 1000 AND i < 2000,
+  i >= 2000
+);
+
+Affected Rows: 0
+
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++---------------+-------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                        |
++---------------+-------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: i1.i ASC NULLS LAST                                                                                   |
+|               |   LeftSemi Join: i1.i = __correlated_sq_1.i                                                                 |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                         |
+|               | SubqueryAlias: i1                                                                                           |
+|               |   TableScan: integers                                                                                       |
+|               | ]]                                                                                                          |
+|               |     SubqueryAlias: __correlated_sq_1                                                                        |
+|               |       Projection: integers.i                                                                                |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                     |
+|               | TableScan: integers                                                                                         |
+|               | ]]                                                                                                          |
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]                                                               |
+|               |   SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]                                         |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                             |
+|               |       HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(i@0, i@0)]                                   |
+|               |         CooperativeExec                                                                                     |
+|               |           MergeScanExec: peers=[4406636445696(1026, 0), 4406636445697(1026, 1), 4406636445698(1026, 2), ]   |
+|               |         ProjectionExec: expr=[i@0 as i]                                                                     |
+|               |           CooperativeExec                                                                                   |
+|               |             MergeScanExec: peers=[4406636445696(1026, 0), 4406636445697(1026, 1), 4406636445698(1026, 2), ] |
+|               |                                                                                                             |
++---------------+-------------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++---------------+---------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                          |
++---------------+---------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: i1.i ASC NULLS LAST                                                                                     |
+|               |   LeftSemi Join: i1.i = __correlated_sq_1.i                                                                   |
+|               |     MergeScan [is_placeholder=false, remote_input=[                                                           |
+|               | SubqueryAlias: i1                                                                                             |
+|               |   TableScan: integers                                                                                         |
+|               | ]]                                                                                                            |
+|               |     SubqueryAlias: __correlated_sq_1                                                                          |
+|               |       Aggregate: groupBy=[[integers.i]], aggr=[[]]                                                            |
+|               |         Projection: integers.i                                                                                |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                     |
+|               | TableScan: integers                                                                                           |
+|               | ]]                                                                                                            |
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]                                                                 |
+|               |   SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]                                           |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                               |
+|               |       HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(i@0, i@0)]                                     |
+|               |         CooperativeExec                                                                                       |
+|               |           MergeScanExec: peers=[4406636445696(1026, 0), 4406636445697(1026, 1), 4406636445698(1026, 2), ]     |
+|               |         AggregateExec: mode=SinglePartitioned, gby=[i@0 as i], aggr=[]                                        |
+|               |           ProjectionExec: expr=[i@0 as i]                                                                     |
+|               |             CooperativeExec                                                                                   |
+|               |               MergeScanExec: peers=[4406636445696(1026, 0), 4406636445697(1026, 1), 4406636445698(1026, 2), ] |
+|               |                                                                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE integers;
 
 Affected Rows: 0
 
