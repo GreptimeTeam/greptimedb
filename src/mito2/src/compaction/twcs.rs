@@ -87,6 +87,9 @@ impl TwcsPicker {
             // We only remove deletion markers if we found less than 2 runs and not in append mode.
             // because after compaction there will be no overlapping files.
             let filter_deleted = !files.overlapping && found_runs <= 2 && !self.append_mode;
+            if found_runs == 0 {
+                return output;
+            }
 
             let inputs = if found_runs > 1 {
                 reduce_runs(sorted_runs)
