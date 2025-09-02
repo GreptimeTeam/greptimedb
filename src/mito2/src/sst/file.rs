@@ -173,6 +173,11 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
 }
 
 /// Metadata of a SST file.
+///
+/// This struct itself derives [`Serialize`] and [`Deserialize`] that can be used as a
+/// standalone part in codec. There is also an improved version `SerializedFileMeta` which
+/// stores partition expression with a key to avoid duplication. That method is to be used
+/// with `RegionManifest`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
