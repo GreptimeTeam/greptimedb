@@ -802,6 +802,44 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]'
+    - title: Remote WAL
+      panels:
+        - title: Meta triggered region flush total
+          type: timeseries
+          unit: none
+          queries:
+            - expr: meta_triggered_region_flush_total
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: Meta triggered region checkpoint total
+          type: timeseries
+          unit: none
+          queries:
+            - expr: meta_triggered_region_checkpoint_total
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: Topic estimated replay size
+          type: timeseries
+          unit: bytes
+          queries:
+            - expr: meta_topic_estimated_replay_size
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{topic_name}}'
+        - title: kafka logstore's bytes traffic
+          type: timeseries
+          unit: bytes
+          queries:
+            - expr: rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{logstore}}'
     - title: Metasrv
       panels:
         - title: Region migration datanode
@@ -948,6 +986,24 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: AlterTable-{{step}} p90
+        - title: Reconciliation stats
+          type: timeseries
+          unit: s
+          queries:
+            - expr: greptime_meta_reconciliation_stats
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{table_type}}-{{type}}'
+        - title: Reconciliation steps
+          type: timeseries
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{procedure_name}}-{{step}}-P90'
     - title: Flownode
       panels:
         - title: Flow Ingest / Output Rate
