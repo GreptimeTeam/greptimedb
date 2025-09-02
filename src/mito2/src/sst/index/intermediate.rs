@@ -57,7 +57,7 @@ impl IntermediateManager {
         // Remove the intermediate directory on bankground
         let aux_pb = PathBuf::from(aux_path.as_ref());
         let intm_dir = aux_pb.join(INTERMEDIATE_DIR);
-        let deleted_dir = intm_dir.with_extension("deleted");
+        let deleted_dir = intm_dir.with_extension(format!("deleted-{}", Uuid::new_v4()));
         if let Err(err) = tokio::fs::rename(&intm_dir, &deleted_dir).await {
             warn!(err; "Failed to rename intermediate directory");
         }
