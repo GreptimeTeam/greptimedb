@@ -806,6 +806,7 @@ groups:
       panels:
         - title: Triggered region flush total
           type: timeseries
+          description: Triggered region flush total
           unit: none
           queries:
             - expr: meta_triggered_region_flush_total
@@ -815,6 +816,7 @@ groups:
               legendFormat: '{{pod}}-{{topic_name}}'
         - title: Triggered region checkpoint total
           type: timeseries
+          description: Triggered region checkpoint total
           unit: none
           queries:
             - expr: meta_triggered_region_checkpoint_total
@@ -824,6 +826,7 @@ groups:
               legendFormat: '{{pod}}-{{topic_name}}'
         - title: Topic estimated replay size
           type: timeseries
+          description: Topic estimated max replay size
           unit: bytes
           queries:
             - expr: meta_topic_estimated_replay_size
@@ -833,6 +836,7 @@ groups:
               legendFormat: '{{pod}}-{{topic_name}}'
         - title: Kafka logstore's bytes traffic
           type: timeseries
+          description: Kafka logstore's bytes traffic
           unit: bytes
           queries:
             - expr: rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])
@@ -988,6 +992,7 @@ groups:
               legendFormat: AlterTable-{{step}} p90
         - title: Reconciliation stats
           type: timeseries
+          description: Reconciliation stats
           unit: s
           queries:
             - expr: greptime_meta_reconciliation_stats
@@ -997,6 +1002,7 @@ groups:
               legendFormat: '{{pod}}-{{table_type}}-{{type}}'
         - title: Reconciliation steps
           type: timeseries
+          description: 'Elapsed of Reconciliation steps '
           unit: s
           queries:
             - expr: histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)
