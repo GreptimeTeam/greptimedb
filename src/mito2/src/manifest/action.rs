@@ -15,11 +15,9 @@
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -98,42 +96,8 @@ pub enum TruncateKind {
     Partial { files_to_remove: Vec<FileMeta> },
 }
 
-/// Serialized representation of RegionManifest with deduplicated partition expressions.
-#[derive(Serialize, Deserialize)]
-struct SerializedRegionManifest {
-    metadata: RegionMetadataRef,
-    files: HashMap<FileId, SerializedFileMeta>,
-    #[serde(default)]
-    removed_files: RemovedFilesRecord,
-    flushed_entry_id: EntryId,
-    flushed_sequence: SequenceNumber,
-    manifest_version: ManifestVersion,
-    truncated_entry_id: Option<EntryId>,
-    #[serde(with = "humantime_serde")]
-    compaction_time_window: Option<Duration>,
-    #[serde(default)]
-    partition_expressions: HashMap<u32, String>,
-}
-
-/// Serialized representation of FileMeta that uses partition expression keys.
-#[derive(Serialize, Deserialize)]
-struct SerializedFileMeta {
-    region_id: RegionId,
-    file_id: FileId,
-    time_range: (common_time::Timestamp, common_time::Timestamp),
-    level: u8,
-    file_size: u64,
-    available_indexes: smallvec::SmallVec<[crate::sst::file::IndexType; 4]>,
-    index_file_size: u64,
-    num_rows: u64,
-    num_row_groups: u64,
-    sequence: Option<std::num::NonZeroU64>,
-    #[serde(default)]
-    partition_expr_key: Option<u32>,
-}
-
 /// The region manifest data.
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[cfg_attr(test, derive(Eq))]
 pub struct RegionManifest {
     /// Metadata of the region.
@@ -149,6 +113,7 @@ pub struct RegionManifest {
     /// current machine time. This is acceptable because the removed files are not used in normal
     /// read/write path.
     ///
+    #[serde(default)]
     pub removed_files: RemovedFilesRecord,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
@@ -159,177 +124,8 @@ pub struct RegionManifest {
     /// Last WAL entry id of truncated data.
     pub truncated_entry_id: Option<EntryId>,
     /// Inferred compaction time window.
+    #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
-    /// Deduplicated partition expressions shared by files.
-    /// Key is assigned during serialization for deduplication.
-    pub partition_expressions: HashMap<u32, Arc<PartitionExpr>>,
-}
-
-impl Serialize for RegionManifest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::Error;
-
-        // Build expression deduplication map
-        let mut expr_to_key: HashMap<String, u32> = HashMap::new();
-        let mut partition_expressions: HashMap<u32, String> = HashMap::new();
-        let mut next_key = 1u32;
-
-        // Collect all unique partition expressions from files
-        for file_meta in self.files.values() {
-            if let Some(expr) = &file_meta.partition_expr {
-                let expr_json = expr.as_json_str().map_err(S::Error::custom)?;
-                if !expr_to_key.contains_key(&expr_json) {
-                    expr_to_key.insert(expr_json.clone(), next_key);
-                    partition_expressions.insert(next_key, expr_json);
-                    next_key += 1;
-                }
-            }
-        }
-
-        // Convert files to serialized format with expression keys
-        let serialized_files: HashMap<FileId, SerializedFileMeta> = self
-            .files
-            .iter()
-            .map(|(file_id, file_meta)| {
-                let partition_expr_key = file_meta.partition_expr.as_ref().and_then(|expr| {
-                    expr.as_json_str()
-                        .ok()
-                        .and_then(|json| expr_to_key.get(&json).copied())
-                });
-
-                let serialized_meta = SerializedFileMeta {
-                    region_id: file_meta.region_id,
-                    file_id: file_meta.file_id,
-                    time_range: file_meta.time_range,
-                    level: file_meta.level,
-                    file_size: file_meta.file_size,
-                    available_indexes: file_meta.available_indexes.clone(),
-                    index_file_size: file_meta.index_file_size,
-                    num_rows: file_meta.num_rows,
-                    num_row_groups: file_meta.num_row_groups,
-                    sequence: file_meta.sequence,
-                    partition_expr_key,
-                };
-
-                (*file_id, serialized_meta)
-            })
-            .collect();
-
-        let serialized = SerializedRegionManifest {
-            metadata: self.metadata.clone(),
-            files: serialized_files,
-            removed_files: self.removed_files.clone(),
-            flushed_entry_id: self.flushed_entry_id,
-            flushed_sequence: self.flushed_sequence,
-            manifest_version: self.manifest_version,
-            truncated_entry_id: self.truncated_entry_id,
-            compaction_time_window: self.compaction_time_window,
-            partition_expressions,
-        };
-
-        serialized.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RegionManifest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-        use serde_json::Value;
-
-        // First deserialize as a generic JSON value to check the format
-        let value = Value::deserialize(deserializer)?;
-
-        // Check if this is the new format (has partition_expressions field and files contain partition_expr_key)
-        let is_new_format = value.get("partition_expressions").is_some();
-
-        if is_new_format {
-            // New format: use the deduplicated serialization
-            let serialized: SerializedRegionManifest =
-                serde_json::from_value(value).map_err(D::Error::custom)?;
-
-            // Deserialize partition expressions into Arc for sharing
-            let mut partition_expressions: HashMap<u32, Arc<PartitionExpr>> = HashMap::new();
-            for (key, expr_json) in serialized.partition_expressions {
-                let expr = PartitionExpr::from_json_str(&expr_json)
-                    .map_err(D::Error::custom)?
-                    .ok_or_else(|| D::Error::custom("Failed to parse partition expression"))?;
-                partition_expressions.insert(key, Arc::new(expr));
-            }
-
-            // Convert serialized files back to FileMeta with Arc-shared expressions
-            let mut files: HashMap<FileId, FileMeta> = HashMap::new();
-            for (file_id, serialized_meta) in serialized.files {
-                let partition_expr = serialized_meta
-                    .partition_expr_key
-                    .and_then(|key| partition_expressions.get(&key))
-                    .map(|arc_expr| (**arc_expr).clone());
-
-                let file_meta = FileMeta {
-                    region_id: serialized_meta.region_id,
-                    file_id: serialized_meta.file_id,
-                    time_range: serialized_meta.time_range,
-                    level: serialized_meta.level,
-                    file_size: serialized_meta.file_size,
-                    available_indexes: serialized_meta.available_indexes,
-                    index_file_size: serialized_meta.index_file_size,
-                    num_rows: serialized_meta.num_rows,
-                    num_row_groups: serialized_meta.num_row_groups,
-                    sequence: serialized_meta.sequence,
-                    partition_expr,
-                };
-
-                files.insert(file_id, file_meta);
-            }
-
-            Ok(RegionManifest {
-                metadata: serialized.metadata,
-                files,
-                removed_files: serialized.removed_files,
-                flushed_entry_id: serialized.flushed_entry_id,
-                flushed_sequence: serialized.flushed_sequence,
-                manifest_version: serialized.manifest_version,
-                truncated_entry_id: serialized.truncated_entry_id,
-                compaction_time_window: serialized.compaction_time_window,
-                partition_expressions,
-            })
-        } else {
-            // Old format: deserialize directly with FileMeta containing inline partition expressions
-            #[derive(serde::Deserialize)]
-            struct OldRegionManifest {
-                metadata: RegionMetadataRef,
-                files: HashMap<FileId, FileMeta>,
-                #[serde(default)]
-                removed_files: RemovedFilesRecord,
-                flushed_entry_id: EntryId,
-                flushed_sequence: SequenceNumber,
-                manifest_version: ManifestVersion,
-                truncated_entry_id: Option<EntryId>,
-                #[serde(with = "humantime_serde")]
-                compaction_time_window: Option<Duration>,
-            }
-
-            let old_manifest: OldRegionManifest =
-                serde_json::from_value(value).map_err(D::Error::custom)?;
-
-            Ok(RegionManifest {
-                metadata: old_manifest.metadata,
-                files: old_manifest.files,
-                removed_files: old_manifest.removed_files,
-                flushed_entry_id: old_manifest.flushed_entry_id,
-                flushed_sequence: old_manifest.flushed_sequence,
-                manifest_version: old_manifest.manifest_version,
-                truncated_entry_id: old_manifest.truncated_entry_id,
-                compaction_time_window: old_manifest.compaction_time_window,
-                partition_expressions: HashMap::new(),
-            })
-        }
-    }
 }
 
 #[cfg(test)]
@@ -342,7 +138,6 @@ impl PartialEq for RegionManifest {
             && self.manifest_version == other.manifest_version
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
-            && self.partition_expressions == other.partition_expressions
     }
 }
 
@@ -356,15 +151,12 @@ pub struct RegionManifestBuilder {
     manifest_version: ManifestVersion,
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
-    partition_expressions: HashMap<u32, Arc<PartitionExpr>>,
-    next_partition_expr_key: u32,
 }
 
 impl RegionManifestBuilder {
     /// Start with a checkpoint.
     pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
         if let Some(s) = checkpoint {
-            let next_key = s.partition_expressions.keys().max().map_or(1, |k| k + 1);
             Self {
                 metadata: Some(s.metadata),
                 files: s.files,
@@ -374,8 +166,6 @@ impl RegionManifestBuilder {
                 flushed_sequence: s.flushed_sequence,
                 truncated_entry_id: s.truncated_entry_id,
                 compaction_time_window: s.compaction_time_window,
-                partition_expressions: s.partition_expressions,
-                next_partition_expr_key: next_key,
             }
         } else {
             Default::default()
@@ -390,7 +180,7 @@ impl RegionManifestBuilder {
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
         for file in edit.files_to_add {
-            self.add_file_with_deduplication(file);
+            self.files.insert(file.file_id, file);
         }
         self.removed_files.add_removed_files(
             edit.files_to_remove
@@ -455,35 +245,6 @@ impl RegionManifestBuilder {
         self.metadata.is_some()
     }
 
-    /// Add a file with partition expression deduplication.
-    fn add_file_with_deduplication(&mut self, file: FileMeta) {
-        if let Some(partition_expr) = &file.partition_expr {
-            // Check if this expression already exists
-            let existing_key = self
-                .partition_expressions
-                .iter()
-                .find(|(_, expr)| expr.as_ref() == partition_expr)
-                .map(|(key, _)| *key);
-
-            match existing_key {
-                Some(_) => {
-                    // Expression exists, use the file as-is (expression will be deduplicated during serialization)
-                    self.files.insert(file.file_id, file);
-                }
-                None => {
-                    // New expression, store it in the map
-                    let key = self.next_partition_expr_key;
-                    self.next_partition_expr_key += 1;
-                    self.partition_expressions
-                        .insert(key, Arc::new(partition_expr.clone()));
-                    self.files.insert(file.file_id, file);
-                }
-            }
-        } else {
-            self.files.insert(file.file_id, file);
-        }
-    }
-
     pub fn try_build(self) -> Result<RegionManifest> {
         let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
         Ok(RegionManifest {
@@ -495,7 +256,6 @@ impl RegionManifestBuilder {
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
-            partition_expressions: self.partition_expressions,
         })
     }
 }
@@ -629,8 +389,6 @@ impl RegionMetaActionList {
 mod tests {
 
     use common_time::Timestamp;
-    use datatypes::value::Value;
-    use partition::expr::{col, PartitionExpr};
 
     use super::*;
 
@@ -920,7 +678,6 @@ mod tests {
                     .unwrap()]),
                 }],
             },
-            partition_expressions: HashMap::new(),
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -1021,7 +778,6 @@ mod tests {
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
-                partition_expressions: HashMap::new(),
             }
         );
 
@@ -1034,7 +790,6 @@ mod tests {
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
-            partition_expressions: HashMap::new(),
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -1112,139 +867,5 @@ mod tests {
             },
             old_from_new
         );
-    }
-
-    #[test]
-    fn test_partition_expression_optimization() {
-        let metadata: RegionMetadataRef = serde_json::from_str(
-            r#"{
-                "column_metadatas": [
-                    {"column_schema": {"name": "a", "data_type": {"Int64": {}}, "is_nullable": false, "is_time_index": false, "default_constraint": null, "metadata": {}}, "semantic_type": "Tag", "column_id": 1},
-                    {"column_schema": {"name": "ts", "data_type": {"Timestamp": {"Millisecond": null}}, "is_nullable": false, "is_time_index": true, "default_constraint": null, "metadata": {}}, "semantic_type": "Timestamp", "column_id": 2}
-                ],
-                "primary_key": [1], "region_id": 4402341478400, "schema_version": 0
-            }"#,
-        ).unwrap();
-
-        // Test comprehensive partition expression optimization: deduplication, Arc sharing, serialization
-        let expr1 = PartitionExpr::new(
-            col("a"),
-            partition::expr::RestrictedOp::GtEq,
-            Value::UInt32(10).into(),
-        );
-        let expr2 = PartitionExpr::new(
-            col("a"),
-            partition::expr::RestrictedOp::Lt,
-            Value::UInt32(20).into(),
-        );
-
-        let base_file = FileMeta {
-            region_id: RegionId::from_u64(4402341478400),
-            file_id: FileId::random(),
-            time_range: (
-                common_time::Timestamp::new_millisecond(1451609210000),
-                common_time::Timestamp::new_millisecond(1451609520000),
-            ),
-            level: 1,
-            file_size: 100,
-            available_indexes: Default::default(),
-            index_file_size: 0,
-            num_rows: 10,
-            num_row_groups: 1,
-            sequence: None,
-            partition_expr: None,
-        };
-
-        let mut files = HashMap::new();
-        // Test deduplication: 2 files with expr1, 1 with expr2, 1 with None
-        files.insert(
-            FileId::random(),
-            FileMeta {
-                partition_expr: Some(expr1.clone()),
-                ..base_file.clone()
-            },
-        );
-        files.insert(
-            FileId::random(),
-            FileMeta {
-                partition_expr: Some(expr1.clone()),
-                ..base_file.clone()
-            },
-        );
-        files.insert(
-            FileId::random(),
-            FileMeta {
-                partition_expr: Some(expr2.clone()),
-                ..base_file.clone()
-            },
-        );
-        files.insert(
-            FileId::random(),
-            FileMeta {
-                partition_expr: None,
-                ..base_file.clone()
-            },
-        );
-
-        let manifest = RegionManifest {
-            metadata,
-            files,
-            removed_files: Default::default(),
-            flushed_entry_id: 0,
-            flushed_sequence: 0,
-            manifest_version: 0,
-            truncated_entry_id: None,
-            compaction_time_window: None,
-            partition_expressions: Default::default(),
-        };
-
-        // Test serialization and deduplication
-        let json = serde_json::to_string(&manifest).unwrap();
-        let serialized_value: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        // Verify deduplication: exactly 2 unique expressions stored
-        assert_eq!(
-            serialized_value["partition_expressions"]
-                .as_object()
-                .unwrap()
-                .len(),
-            2
-        );
-
-        // Verify files use keys instead of inline expressions
-        let mut expr_key_count = 0;
-        let mut null_key_count = 0;
-        for file in serialized_value["files"].as_object().unwrap().values() {
-            if file["partition_expr_key"].is_null() {
-                null_key_count += 1;
-            } else {
-                expr_key_count += 1;
-            }
-        }
-        assert_eq!(expr_key_count, 3); // 3 files with expressions
-        assert_eq!(null_key_count, 1); // 1 file without
-
-        // Test deserialization and Arc sharing
-        let deserialized: RegionManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.files.len(), 4);
-        assert_eq!(deserialized.partition_expressions.len(), 2);
-
-        // Verify expressions restored correctly
-        let mut expr1_count = 0;
-        let mut expr2_count = 0;
-        let mut none_count = 0;
-        for file_meta in deserialized.files.values() {
-            match &file_meta.partition_expr {
-                Some(expr) => match format!("{}", expr).as_str() {
-                    "a >= 10" => expr1_count += 1,
-                    "a < 20" => expr2_count += 1,
-                    _ => panic!("Unexpected expression"),
-                },
-                None => none_count += 1,
-            }
-        }
-        assert_eq!(expr1_count, 2);
-        assert_eq!(expr2_count, 1);
-        assert_eq!(none_count, 1);
     }
 }
