@@ -24,6 +24,7 @@ use datatypes::schema::ColumnSchema;
 use futures::future::{join_all, try_join_all};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, RawTableMeta};
 use table::table_name::TableName;
@@ -384,6 +385,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
     *next_column_id = column_ids
         .iter()
+        .filter(|id| !ReservedColumnId::is_reserved(**id))
         .max()
         .map(|max| max + 1)
         .unwrap_or(*next_column_id)
@@ -1039,9 +1041,13 @@ mod tests {
     fn test_build_table_info_from_column_metadatas() {
         let mut column_metadatas = new_test_column_metadatas();
         column_metadatas.push(ColumnMetadata {
-            column_schema: ColumnSchema::new("col3", ConcreteDataType::string_datatype(), true),
+            column_schema: ColumnSchema::new(
+                "__table_id",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
             semantic_type: SemanticType::Tag,
-            column_id: 3,
+            column_id: ReservedColumnId::table_id(),
         });
 
         let table_id = 1;
@@ -1066,8 +1072,11 @@ mod tests {
         assert_eq!(new_table_meta.partition_key_indices, vec![2]);
         assert_eq!(new_table_meta.value_indices, vec![1, 2]);
         assert_eq!(new_table_meta.schema.timestamp_index, Some(1));
-        assert_eq!(new_table_meta.column_ids, vec![0, 1, 2, 3]);
-        assert_eq!(new_table_meta.next_column_id, 4);
+        assert_eq!(
+            new_table_meta.column_ids,
+            vec![0, 1, 2, ReservedColumnId::table_id()]
+        );
+        assert_eq!(new_table_meta.next_column_id, table_meta.next_column_id);
     }
 
     #[test]
