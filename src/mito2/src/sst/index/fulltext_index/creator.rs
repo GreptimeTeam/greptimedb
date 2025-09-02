@@ -17,9 +17,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
+use datatypes::arrow::array::{Array, StringArray};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
-use datatypes::vectors::Helper;
 use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
@@ -31,8 +32,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::error::{
-    CastVectorSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu, FulltextFinishSnafu,
-    FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, Result,
+    CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
+    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
+    Result,
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
@@ -318,24 +320,13 @@ impl SingleCreator {
     async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
         // Find the column in the RecordBatch by name
         if let Some(column_array) = batch.column_by_name(&self.column_name) {
-            // Convert Arrow array to VectorRef
-            let vector = Helper::try_into_vector(column_array.clone())
-                .context(crate::error::ConvertVectorSnafu)?;
-            // Cast to string if needed
-            let string_vector =
-                vector
-                    .cast(&ConcreteDataType::string_datatype())
-                    .context(CastVectorSnafu {
-                        from: vector.data_type(),
-                        to: ConcreteDataType::string_datatype(),
-                    })?;
-
-            for i in 0..batch.num_rows() {
-                let data = string_vector.get_ref(i);
-                let text = data
-                    .as_string()
-                    .context(DataTypeMismatchSnafu)?
-                    .unwrap_or_default();
+            // Convert Arrow array to string array.
+            // TODO(yingwen): Use Utf8View later if possible.
+            let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
+                .context(ComputeArrowSnafu)?;
+            let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+            for text_opt in string_array.iter() {
+                let text = text_opt.unwrap_or_default();
                 self.inner.push_text(text).await?;
             }
         } else {
