@@ -242,8 +242,18 @@ pub async fn open_compaction_region(
 }
 
 impl CompactionRegion {
+    /// Get the file purger of the compaction region.
     pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
         self.file_purger.clone()
+    }
+
+    /// Stop the file purger scheduler of the compaction region.
+    pub async fn stop_purger_scheduler(&self) -> Result<()> {
+        if let Some(file_purger) = &self.file_purger {
+            file_purger.stop_scheduler().await
+        } else {
+            Ok(())
+        }
     }
 }
 

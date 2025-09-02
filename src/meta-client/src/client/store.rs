@@ -237,10 +237,17 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
+        let max_decoding_message_size = self
+            .channel_manager
+            .config()
+            .max_recv_message_size
+            .as_bytes() as usize;
+
         Ok(StoreClient::new(channel)
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd))
+            .send_compressed(CompressionEncoding::Zstd)
+            .max_decoding_message_size(max_decoding_message_size))
     }
 
     #[inline]
