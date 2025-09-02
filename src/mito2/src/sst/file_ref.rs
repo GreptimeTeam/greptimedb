@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use common_telemetry::info;
+use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
 use store_api::region_request::PathType;
 use store_api::storage::{RegionId, TableId};
 use store_api::ManifestVersion;
 
-use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::region::RegionMapRef;
 use crate::sst::file::{FileId, FileMeta};
@@ -40,13 +40,10 @@ impl FileRef {
 
 /// File references for a table.
 /// It contains all files referenced by the table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TableFileRefs {
     /// (FileRef, Ref Count) meaning how many FileHandleInner is opened for this file.
     pub files: HashMap<FileRef, usize>,
-    /// Access layer per table. Will be used to upload tmp file for recording references
-    /// to the object storage.
-    pub access_layer: AccessLayerRef,
 }
 
 pub const REFS_PATH: &str = ".refs";
@@ -103,7 +100,7 @@ pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
     node_id: u64,
     /// TODO(discord9): use no hash hasher since table id is sequential.
-    files_per_table: Mutex<HashMap<TableId, TableFileRefs>>,
+    files_per_table: DashMap<TableId, TableFileRefs>,
 }
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
@@ -125,12 +122,13 @@ impl FileReferenceManager {
     }
 
     fn ref_file_set(&self, table_id: TableId) -> Option<HashSet<FileRef>> {
-        let file_refs = self
-            .files_per_table
-            .lock()
-            .unwrap()
-            .get(&table_id)
-            .cloned()?;
+        let file_refs = if let Some(file_refs) = self.files_per_table.get(&table_id) {
+            file_refs.clone()
+        } else {
+            // still return an empty manifest to indicate no files are referenced.
+            // and differentiate from error case where table_id not found.
+            return None;
+        };
 
         if file_refs.files.is_empty() {
             // still return an empty manifest to indicate no files are referenced.
@@ -153,15 +151,12 @@ impl FileReferenceManager {
 
     /// Gets all ref files for the given table id, excluding those already in region manifest.
     ///
-    /// It's safe if manifest version became outdated when gc worker is called, because:
-    /// 1. if new files are added, they wouldn't be deleted
-    /// 2. if files are removed from manifest, but still being referred, they will appear to be unused.
-    ///    But since their linger time wouldn't pass for a while(assuming reading the whole region manifest wouldn't surpass linger time), so they wouldn't be deleted until next gc round, which will use the latest manifest and hence a correct tmp ref file set.
-    /// 3. if files are removed from manifest, and not being referred, they will still linger for a while until a gc round and be deleted then.
+    /// It's safe if manifest version became outdated when gc worker is called, as gc worker will check the changes between those two versions and act accordingly to make sure to get the real truly tmp ref file sets at the time of old manifest version.
     ///
-    /// TODO(discord9): consider adding region manifest version for more precise gc.
+    /// Since query will only possible refer to files in latest manifest when it's started, the only true risks is files removed from manifest between old version(when reading refs) and new version(at gc worker), so in case of having outdated manifest version, gc worker should make sure not to delete those files(Until next gc round which will use the latest manifest version and handle those files normally).
+    ///
     #[allow(unused)]
-    pub(crate) async fn get_ref_files_excluding_in_manifest(
+    pub(crate) async fn get_truly_tmp_ref_files(
         &self,
         table_id: TableId,
         region_map: &RegionMapRef,
@@ -200,12 +195,11 @@ impl FileReferenceManager {
     /// Adds a new file reference.
     /// Also records the access layer for the table if not exists.
     /// The access layer will be used to upload ref file to object storage.
-    pub fn add_file(&self, file_meta: &FileMeta, table_access_layer: AccessLayerRef) {
+    pub fn add_file(&self, file_meta: &FileMeta) {
         let table_id = file_meta.region_id.table_id();
         {
-            let mut guard = self.files_per_table.lock().unwrap();
             let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
-            guard
+            self.files_per_table
                 .entry(table_id)
                 .and_modify(|refs| {
                     refs.files
@@ -215,7 +209,6 @@ impl FileReferenceManager {
                 })
                 .or_insert_with(|| TableFileRefs {
                     files: HashMap::from_iter([(file_ref, 1)]),
-                    access_layer: table_access_layer.clone(),
                 });
         }
     }
@@ -225,31 +218,34 @@ impl FileReferenceManager {
     pub fn remove_file(&self, file_meta: &FileMeta) {
         let table_id = file_meta.region_id.table_id();
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
-        let mut guard = self.files_per_table.lock().unwrap();
-        guard.entry(table_id).and_modify(|refs| {
-            refs.files.entry(file_ref.clone()).and_modify(|count| {
+
+        let mut remove_table_entry = false;
+
+        let table_ref = self.files_per_table.entry(table_id).and_modify(|refs| {
+            let mut remove_file_ref = false;
+            let entry = refs.files.entry(file_ref.clone()).and_modify(|count| {
                 if *count > 0 {
                     *count -= 1;
                 }
+                if *count == 0 {
+                    remove_file_ref = true;
+                }
             });
+            if let std::collections::hash_map::Entry::Occupied(o) = entry
+                && remove_file_ref
+            {
+                o.remove_entry();
+            }
+
+            if refs.files.is_empty() {
+                remove_table_entry = true;
+            }
         });
 
-        // if the ref count is 0, meaning no existing FileHandleInner, remove the file ref from table.
-        if guard
-            .get(&table_id)
-            .map(|table_refs| table_refs.files.get(&file_ref))
-            == Some(Some(&0))
+        if let Entry::Occupied(o) = table_ref
+            && remove_table_entry
         {
-            if let Some(table_refs) = guard.get_mut(&table_id) {
-                table_refs.files.remove(&file_ref);
-            }
-        }
-
-        // if no more files for the table, remove the table entry.
-        if let Some(refs) = guard.get(&table_id) {
-            if refs.files.is_empty() {
-                guard.remove(&table_id);
-            }
+            o.remove_entry();
         }
     }
 }
@@ -258,46 +254,18 @@ impl FileReferenceManager {
 mod tests {
     use std::num::NonZeroU64;
 
-    use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
-    use object_store::ObjectStore;
     use smallvec::SmallVec;
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::access_layer::AccessLayer;
     use crate::sst::file::{FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
-    use crate::sst::index::intermediate::IntermediateManager;
-    use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     #[tokio::test]
     async fn test_file_ref_mgr() {
         common_telemetry::init_default_ut_logging();
 
-        let dir = create_temp_dir("file_ref_mgr");
-        let dir_path = dir.path().display().to_string();
-        let builder = Fs::default().root(&dir_path);
         let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
-        let sst_dir = "table1";
-
-        let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-
-        let object_store = ObjectStore::new(builder).unwrap().finish();
-
-        let layer = Arc::new(AccessLayer::new(
-            sst_dir,
-            PathType::Bare,
-            object_store.clone(),
-            puffin_mgr,
-            intm_mgr,
-        ));
 
         let file_ref_mgr = FileReferenceManager::new(0);
 
@@ -314,20 +282,14 @@ mod tests {
             sequence: NonZeroU64::new(4096),
         };
 
-        file_ref_mgr.add_file(&file_meta, layer.clone());
+        file_ref_mgr.add_file(&file_meta);
 
         assert_eq!(
-            file_ref_mgr
-                .files_per_table
-                .lock()
-                .unwrap()
-                .get(&0)
-                .unwrap()
-                .files,
+            file_ref_mgr.files_per_table.get(&0).unwrap().files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
         );
 
-        file_ref_mgr.add_file(&file_meta, layer.clone());
+        file_ref_mgr.add_file(&file_meta);
 
         let expected_table_ref_manifest =
             HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]);
@@ -338,13 +300,7 @@ mod tests {
         );
 
         assert_eq!(
-            file_ref_mgr
-                .files_per_table
-                .lock()
-                .unwrap()
-                .get(&0)
-                .unwrap()
-                .files,
+            file_ref_mgr.files_per_table.get(&0).unwrap().files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 2)])
         );
 
@@ -356,13 +312,7 @@ mod tests {
         file_ref_mgr.remove_file(&file_meta);
 
         assert_eq!(
-            file_ref_mgr
-                .files_per_table
-                .lock()
-                .unwrap()
-                .get(&0)
-                .unwrap()
-                .files,
+            file_ref_mgr.files_per_table.get(&0).unwrap().files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
         );
 
@@ -374,20 +324,15 @@ mod tests {
         file_ref_mgr.remove_file(&file_meta);
 
         assert!(
-            file_ref_mgr
-                .files_per_table
-                .lock()
-                .unwrap()
-                .get(&0)
-                .is_none(),
+            file_ref_mgr.files_per_table.get(&0).is_none(),
             "{:?}",
-            file_ref_mgr.files_per_table.lock().unwrap()
+            file_ref_mgr.files_per_table
         );
 
         assert!(
             file_ref_mgr.ref_file_set(0).is_none(),
             "{:?}",
-            file_ref_mgr.files_per_table.lock().unwrap()
+            file_ref_mgr.files_per_table
         );
     }
 

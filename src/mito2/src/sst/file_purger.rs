@@ -179,8 +179,7 @@ impl FilePurger for LocalFilePurger {
             // If the access layer is local file system, we don't need to track the file reference.
             return;
         }
-        self.file_ref_manager
-            .add_file(file_meta, self.sst_layer.clone());
+        self.file_ref_manager.add_file(file_meta);
     }
 }
 
