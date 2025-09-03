@@ -2517,12 +2517,12 @@ dispatcher:
   field: type
   rules:
     - value: http
-      table_suffix: http
+      table_suffix: _http
       pipeline: http
     - value: db
-      table_suffix: db
+      table_suffix: _db
     - value: not_found
-      table_suffix: not_found
+      table_suffix: _not_found
       pipeline: not_found
 
 transform:
