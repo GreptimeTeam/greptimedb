@@ -20,6 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
@@ -443,6 +444,39 @@ pub struct RecordBatchMetrics {
     pub plan_metrics: Vec<PlanMetrics>,
 }
 
+/// Determines if a metric name represents a time measurement that should be formatted.
+fn is_time_metric(metric_name: &str) -> bool {
+    metric_name.contains("elapsed") || metric_name.contains("time") || metric_name.contains("cost")
+}
+
+/// Determines if a metric name represents a bytes measurement that should be formatted.
+fn is_bytes_metric(metric_name: &str) -> bool {
+    metric_name.contains("bytes") || metric_name.contains("mem")
+}
+
+fn format_bytes_human_readable(bytes: usize) -> String {
+    if bytes == 0 {
+        return "0B".to_string();
+    }
+
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    const THRESHOLD: f64 = 1024.0;
+
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+
+    while size >= THRESHOLD && unit_index < UNITS.len() - 1 {
+        size /= THRESHOLD;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{}{}", bytes, UNITS[unit_index])
+    } else {
+        format!("{:.2}{}", size, UNITS[unit_index])
+    }
+}
+
 /// Only display `plan_metrics` with indent `  ` (2 spaces).
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -455,7 +489,18 @@ impl Display for RecordBatchMetrics {
                 indent = metric.level * 2,
             )?;
             for (label, value) in &metric.metrics {
-                write!(f, "{}: {}, ", label, value)?;
+                if is_time_metric(label) {
+                    write!(
+                        f,
+                        "{}: {}",
+                        label,
+                        format_nanoseconds_human_readable(*value),
+                    )?;
+                } else if is_bytes_metric(label) {
+                    write!(f, "{}: {}", label, format_bytes_human_readable(*value),)?;
+                } else {
+                    write!(f, "{}: {}, ", label, value)?;
+                }
             }
             writeln!(f, "]")?;
         }
@@ -848,5 +893,43 @@ mod test {
                 assert!(binary_array_json.is_null(i));
             }
         }
+    }
+
+    #[test]
+    fn test_format_bytes_human_readable() {
+        // Test exact powers of 1024
+        assert_eq!(format_bytes_human_readable(0), "0B");
+        assert_eq!(format_bytes_human_readable(1), "1B");
+        assert_eq!(format_bytes_human_readable(1023), "1023B");
+        assert_eq!(format_bytes_human_readable(1024), "1.00KiB");
+        assert_eq!(format_bytes_human_readable(1024 * 1024), "1.00MiB");
+        assert_eq!(format_bytes_human_readable(1024 * 1024 * 1024), "1.00GiB");
+        assert_eq!(format_bytes_human_readable(1024_usize.pow(4)), "1.00TiB");
+        assert_eq!(format_bytes_human_readable(1024_usize.pow(5)), "1.00PiB");
+
+        // Test fractional values
+        assert_eq!(format_bytes_human_readable(1536), "1.50KiB"); // 1024 + 512
+        assert_eq!(format_bytes_human_readable(2048), "2.00KiB");
+        assert_eq!(
+            format_bytes_human_readable(1024 * 1024 + 512 * 1024),
+            "1.50MiB"
+        );
+        assert_eq!(format_bytes_human_readable(2560), "2.50KiB"); // 2.5 * 1024
+
+        // Test rounding behavior
+        assert_eq!(format_bytes_human_readable(1025), "1.00KiB"); // Should round down
+        assert_eq!(format_bytes_human_readable(1075), "1.05KiB"); // Should round to 1.0
+        assert_eq!(format_bytes_human_readable(1126), "1.10KiB"); // Should round to 1.1
+
+        // Test edge cases
+        assert_eq!(format_bytes_human_readable(999), "999B");
+        assert_eq!(format_bytes_human_readable(1000), "1000B");
+
+        // Test values just under the next unit
+        assert_eq!(format_bytes_human_readable(1024 * 1024 - 1), "1024.00KiB");
+        assert_eq!(
+            format_bytes_human_readable(1024_usize.pow(3) - 1),
+            "1024.00MiB"
+        );
     }
 }
