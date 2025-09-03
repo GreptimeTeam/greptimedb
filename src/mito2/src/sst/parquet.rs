@@ -67,7 +67,7 @@ impl Default for WriteOptions {
 }
 
 /// Parquet SST info returned by the writer.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SstInfo {
     /// SST file id.
     pub file_id: FileId,
@@ -115,6 +115,7 @@ mod tests {
     };
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
+    use crate::config::IndexConfig;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
@@ -183,6 +184,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
             Metrics::new(WriteType::Flush),
@@ -244,6 +246,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -329,6 +332,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -377,6 +381,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -435,6 +440,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -478,6 +484,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -635,6 +642,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             path_provider,
             Metrics::new(WriteType::Flush),
@@ -711,6 +719,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
             Metrics::new(WriteType::Flush),
@@ -1085,6 +1094,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
             Metrics::new(WriteType::Flush),
@@ -1140,6 +1150,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
             Metrics::new(WriteType::Flush),

@@ -22,25 +22,39 @@ mod statistics;
 pub(crate) mod store;
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use statistics::{ByteCount, RowCount};
+use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, FileId, RegionId};
+use store_api::region_request::PathType;
+use store_api::storage::{ColumnId, RegionId, FileId, SequenceNumber};
+use tokio::sync::mpsc::Sender;
 
-use crate::access_layer::OperationType;
+use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::error::Result;
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
-use crate::read::Batch;
+use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::sst::file::IndexType;
+use crate::region::{ManifestContextRef, RegionLeaderState};
+use crate::request::{BackgroundNotify, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime};
+use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, RegionFileId};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
+use crate::sst::location;
+use crate::sst::parquet::SstInfo;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
@@ -179,7 +193,7 @@ pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
     async fn build(&self, file_id: FileId) -> Indexer;
 }
-
+#[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
     pub(crate) op_type: OperationType,
     pub(crate) metadata: RegionMetadataRef,
@@ -381,6 +395,212 @@ impl IndexerBuilderImpl {
         }
 
         None
+    }
+}
+
+/// Type of an index build task.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexBuildType {
+    /// Build index when schema change.
+    SchemaChange,
+    /// Create or update index after flush.
+    Flush,
+    /// Create or update index after compact.
+    Compact,
+    /// Manually build index.
+    Manual,
+}
+
+impl IndexBuildType {
+    /// Get index build type as a string.
+    fn as_str(&self) -> &'static str {
+        match self {
+            IndexBuildType::SchemaChange => "schema change",
+            IndexBuildType::Flush => "flush",
+            IndexBuildType::Compact => "compact",
+            IndexBuildType::Manual => "manual",
+        }
+    }
+}
+
+pub struct IndexBuildTask {
+    pub file_meta: FileMeta,
+    pub reason: IndexBuildType,
+    pub flushed_entry_id: Option<EntryId>,
+    pub flushed_sequence: Option<SequenceNumber>,
+    pub access_layer: AccessLayerRef,
+    pub write_cache: Option<WriteCacheRef>,
+    pub(crate) manifest_ctx: ManifestContextRef,
+    pub file_purger: FilePurgerRef,
+    pub indexer_builder: Arc<dyn IndexerBuilder + Send + Sync>,
+    pub(crate) request_sender: Sender<WorkerRequestWithTime>,
+}
+
+impl IndexBuildTask {
+    fn into_index_build_job(mut self) -> Job {
+        Box::pin(async move {
+            self.do_index_build().await;
+        })
+    }
+
+    async fn do_index_build(&mut self) {
+        let _ = self.index_build().await;
+    }
+
+    async fn check_sst_file_exists(&self) -> bool {
+        let sst_path = location::sst_file_path(
+            self.access_layer.table_dir(),
+            RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id),
+            self.access_layer.path_type(),
+        );
+        match self.access_layer.object_store().exists(&sst_path).await {
+            Ok(exists) => {
+                if !exists {
+                    warn!(
+                        "SST file not found during index build, skipping. region: {}, file_id: {}",
+                        self.file_meta.region_id, self.file_meta.file_id
+                    );
+                }
+                exists
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to check SST file existence during index build, skipping. region: {}, file_id: {}, error: {:?}",
+                    self.file_meta.region_id, self.file_meta.file_id, e
+                );
+                false
+            }
+        }
+    }
+
+    async fn index_build(&mut self) -> Result<()> {
+        let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
+        let mut parquet_reader = self
+            .access_layer
+            .read_sst(FileHandle::new(
+                self.file_meta.clone(),
+                self.file_purger.clone(),
+            ))
+            .build()
+            .await?;
+
+        if !self.check_sst_file_exists().await {
+            return Ok(());
+        }
+
+        // TODO(SNC123): optimize index batch
+        while let Some(batch) = &mut parquet_reader.next_batch().await? {
+            indexer.update(batch).await;
+        }
+
+        let index_output = indexer.finish().await;
+        if index_output.file_size > 0 {
+            if !self.check_sst_file_exists().await {
+                return Ok(());
+            }
+
+            self.upload_index_file(index_output.clone()).await;
+            self.file_meta.available_indexes = index_output.build_available_indexes();
+            self.file_meta.index_file_size = index_output.file_size;
+            let edit = RegionEdit {
+                files_to_add: vec![self.file_meta.clone()],
+                files_to_remove: vec![],
+                timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+                flushed_sequence: self.flushed_sequence,
+                flushed_entry_id: self.flushed_entry_id,
+                compaction_time_window: None,
+            };
+            let index_build_finished = IndexBuildFinished {
+                region_id: self.file_meta.region_id,
+                edit: edit,
+            };
+            let worker_request = WorkerRequest::Background {
+                region_id: self.file_meta.region_id,
+                notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
+            };
+            let _ = self
+                .request_sender
+                .send(WorkerRequestWithTime::new(worker_request))
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn upload_index_file(&self, output: IndexOutput) {
+        if let Some(write_cache) = &self.write_cache {
+            let file_id = self.file_meta.file_id;
+            let region_id = self.file_meta.region_id;
+            let remote_store = self.access_layer.object_store();
+            let mut upload_tracker = UploadTracker::new(region_id);
+            let mut err = None;
+            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+            let puffin_path = RegionFilePathFactory::new(
+                self.access_layer.table_dir().to_string(),
+                self.access_layer.path_type(),
+            )
+            .build_index_file_path(RegionFileId::new(region_id, file_id));
+            if let Err(e) = write_cache
+                .upload(puffin_key, &puffin_path, remote_store)
+                .await
+            {
+                err = Some(e);
+            }
+            upload_tracker.push_uploaded_file(puffin_path);
+            if let Some(_) = err {
+                // Cleans index files on failure.
+                upload_tracker
+                    .clean(
+                        &smallvec![SstInfo {
+                            file_id,
+                            index_metadata: output,
+                            ..Default::default()
+                        }],
+                        &write_cache.file_cache(),
+                        remote_store,
+                    )
+                    .await;
+                return;
+            }
+        } else {
+            debug!("write cache is not available, skip uploading index file");
+        }
+    }
+
+    async fn update_manifest(&mut self, output: IndexOutput, edit: RegionEdit) -> Result<RegionEdit> {
+        self.file_meta.available_indexes = output.build_available_indexes();
+        self.file_meta.index_file_size = output.file_size;
+        let version = self
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
+            )
+            .await?;
+        debug!(
+            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            self.file_meta.region_id,
+            self.reason.as_str()
+        );
+        Ok(edit)
+    }
+}
+
+#[derive(Clone)]
+pub struct IndexBuildScheduler {
+    scheduler: SchedulerRef,
+}
+
+impl IndexBuildScheduler {
+    pub fn new(scheduler: SchedulerRef) -> Self {
+        IndexBuildScheduler { scheduler }
+    }
+    pub fn schedule_build(&mut self, task: IndexBuildTask) -> Result<()> {
+        let file_id = task.file_meta.file_id;
+        let job = task.into_index_build_job();
+        if let Err(e) = self.scheduler.schedule(job) {
+            return Err(e);
+        }
+        Ok(())
     }
 }
 

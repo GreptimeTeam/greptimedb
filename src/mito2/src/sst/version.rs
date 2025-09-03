@@ -45,8 +45,9 @@ impl SstVersion {
         &self.levels
     }
 
-    /// Add files to the version.
-    ///
+    /// Add files to the version. If a file with the same `file_id` already exists, 
+    /// it will be overwritten with the new file.
+    /// 
     /// # Panics
     /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
     pub(crate) fn add_files(
@@ -56,10 +57,10 @@ impl SstVersion {
     ) {
         for file in files_to_add {
             let level = file.level;
-            self.levels[level as usize]
-                .files
-                .entry(file.file_id)
-                .or_insert_with(|| FileHandle::new(file, file_purger.clone()));
+            self.levels[level as usize].files.insert(
+                file.file_id,
+                FileHandle::new(file, file_purger.clone())
+            ); 
         }
     }
 

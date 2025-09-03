@@ -50,6 +50,8 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::sst::file::FileMeta;
+use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
 use crate::wal::entry_distributor::WalEntryReceiver;
 
@@ -597,6 +599,9 @@ pub(crate) enum WorkerRequest {
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
+    /// Build indexes of a region.
+    BuildIndexRegion(RegionBuildIndexRequest),
+
     /// Bulk inserts request and region metadata.
     BulkInserts {
         metadata: Option<RegionMetadataRef>,
@@ -776,6 +781,10 @@ pub(crate) enum BackgroundNotify {
     FlushFinished(FlushFinished),
     /// Flush has failed.
     FlushFailed(FlushFailed),
+    /// Index build has finished.
+    IndexBuildFinished(IndexBuildFinished),
+    /// Index build has failed.
+    IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has failed.
@@ -829,6 +838,18 @@ impl OnFailure for FlushFinished {
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
     /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
+
+#[derive(Debug)]
+pub(crate) struct IndexBuildFinished {
+    pub(crate) region_id: RegionId,
+    pub(crate) edit: RegionEdit,
+}
+
+/// Notifies an index build job has failed.
+#[derive(Debug)]
+pub(crate) struct IndexBuildFailed {
     pub(crate) err: Arc<Error>,
 }
 
@@ -922,6 +943,14 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionBuildIndexRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) build_type: IndexBuildType,
+    /// files need to build index, empty means all.
+    pub(crate) file_metas: Vec<FileMeta>,
 }
 
 #[derive(Debug)]
