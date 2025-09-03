@@ -151,10 +151,11 @@ impl BatchingEngine {
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = HashSet::new();
+                let mut is_dirty = false;
                 for src_table_name in src_table_names {
                     if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
-                            task.state.write().unwrap().dirty_time_windows.set_dirty();
+                            is_dirty = true;
                             continue;
                         };
                         for timestamp in timestamps {
@@ -169,6 +170,9 @@ impl BatchingEngine {
                     }
                 }
                 let mut state = task.state.write().unwrap();
+                if is_dirty {
+                    state.dirty_time_windows.set_dirty();
+                }
                 let flow_id_label = task.config.flow_id.to_string();
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
@@ -270,10 +274,12 @@ impl BatchingEngine {
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
 
+                let mut is_dirty = false;
+
                 for src_table_name in src_table_names {
                     if let Some(entry) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
-                            task.state.write().unwrap().dirty_time_windows.set_dirty();
+                            is_dirty = true;
                             continue;
                         };
                         let involved_time_windows = expr.handle_rows(entry.clone()).await?;
@@ -283,6 +289,10 @@ impl BatchingEngine {
                             .add_lower_bounds(involved_time_windows.into_iter());
                     }
                 }
+                if is_dirty {
+                    task.state.write().unwrap().dirty_time_windows.set_dirty();
+                }
+
                 Ok(())
             });
             handles.push(handle);
