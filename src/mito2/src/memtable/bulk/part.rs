@@ -61,6 +61,7 @@ use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::BoxedRecordBatchIterator;
+use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -150,6 +151,18 @@ impl BulkPart {
             // If can not get slice memory size, assume 0 here.
             .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
             .sum()
+    }
+
+    /// Returns the estimated series count in this BulkPart.
+    /// This is calculated from the dictionary values count of the PrimaryKeyArray.
+    pub fn estimated_series_count(&self) -> usize {
+        let pk_column_idx = primary_key_column_index(self.batch.num_columns());
+        let pk_column = self.batch.column(pk_column_idx);
+        if let Some(dict_array) = pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+            dict_array.values().len()
+        } else {
+            0
+        }
     }
 
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
@@ -489,7 +502,7 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EncodedBulkPart {
     data: Bytes,
     metadata: BulkPartMeta,
@@ -528,7 +541,7 @@ impl EncodedBulkPart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BulkPartMeta {
     /// Total rows in part.
     pub num_rows: usize,
