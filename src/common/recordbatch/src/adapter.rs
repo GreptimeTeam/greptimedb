@@ -492,12 +492,12 @@ impl Display for RecordBatchMetrics {
                 if is_time_metric(label) {
                     write!(
                         f,
-                        "{}: {}",
+                        "{}: {}, ",
                         label,
                         format_nanoseconds_human_readable(*value),
                     )?;
                 } else if is_bytes_metric(label) {
-                    write!(f, "{}: {}", label, format_bytes_human_readable(*value),)?;
+                    write!(f, "{}: {}, ", label, format_bytes_human_readable(*value),)?;
                 } else {
                     write!(f, "{}: {}, ", label, value)?;
                 }
