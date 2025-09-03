@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, TableId};

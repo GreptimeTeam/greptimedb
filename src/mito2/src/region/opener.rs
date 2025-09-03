@@ -60,7 +60,7 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file_purger::LocalFilePurger;
+use crate::sst::file_purger::create_local_file_purger;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -288,11 +288,12 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
-            file_purger: Arc::new(LocalFilePurger::new(
+            file_purger: create_local_file_purger(
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
-            )),
+                self.file_ref_manager.clone(),
+            ),
             provider,
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
@@ -410,11 +411,12 @@ impl RegionOpener {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
-        let file_purger = Arc::new(LocalFilePurger::new(
+        let file_purger = create_local_file_purger(
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
-        ));
+            self.file_ref_manager.clone(),
+        );
         let memtable_builder = self.memtable_builder_provider.builder_for_options(
             region_options.memtable.as_ref(),
             region_options.need_dedup(),
