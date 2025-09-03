@@ -372,6 +372,8 @@ impl ClusterInfo for MetaClient {
                     version: node.version,
                     git_commit: node.git_commit,
                     start_time_ms: node.start_time_ms,
+                    cpus: node.cpus,
+                    memory_bytes: node.memory_bytes,
                 })
                 .chain(leader.into_iter().map(|node| NodeInfo {
                     peer: node.peer.unwrap_or_default(),
@@ -380,6 +382,8 @@ impl ClusterInfo for MetaClient {
                     version: node.version,
                     git_commit: node.git_commit,
                     start_time_ms: node.start_time_ms,
+                    cpus: node.cpus,
+                    memory_bytes: node.memory_bytes,
                 }))
                 .collect::<Vec<_>>()
         } else {

@@ -32,6 +32,7 @@ use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
     Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
+    UInt32VectorBuilder, UInt64VectorBuilder,
 };
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
@@ -44,6 +45,8 @@ use crate::system_schema::utils;
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";
 const PEER_ADDR: &str = "peer_addr";
+const CPUS: &str = "cpus";
+const MEMORY_BYTES: &str = "memory_bytes";
 const VERSION: &str = "version";
 const GIT_COMMIT: &str = "git_commit";
 const START_TIME: &str = "start_time";
@@ -57,6 +60,8 @@ const INIT_CAPACITY: usize = 42;
 /// - `peer_id`: the peer server id.
 /// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
 /// - `peer_addr`: the peer gRPC address.
+/// - `cpus`: the number of CPUs of the peer.
+/// - `memory_bytes`: the memory bytes of the peer.
 /// - `version`: the build package version of the peer.
 /// - `git_commit`: the build git commit hash of the peer.
 /// - `start_time`: the starting time of the peer.
@@ -82,6 +87,8 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(PEER_ID, ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(CPUS, ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(MEMORY_BYTES, ConcreteDataType::uint64_datatype(), false),
             ColumnSchema::new(VERSION, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(GIT_COMMIT, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
@@ -140,6 +147,8 @@ struct InformationSchemaClusterInfoBuilder {
     peer_ids: Int64VectorBuilder,
     peer_types: StringVectorBuilder,
     peer_addrs: StringVectorBuilder,
+    cpus: UInt32VectorBuilder,
+    memory_bytes: UInt64VectorBuilder,
     versions: StringVectorBuilder,
     git_commits: StringVectorBuilder,
     start_times: TimestampMillisecondVectorBuilder,
@@ -155,6 +164,8 @@ impl InformationSchemaClusterInfoBuilder {
             peer_ids: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            cpus: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            memory_bytes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             versions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             git_commits: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -212,6 +223,8 @@ impl InformationSchemaClusterInfoBuilder {
             self.start_times.push(None);
             self.uptimes.push(None);
         }
+        self.cpus.push(Some(node_info.cpus));
+        self.memory_bytes.push(Some(node_info.memory_bytes));
 
         if node_info.last_activity_ts > 0 {
             self.active_times.push(Some(
@@ -233,6 +246,8 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.peer_ids.finish()),
             Arc::new(self.peer_types.finish()),
             Arc::new(self.peer_addrs.finish()),
+            Arc::new(self.cpus.finish()),
+            Arc::new(self.memory_bytes.finish()),
             Arc::new(self.versions.finish()),
             Arc::new(self.git_commits.finish()),
             Arc::new(self.start_times.finish()),

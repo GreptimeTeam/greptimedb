@@ -1000,6 +1000,8 @@ mod tests {
             version: "test_version".to_string(),
             git_commit: "test_git_commit".to_string(),
             start_time_ms: 0,
+            cpus: 0,
+            memory_bytes: 0,
         };
         pg_election.register_candidate(&node_info).await.unwrap();
     }

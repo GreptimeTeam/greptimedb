@@ -372,6 +372,12 @@ pub struct MetasrvNodeInfo {
     pub git_commit: String,
     // The node start timestamp in milliseconds
     pub start_time_ms: u64,
+    // The node cpus
+    #[serde(default)]
+    pub cpus: u32,
+    #[serde(default)]
+    // The node memory bytes
+    pub memory_bytes: u64,
 }
 
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
@@ -384,6 +390,8 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
             version: node_info.version,
             git_commit: node_info.git_commit,
             start_time_ms: node_info.start_time_ms,
+            cpus: node_info.cpus,
+            memory_bytes: node_info.memory_bytes,
         }
     }
 }
@@ -686,6 +694,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
+            cpus: common_config::utils::get_cpus() as u32,
+            memory_bytes: common_config::utils::get_sys_total_memory()
+                .unwrap_or_default()
+                .as_bytes(),
         }
     }
 
