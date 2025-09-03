@@ -48,8 +48,8 @@ use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::{FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
-    FindGroupByFinalName,
+    gen_plan_with_matching_schema, get_table_info_df_schema, sql_to_df_plan, AddFilterRewriter,
+    ColumnMatcherRewriter, FindGroupByFinalName,
 };
 use crate::batching_mode::BatchingModeOptions;
 use crate::df_optimizer::apply_df_optimizer;
@@ -618,42 +618,63 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let (Some((Some(l), Some(u))), QueryType::Sql) =
-            (expire_time_window_bound, &self.config.query_type)
-        else {
-            // either no time window or not a sql query, then just use the original query
-            // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-            debug!(
-                "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
-            );
-            // clean dirty time window too, this could be from create flow's check_execute
-            self.state.write().unwrap().dirty_time_windows.clean();
+        let (expire_lower_bound, expire_upper_bound) =
+            match (expire_time_window_bound, &self.config.query_type) {
+                (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
+                (None, QueryType::Sql) => {
+                    // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
+                    // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
+                    debug!(
+                        "Flow id = {:?}, no time window, using the same query",
+                        self.config.flow_id
+                    );
+                    // clean dirty time window too, this could be from create flow's check_execute
+                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-            // TODO(discord9): not add auto column for tql query?
-            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+                    if !is_dirty {
+                        // no dirty data, hence no need to update
+                        debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+                        return Ok(None);
+                    }
 
-            let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
-                .await?;
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
 
-            let plan = plan
-                .clone()
-                .rewrite(&mut add_auto_column)
-                .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan:\n {}\n", plan),
-                })?
-                .data;
+                    return Ok(Some(PlanInfo { plan, filter: None }));
+                }
+                _ => {
+                    // clean for tql have no use for time window
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-            // since no time window lower/upper bound is found, just return the original query(with auto columns)
-            return Ok(Some(PlanInfo { plan, filter: None }));
-        };
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
+
+                    return Ok(Some(PlanInfo { plan, filter: None }));
+                }
+            };
 
         debug!(
             "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
-            self.config.flow_id, l, u, self.state.read().unwrap().dirty_time_windows
+            self.config.flow_id, expire_lower_bound, expire_upper_bound, self.state.read().unwrap().dirty_time_windows
         );
-        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
-            reason: format!("Can't get window size from {u:?} - {l:?}"),
-        })?;
+        let window_size = expire_upper_bound
+            .sub(&expire_lower_bound)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Can't get window size from {expire_upper_bound:?} - {expire_lower_bound:?}"
+                ),
+            })?;
         let col_name = self
             .config
             .time_window_expr
@@ -673,7 +694,7 @@ impl BatchingTask {
             .dirty_time_windows
             .gen_filter_exprs(
                 &col_name,
-                Some(l),
+                Some(expire_lower_bound),
                 window_size,
                 max_window_cnt
                     .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query),
@@ -701,7 +722,7 @@ impl BatchingTask {
         };
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
-        let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+        let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema.clone());
 
         let plan =
             sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
