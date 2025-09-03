@@ -25,6 +25,7 @@ use std::num::NonZeroUsize;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
@@ -110,12 +111,20 @@ pub struct Indexer {
     last_mem_fulltext_index: usize,
     bloom_filter_indexer: Option<BloomFilterIndexer>,
     last_mem_bloom_filter: usize,
+    intermediate_manager: Option<IntermediateManager>,
 }
 
 impl Indexer {
     /// Updates the index with the given batch.
     pub async fn update(&mut self, batch: &mut Batch) {
         self.do_update(batch).await;
+
+        self.flush_mem_metrics();
+    }
+
+    /// Updates the index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) {
+        self.do_update_flat(batch).await;
 
         self.flush_mem_metrics();
     }
@@ -196,6 +205,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.inverted_indexer = self.build_inverted_indexer(file_id);
         indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
         indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
+        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
         if indexer.inverted_indexer.is_none()
             && indexer.fulltext_indexer.is_none()
             && indexer.bloom_filter_indexer.is_none()

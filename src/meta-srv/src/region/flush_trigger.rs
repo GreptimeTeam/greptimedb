@@ -225,10 +225,6 @@ impl RegionFlushTrigger {
         region_ids: &[RegionId],
         leader_regions: &HashMap<RegionId, LeaderRegion>,
     ) -> Result<()> {
-        if region_ids.is_empty() {
-            return Ok(());
-        }
-
         let regions = region_ids
             .iter()
             .flat_map(|region_id| match leader_regions.get(region_id) {
@@ -247,6 +243,11 @@ impl RegionFlushTrigger {
                 None => None,
             })
             .collect::<Vec<_>>();
+
+        // The`chunks` will panic if chunks_size is zero, so we return early if there are no regions to persist.
+        if regions.is_empty() {
+            return Ok(());
+        }
 
         let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
         let batch_size = max_txn_ops.min(regions.len());

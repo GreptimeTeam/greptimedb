@@ -89,6 +89,18 @@ impl FlatProjectionMapper {
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
 
+        // Creates a map to lookup index.
+        let id_to_index = sst_column_id_indices(metadata);
+        // TODO(yingwen): Support different flat schema options.
+        let format_projection = FormatProjection::compute_format_projection(
+            &id_to_index,
+            // All columns with internal columns.
+            metadata.column_metadatas.len() + 3,
+            column_ids.iter().copied(),
+        );
+
+        let batch_schema = flat_projected_columns(metadata, &format_projection);
+
         if is_empty_projection {
             // If projection is empty, we don't output any column.
             return Ok(FlatProjectionMapper {
@@ -104,16 +116,6 @@ impl FlatProjectionMapper {
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
 
-        // Creates a map to lookup index.
-        let id_to_index = sst_column_id_indices(metadata);
-        // TODO(yingwen): Support different flat schema options.
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            // All columns with internal columns.
-            metadata.column_metadatas.len() + 3,
-            column_ids.iter().copied(),
-        );
-
         let batch_indices: Vec<_> = column_ids
             .iter()
             .map(|id| {
@@ -125,8 +127,6 @@ impl FlatProjectionMapper {
                     .unwrap()
             })
             .collect();
-
-        let batch_schema = flat_projected_columns(metadata, &format_projection);
 
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
