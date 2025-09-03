@@ -115,7 +115,7 @@ impl Default for StatsPersistenceOptions {
     fn default() -> Self {
         Self {
             ttl: Duration::ZERO,
-            interval: Duration::from_mins(15),
+            interval: Duration::from_mins(10),
         }
     }
 }
