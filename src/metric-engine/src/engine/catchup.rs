@@ -15,7 +15,9 @@
 use common_telemetry::debug;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AffectedRows, RegionCatchupRequest, RegionRequest};
+use store_api::region_request::{
+    AffectedRows, RegionCatchupRequest, RegionRequest, ReplayCheckpoint,
+};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
@@ -59,6 +61,10 @@ impl MetricEngineInner {
                     entry_id: req.metadata_entry_id,
                     metadata_entry_id: None,
                     location_id: req.location_id,
+                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
+                        entry_id: c.metadata_entry_id.unwrap_or_default(),
+                        metadata_entry_id: None,
+                    }),
                 }),
             )
             .await
@@ -73,6 +79,10 @@ impl MetricEngineInner {
                     entry_id: req.entry_id,
                     metadata_entry_id: None,
                     location_id: req.location_id,
+                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
+                        entry_id: c.entry_id,
+                        metadata_entry_id: None,
+                    }),
                 }),
             )
             .await
