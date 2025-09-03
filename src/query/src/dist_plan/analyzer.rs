@@ -634,6 +634,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 acc
             })
             .unwrap_or_default();
+        // TODO(discord9): somehow handle both alias and subquery alias here
 
         debug!(
             "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
