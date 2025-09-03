@@ -97,7 +97,7 @@ impl store_server::Store for Metasrv {
         let req = req.into_inner();
 
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.kv_backend().name(), "batch_pub"])
+            .with_label_values(&[self.kv_backend().name(), "batch_put"])
             .start_timer();
 
         let req: BatchPutRequest = req.into();
