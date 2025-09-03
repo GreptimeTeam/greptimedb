@@ -238,8 +238,11 @@ impl RegionOpener {
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
+        // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
+        let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
+            flushed_entry_id,
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
@@ -439,7 +442,7 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        if !self.skip_wal_replay {
+        let topic_latest_entry_id = if !self.skip_wal_replay {
             let replay_from_entry_id = self
                 .replay_checkpoint
                 .unwrap_or_default()
@@ -461,14 +464,26 @@ impl RegionOpener {
                 on_region_opened,
             )
             .await?;
+            // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
+            // Only set after the WAL replay is completed.
+            let topic_latest_entry_id = if provider.is_remote_wal()
+                && version_control.current().version.memtables.is_empty()
+            {
+                wal.store().latest_entry_id(&provider).unwrap_or(0)
+            } else {
+                0
+            };
+
+            topic_latest_entry_id
         } else {
             info!(
                 "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
                 region_id, manifest.manifest_version, flushed_entry_id
             );
-        }
-        let now = self.time_provider.current_time_millis();
 
+            0
+        };
+        let now = self.time_provider.current_time_millis();
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
@@ -483,7 +498,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
-            topic_latest_entry_id: AtomicU64::new(0),
+            topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             write_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
             stats: self.stats.clone(),
@@ -713,8 +728,8 @@ where
 
     let series_count = version_control.current().series_count();
     info!(
-        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
-        region_id, rows_replayed, last_entry_id, series_count, now.elapsed()
+        "Replay WAL for region: {}, provider: {:?}, rows recovered: {}, replay from entry id: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
+        region_id, provider, rows_replayed, replay_from_entry_id, last_entry_id, series_count, now.elapsed()
     );
     Ok(last_entry_id)
 }
