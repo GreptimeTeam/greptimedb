@@ -87,6 +87,13 @@
 | Other Request P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~"read\|write\|list\|Writer::write\|Writer::close\|Reader::read"}[$__rate_interval])))` | `timeseries` | Other Request P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
 | Opendal traffic | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))` | `timeseries` | Total traffic as in bytes by instance and operation | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
 | OpenDAL errors per Instance | `sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{ error!="NotFound"}[$__rate_interval]))` | `timeseries` | OpenDAL error counts per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]` |
+# Remote WAL
+| Title | Query | Type | Description | Datasource | Unit | Legend Format |
+| --- | --- | --- | --- | --- | --- | --- |
+| Triggered region flush total | `meta_triggered_region_flush_total` | `timeseries` | Triggered region flush total | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Triggered region checkpoint total | `meta_triggered_region_checkpoint_total` | `timeseries` | Triggered region checkpoint total | `prometheus` | `none` | `{{pod}}-{{topic_name}}` |
+| Topic estimated replay size | `meta_topic_estimated_replay_size` | `timeseries` | Topic estimated max replay size | `prometheus` | `bytes` | `{{pod}}-{{topic_name}}` |
+| Kafka logstore's bytes traffic | `rate(greptime_logstore_kafka_client_bytes_total[$__rate_interval])` | `timeseries` | Kafka logstore's bytes traffic | `prometheus` | `bytes` | `{{pod}}-{{logstore}}` |
 # Metasrv
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -103,6 +110,8 @@
 | Meta KV Ops Latency | `histogram_quantile(0.99, sum by(pod, le, op, target) (greptime_meta_kv_request_elapsed_bucket))` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `s` | `{{pod}}-{{op}} p99` |
 | Rate of meta KV Ops | `rate(greptime_meta_kv_request_elapsed_count[$__rate_interval])` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `none` | `{{pod}}-{{op}} p99` |
 | DDL Latency | `histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))`<br/>`histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))` | `timeseries` | Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads. | `prometheus` | `s` | `CreateLogicalTables-{{step}} p90` |
+| Reconciliation stats | `greptime_meta_reconciliation_stats` | `timeseries` | Reconciliation stats | `prometheus` | `s` | `{{pod}}-{{table_type}}-{{type}}` |
+| Reconciliation steps | `histogram_quantile(0.9, greptime_meta_reconciliation_procedure_bucket)` | `timeseries` | Elapsed of Reconciliation steps  | `prometheus` | `s` | `{{procedure_name}}-{{step}}-P90` |
 # Flownode
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |

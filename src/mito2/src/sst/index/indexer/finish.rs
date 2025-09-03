@@ -54,6 +54,7 @@ impl Indexer {
             return IndexOutput::default();
         }
 
+        self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
         output
     }
@@ -269,5 +270,13 @@ impl Indexer {
         output.index_size = byte_count;
         output.row_count = row_count;
         output.columns = column_ids;
+    }
+
+    pub(crate) async fn do_prune_intm_sst_dir(&mut self) {
+        if let Some(manager) = self.intermediate_manager.take() {
+            if let Err(e) = manager.prune_sst_dir(&self.region_id, &self.file_id).await {
+                warn!(e; "Failed to prune intermediate SST directory, region_id: {}, file_id: {}", self.region_id, self.file_id);
+            }
+        }
     }
 }

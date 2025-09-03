@@ -19,7 +19,6 @@ use api::v1::meta::MailboxMessage;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::wal_options_allocator::extract_topic_from_wal_options;
 use common_meta::RegionIdent;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
@@ -68,7 +67,6 @@ impl OpenCandidateRegion {
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
         let table_id = pc.region_id.table_id();
-        let region_id = pc.region_id;
         let region_number = pc.region_id.region_number();
         let candidate_id = pc.to_peer.id;
         let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
@@ -80,31 +78,18 @@ impl OpenCandidateRegion {
             engine,
         } = datanode_table_value.region_info.clone();
 
-        let checkpoint =
-            if let Some(topic) = extract_topic_from_wal_options(region_id, &region_wal_options) {
-                ctx.fetch_replay_checkpoint(&topic).await.ok().flatten()
-            } else {
-                None
-            };
-
-        let open_instruction = Instruction::OpenRegion(
-            OpenRegion::new(
-                RegionIdent {
-                    datanode_id: candidate_id,
-                    table_id,
-                    region_number,
-                    engine,
-                },
-                &region_storage_path,
-                region_options,
-                region_wal_options,
-                true,
-            )
-            .with_replay_entry_id(checkpoint.map(|checkpoint| checkpoint.entry_id))
-            .with_metadata_replay_entry_id(
-                checkpoint.and_then(|checkpoint| checkpoint.metadata_entry_id),
-            ),
-        );
+        let open_instruction = Instruction::OpenRegion(OpenRegion::new(
+            RegionIdent {
+                datanode_id: candidate_id,
+                table_id,
+                region_number,
+                engine,
+            },
+            &region_storage_path,
+            region_options,
+            region_wal_options,
+            true,
+        ));
 
         Ok(open_instruction)
     }
@@ -241,8 +226,6 @@ mod tests {
             region_options: Default::default(),
             region_wal_options: Default::default(),
             skip_wal_replay: true,
-            replay_entry_id: None,
-            metadata_replay_entry_id: None,
         })
     }
 

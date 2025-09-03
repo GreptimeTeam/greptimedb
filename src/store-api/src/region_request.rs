@@ -1358,7 +1358,7 @@ pub enum RegionTruncateRequest {
 ///
 /// Makes a readonly region to catch up to leader region changes.
 /// There is no effect if it operating on a leader region.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
     pub set_writable: bool,
@@ -1371,6 +1371,8 @@ pub struct RegionCatchupRequest {
     pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
+    /// Replay checkpoint.
+    pub checkpoint: Option<ReplayCheckpoint>,
 }
 
 /// Get sequences of regions by region ids.
