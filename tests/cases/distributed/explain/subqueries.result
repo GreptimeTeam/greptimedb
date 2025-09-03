@@ -236,3 +236,150 @@ DROP TABLE integers;
 
 Affected Rows: 0
 
+CREATE TABLE IF NOT EXISTS `greptime_cloud_op_logs` (
+  `timestamp` TIMESTAMP(9) NOT NULL,
+  `channel` STRING NULL,
+  `db` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  `op_type` STRING NULL,
+  TIME INDEX (`timestamp`)
+)
+ENGINE=mito
+WITH(
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+  count(`tt`.`timestamp`) as t_cnt
+FROM
+  greptime_cloud_op_logs AS tt
+WHERE
+  `tt`.`timestamp` > 1756722459558000000
+  and `tt`.`timestamp` <= 1756726059558000000;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: count(tt.timestamp) AS t_cnt_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(tt.timestamp)]]_|
+|_|_Filter: tt.timestamp > TimestampNanosecond(1756722459558000000, None) AND tt.timestamp <= TimestampNanosecond(1756726059558000000, None) |
+|_|_SubqueryAlias: tt_|
+|_|_TableScan: greptime_cloud_op_logs_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT
+  count(`tt`.`timestamp`) as t_cnt
+FROM
+  greptime_cloud_op_logs AS tt
+WHERE
+  `tt`.`timestamp` > 1756722459558000000
+  and `tt`.`timestamp` <= 1756726059558000000;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: count(tt.timestamp) AS t_cnt_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(tt.timestamp)]]_|
+|_|_Filter: tt.timestamp > TimestampNanosecond(1756722459558000000, None) AND tt.timestamp <= TimestampNanosecond(1756726059558000000, None) |
+|_|_SubqueryAlias: tt_|
+|_|_TableScan: greptime_cloud_op_logs_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN WITH top_50_dbs AS (
+    SELECT db,count(*) as t_cnt
+    FROM greptime_cloud_op_logs
+    WHERE timestamp > 1756722459558000000 and timestamp <= 1756726059558000000
+    GROUP BY db
+    ORDER BY t_cnt DESC
+    LIMIT 50
+)
+SELECT 
+    t.db,
+    count(*) as cnt,
+    date_bin('1 day',timestamp) as date
+FROM greptime_cloud_op_logs AS t
+JOIN top_50_dbs td ON t.db = td.db
+WHERE t.timestamp > 1756722459558000000 and t.timestamp <= 1756726059558000000
+GROUP BY t.db, date
+ORDER BY cnt desc;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: cnt DESC NULLS FIRST_|
+|_|_Projection: t.db, count(Int64(1)) AS count(*) AS cnt, date_bin(Utf8("1 day"),t.timestamp) AS date_|
+|_|_Aggregate: groupBy=[[t.db, date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }"), t.timestamp) AS date_bin(Utf8("1 day"),t.timestamp)]], aggr=[[count(t.timestamp) AS count(Int64(1))]] |
+|_|_Projection: t.timestamp, t.db_|
+|_|_Inner Join: t.db = td.db_|
+|_|_Filter: t.timestamp > TimestampNanosecond(1756722459558000000, None) AND t.timestamp <= TimestampNanosecond(1756726059558000000, None)_|
+|_|_Projection: t.timestamp, t.db_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: t_|
+|_|_TableScan: greptime_cloud_op_logs_|
+|_| ]]_|
+|_|_Projection: td.db_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: td_|
+|_|_SubqueryAlias: top_50_dbs_|
+|_|_Limit: skip=0, fetch=50_|
+|_|_Sort: t_cnt DESC NULLS FIRST_|
+|_|_Projection: greptime_cloud_op_logs.db, count(Int64(1)) AS count(*) AS t_cnt_|
+|_|_Aggregate: groupBy=[[greptime_cloud_op_logs.db]], aggr=[[count(greptime_cloud_op_logs.timestamp) AS count(Int64(1))]]_|
+|_|_Filter: greptime_cloud_op_logs.timestamp > TimestampNanosecond(1756722459558000000, None) AND greptime_cloud_op_logs.timestamp <= TimestampNanosecond(1756726059558000000, None)_|
+|_|_TableScan: greptime_cloud_op_logs_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [cnt@1 DESC]_|
+|_|_SortExec: expr=[cnt@1 DESC], preserve_partitioning=[true]_|
+|_|_ProjectionExec: expr=[db@0 as db, count(Int64(1))@2 as cnt, date_bin(Utf8("1 day"),t.timestamp)@1 as date]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[db@0 as db, date_bin(Utf8("1 day"),t.timestamp)@1 as date_bin(Utf8("1 day"),t.timestamp)], aggr=[count(Int64(1))]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[db@1 as db, date_bin(IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }, timestamp@0) as date_bin(Utf8("1 day"),t.timestamp)], aggr=[count(Int64(1))]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_FilterExec: timestamp@0 > 1756722459558000000 AND timestamp@0 <= 1756726059558000000_|
+|_|_ProjectionExec: expr=[timestamp@0 as timestamp, db@2 as db]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[db@0 as db]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE greptime_cloud_op_logs;
+
+Affected Rows: 0
+

@@ -436,7 +436,7 @@ impl PlanRewriter {
                 self.get_aliased_partition_columns()
             );
         } else if let LogicalPlan::TableScan(table_scan) = node {
-            self.alias_tracker = AliasTracker::new(table_scan);
+            self.alias_tracker = AliasTracker::from_table_scan(table_scan);
             debug!(
                 "Initialize partition columns: {:?} with table={}",
                 self.get_aliased_partition_columns(),
@@ -592,6 +592,7 @@ struct EnforceDistRequirementRewriter {
     /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
     /// because the `Projection` node is not in the scope of the `Aggregate` node
     cur_level: usize,
+    alias_tracker: AliasTracker,
 }
 
 impl EnforceDistRequirementRewriter {
@@ -599,6 +600,7 @@ impl EnforceDistRequirementRewriter {
         Self {
             column_requirements,
             cur_level,
+            alias_tracker: Default::default(),
         }
     }
 }
@@ -619,6 +621,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     }
 
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        self.alias_tracker.update_or_init_alias(&node);
         self.cur_level -= 1;
         // first get all applicable column requirements
         let mut applicable_column_requirements = self
