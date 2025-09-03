@@ -370,7 +370,7 @@ impl<H> BoundedStager<H> {
     ///       is configured to purge the dangling files and directories.
     async fn recover(&self) -> Result<()> {
         let timer = std::time::Instant::now();
-        common_telemetry::info!("Recovering the staging area, base_dir: {:?}", self.base_dir);
+        info!("Recovering the staging area, base_dir: {:?}", self.base_dir);
 
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
