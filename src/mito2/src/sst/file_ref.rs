@@ -46,50 +46,6 @@ pub struct TableFileRefs {
     pub files: HashMap<FileRef, usize>,
 }
 
-pub const REFS_PATH: &str = ".refs";
-
-/// Returns the path of the tmp ref file for given table id and datanode id.
-pub fn ref_file_path(table_dir: &str, node_id: u64, path_type: PathType) -> String {
-    let path_type_postfix = match path_type {
-        PathType::Bare => "",
-        PathType::Data => ".data",
-        PathType::Metadata => ".metadata",
-    };
-    format!(
-        "{}/{}/{:020}{}.refs",
-        table_dir, REFS_PATH, node_id, path_type_postfix
-    )
-}
-
-pub fn ref_path_to_node_id_path_type(path: &str) -> Option<(u64, PathType)> {
-    let parts: Vec<&str> = path.rsplitn(2, '/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let file_name = parts[0];
-    let segments: Vec<&str> = file_name.split('.').collect();
-    if segments.len() < 2 {
-        return None;
-    }
-    let node_id_str = segments[0];
-    let path_type = if segments.len() == 2 {
-        PathType::Bare
-    } else {
-        match segments[1] {
-            "data" => PathType::Data,
-            "metadata" => PathType::Metadata,
-            _ => return None,
-        }
-    };
-    let node_id = node_id_str.parse::<u64>().ok()?;
-    Some((node_id, path_type))
-}
-
-/// Returns the directory path to store all purger ref files.
-pub fn ref_dir(table_dir: &str) -> String {
-    object_store::util::join_dir(table_dir, REFS_PATH)
-}
-
 /// Manages all file references in one datanode.
 /// It keeps track of which files are referenced and group by table ids.
 /// And periodically update the references to tmp file in object storage.
@@ -262,7 +218,6 @@ mod tests {
     use std::num::NonZeroU64;
 
     use smallvec::SmallVec;
-    use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -341,37 +296,5 @@ mod tests {
             "{:?}",
             file_ref_mgr.files_per_table
         );
-    }
-
-    #[test]
-    fn test_ref_file_path() {
-        let testcases = vec![
-            (
-                "/path/to/table",
-                1,
-                PathType::Bare,
-                "/path/to/table/.refs/00000000000000000001.refs",
-            ),
-            (
-                "/path/to/table",
-                42,
-                PathType::Data,
-                "/path/to/table/.refs/00000000000000000042.data.refs",
-            ),
-            (
-                "/path/to/table",
-                100,
-                PathType::Metadata,
-                "/path/to/table/.refs/00000000000000000100.metadata.refs",
-            ),
-        ];
-
-        for (table_dir, node_id, path_type, expected) in testcases {
-            let path = ref_file_path(table_dir, node_id, path_type);
-            assert_eq!(path, expected);
-            let (parsed_node_id, parsed_path_type) = ref_path_to_node_id_path_type(&path).unwrap();
-            assert_eq!(parsed_node_id, node_id);
-            assert_eq!(parsed_path_type, path_type);
-        }
     }
 }

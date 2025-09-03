@@ -338,7 +338,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub(crate) fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 
