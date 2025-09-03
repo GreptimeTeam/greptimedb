@@ -99,6 +99,7 @@ where
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
+        let intm_manager = self.intermediate_manager.clone();
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
@@ -111,6 +112,9 @@ where
                 gc_duration,
             )
             .await;
+            if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
+                warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
+            }
             listener.on_later_drop_end(region_id, removed);
         });
 
