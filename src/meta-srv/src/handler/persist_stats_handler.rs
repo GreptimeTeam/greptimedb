@@ -152,13 +152,9 @@ fn align_ts(ts: i64, interval: Duration) -> i64 {
 impl PersistStatsHandler {
     /// Creates a new [`PersistStatsHandler`].
     pub fn new(inserter: Box<dyn Inserter>, mut persist_interval: Duration) -> Self {
-        if persist_interval < Duration::from_secs(60) {
-            warn!("persist_interval is less than 60 seconds, set to 60 seconds");
-            persist_interval = Duration::from_secs(60);
-        }
-        if persist_interval.as_millis() == 0 {
-            warn!("persist_interval as milliseconds is zero, set to 60 second");
-            persist_interval = Duration::from_secs(60);
+        if persist_interval < Duration::from_mins(10) {
+            warn!("persist_interval is less than 10 minutes, set to 10 minutes");
+            persist_interval = Duration::from_mins(10);
         }
 
         Self {
