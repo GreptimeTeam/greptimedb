@@ -128,7 +128,7 @@ impl Election for EtcdElection {
 
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         let mut lease_client = self.client.lease_client();
-        let res = lease_client
+        let res: etcd_client::LeaseGrantResponse = lease_client
             .grant(CANDIDATE_LEASE_SECS as i64, None)
             .await
             .context(error::EtcdFailedSnafu)?;

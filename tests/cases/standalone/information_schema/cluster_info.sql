@@ -8,7 +8,7 @@ DESC TABLE CLUSTER_INFO;
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO;
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)+) Version
@@ -16,9 +16,9 @@ SELECT * FROM CLUSTER_INFO;
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'STANDALONE';
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'STANDALONE';
 
-SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)+) Version
@@ -26,8 +26,10 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_ID = 0;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID = 0;
 
-SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 0;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID > 0;
+
+SELECT peer_type, cpus!=0, memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
 USE PUBLIC;
