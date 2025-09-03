@@ -53,13 +53,9 @@ impl HandlerContext {
             let region_server_moved = self.region_server.clone();
 
             let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
-                (Some(entry_id), Some(metadata_entry_id)) => Some(ReplayCheckpoint {
+                (Some(entry_id), metadata_entry_id) => Some(ReplayCheckpoint {
                     entry_id,
-                    metadata_entry_id: Some(metadata_entry_id),
-                }),
-                (Some(entry_id), None) => Some(ReplayCheckpoint {
-                    entry_id,
-                    metadata_entry_id: None,
+                    metadata_entry_id,
                 }),
                 _ => None,
             };

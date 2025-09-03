@@ -372,7 +372,7 @@ impl LogStore for KafkaLogStore {
             .and_modify(|stat| {
                 stat.latest_offset = stat.latest_offset.max(latest_offset);
             })
-            .or_insert(TopicStat {
+            .or_insert_with(|| TopicStat {
                 latest_offset,
                 record_size: 0,
                 record_num: 0,
