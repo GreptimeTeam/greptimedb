@@ -1077,6 +1077,7 @@ mod tests {
         let staging_manifest_ctx = {
             let manager = RegionManifestManager::new(
                 version_control.current().version.metadata.clone(),
+                0,
                 RegionManifestOptions {
                     manifest_dir: "".to_string(),
                     object_store: env.access_layer.object_store().clone(),

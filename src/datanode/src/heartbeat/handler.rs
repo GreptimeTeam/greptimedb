@@ -238,10 +238,7 @@ mod tests {
         // Upgrade region
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
-            last_entry_id: None,
-            metadata_last_entry_id: None,
-            replay_timeout: None,
-            location_id: None,
+            ..Default::default()
         });
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
