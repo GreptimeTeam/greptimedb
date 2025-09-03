@@ -114,8 +114,8 @@ pub struct StatsPersistenceOptions {
 impl Default for StatsPersistenceOptions {
     fn default() -> Self {
         Self {
-            ttl: Duration::from_days(30),
-            interval: Duration::from_secs(60),
+            ttl: Duration::ZERO,
+            interval: Duration::from_mins(10),
         }
     }
 }
