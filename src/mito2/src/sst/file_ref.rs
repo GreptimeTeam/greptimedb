@@ -15,14 +15,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
-use store_api::region_request::PathType;
 use store_api::storage::{RegionId, TableId};
 use store_api::ManifestVersion;
 
 use crate::error::Result;
+use crate::metrics::GC_TABLE_REF_FILE_CNT;
 use crate::region::RegionMapRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -54,7 +54,7 @@ pub struct TableFileRefs {
 #[derive(Debug)]
 pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
-    node_id: u64,
+    node_id: Option<u64>,
     /// TODO(discord9): use no hash hasher since table id is sequential.
     files_per_table: DashMap<TableId, TableFileRefs>,
 }
@@ -70,7 +70,7 @@ pub struct TableFileRefsManifest {
 }
 
 impl FileReferenceManager {
-    pub fn new(node_id: u64) -> Self {
+    pub fn new(node_id: Option<u64>) -> Self {
         Self {
             node_id,
             files_per_table: Default::default(),
@@ -94,12 +94,11 @@ impl FileReferenceManager {
 
         let ref_file_set: HashSet<FileRef> = file_refs.files.keys().cloned().collect();
 
-        info!(
-            "Preparing to upload ref file for table {}, node {}, {} files: {:?}",
+        debug!(
+            "Get file refs for table {}, node {:?}, {} files",
             table_id,
             self.node_id,
             ref_file_set.len(),
-            ref_file_set,
         );
 
         Some(ref_file_set)
@@ -160,6 +159,7 @@ impl FileReferenceManager {
     /// The access layer will be used to upload ref file to object storage.
     pub fn add_file(&self, file_meta: &FileMeta) {
         let table_id = file_meta.region_id.table_id();
+        let mut file_cnt = 1;
         {
             let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
             self.files_per_table
@@ -169,11 +169,15 @@ impl FileReferenceManager {
                         .entry(file_ref.clone())
                         .and_modify(|count| *count += 1)
                         .or_insert(1);
+                    file_cnt = refs.files.len();
                 })
                 .or_insert_with(|| TableFileRefs {
                     files: HashMap::from_iter([(file_ref, 1)]),
                 });
         }
+        GC_TABLE_REF_FILE_CNT
+            .with_label_values(&[&table_id.to_string()])
+            .set(file_cnt as i64);
     }
 
     /// Removes a file reference.
@@ -183,6 +187,7 @@ impl FileReferenceManager {
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
 
         let mut remove_table_entry = false;
+        let mut file_cnt = 0;
 
         let table_ref = self.files_per_table.entry(table_id).and_modify(|refs| {
             let mut remove_file_ref = false;
@@ -200,6 +205,8 @@ impl FileReferenceManager {
                 o.remove_entry();
             }
 
+            file_cnt = refs.files.len();
+
             if refs.files.is_empty() {
                 remove_table_entry = true;
             }
@@ -210,6 +217,10 @@ impl FileReferenceManager {
         {
             o.remove_entry();
         }
+
+        GC_TABLE_REF_FILE_CNT
+            .with_label_values(&[&table_id.to_string()])
+            .set(file_cnt as i64);
     }
 }
 
@@ -229,7 +240,7 @@ mod tests {
 
         let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
 
-        let file_ref_mgr = FileReferenceManager::new(0);
+        let file_ref_mgr = FileReferenceManager::new(None);
 
         let file_meta = FileMeta {
             region_id: sst_file_id.region_id(),

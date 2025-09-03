@@ -245,7 +245,7 @@ impl TestEnv {
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
-            file_ref_manager: Arc::new(FileReferenceManager::new(0)),
+            file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
         }
     }

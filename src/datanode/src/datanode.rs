@@ -239,7 +239,7 @@ impl DatanodeBuilder {
             table_id_schema_cache,
             schema_cache,
         ));
-        let file_ref_manager = Arc::new(FileReferenceManager::new(node_id));
+        let file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
         let region_server = self
             .new_region_server(
                 schema_metadata_manager,

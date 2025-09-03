@@ -292,7 +292,6 @@ impl RegionOpener {
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
-                self.file_ref_manager,
             )),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -415,7 +414,6 @@ impl RegionOpener {
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
-            self.file_ref_manager.clone(),
         ));
         let memtable_builder = self.memtable_builder_provider.builder_for_options(
             region_options.memtable.as_ref(),
