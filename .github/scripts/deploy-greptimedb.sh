@@ -3,12 +3,14 @@
 set -e
 set -o pipefail
 
-KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.24.0}"
+KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.32.0}"
 ENABLE_STANDALONE_MODE="${ENABLE_STANDALONE_MODE:-true}"
 DEFAULT_INSTALL_NAMESPACE=${DEFAULT_INSTALL_NAMESPACE:-default}
 GREPTIMEDB_IMAGE_TAG=${GREPTIMEDB_IMAGE_TAG:-latest}
-ETCD_CHART="oci://registry-1.docker.io/bitnamicharts/etcd"
 GREPTIME_CHART="https://greptimeteam.github.io/helm-charts/"
+ETCD_CHART="oci://registry-1.docker.io/bitnamicharts/etcd"
+ETCD_CHART_VERSION="${ETCD_CHART_VERSION:-12.0.8}"
+ETCD_IMAGE_TAG="${ETCD_IMAGE_TAG:-3.6.1-debian-12-r3}"
 
 # Create a cluster with 1 control-plane node and 5 workers.
 function create_kind_cluster() {
@@ -35,10 +37,16 @@ function add_greptime_chart() {
 function deploy_etcd_cluster() {
   local namespace="$1"
 
-  helm install etcd "$ETCD_CHART" \
+  helm upgrade --install etcd "$ETCD_CHART" \
+    --version "$ETCD_CHART_VERSION" \
+    --create-namespace \
     --set replicaCount=3 \
     --set auth.rbac.create=false \
     --set auth.rbac.token.enabled=false \
+    --set global.security.allowInsecureImages=true \
+    --set image.registry=docker.io \
+    --set image.repository=greptime/etcd \
+    --set image.tag="$ETCD_IMAGE_TAG" \
     -n "$namespace"
 
   # Wait for etcd cluster to be ready.
@@ -48,7 +56,8 @@ function deploy_etcd_cluster() {
 # Deploy greptimedb-operator.
 function deploy_greptimedb_operator() {
   # Use the latest chart and image.
-  helm install greptimedb-operator greptime/greptimedb-operator \
+  helm upgrade --install greptimedb-operator greptime/greptimedb-operator \
+    --create-namespace \
     --set image.tag=latest \
     -n "$DEFAULT_INSTALL_NAMESPACE"
 
@@ -66,9 +75,11 @@ function deploy_greptimedb_cluster() {
 
   deploy_etcd_cluster "$install_namespace"
 
-  helm install "$cluster_name" greptime/greptimedb-cluster \
+  helm upgrade --install "$cluster_name" greptime/greptimedb-cluster \
+    --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
+    --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     -n "$install_namespace"
 
   # Wait for greptimedb cluster to be ready.
@@ -101,15 +112,17 @@ function deploy_greptimedb_cluster_with_s3_storage() {
 
   deploy_etcd_cluster "$install_namespace"
 
-  helm install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
+  helm upgrade --install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
+    --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
-    --set storage.s3.bucket="$AWS_CI_TEST_BUCKET" \
-    --set storage.s3.region="$AWS_REGION" \
-    --set storage.s3.root="$DATA_ROOT" \
-    --set storage.credentials.secretName=s3-credentials \
-    --set storage.credentials.accessKeyId="$AWS_ACCESS_KEY_ID" \
-    --set storage.credentials.secretAccessKey="$AWS_SECRET_ACCESS_KEY"
+    --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
+    --set objectStorage.s3.bucket="$AWS_CI_TEST_BUCKET" \
+    --set objectStorage.s3.region="$AWS_REGION" \
+    --set objectStorage.s3.root="$DATA_ROOT" \
+    --set objectStorage.credentials.secretName=s3-credentials \
+    --set objectStorage.credentials.accessKeyId="$AWS_ACCESS_KEY_ID" \
+    --set objectStorage.credentials.secretAccessKey="$AWS_SECRET_ACCESS_KEY"
 
   # Wait for greptimedb cluster to be ready.
   while true; do
@@ -134,7 +147,8 @@ function deploy_greptimedb_cluster_with_s3_storage() {
 # Deploy standalone greptimedb.
 # It will expose cluster service ports as '34000', '34001', '34002', '34003' to local access.
 function deploy_standalone_greptimedb() {
-  helm install greptimedb-standalone greptime/greptimedb-standalone \
+  helm upgrade --install greptimedb-standalone greptime/greptimedb-standalone \
+    --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
     -n "$DEFAULT_INSTALL_NAMESPACE"
 
