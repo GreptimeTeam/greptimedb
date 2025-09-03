@@ -1,0 +1,82 @@
+-- Migrated from DuckDB test: Multiple window aggregate tests
+-- Tests window aggregate functions
+CREATE TABLE sales(region VARCHAR, "quarter" INTEGER, amount INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO sales VALUES 
+('North', 1, 1000, 1000), ('North', 2, 1200, 2000), ('North', 3, 1100, 3000),
+('South', 1, 800, 4000), ('South', 2, 900, 5000), ('South', 3, 950, 6000);
+
+Affected Rows: 6
+
+-- Running totals with SUM window function
+SELECT region, "quarter", amount, 
+  SUM(amount) OVER (PARTITION BY region ORDER BY "quarter") as running_total
+FROM sales ORDER BY region, "quarter";
+
++--------+---------+--------+---------------+
+| region | quarter | amount | running_total |
++--------+---------+--------+---------------+
+| North  | 1       | 1000   | 1000          |
+| North  | 2       | 1200   | 2200          |
+| North  | 3       | 1100   | 3300          |
+| South  | 1       | 800    | 800           |
+| South  | 2       | 900    | 1700          |
+| South  | 3       | 950    | 2650          |
++--------+---------+--------+---------------+
+
+-- Moving averages with AVG window function
+SELECT region, "quarter", amount,
+  AVG(amount) OVER (PARTITION BY region ORDER BY "quarter" ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) as moving_avg
+FROM sales ORDER BY region, "quarter";
+
++--------+---------+--------+------------+
+| region | quarter | amount | moving_avg |
++--------+---------+--------+------------+
+| North  | 1       | 1000   | 1000.0     |
+| North  | 2       | 1200   | 1100.0     |
+| North  | 3       | 1100   | 1150.0     |
+| South  | 1       | 800    | 800.0      |
+| South  | 2       | 900    | 850.0      |
+| South  | 3       | 950    | 925.0      |
++--------+---------+--------+------------+
+
+-- MIN/MAX window functions
+SELECT region, "quarter", amount,
+  MIN(amount) OVER (PARTITION BY region) as min_amount,
+  MAX(amount) OVER (PARTITION BY region) as max_amount
+FROM sales ORDER BY region, "quarter";
+
++--------+---------+--------+------------+------------+
+| region | quarter | amount | min_amount | max_amount |
++--------+---------+--------+------------+------------+
+| North  | 1       | 1000   | 1000       | 1200       |
+| North  | 2       | 1200   | 1000       | 1200       |
+| North  | 3       | 1100   | 1000       | 1200       |
+| South  | 1       | 800    | 800        | 950        |
+| South  | 2       | 900    | 800        | 950        |
+| South  | 3       | 950    | 800        | 950        |
++--------+---------+--------+------------+------------+
+
+-- COUNT window function
+SELECT region, "quarter", 
+  COUNT(*) OVER (PARTITION BY region) as region_count,
+  COUNT(*) OVER () as total_count
+FROM sales ORDER BY region, "quarter";
+
++--------+---------+--------------+-------------+
+| region | quarter | region_count | total_count |
++--------+---------+--------------+-------------+
+| North  | 1       | 3            | 6           |
+| North  | 2       | 3            | 6           |
+| North  | 3       | 3            | 6           |
+| South  | 1       | 3            | 6           |
+| South  | 2       | 3            | 6           |
+| South  | 3       | 3            | 6           |
++--------+---------+--------------+-------------+
+
+DROP TABLE sales;
+
+Affected Rows: 0
+
