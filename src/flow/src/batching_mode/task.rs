@@ -618,52 +618,51 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let (expire_lower_bound, expire_upper_bound) = match (
-            expire_time_window_bound,
-            &self.config.query_type,
-        ) {
-            (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
-            (None, QueryType::Sql) => {
-                // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
-                // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-                debug!(
-                        "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
+        let (expire_lower_bound, expire_upper_bound) =
+            match (expire_time_window_bound, &self.config.query_type) {
+                (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
+                (None, QueryType::Sql) => {
+                    // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
+                    // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
+                    debug!(
+                        "Flow id = {:?}, no time window, using the same query",
+                        self.config.flow_id
                     );
-                // clean dirty time window too, this could be from create flow's check_execute
-                let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
-                self.state.write().unwrap().dirty_time_windows.clean();
+                    // clean dirty time window too, this could be from create flow's check_execute
+                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-                if !is_dirty {
-                    // no dirty data, hence no need to update
-                    debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                    return Ok(None);
+                    if !is_dirty {
+                        // no dirty data, hence no need to update
+                        debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+                        return Ok(None);
+                    }
+
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
+
+                    return Ok(Some(PlanInfo { plan, filter: None }));
                 }
+                _ => {
+                    // clean for tql have no use for time window
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-                let plan = gen_plan_with_matching_schema(
-                    &self.config.query,
-                    query_ctx,
-                    engine,
-                    sink_table_schema.clone(),
-                )
-                .await?;
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
 
-                return Ok(Some(PlanInfo { plan, filter: None }));
-            }
-            _ => {
-                // clean for tql have no use for time window
-                self.state.write().unwrap().dirty_time_windows.clean();
-
-                let plan = gen_plan_with_matching_schema(
-                    &self.config.query,
-                    query_ctx,
-                    engine,
-                    sink_table_schema.clone(),
-                )
-                .await?;
-
-                return Ok(Some(PlanInfo { plan, filter: None }));
-            }
-        };
+                    return Ok(Some(PlanInfo { plan, filter: None }));
+                }
+            };
 
         debug!(
             "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
