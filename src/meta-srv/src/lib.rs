@@ -18,7 +18,6 @@
 #![feature(let_chains)]
 #![feature(duration_constructors_lite)]
 #![feature(duration_constructors)]
-#![feature(duration_constructors_lite)]
 
 pub mod bootstrap;
 pub mod cache_invalidator;
