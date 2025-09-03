@@ -371,7 +371,7 @@ impl VersionBuilder {
         self
     }
 
-    /// Sets truncated entty id.
+    /// Sets truncated entry id.
     pub(crate) fn truncated_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
         self.truncated_entry_id = entry_id;
         self
