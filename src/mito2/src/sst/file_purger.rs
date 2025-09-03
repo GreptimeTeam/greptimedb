@@ -131,12 +131,13 @@ impl FilePurger for LocalFilePurger {
                 error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             }
+            let file_id = file_meta.file_id;
             if let Err(e) = sst_layer
                 .intermediate_manager()
-                .prune_region_dir(&file_meta.region_id)
+                .prune_sst_dir(&file_meta.region_id, &file_id)
                 .await
             {
-                error!(e; "Failed to prune intermediate region directory, region_id: {}", file_meta.region_id);
+                error!(e; "Failed to prune intermediate sst directory, region_id: {}, file_id: {}", file_meta.region_id, file_id);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
