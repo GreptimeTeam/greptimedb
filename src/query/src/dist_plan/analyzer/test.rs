@@ -1293,7 +1293,8 @@ Limit: skip=0, fetch=1
 }
 
 #[test]
-fn transform_unalighed_join_with_alias() {
+fn transform_unaligned_join_with_alias() {
+    init_default_ut_logging();
     let left = NumbersTable::table(0);
     let right = NumbersTable::table(1);
     let left_source = Arc::new(DefaultTableSource::new(Arc::new(
@@ -1332,10 +1333,10 @@ fn transform_unalighed_join_with_alias() {
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
         "]]",
-        "    SubqueryAlias: right",
-        "      Projection: t.number",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t",
+        "    Projection: right.number",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "SubqueryAlias: right",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
