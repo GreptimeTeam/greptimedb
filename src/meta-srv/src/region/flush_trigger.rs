@@ -357,7 +357,8 @@ impl RegionFlushTrigger {
         let flush_instructions = leader_to_region_ids
             .into_iter()
             .map(|(leader, region_ids)| {
-                let flush_instruction = Instruction::FlushRegions(FlushRegions { region_ids });
+                let flush_instruction =
+                    Instruction::FlushRegions(FlushRegions::async_batch(region_ids));
                 (leader, flush_instruction)
             });
 
