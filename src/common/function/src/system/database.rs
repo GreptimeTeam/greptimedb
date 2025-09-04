@@ -78,7 +78,7 @@ impl Function for CurrentSchemaFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
@@ -98,7 +98,7 @@ impl Function for SessionUserFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
