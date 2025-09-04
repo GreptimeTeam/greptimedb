@@ -40,6 +40,7 @@ const REGION_ID: &str = "region_id";
 const TABLE_ID: &str = "table_id";
 const REGION_NUMBER: &str = "region_number";
 const REGION_ROWS: &str = "region_rows";
+const WRITE_BYTES: &str = "write_bytes";
 const DISK_SIZE: &str = "disk_size";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
@@ -57,6 +58,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `table_id`: The table id.
 /// - `region_number`: The region number.
 /// - `region_rows`: The number of rows in region.
+/// - `write_bytes`: The written bytes of the region.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
 /// - `manifest_size`: The manifest size in bytes.
@@ -84,6 +86,7 @@ impl InformationSchemaRegionStatistics {
             ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(REGION_NUMBER, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(REGION_ROWS, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(WRITE_BYTES, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(DISK_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MEMTABLE_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MANIFEST_SIZE, ConcreteDataType::uint64_datatype(), true),
@@ -147,6 +150,7 @@ struct InformationSchemaRegionStatisticsBuilder {
     table_ids: UInt32VectorBuilder,
     region_numbers: UInt32VectorBuilder,
     region_rows: UInt64VectorBuilder,
+    write_bytes: UInt64VectorBuilder,
     disk_sizes: UInt64VectorBuilder,
     memtable_sizes: UInt64VectorBuilder,
     manifest_sizes: UInt64VectorBuilder,
@@ -166,6 +170,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             table_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             region_numbers: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             region_rows: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            write_bytes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             disk_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             memtable_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             manifest_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
@@ -197,6 +202,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             (TABLE_ID, &Value::from(region_stat.id.table_id())),
             (REGION_NUMBER, &Value::from(region_stat.id.region_number())),
             (REGION_ROWS, &Value::from(region_stat.num_rows)),
+            (WRITE_BYTES, &Value::from(region_stat.write_bytes)),
             (DISK_SIZE, &Value::from(region_stat.approximate_bytes)),
             (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
             (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
@@ -216,6 +222,7 @@ impl InformationSchemaRegionStatisticsBuilder {
         self.region_numbers
             .push(Some(region_stat.id.region_number()));
         self.region_rows.push(Some(region_stat.num_rows));
+        self.write_bytes.push(Some(region_stat.write_bytes));
         self.disk_sizes.push(Some(region_stat.approximate_bytes));
         self.memtable_sizes.push(Some(region_stat.memtable_size));
         self.manifest_sizes.push(Some(region_stat.manifest_size));
@@ -232,6 +239,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.table_ids.finish()),
             Arc::new(self.region_numbers.finish()),
             Arc::new(self.region_rows.finish()),
+            Arc::new(self.write_bytes.finish()),
             Arc::new(self.disk_sizes.finish()),
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),
