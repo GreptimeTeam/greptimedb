@@ -84,13 +84,13 @@ impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> Itera
 }
 
 /// An async reader to dedup sorted record batches from a stream based on the dedup strategy.
-pub struct DedupReader<I, S> {
+pub struct FlatDedupReader<I, S> {
     stream: I,
     strategy: S,
     metrics: DedupMetrics,
 }
 
-impl<I, S> DedupReader<I, S> {
+impl<I, S> FlatDedupReader<I, S> {
     /// Creates a new dedup iterator.
     pub fn new(stream: I, strategy: S) -> Self {
         Self {
@@ -101,7 +101,9 @@ impl<I, S> DedupReader<I, S> {
     }
 }
 
-impl<I: Stream<Item = Result<RecordBatch>> + Unpin, S: RecordBatchDedupStrategy> DedupReader<I, S> {
+impl<I: Stream<Item = Result<RecordBatch>> + Unpin, S: RecordBatchDedupStrategy>
+    FlatDedupReader<I, S>
+{
     /// Returns the next deduplicated batch.
     async fn fetch_next_batch(&mut self) -> Result<Option<RecordBatch>> {
         while let Some(batch) = self.stream.try_next().await? {

@@ -37,7 +37,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu, UnexpectedSnafu};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
-use crate::read::flat_dedup::{self, FlatLastNonNull, FlatLastRow};
+use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
@@ -242,14 +242,14 @@ impl SeqScan {
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
                 MergeMode::LastRow => Box::pin(
-                    flat_dedup::DedupReader::new(
+                    FlatDedupReader::new(
                         reader.into_stream().boxed(),
                         FlatLastRow::new(stream_ctx.input.filter_deleted),
                     )
                     .into_stream(),
                 ) as _,
                 MergeMode::LastNonNull => Box::pin(
-                    flat_dedup::DedupReader::new(
+                    FlatDedupReader::new(
                         reader.into_stream().boxed(),
                         FlatLastNonNull::new(
                             mapper.field_column_start(),
