@@ -30,6 +30,8 @@ SELECT ts, host, min(floor(val::DOUBLE)) RANGE '5s' FROM host ALIGN '5s' ORDER B
 
 SELECT ts, host, floor(min(val) RANGE '5s') FROM host ALIGN '5s' ORDER BY host, ts;
 
+SELECT ts, host, approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+
 -- Test complex range expr calculate
 
 SELECT ts, host, (min(val) + max(val)) RANGE '20s' + 1.0 FROM host ALIGN '10s' ORDER BY host, ts;
