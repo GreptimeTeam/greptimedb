@@ -212,6 +212,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Whether to use flat format.
+    flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -236,6 +238,7 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -290,6 +293,13 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -374,8 +384,10 @@ impl ScanRegion {
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
-            None => ProjectionMapper::all(&self.version.metadata, false)?,
+            Some(p) => {
+                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), self.flat_format)?
+            }
+            None => ProjectionMapper::all(&self.version.metadata, self.flat_format)?,
         };
 
         let ssts = &self.version.ssts;
@@ -449,11 +461,6 @@ impl ScanRegion {
         let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
-        // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
-            None => ProjectionMapper::all(&self.version.metadata, false)?,
-        };
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -471,7 +478,8 @@ impl ScanRegion {
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_distribution(self.request.distribution);
+            .with_distribution(self.request.distribution)
+            .with_flat_format(self.flat_format);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
@@ -673,6 +681,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Whether to use flat format.
+    pub(crate) flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -701,6 +711,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -845,6 +856,13 @@ impl ScanInput {
         self
     }
 
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -894,6 +912,7 @@ impl ScanInput {
             .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
             .fulltext_index_applier(self.fulltext_index_applier.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .flat_format(self.flat_format)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {

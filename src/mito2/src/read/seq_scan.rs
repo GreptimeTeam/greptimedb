@@ -26,7 +26,7 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
@@ -37,16 +37,22 @@ use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu, UnexpectedSnafu};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
+use crate::read::flat_dedup::{self, FlatLastNonNull, FlatLastRow};
+use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::{RangeBuilderList, RangeMeta};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+    scan_file_ranges, scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
+    PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::read::{
+    scan_util, Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, ScannerMetrics, Source,
+};
 use crate::region::options::MergeMode;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -210,6 +216,49 @@ impl SeqScan {
         Ok(reader)
     }
 
+    /// Builds a flat reader to read sources that returns RecordBatch. If `semaphore` is provided, reads sources in parallel
+    /// if possible.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    pub(crate) async fn build_flat_reader_from_sources(
+        stream_ctx: &StreamContext,
+        sources: Vec<BoxedRecordBatchStream>,
+        _semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<BoxedRecordBatchStream> {
+        // TODO(yingwen): Consider parallel reading for flat sources
+
+        let mapper = stream_ctx.input.mapper.as_flat().unwrap();
+        let schema = mapper.input_arrow_schema();
+
+        let reader = FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE).await?;
+
+        let dedup = !stream_ctx.input.append_mode;
+        let reader = if dedup {
+            match stream_ctx.input.merge_mode {
+                MergeMode::LastRow => Box::pin(
+                    flat_dedup::DedupReader::new(
+                        reader.into_stream().boxed(),
+                        FlatLastRow::new(stream_ctx.input.filter_deleted),
+                    )
+                    .into_stream(),
+                ) as _,
+                MergeMode::LastNonNull => Box::pin(
+                    flat_dedup::DedupReader::new(
+                        reader.into_stream().boxed(),
+                        FlatLastNonNull::new(
+                            mapper.field_column_start(),
+                            stream_ctx.input.filter_deleted,
+                        ),
+                    )
+                    .into_stream(),
+                ) as _,
+            }
+        } else {
+            Box::pin(reader.into_stream()) as _
+        };
+
+        Ok(reader)
+    }
+
     /// Scans the given partition when the part list is set properly.
     /// Otherwise the returned stream might not contains any data.
     fn scan_partition_impl(
@@ -227,10 +276,15 @@ impl SeqScan {
         }
 
         let metrics = self.new_partition_metrics(ctx.explain_verbose, metrics_set, partition);
-
-        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
-
         let input = &self.stream_ctx.input;
+
+        let batch_stream = if input.flat_format {
+            // Use flat scan for bulk memtables
+            self.scan_flat_batch_in_partition(partition, metrics.clone())?
+        } else {
+            // Use regular batch scan for normal memtables
+            self.scan_batch_in_partition(partition, metrics.clone())?
+        };
         let record_batch_stream = ConvertBatchStream::new(
             batch_stream,
             input.mapper.clone(),
@@ -331,6 +385,79 @@ impl SeqScan {
                     let yield_start = Instant::now();
                     yield ScanBatch::Normal(Batch::empty());
                     metrics.yield_cost += yield_start.elapsed();
+                }
+
+                metrics.scan_cost += fetch_start.elapsed();
+                part_metrics.merge_metrics(&metrics);
+            }
+
+            part_metrics.on_finish();
+        };
+        Ok(Box::pin(stream))
+    }
+
+    fn scan_flat_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+    ) -> Result<ScanBatchStream> {
+        ensure!(
+            partition < self.properties.partitions.len(),
+            PartitionOutOfRangeSnafu {
+                given: partition,
+                all: self.properties.partitions.len(),
+            }
+        );
+
+        if self.properties.partitions[partition].is_empty() {
+            return Ok(Box::pin(futures::stream::empty()));
+        }
+
+        let stream_ctx = self.stream_ctx.clone();
+        let semaphore = self.new_semaphore();
+        let partition_ranges = self.properties.partitions[partition].clone();
+        let compaction = self.compaction;
+
+        let stream = try_stream! {
+            part_metrics.on_first_poll();
+
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                stream_ctx.input.num_files(),
+            ));
+            // Scans each part.
+            for part_range in partition_ranges {
+                let mut sources = Vec::new();
+                build_flat_sources(
+                    &stream_ctx,
+                    &part_range,
+                    compaction,
+                    &part_metrics,
+                    range_builder_list.clone(),
+                    &mut sources,
+                ).await?;
+
+                let mut metrics = ScannerMetrics::default();
+                let mut fetch_start = Instant::now();
+                let mut reader =
+                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone())
+                        .await?;
+
+                while let Some(record_batch) = reader.try_next().await? {
+                    metrics.scan_cost += fetch_start.elapsed();
+                    metrics.num_batches += 1;
+                    metrics.num_rows += record_batch.num_rows();
+
+                    debug_assert!(record_batch.num_rows() > 0);
+                    if record_batch.num_rows() == 0 {
+                        continue;
+                    }
+
+                    let yield_start = Instant::now();
+                    yield ScanBatch::RecordBatch(record_batch);
+                    metrics.yield_cost += yield_start.elapsed();
+
+                    fetch_start = Instant::now();
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
@@ -539,6 +666,59 @@ pub(crate) async fn build_sources(
             scan_util::maybe_scan_other_ranges(stream_ctx, *index, part_metrics).await?
         };
         sources.push(Source::Stream(stream));
+    }
+    Ok(())
+}
+
+/// Builds flat sources for the partition range and push them to the `sources` vector.
+pub(crate) async fn build_flat_sources(
+    stream_ctx: &Arc<StreamContext>,
+    part_range: &PartitionRange,
+    compaction: bool,
+    part_metrics: &PartitionMetrics,
+    range_builder_list: Arc<RangeBuilderList>,
+    sources: &mut Vec<BoxedRecordBatchStream>,
+) -> Result<()> {
+    // Gets range meta.
+    let range_meta = &stream_ctx.ranges[part_range.identifier];
+    #[cfg(debug_assertions)]
+    if compaction {
+        // Compaction expects input sources are not been split.
+        debug_assert_eq!(range_meta.indices.len(), range_meta.row_group_indices.len());
+        for (i, row_group_idx) in range_meta.row_group_indices.iter().enumerate() {
+            // It should scan all row groups.
+            debug_assert_eq!(
+                -1, row_group_idx.row_group_index,
+                "Expect {} range scan all row groups, given: {}",
+                i, row_group_idx.row_group_index,
+            );
+        }
+    }
+
+    sources.reserve(range_meta.row_group_indices.len());
+    for index in &range_meta.row_group_indices {
+        let stream = if stream_ctx.is_mem_range_index(*index) {
+            let stream = scan_flat_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+            Box::pin(stream) as _
+        } else if stream_ctx.is_file_range_index(*index) {
+            let read_type = if compaction {
+                "compaction"
+            } else {
+                "seq_scan_files"
+            };
+            let stream = scan_flat_file_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                read_type,
+                range_builder_list.clone(),
+            )
+            .await?;
+            Box::pin(stream) as _
+        } else {
+            scan_util::maybe_scan_flat_other_ranges(stream_ctx, *index, part_metrics).await?
+        };
+        sources.push(stream);
     }
     Ok(())
 }
