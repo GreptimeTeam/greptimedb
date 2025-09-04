@@ -332,6 +332,14 @@ impl ReadFormat {
         Some(Arc::new(UInt64Array::from_iter(values)))
     }
 
+    /// Sets the sequence number to override.
+    pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
+        match self {
+            ReadFormat::PrimaryKey(format) => format.set_override_sequence(sequence),
+            ReadFormat::Flat(format) => format.set_override_sequence(sequence),
+        }
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         match self {
