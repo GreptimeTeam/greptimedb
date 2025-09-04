@@ -221,10 +221,17 @@ impl SeqScan {
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn build_flat_reader_from_sources(
         stream_ctx: &StreamContext,
-        sources: Vec<BoxedRecordBatchStream>,
-        _semaphore: Option<Arc<Semaphore>>,
+        mut sources: Vec<BoxedRecordBatchStream>,
+        semaphore: Option<Arc<Semaphore>>,
     ) -> Result<BoxedRecordBatchStream> {
-        // TODO(yingwen): Consider parallel reading for flat sources
+        if let Some(semaphore) = semaphore.as_ref() {
+            // Read sources in parallel.
+            if sources.len() > 1 {
+                sources = stream_ctx
+                    .input
+                    .create_parallel_flat_sources(sources, semaphore.clone())?;
+            }
+        }
 
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
         let schema = mapper.input_arrow_schema();
