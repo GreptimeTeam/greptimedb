@@ -442,10 +442,6 @@ impl MitoRegion {
                     )
                     .await;
             }
-
-            manager.maybe_do_checkpoint_with_state(RegionRoleState::Leader(
-                RegionLeaderState::Writable,
-            ));
         }
 
         Ok(())

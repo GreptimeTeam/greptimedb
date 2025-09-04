@@ -658,8 +658,7 @@ async fn open_all_regions(
                     e; "failed to convert region {region_id} to leader"
                 );
             } else {
-                // In standalone mode, finalize leadership: persist backfilled metadata and maybe checkpoint.
-                // This call is a no-op for state but runs finalize logic under manifest lock.
+                // Finalize leadership: persist backfilled metadata.
                 if let SetRegionRoleStateResponse::InvalidTransition(err) = region_server
                     .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
                     .await?

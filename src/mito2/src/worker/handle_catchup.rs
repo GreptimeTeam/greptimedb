@@ -20,7 +20,7 @@ use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use snafu::ensure;
 use store_api::logstore::LogStore;
-use store_api::region_engine::RegionRole;
+use store_api::region_engine::{RegionRole, SettableRegionRoleState};
 use store_api::region_request::{AffectedRows, RegionCatchupRequest};
 use store_api::storage::RegionId;
 use tokio::time::Instant;
@@ -126,6 +126,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if request.set_writable {
             region.set_role(RegionRole::Leader);
+            // Finalize leadership: persist backfilled metadata.
+            region
+                .set_role_state_gracefully(SettableRegionRoleState::Leader)
+                .await?;
         }
 
         Ok(0)

@@ -21,7 +21,6 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use common_telemetry::init_default_ut_logging;
 use either::Either;
 use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
@@ -579,7 +578,7 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
     let meta = engine.get_region(region_id).unwrap().metadata();
     assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
 
-    // Set leader and trigger checkpoint
+    // Set leader and trigger backfill
     engine
         .set_region_role(region_id, RegionRole::Leader)
         .unwrap();
