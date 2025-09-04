@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
@@ -43,10 +43,7 @@ impl Function for STContains {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
             Volatility::Stable,
         )
     }
@@ -97,10 +94,7 @@ impl Function for STWithin {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
             Volatility::Stable,
         )
     }
@@ -151,10 +145,7 @@ impl Function for STIntersects {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
             Volatility::Stable,
         )
     }

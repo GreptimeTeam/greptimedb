@@ -17,7 +17,8 @@ use std::iter::repeat_n;
 use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Volatility;
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
@@ -96,14 +97,8 @@ impl Function for MatchesTermFunction {
         Ok(ConcreteDataType::boolean_datatype())
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::exact(
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> Signature {
+        Signature::exact(vec![DataType::Utf8, DataType::Utf8], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

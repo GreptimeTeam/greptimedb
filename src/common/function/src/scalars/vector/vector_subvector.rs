@@ -16,8 +16,8 @@ use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
@@ -59,16 +59,8 @@ impl Function for VectorSubvectorFunction {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::string_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::binary_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                    ConcreteDataType::int64_datatype(),
-                ]),
+                TypeSignature::Exact(vec![DataType::Utf8, DataType::Int64, DataType::Int64]),
+                TypeSignature::Exact(vec![DataType::Binary, DataType::Int64, DataType::Int64]),
             ],
             Volatility::Immutable,
         )

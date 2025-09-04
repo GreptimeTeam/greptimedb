@@ -15,8 +15,8 @@
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
@@ -46,10 +46,7 @@ impl Function for STDistance {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
             Volatility::Stable,
         )
     }
@@ -100,10 +97,7 @@ impl Function for STDistanceSphere {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
             Volatility::Stable,
         )
     }
@@ -164,7 +158,7 @@ impl Function for STArea {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
+            TypeSignature::Exact(vec![DataType::Utf8]),
             Volatility::Stable,
         )
     }

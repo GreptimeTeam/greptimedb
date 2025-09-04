@@ -33,6 +33,7 @@ use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF};
 use datafusion::prelude::create_udaf;
+use datafusion_expr::Volatility;
 use datatypes::arrow::datatypes::DataType;
 use hyperloglogplus::{HyperLogLog, HyperLogLogPlus};
 

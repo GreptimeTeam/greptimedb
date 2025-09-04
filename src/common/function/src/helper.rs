@@ -16,14 +16,15 @@ use api::v1::meta::ResolveStrategy;
 use common_query::error::{
     InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result, UnsupportedInputDataTypeSnafu,
 };
-use common_query::prelude::{Signature, TypeSignature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::cast::cast;
 use datatypes::value::ValueRef;
 use snafu::{OptionExt, ResultExt};
 
 /// Create a function signature with oneof signatures of interleaving two arguments.
-pub fn one_of_sigs2(args1: Vec<ConcreteDataType>, args2: Vec<ConcreteDataType>) -> Signature {
+pub(crate) fn one_of_sigs2(args1: Vec<DataType>, args2: Vec<DataType>) -> Signature {
     let mut sigs = Vec::with_capacity(args1.len() * args2.len());
 
     for arg1 in &args1 {

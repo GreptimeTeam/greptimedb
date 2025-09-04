@@ -15,8 +15,9 @@
 use std::fmt;
 
 use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
+use datafusion_expr::Signature;
 use datatypes::arrow::compute::kernels::numeric;
+use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, ResultExt};
@@ -44,16 +45,16 @@ impl Function for DateAddFunction {
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
             vec![
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::timestamp_second_datatype(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                ConcreteDataType::timestamp_microsecond_datatype(),
-                ConcreteDataType::timestamp_nanosecond_datatype(),
+                DataType::Date32,
+                DataType::Timestamp(TimeUnit::Second, None),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
             ],
             vec![
-                ConcreteDataType::interval_month_day_nano_datatype(),
-                ConcreteDataType::interval_year_month_datatype(),
-                ConcreteDataType::interval_day_time_datatype(),
+                DataType::Interval(IntervalUnit::MonthDayNano),
+                DataType::Interval(IntervalUnit::YearMonth),
+                DataType::Interval(IntervalUnit::DayTime),
             ],
         )
     }
@@ -90,7 +91,7 @@ impl fmt::Display for DateAddFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::{TypeSignature, Volatility};
+    use datafusion_expr::{TypeSignature, Volatility};
     use datatypes::arrow::datatypes::IntervalDayTime;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;

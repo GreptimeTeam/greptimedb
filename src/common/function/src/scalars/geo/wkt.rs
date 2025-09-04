@@ -12,29 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::LazyLock;
+
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
 use derive_more::Display;
 use geo_types::{Geometry, Point};
-use once_cell::sync::Lazy;
 use snafu::ResultExt;
 use wkt::{ToWkt, TryFromWkt};
 
 use crate::function::{Function, FunctionContext};
 use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
 
-static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::float32_datatype(),
-        ConcreteDataType::float64_datatype(),
-    ]
-});
+static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
 #[derive(Clone, Debug, Default, Display)]

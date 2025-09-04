@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::type_coercion::aggregates::INTEGERS;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
@@ -28,63 +30,22 @@ use datatypes::vectors::{
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
-use once_cell::sync::Lazy;
 use snafu::ResultExt;
 
 use crate::function::{Function, FunctionContext};
 use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 
-static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::string_datatype(),
-    ]
-});
+static CELL_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Int64, DataType::UInt64, DataType::Utf8]);
 
-static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::float32_datatype(),
-        ConcreteDataType::float64_datatype(),
-    ]
-});
-static RESOLUTION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int8_datatype(),
-        ConcreteDataType::int16_datatype(),
-        ConcreteDataType::int32_datatype(),
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint8_datatype(),
-        ConcreteDataType::uint16_datatype(),
-        ConcreteDataType::uint32_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
-static DISTANCE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int8_datatype(),
-        ConcreteDataType::int16_datatype(),
-        ConcreteDataType::int32_datatype(),
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint8_datatype(),
-        ConcreteDataType::uint16_datatype(),
-        ConcreteDataType::uint32_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static POSITION_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int8_datatype(),
-        ConcreteDataType::int16_datatype(),
-        ConcreteDataType::int32_datatype(),
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint8_datatype(),
-        ConcreteDataType::uint16_datatype(),
-        ConcreteDataType::uint32_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static RESOLUTION_TYPES: &[DataType] = INTEGERS;
+
+static DISTANCE_TYPES: &[DataType] = INTEGERS;
+
+static POSITION_TYPES: &[DataType] = INTEGERS;
 
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///
@@ -105,7 +66,7 @@ impl Function for H3LatLngToCell {
     fn signature(&self) -> Signature {
         let mut signatures = Vec::new();
         for coord_type in COORDINATE_TYPES.as_slice() {
-            for resolution_type in RESOLUTION_TYPES.as_slice() {
+            for resolution_type in RESOLUTION_TYPES {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -177,7 +138,7 @@ impl Function for H3LatLngToCellString {
     fn signature(&self) -> Signature {
         let mut signatures = Vec::new();
         for coord_type in COORDINATE_TYPES.as_slice() {
-            for resolution_type in RESOLUTION_TYPES.as_slice() {
+            for resolution_type in RESOLUTION_TYPES {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -280,7 +241,7 @@ impl Function for H3StringToCell {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
+            TypeSignature::Exact(vec![DataType::Utf8]),
             Volatility::Stable,
         )
     }
@@ -692,9 +653,9 @@ impl Function for H3ChildPosToCell {
     fn signature(&self) -> Signature {
         let mut signatures =
             Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
-        for position_type in POSITION_TYPES.as_slice() {
+        for position_type in POSITION_TYPES {
             for cell_type in CELL_TYPES.as_slice() {
-                for resolution_type in RESOLUTION_TYPES.as_slice() {
+                for resolution_type in RESOLUTION_TYPES {
                     signatures.push(TypeSignature::Exact(vec![
                         position_type.clone(),
                         cell_type.clone(),
@@ -969,10 +930,10 @@ impl Function for H3CellContains {
 
     fn signature(&self) -> Signature {
         let multi_cell_types = vec![
-            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::uint64_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
-            ConcreteDataType::string_datatype(),
+            DataType::new_list(DataType::Int64, true),
+            DataType::new_list(DataType::UInt64, true),
+            DataType::new_list(DataType::Utf8, true),
+            DataType::Utf8,
         ];
 
         let mut signatures = Vec::with_capacity(multi_cell_types.len() * CELL_TYPES.len());
@@ -1204,7 +1165,7 @@ fn signature_of_double_cells() -> Signature {
 fn signature_of_cell_and_resolution() -> Signature {
     let mut signatures = Vec::with_capacity(CELL_TYPES.len() * RESOLUTION_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for resolution_type in RESOLUTION_TYPES.as_slice() {
+        for resolution_type in RESOLUTION_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 resolution_type.clone(),
@@ -1217,7 +1178,7 @@ fn signature_of_cell_and_resolution() -> Signature {
 fn signature_of_cell_and_distance() -> Signature {
     let mut signatures = Vec::with_capacity(CELL_TYPES.len() * DISTANCE_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for distance_type in DISTANCE_TYPES.as_slice() {
+        for distance_type in DISTANCE_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 distance_type.clone(),

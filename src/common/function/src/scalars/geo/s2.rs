@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::LazyLock;
+
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::Value;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt64VectorBuilder, VectorRef};
 use derive_more::Display;
-use once_cell::sync::Lazy;
 use s2::cellid::{CellID, MAX_LEVEL};
 use s2::latlng::LatLng;
 use snafu::ensure;
@@ -28,32 +29,13 @@ use snafu::ensure;
 use crate::function::{Function, FunctionContext};
 use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 
-static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static CELL_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Int64, DataType::UInt64]);
 
-static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::float32_datatype(),
-        ConcreteDataType::float64_datatype(),
-    ]
-});
+static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
+    LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static LEVEL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
-    vec![
-        ConcreteDataType::int8_datatype(),
-        ConcreteDataType::int16_datatype(),
-        ConcreteDataType::int32_datatype(),
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::uint8_datatype(),
-        ConcreteDataType::uint16_datatype(),
-        ConcreteDataType::uint32_datatype(),
-        ConcreteDataType::uint64_datatype(),
-    ]
-});
+static LEVEL_TYPES: &[DataType] = datafusion_expr::type_coercion::aggregates::INTEGERS;
 
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///
@@ -242,7 +224,7 @@ fn signature_of_cell() -> Signature {
 fn signature_of_cell_and_level() -> Signature {
     let mut signatures = Vec::with_capacity(CELL_TYPES.len() * LEVEL_TYPES.len());
     for cell_type in CELL_TYPES.as_slice() {
-        for level_type in LEVEL_TYPES.as_slice() {
+        for level_type in LEVEL_TYPES {
             signatures.push(TypeSignature::Exact(vec![
                 cell_type.clone(),
                 level_type.clone(),

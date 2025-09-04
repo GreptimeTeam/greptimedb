@@ -16,7 +16,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
@@ -37,10 +38,7 @@ impl Function for TestAndFunction {
 
     fn signature(&self) -> Signature {
         Signature::exact(
-            vec![
-                ConcreteDataType::boolean_datatype(),
-                ConcreteDataType::boolean_datatype(),
-            ],
+            vec![DataType::Boolean, DataType::Boolean],
             Volatility::Immutable,
         )
     }

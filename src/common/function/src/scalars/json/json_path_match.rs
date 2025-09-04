@@ -15,8 +15,8 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -42,10 +42,7 @@ impl Function for JsonPathMatchFunction {
 
     fn signature(&self) -> Signature {
         Signature::exact(
-            vec![
-                ConcreteDataType::json_datatype(),
-                ConcreteDataType::string_datatype(),
-            ],
+            vec![DataType::Binary, DataType::Utf8],
             Volatility::Immutable,
         )
     }
@@ -117,7 +114,7 @@ impl Display for JsonPathMatchFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
+    use datafusion_expr::TypeSignature;
     use datatypes::vectors::{BinaryVector, StringVector};
 
     use super::*;
@@ -138,7 +135,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
-                         } if valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()],
+                         } if valid_types == vec![DataType::Binary, DataType::Utf8],
         ));
 
         let json_strings = [

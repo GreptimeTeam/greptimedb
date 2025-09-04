@@ -15,7 +15,8 @@
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::vector_type_value_to_string;
@@ -40,10 +41,7 @@ impl Function for VectorToStringFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![ConcreteDataType::binary_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
