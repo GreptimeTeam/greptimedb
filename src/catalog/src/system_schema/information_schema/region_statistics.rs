@@ -58,7 +58,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `table_id`: The table id.
 /// - `region_number`: The region number.
 /// - `region_rows`: The number of rows in region.
-/// - `write_bytes`: The written bytes of the region.
+/// - `write_bytes`: The total bytes written of the region since region opened.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
 /// - `manifest_size`: The manifest size in bytes.
