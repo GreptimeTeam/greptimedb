@@ -436,7 +436,7 @@ impl PlanRewriter {
                 self.get_aliased_partition_columns()
             );
         } else if let LogicalPlan::TableScan(table_scan) = node {
-            self.alias_tracker = AliasTracker::new(table_scan);
+            self.alias_tracker = AliasTracker::from_table_scan(table_scan);
             debug!(
                 "Initialize partition columns: {:?} with table={}",
                 self.get_aliased_partition_columns(),
