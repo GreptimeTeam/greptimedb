@@ -41,7 +41,9 @@ use crate::error::{
     FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
     UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{
+    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -321,7 +323,7 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
-        let _manager = self.manifest_ctx.manifest_manager.write().await;
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -421,6 +423,29 @@ impl MitoRegion {
                     }
                 }
             }
+        }
+
+        // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata
+        // and trigger a manifest checkpoint.
+        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
+            let manifest_meta = &manager.manifest().metadata;
+            let current_meta = &self.version().metadata;
+            if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
+                let action = RegionMetaAction::Change(RegionChange {
+                    metadata: current_meta.clone(),
+                });
+                let _ = manager
+                    .update(
+                        RegionMetaActionList::with_action(action),
+                        RegionRoleState::Leader(RegionLeaderState::Writable),
+                    )
+                    .await;
+            }
+
+            manager.maybe_do_checkpoint_with_state(RegionRoleState::Leader(
+                RegionLeaderState::Writable,
+            ));
         }
 
         Ok(())

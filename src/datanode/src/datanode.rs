@@ -48,7 +48,9 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::WAL_DIR;
-use store_api::region_engine::{RegionEngineRef, RegionRole};
+use store_api::region_engine::{
+    RegionEngineRef, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -655,6 +657,17 @@ async fn open_all_regions(
                 error!(
                     e; "failed to convert region {region_id} to leader"
                 );
+            } else {
+                // In standalone mode, finalize leadership: persist backfilled metadata and maybe checkpoint.
+                // This call is a no-op for state but runs finalize logic under manifest lock.
+                if let SetRegionRoleStateResponse::InvalidTransition(err) = region_server
+                    .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+                    .await?
+                {
+                    error!(
+                        err; "failed to convert region {region_id} to leader"
+                    );
+                }
             }
         }
     }

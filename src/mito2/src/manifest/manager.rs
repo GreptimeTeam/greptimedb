@@ -598,6 +598,13 @@ impl RegionManifestManager {
     pub(crate) fn checkpointer(&self) -> &Checkpointer {
         &self.checkpointer
     }
+
+    /// Triggers a checkpoint if conditions are met.
+    /// Safe to call while holding the write lock of this manager.
+    pub fn maybe_do_checkpoint_with_state(&self, region_state: RegionRoleState) {
+        self.checkpointer
+            .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
+    }
 }
 
 #[cfg(test)]

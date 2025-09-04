@@ -46,9 +46,7 @@ use crate::error::{
     EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
     Result, StaleLogEntrySnafu,
 };
-use crate::manifest::action::{
-    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
-};
+use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::bulk::part::BulkPart;
@@ -389,7 +387,7 @@ impl RegionOpener {
             &self.region_dir(),
             &self.object_store_manager,
         )?;
-        let Some(mut manifest_manager) = RegionManifestManager::open(
+        let Some(manifest_manager) = RegionManifestManager::open(
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
@@ -399,32 +397,18 @@ impl RegionOpener {
             return Ok(None);
         };
 
-        // Backfill partition_expr if missing.
-        {
-            let manifest = manifest_manager.manifest();
-            if manifest.metadata.partition_expr.is_none() {
-                let expr_json = self.partition_expr_fetcher.fetch_expr(self.region_id).await;
-                if let Some(expr_json) = expr_json {
-                    let metadata = manifest.metadata.as_ref().clone();
-                    let mut builder = RegionMetadataBuilder::from_existing(metadata);
-                    builder.partition_expr_json(Some(expr_json));
-                    let new_meta = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
-
-                    let action = RegionMetaAction::Change(RegionChange { metadata: new_meta });
-                    // Use follower state during open.
-                    let _ = manifest_manager
-                        .update(
-                            RegionMetaActionList::with_action(action),
-                            RegionRoleState::Follower,
-                        )
-                        .await?;
-                }
-            }
-        }
-
-        // Re-fetch manifest after potential update.
+        // Backfill `partition_expr` if missing. Use the backfilled metadata in-memory during this open.
         let manifest = manifest_manager.manifest();
-        let metadata = manifest.metadata.clone();
+        let metadata = if manifest.metadata.partition_expr.is_none()
+            && let Some(expr_json) = self.partition_expr_fetcher.fetch_expr(self.region_id).await
+        {
+            let metadata = manifest.metadata.as_ref().clone();
+            let mut builder = RegionMetadataBuilder::from_existing(metadata);
+            builder.partition_expr_json(Some(expr_json));
+            Arc::new(builder.build().context(InvalidMetadataSnafu)?)
+        } else {
+            manifest.metadata.clone()
+        };
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
