@@ -438,10 +438,9 @@ lazy_static! {
             &[WORKER_LABEL]
         ).unwrap();
     /// Number of ref files per table
-    pub static ref GC_TABLE_REF_FILE_CNT: IntGaugeVec = register_int_gauge_vec!(
-            "greptime_gc_table_ref_file_count",
-            "gc table ref file count",
-            &["table_id"]
+    pub static ref GC_REF_FILE_CNT: IntGauge = register_int_gauge!(
+            "greptime_gc_ref_file_count",
+            "gc ref file count",
         ).unwrap();
     /// Total number of stalled write requests.
     pub static ref WRITE_STALL_TOTAL: IntCounter = register_int_counter!(

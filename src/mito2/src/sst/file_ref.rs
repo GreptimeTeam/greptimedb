@@ -22,7 +22,7 @@ use store_api::storage::{RegionId, TableId};
 use store_api::ManifestVersion;
 
 use crate::error::Result;
-use crate::metrics::GC_TABLE_REF_FILE_CNT;
+use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::RegionMapRef;
 use crate::sst::file::{FileId, FileMeta};
 
@@ -159,7 +159,7 @@ impl FileReferenceManager {
     /// The access layer will be used to upload ref file to object storage.
     pub fn add_file(&self, file_meta: &FileMeta) {
         let table_id = file_meta.region_id.table_id();
-        let mut file_cnt = 1;
+        let mut is_new = false;
         {
             let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
             self.files_per_table
@@ -168,16 +168,18 @@ impl FileReferenceManager {
                     refs.files
                         .entry(file_ref.clone())
                         .and_modify(|count| *count += 1)
-                        .or_insert(1);
-                    file_cnt = refs.files.len();
+                        .or_insert_with(|| {
+                            is_new = true;
+                            1
+                        });
                 })
                 .or_insert_with(|| TableFileRefs {
                     files: HashMap::from_iter([(file_ref, 1)]),
                 });
         }
-        GC_TABLE_REF_FILE_CNT
-            .with_label_values(&[&table_id.to_string()])
-            .set(file_cnt as i64);
+        if is_new {
+            GC_REF_FILE_CNT.inc();
+        }
     }
 
     /// Removes a file reference.
@@ -187,10 +189,10 @@ impl FileReferenceManager {
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
 
         let mut remove_table_entry = false;
+        let mut remove_file_ref = false;
         let mut file_cnt = 0;
 
         let table_ref = self.files_per_table.entry(table_id).and_modify(|refs| {
-            let mut remove_file_ref = false;
             let entry = refs.files.entry(file_ref.clone()).and_modify(|count| {
                 if *count > 0 {
                     *count -= 1;
@@ -217,10 +219,9 @@ impl FileReferenceManager {
         {
             o.remove_entry();
         }
-
-        GC_TABLE_REF_FILE_CNT
-            .with_label_values(&[&table_id.to_string()])
-            .set(file_cnt as i64);
+        if remove_file_ref {
+            GC_REF_FILE_CNT.dec();
+        }
     }
 }
 
