@@ -316,15 +316,19 @@ impl BulkMemtable {
     }
 
     /// Updates memtable stats.
+    ///
+    /// Please update this inside the write lock scope.
     fn update_stats(&self, stats: WriteMetrics) {
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
 
-        self.max_timestamp.fetch_max(stats.max_ts, Ordering::SeqCst);
-        self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
+        self.max_timestamp
+            .fetch_max(stats.max_ts, Ordering::Relaxed);
+        self.min_timestamp
+            .fetch_min(stats.min_ts, Ordering::Relaxed);
         self.max_sequence
-            .fetch_max(stats.max_sequence, Ordering::SeqCst);
-        self.num_rows.fetch_add(stats.num_rows, Ordering::SeqCst);
+            .fetch_max(stats.max_sequence, Ordering::Relaxed);
+        self.num_rows.fetch_add(stats.num_rows, Ordering::Relaxed);
     }
 
     /// Returns the estimated time series count.
