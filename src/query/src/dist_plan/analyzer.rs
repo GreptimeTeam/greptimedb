@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -230,7 +230,7 @@ struct PlanRewriter {
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
     /// Partition columns of the table in current pass
-    partition_cols: Option<Vec<String>>,
+    partition_cols: Option<AliasMapping>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
     /// ```ignore
@@ -313,7 +313,7 @@ impl PlanRewriter {
         if self.expand_on_next_part_cond_trans_commutative {
             // since `plan` is parent to current node, and partition columns to be checked
             // should come from `plan`'s child, so `at_level` should be `self.level` which is current node's level
-            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns(plan)?);
+            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns()?);
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -335,7 +335,7 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(plan, self.get_aliased_partition_columns(plan)?) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -430,42 +430,31 @@ impl PlanRewriter {
     }
 
     /// Get the aliased partition columns at given node's input position
-    fn get_aliased_partition_columns(&self, node: &LogicalPlan) -> DfResult<Option<AliasMapping>> {
-        let plan = node.inputs().get(0).cloned().ok_or_else(|| {
-            datafusion_common::DataFusionError::Internal(format!(
-                "get_aliased_partition_columns: node has no child: {node}"
-            ))
-        })?;
-        if let Some(part_cols) = self.partition_cols.as_ref() {
-            let mut mapping = aliased_columns_for(
-                part_cols.iter().map(Column::from).collect(),
-                plan.clone(),
-                None,
-            )?
-            .into_iter()
-            .map(|(k, v)| (k.name, v))
-            .collect::<HashMap<_, _>>();
-
-            for part_col in part_cols {
-                // fill missing partition columns with empty set, so later handling know
-                // different between no partition column and partition column with no alias
-                mapping.entry(part_col.clone()).or_default();
-            }
-
-            common_telemetry::debug!(
-                "At node {}, aliased partition columns: {mapping:?}",
-                plan.display()
-            );
-            Ok(Some(mapping))
-        } else {
-            Ok(None)
-        }
+    fn get_aliased_partition_columns(&self) -> DfResult<Option<AliasMapping>> {
+        Ok(self.partition_cols.clone())
     }
 
-    fn maybe_set_partitions(&mut self, plan: &LogicalPlan) {
-        if self.partition_cols.is_some() {
-            // only need to set once
-            return;
+    fn maybe_set_partitions(&mut self, plan: &LogicalPlan) -> DfResult<()> {
+        if let Some(part_cols) = &mut self.partition_cols {
+            // update partition alias
+            let child = plan.inputs().first().cloned().ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(
+                    "PlanRewriter: maybe_set_partitions: plan has no child".to_string(),
+                )
+            })?;
+
+            for (_col_name, alias_set) in part_cols.iter_mut() {
+                let aliased_cols = aliased_columns_for(alias_set.clone(), plan, Some(child))?;
+                *alias_set = aliased_cols.into_values().flatten().collect();
+            }
+
+            debug!(
+                "PlanRewriter: maybe_set_partitions: updated partition columns: {:?} at plan: {}",
+                part_cols,
+                plan.display()
+            );
+
+            return Ok(());
         }
 
         if let LogicalPlan::TableScan(table_scan) = plan {
@@ -505,11 +494,23 @@ impl PlanRewriter {
                             partition_cols
                                 .push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
                         }
-                        self.partition_cols = Some(partition_cols);
+                        self.partition_cols = Some(
+                            partition_cols
+                                .into_iter()
+                                .map(|c| {
+                                    let index =
+                                        plan.schema().index_of_column_by_name(None, &c).unwrap();
+                                    let column = plan.schema().columns()[index].clone();
+                                    (c.clone(), HashSet::from([column]))
+                                })
+                                .collect(),
+                        );
                     }
                 }
             }
         }
+
+        Ok(())
     }
 
     /// pop one stack item and reduce the level by 1
@@ -541,7 +542,12 @@ impl PlanRewriter {
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
-            self.partition_cols.clone().unwrap_or_default(),
+            self.partition_cols
+                .clone()
+                .unwrap_or_default()
+                .keys()
+                .cloned()
+                .collect(),
         )
         .into_logical_plan();
 
@@ -695,7 +701,7 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(Transformed::no(node));
         }
 
-        self.maybe_set_partitions(&node);
+        self.maybe_set_partitions(&node)?;
 
         let Some(parent) = self.get_parent() else {
             debug!("Plan Rewriter: expand now for no parent found for node: {node}");
