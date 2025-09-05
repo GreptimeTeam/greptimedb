@@ -611,6 +611,63 @@ impl RegionManifestManager {
     pub(crate) fn checkpointer(&self) -> &Checkpointer {
         &self.checkpointer
     }
+
+    /// Merge all staged manifest actions into a single action list ready for submission.
+    /// This collects all staging manifests, applies them sequentially, and returns the merged actions.
+    pub(crate) async fn merge_staged_actions(
+        &mut self,
+        region_state: RegionRoleState,
+    ) -> Result<Option<RegionMetaActionList>> {
+        // Only merge if we're in staging mode
+        if region_state != RegionRoleState::Leader(RegionLeaderState::Staging) {
+            return Ok(None);
+        }
+
+        // Fetch all staging manifests
+        let staging_manifests = self.store.fetch_staging_manifests().await?;
+
+        if staging_manifests.is_empty() {
+            info!(
+                "No staging manifests to merge for region {}",
+                self.manifest.metadata.region_id
+            );
+            return Ok(None);
+        }
+
+        info!(
+            "Merging {} staging manifests for region {}",
+            staging_manifests.len(),
+            self.manifest.metadata.region_id
+        );
+
+        // Start with current manifest state as the base
+        let mut merged_actions = Vec::new();
+        let mut latest_version = self.last_version();
+
+        // Apply all staging actions in order
+        for (manifest_version, raw_action_list) in staging_manifests {
+            let action_list = RegionMetaActionList::decode(&raw_action_list)?;
+
+            for action in action_list.actions {
+                merged_actions.push(action);
+            }
+
+            latest_version = latest_version.max(manifest_version);
+        }
+
+        if merged_actions.is_empty() {
+            return Ok(None);
+        }
+
+        info!(
+            "Successfully merged {} actions from staging manifests for region {}, latest version: {}",
+            merged_actions.len(),
+            self.manifest.metadata.region_id,
+            latest_version
+        );
+
+        Ok(Some(RegionMetaActionList::new(merged_actions)))
+    }
 }
 
 #[cfg(test)]
