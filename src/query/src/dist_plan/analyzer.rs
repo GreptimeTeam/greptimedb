@@ -32,7 +32,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::utils::LayeredAliasTracker;
+use crate::dist_plan::analyzer::utils::aliased_columns_for;
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
@@ -231,7 +231,6 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
-    layered_alias_tracker: Option<LayeredAliasTracker>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
     /// ```ignore
@@ -289,7 +288,7 @@ impl PlanRewriter {
     }
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
-    fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
+    fn should_expand(&mut self, plan: &LogicalPlan) -> DfResult<bool> {
         debug!(
             "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
@@ -303,19 +302,18 @@ impl PlanRewriter {
             .encode(plan, DefaultSerializer)
             .is_err()
         {
-            return true;
+            return Ok(true);
         }
 
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
-            return true;
+            return Ok(true);
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
             // since `plan` is parent to current node, and partition columns to be checked
             // should come from `plan`'s child, so `at_level` should be `self.level` which is current node's level
-            let comm =
-                Categorizer::check_plan(plan, self.get_aliased_partition_columns(self.level));
+            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns(plan)?);
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -331,13 +329,13 @@ impl PlanRewriter {
                     // again a new node that can be push down, we should just
                     // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
-                    return true;
+                    return Ok(true);
                 }
                 _ => (),
             }
         }
 
-        match Categorizer::check_plan(plan, self.get_aliased_partition_columns(self.level)) {
+        match Categorizer::check_plan(plan, self.get_aliased_partition_columns(plan)?) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -391,11 +389,11 @@ impl PlanRewriter {
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
-                return true;
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Update the column requirements for the current plan, plan_level is the level of the plan
@@ -431,22 +429,36 @@ impl PlanRewriter {
         self.status = RewriterStatus::Unexpanded;
     }
 
-    /// Get the aliased partition columns at given level
-    fn get_aliased_partition_columns(&self, at_level: usize) -> Option<AliasMapping> {
+    /// Get the aliased partition columns at given node's input position
+    fn get_aliased_partition_columns(&self, node: &LogicalPlan) -> DfResult<Option<AliasMapping>> {
+        let plan = node.inputs().get(0).cloned().ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal(format!(
+                "get_aliased_partition_columns: node has no child: {node}"
+            ))
+        })?;
         if let Some(part_cols) = self.partition_cols.as_ref() {
-            let Some(tracker) = &self.layered_alias_tracker else {
-                return None;
-            };
-            let mut aliased = HashMap::new();
-            for part_col in part_cols {
-                let all_alias = tracker.query_alias_at(at_level, None, &Column::from(part_col));
+            let mut mapping = aliased_columns_for(
+                part_cols.iter().map(Column::from).collect(),
+                plan.clone(),
+                None,
+            )?
+            .into_iter()
+            .map(|(k, v)| (k.name, v))
+            .collect::<HashMap<_, _>>();
 
-                aliased.insert(part_col.clone(), all_alias);
+            for part_col in part_cols {
+                // fill missing partition columns with empty set, so later handling know
+                // different between no partition column and partition column with no alias
+                mapping.entry(part_col.clone()).or_default();
             }
-            common_telemetry::debug!("At level {at_level}, aliased partition columns: {aliased:?}");
-            Some(aliased)
+
+            common_telemetry::debug!(
+                "At node {}, aliased partition columns: {mapping:?}",
+                plan.display()
+            );
+            Ok(Some(mapping))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -657,25 +669,6 @@ impl TreeNodeRewriter for PlanRewriter {
 
     /// descend
     fn f_down<'a>(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        // if previous tracker is not valid, re-construct the layered alias tracker
-        // notice use `self.level` before inc it to make sure the level is correct
-        if !self
-            .layered_alias_tracker
-            .as_ref()
-            .map(|t| t.is_valid())
-            .unwrap_or(false)
-        {
-            self.layered_alias_tracker = {
-                let mut tracker = LayeredAliasTracker::new(self.level);
-                node.visit(&mut tracker)?;
-                if tracker.is_valid() {
-                    Some(tracker)
-                } else {
-                    None
-                }
-            };
-        }
-
         self.level += 1;
         self.stack.push((node.clone(), self.level));
         // decendening will clear the stage
@@ -722,7 +715,7 @@ impl TreeNodeRewriter for PlanRewriter {
         let parent = parent.clone();
 
         // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent) {
+        if self.should_expand(&parent)? {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
                 "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",
