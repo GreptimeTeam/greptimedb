@@ -834,7 +834,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     region_manifest: region_stat.manifest.into(),
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
                     metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
-                    write_bytes: 0,
+                    written_bytes: region_stat.written_bytes,
                 }
             })
             .collect::<Vec<_>>();

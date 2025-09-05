@@ -51,14 +51,14 @@ const DEFAULT_CONTEXT: InserterContext = InserterContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PersistedRegionStat {
     region_id: RegionId,
-    write_bytess: u64,
+    written_bytes: u64,
 }
 
 impl From<&RegionStat> for PersistedRegionStat {
     fn from(stat: &RegionStat) -> Self {
         Self {
             region_id: stat.id,
-            write_bytess: stat.write_bytes,
+            written_bytes: stat.written_bytes,
         }
     }
 }
@@ -94,8 +94,8 @@ fn compute_persist_region_stat(
     let write_bytes_delta = persisted_region_stat
         .and_then(|persisted_region_stat| {
             region_stat
-                .write_bytes
-                .checked_sub(persisted_region_stat.write_bytess)
+                .written_bytes
+                .checked_sub(persisted_region_stat.written_bytes)
         })
         .unwrap_or_default();
 
@@ -273,7 +273,7 @@ mod tests {
     fn create_test_region_stat(
         table_id: u32,
         region_number: u32,
-        write_bytes: u64,
+        written_bytes: u64,
         engine: &str,
     ) -> RegionStat {
         let region_id = RegionId::new(table_id, region_number);
@@ -294,7 +294,7 @@ mod tests {
                 manifest_version: 1,
                 flushed_entry_id: 100,
             },
-            write_bytes,
+            written_bytes,
             data_topic_latest_entry_id: 200,
             metadata_topic_latest_entry_id: 200,
         }
@@ -326,7 +326,7 @@ mod tests {
         let timestamp_millis = 1640995260000; // 2022-01-01 00:01:00 UTC
         let persisted_stat = PersistedRegionStat {
             region_id: region_stat.id,
-            write_bytess: 1000, // Previous write bytes
+            written_bytes: 1000, // Previous write bytes
         };
         let result = compute_persist_region_stat(
             &region_stat,
@@ -354,7 +354,7 @@ mod tests {
         let timestamp_millis = 1640995320000; // 2022-01-01 00:02:00 UTC
         let persisted_stat = PersistedRegionStat {
             region_id: region_stat.id,
-            write_bytess: 1200, // Previous write bytes (higher than current)
+            written_bytes: 1200, // Previous write bytes (higher than current)
         };
         let result = compute_persist_region_stat(
             &region_stat,
@@ -382,7 +382,7 @@ mod tests {
         let timestamp_millis = 1640995380000; // 2022-01-01 00:03:00 UTC
         let persisted_stat = PersistedRegionStat {
             region_id: region_stat.id,
-            write_bytess: 2000, // Same as current write bytes
+            written_bytes: 2000, // Same as current write bytes
         };
         let result = compute_persist_region_stat(
             &region_stat,
@@ -410,7 +410,7 @@ mod tests {
         let timestamp_millis = 1640995620000; // 2022-01-01 00:07:00 UTC
         let persisted_stat = PersistedRegionStat {
             region_id: region_stat.id,
-            write_bytess: 1000, // Higher than current, would cause underflow
+            written_bytes: 1000, // Higher than current, would cause underflow
         };
         let result = compute_persist_region_stat(
             &region_stat,
@@ -507,7 +507,7 @@ mod tests {
             region_id,
             PersistedRegionStat {
                 region_id,
-                write_bytess: 500,
+                written_bytes: 500,
             },
         );
         let (expected_row, expected_persisted_region_stat) = to_persisted_if_leader(
