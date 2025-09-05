@@ -26,16 +26,22 @@ use datafusion_sql::TableReference;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-/// Return all the original columns for the given aliased columns at the original node
+/// Return all the original columns(at original node) for the given aliased columns at the aliased node
 pub fn original_column_for(
     aliased_columns: HashSet<Column>,
     aliased_node: LogicalPlan,
     original_node: Option<Arc<LogicalPlan>>,
 ) -> DfResult<HashMap<Column, Column>> {
+    let schema_cols: HashSet<Column> = aliased_node.schema().columns().iter().cloned().collect();
     let cur_aliases: HashMap<Column, Column> = aliased_columns
         .iter()
+        .filter(|c| schema_cols.contains(c))
         .map(|c| (c.clone(), c.clone()))
         .collect();
+
+    if cur_aliases.is_empty() {
+        return Ok(HashMap::new());
+    }
 
     original_column_for_recursive(cur_aliases, &aliased_node, &original_node)
 }
@@ -75,16 +81,31 @@ fn original_column_for_recursive(
     original_column_for_recursive(new_aliases, node.inputs()[0], original_node)
 }
 
-/// Return all the aliased columns for the given original columns at the alias node
+/// Return all the aliased columns(at aliased node) for the given original columns(at original node)
 pub fn aliased_columns_for(
     original_columns: HashSet<Column>,
     aliased_node: LogicalPlan,
     original_node: Option<Arc<LogicalPlan>>,
 ) -> DfResult<HashMap<Column, HashSet<Column>>> {
-    let initial_aliases: HashMap<Column, HashSet<Column>> = original_columns
-        .iter()
-        .map(|c| (c.clone(), HashSet::from([c.clone()])))
-        .collect();
+    let initial_aliases: HashMap<Column, HashSet<Column>> = {
+        if let Some(original) = &original_node {
+            let schema_cols: HashSet<Column> = original.schema().columns().into_iter().collect();
+            original_columns
+                .iter()
+                .filter(|c| schema_cols.contains(c))
+                .map(|c| (c.clone(), HashSet::from([c.clone()])))
+                .collect()
+        } else {
+            original_columns
+                .iter()
+                .map(|c| (c.clone(), HashSet::from([c.clone()])))
+                .collect()
+        }
+    };
+
+    if initial_aliases.is_empty() {
+        return Ok(HashMap::new());
+    }
 
     aliased_columns_for_recursive(initial_aliases, &aliased_node, &original_node)
 }
@@ -596,6 +617,7 @@ mod tests {
             ])
         );
 
+        // columns not in the plan should return empty mapping
         assert_eq!(
             aliased_columns_for(
                 HashSet::from([qcol("pk1"), qcol("pk2")]),
@@ -613,7 +635,7 @@ mod tests {
                 Some(Arc::new(child.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("t.pk3"), HashSet::from([qcol("pk5"), qcol("pk4")]))])
+            HashMap::from([])
         );
 
         assert_eq!(
