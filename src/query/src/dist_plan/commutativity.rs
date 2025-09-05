@@ -302,6 +302,10 @@ impl Categorizer {
 
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
+    ///
+    /// So only if all partition columns show up in `exprs`, return true.
+    /// Otherwise return false.
+    ///
     fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
         let mut ref_cols = HashSet::new();
         for expr in exprs {
