@@ -60,6 +60,7 @@ paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+partition.workspace = true
 puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"

@@ -7610,6 +7610,7 @@ dependencies = [
  "moka",
  "object-store",
  "parquet",
+ "partition",
  "paste",
  "pin-project",
  "prometheus",
