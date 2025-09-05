@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ::auth::{Identity, Password, UserProviderRef};
@@ -38,12 +38,13 @@ use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};
 use session::{Session, SessionRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sql::dialect::MySqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
+use crate::SqlPlan;
 use crate::error::{self, DataFrameSnafu, InvalidPrepareStatementSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
@@ -52,7 +53,6 @@ use crate::mysql::helper::{
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::SqlPlan;
 
 const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
 const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";

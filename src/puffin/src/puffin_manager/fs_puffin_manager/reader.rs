@@ -22,7 +22,7 @@ use bytes::{BufMut, Bytes};
 use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader, SizeAwareRangeReader};
 use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
@@ -33,8 +33,8 @@ use crate::file_format::reader::{AsyncReader, PuffinFileReader};
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
-use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::fs_puffin_manager::PuffinMetadataCacheRef;
+use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
 use crate::puffin_manager::{BlobGuard, GuardWithMetadata, PuffinReader};
 

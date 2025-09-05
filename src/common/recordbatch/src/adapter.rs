@@ -26,13 +26,13 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::ExecutionProps;
-use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
-    RecordBatchStream as DfRecordBatchStream,
+    DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
+    RecordBatchStream as DfRecordBatchStream, accept,
 };
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::{DataFusionError, ToDFSchema};
@@ -555,7 +555,7 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                     };
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
-                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)))
+                    return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)));
                 }
                 AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
@@ -661,7 +661,7 @@ fn convert_map_to_json_binary(
                             return Err(ArrowError::CastError(format!(
                                 "Failed to serialize JSON: {}",
                                 e
-                            )))
+                            )));
                         }
                     };
                     match jsonb::parse_value(json_string.as_bytes()) {
@@ -670,7 +670,7 @@ fn convert_map_to_json_binary(
                             return Err(ArrowError::CastError(format!(
                                 "Failed to serialize JSONB: {}",
                                 e
-                            )))
+                            )));
                         }
                     }
                 }
@@ -680,7 +680,7 @@ fn convert_map_to_json_binary(
                         return Err(ArrowError::CastError(format!(
                             "Failed to serialize JSON: {}",
                             e
-                        )))
+                        )));
                     }
                 },
             };
@@ -706,8 +706,8 @@ mod test {
     use snafu::IntoError;
 
     use super::*;
-    use crate::error::Error;
     use crate::RecordBatches;
+    use crate::error::Error;
 
     #[tokio::test]
     async fn test_async_recordbatch_stream_adaptor() {

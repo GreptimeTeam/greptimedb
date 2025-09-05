@@ -23,8 +23,8 @@ use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,

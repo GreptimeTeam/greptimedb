@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mito2::compaction::run::{
-    find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs, Item, Ranged, SortedRun,
+    Item, Ranged, SortedRun, find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

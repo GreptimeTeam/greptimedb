@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use common_telemetry::{debug, error};

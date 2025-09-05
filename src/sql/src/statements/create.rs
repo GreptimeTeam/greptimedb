@@ -27,9 +27,9 @@ use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
     InvalidFlowQuerySnafu, Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
+use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
-use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";

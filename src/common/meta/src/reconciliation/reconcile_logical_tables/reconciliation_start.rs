@@ -17,7 +17,7 @@ use std::any::Any;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use store_api::storage::TableId;
 use table::table_name::TableName;
 

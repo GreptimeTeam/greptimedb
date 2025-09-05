@@ -14,7 +14,7 @@
 
 //! Handling write requests.
 
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::sync::Arc;
 
 use api::v1::OpType;

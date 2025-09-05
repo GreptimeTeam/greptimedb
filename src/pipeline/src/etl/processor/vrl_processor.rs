@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use chrono_tz::Tz;
 use snafu::OptionExt;
 use vrl::compiler::runtime::Runtime;
-use vrl::compiler::{compile, Program, TargetValue};
+use vrl::compiler::{Program, TargetValue, compile};
 use vrl::diagnostic::Formatter;
 use vrl::prelude::TimeZone;
 use vrl::value::{Kind, Secrets, Value as VrlValue};
@@ -218,7 +218,10 @@ processors:
         assert!(vrl.is_ok());
         let vrl = vrl.unwrap();
 
-        assert_eq!(vrl.source, ".name.a = .user_info.name\n.name.b = .user_info.name\ndel(.user_info)\n.timestamp = now()\n.\n");
+        assert_eq!(
+            vrl.source,
+            ".name.a = .user_info.name\n.name.b = .user_info.name\ndel(.user_info)\n.timestamp = now()\n.\n"
+        );
     }
 
     #[test]

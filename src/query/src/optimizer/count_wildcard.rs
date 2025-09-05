@@ -19,9 +19,9 @@ use datafusion_common::tree_node::{
 use datafusion_common::{Column, Result as DataFusionResult, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, WindowFunction};
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
-use datafusion_expr::{col, lit, Expr, LogicalPlan, WindowFunctionDefinition};
-use datafusion_optimizer::utils::NamePreserver;
+use datafusion_expr::{Expr, LogicalPlan, WindowFunctionDefinition, col, lit};
 use datafusion_optimizer::AnalyzerRule;
+use datafusion_optimizer::utils::NamePreserver;
 use datafusion_sql::TableReference;
 use table::table::adapter::DfTableProviderAdapter;
 

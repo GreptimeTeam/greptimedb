@@ -14,15 +14,15 @@
 
 use std::sync::Arc;
 
-use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use api::v1::value::ValueData;
 use chrono::{DateTime, Utc};
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::timestamp::TimestampNanosecond;
 use itertools::Itertools;
 use session::context::Channel;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use util::to_pipeline_version;
 use vrl::value::Value as VrlValue;
 
@@ -277,7 +277,7 @@ impl IdentityTimeIndex {
                                     "failed to convert {} to number",
                                     String::from_utf8_lossy(s)
                                 ),
-                            )
+                            );
                         }
                     },
                     Some(VrlValue::Timestamp(timestamp)) => datetime_utc_to_unit(timestamp, unit)?,
@@ -286,10 +286,10 @@ impl IdentityTimeIndex {
                             *ignore_errors,
                             *unit,
                             format!("unsupported value type to convert to timestamp: {}", v),
-                        )
+                        );
                     }
                     None => {
-                        return if_ignore_errors(*ignore_errors, *unit, "missing field".to_string())
+                        return if_ignore_errors(*ignore_errors, *unit, "missing field".to_string());
                     }
                 };
                 Ok(time_unit_to_value_data(*unit, v))
@@ -309,7 +309,7 @@ impl IdentityTimeIndex {
                             *ignore_errors,
                             TimeUnit::Nanosecond,
                             "missing field".to_string(),
-                        )
+                        );
                     }
                 };
 
@@ -320,7 +320,7 @@ impl IdentityTimeIndex {
                             *ignore_errors,
                             TimeUnit::Nanosecond,
                             format!("failed to parse date string: {}, format: {}", v, format),
-                        )
+                        );
                     }
                 };
 

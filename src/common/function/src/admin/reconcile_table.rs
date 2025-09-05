@@ -54,15 +54,16 @@ pub(crate) async fn reconcile_table(
 ) -> Result<Value> {
     let (table_name, resolve_strategy) = match params {
         [ValueRef::String(table_name)] => (table_name, ResolveStrategy::UseLatest),
-        [ValueRef::String(table_name), ValueRef::String(resolve_strategy)] => {
-            (table_name, parse_resolve_strategy(resolve_strategy)?)
-        }
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(resolve_strategy),
+        ] => (table_name, parse_resolve_strategy(resolve_strategy)?),
         _ => {
             return UnsupportedInputDataTypeSnafu {
                 function: FN_NAME,
                 datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
             }
-            .fail()
+            .fail();
         }
     };
     let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, query_ctx)

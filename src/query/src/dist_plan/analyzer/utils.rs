@@ -154,7 +154,7 @@ mod tests {
     use common_telemetry::init_default_ut_logging;
     use datafusion::error::Result as DfResult;
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, col};
 
     use super::*;
     use crate::dist_plan::analyzer::test::TestTable;

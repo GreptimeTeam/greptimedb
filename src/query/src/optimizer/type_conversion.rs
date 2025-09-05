@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::Timezone;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
@@ -25,9 +25,9 @@ use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
 
+use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::plan::ExtractExpr;
-use crate::QueryEngineContext;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
 /// to data type of corresponding columns.

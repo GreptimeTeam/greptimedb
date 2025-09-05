@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::GrantedRegion;
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
 use tokio::sync::oneshot;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
@@ -196,7 +196,7 @@ impl RegionAliveKeeper {
                         return error::UnexpectedSnafu {
                             violated: "RegionServerEventSender closed",
                         }
-                        .fail()
+                        .fail();
                     }
                     Err(mpsc::error::TryRecvError::Empty) => {
                         break;

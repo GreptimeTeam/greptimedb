@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::precision::Precision;
 use common_telemetry::tracing;

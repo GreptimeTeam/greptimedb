@@ -254,8 +254,8 @@ mod tests {
     use index::inverted_index::search::predicate::{
         Bound, Range, RangePredicate, RegexMatchPredicate,
     };
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 

@@ -153,7 +153,7 @@ impl DfAccumulator for HllState {
                 return not_impl_err!(
                     "HLL functions do not support data type: {}",
                     array.data_type()
-                )
+                );
             }
         }
 

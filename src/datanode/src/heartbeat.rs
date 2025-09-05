@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
@@ -32,11 +32,11 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
-use meta_client::client::{HeartbeatSender, MetaClient};
 use meta_client::MetaClientRef;
+use meta_client::client::{HeartbeatSender, MetaClient};
 use servers::addrs;
 use snafu::ResultExt;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
@@ -198,7 +198,9 @@ impl HeartbeatTask {
         let node_id = self.node_id;
         let node_epoch = self.node_epoch;
         let addr = &self.peer_addr;
-        info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
+        info!(
+            "Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}."
+        );
 
         let meta_client = self.meta_client.clone();
         let region_server_clone = self.region_server.clone();

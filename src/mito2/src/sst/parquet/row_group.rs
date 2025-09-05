@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
@@ -34,7 +34,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::FileId;
-use crate::sst::parquet::helper::{fetch_byte_ranges, MERGE_GAP};
+use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
 pub(crate) struct RowGroupBase<'a> {
     metadata: &'a RowGroupMetaData,
@@ -182,7 +182,7 @@ impl<'a> RowGroupBase<'a> {
             None => {
                 return Err(ParquetError::General(format!(
                     "Invalid column index {col_idx}, column was not fetched"
-                )))
+                )));
             }
             Some(data) => {
                 let page_locations = self

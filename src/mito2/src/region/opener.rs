@@ -16,21 +16,21 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::logstore::provider::Provider;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -49,9 +49,9 @@ use crate::error::{
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -455,10 +455,7 @@ impl RegionOpener {
                 .max(flushed_entry_id);
             info!(
                 "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
-                replay_from_entry_id,
-                region_id,
-                manifest.manifest_version,
-                flushed_entry_id
+                replay_from_entry_id, region_id, manifest.manifest_version, flushed_entry_id
             );
             replay_memtable(
                 &provider,
@@ -677,7 +674,10 @@ where
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         if entry_id <= flushed_entry_id {
-            warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
+            warn!(
+                "Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}",
+                region_id, flushed_entry_id, entry_id
+            );
             ensure!(
                 allow_stale_entries,
                 StaleLogEntrySnafu {
@@ -735,7 +735,13 @@ where
     let series_count = version_control.current().series_count();
     info!(
         "Replay WAL for region: {}, provider: {:?}, rows recovered: {}, replay from entry id: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
-        region_id, provider, rows_replayed, replay_from_entry_id, last_entry_id, series_count, now.elapsed()
+        region_id,
+        provider,
+        rows_replayed,
+        replay_from_entry_id,
+        last_entry_id,
+        series_count,
+        now.elapsed()
     );
     Ok(last_entry_id)
 }

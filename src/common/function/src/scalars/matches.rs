@@ -29,7 +29,7 @@ use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::BooleanVector;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::ConcreteDataType;
 
 use crate::function::{Function, FunctionContext};

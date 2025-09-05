@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{trace_services_table_name, TRACE_TABLE_NAME};
+use common_catalog::consts::{TRACE_TABLE_NAME, trace_services_table_name};
 use common_function::function::{Function, FunctionRef};
 use common_function::scalars::json::json_get::{
     JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
@@ -28,10 +28,10 @@ use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
 use datafusion::dataframe::DataFrame;
-use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::context::SessionContext;
 use datafusion_expr::select_expr::SelectExpr;
-use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr, SortExpr};
+use datafusion_expr::{Expr, SortExpr, col, lit, lit_timestamp_nano, wildcard};
 use datatypes::value::ValueRef;
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
@@ -39,7 +39,7 @@ use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
+use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
     SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
@@ -251,14 +251,16 @@ impl JaegerQueryHandler for Instance {
         //   timestamp >= {start_time} AND
         //   timestamp <= {end_time}
         // ```
-        let mut filters = vec![col(TRACE_ID_COLUMN).in_list(
-            trace_ids_from_output(output)
-                .await?
-                .iter()
-                .map(lit)
-                .collect::<Vec<Expr>>(),
-            false,
-        )];
+        let mut filters = vec![
+            col(TRACE_ID_COLUMN).in_list(
+                trace_ids_from_output(output)
+                    .await?
+                    .iter()
+                    .map(lit)
+                    .collect::<Vec<Expr>>(),
+                false,
+            ),
+        ];
 
         if let Some(start_time) = query_params.start_time {
             filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));

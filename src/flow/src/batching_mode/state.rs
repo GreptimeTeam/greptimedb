@@ -22,7 +22,7 @@ use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -279,23 +279,24 @@ impl DirtyTimeWindows {
 
             if let Some(task_ctx) = task_ctx {
                 warn!(
-                "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
-                task_ctx.config.flow_id,
-                self.windows.len(),
-                self.max_filter_num_per_query,
-                task_ctx.config.time_window_expr,
-                task_ctx.config.expire_after,
-                first_time_window,
-                last_time_window,
-                task_ctx.config.query
-            );
+                    "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
+                    task_ctx.config.flow_id,
+                    self.windows.len(),
+                    self.max_filter_num_per_query,
+                    task_ctx.config.time_window_expr,
+                    task_ctx.config.expire_after,
+                    first_time_window,
+                    last_time_window,
+                    task_ctx.config.query
+                );
             } else {
-                warn!("Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
-                flow_id,
-                self.windows.len(),
-                self.max_filter_num_per_query,
-                first_time_window,
-                last_time_window
+                warn!(
+                    "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
+                    flow_id,
+                    self.windows.len(),
+                    self.max_filter_num_per_query,
+                    first_time_window,
+                    last_time_window
                 )
             }
         }
@@ -590,13 +591,11 @@ mod test {
                 (chrono::Duration::seconds(5 * 60), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        (2 + merge_dist as i64) * 5 * 60,
-                    )),
+                    Some(Timestamp::new_second((2 + merge_dist as i64) * 5 * 60)),
                 )]),
                 Some(
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:25:00' AS TIMESTAMP)))",
-                )
+                ),
             ),
             // separate time window
             (
@@ -612,14 +611,12 @@ mod test {
                     ),
                     (
                         Timestamp::new_second((2 + merge_dist as i64) * 5 * 60),
-                        Some(Timestamp::new_second(
-                            (3 + merge_dist as i64) * 5 * 60,
-                        )),
+                        Some(Timestamp::new_second((3 + merge_dist as i64) * 5 * 60)),
                     ),
                 ]),
                 Some(
                     "(((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:05:00' AS TIMESTAMP))) OR ((ts >= CAST('1970-01-01 00:25:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:30:00' AS TIMESTAMP))))",
-                )
+                ),
             ),
             // overlapping
             (
@@ -630,13 +627,11 @@ mod test {
                 (chrono::Duration::seconds(5 * 60), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        (1 + merge_dist as i64) * 5 * 60,
-                    )),
+                    Some(Timestamp::new_second((1 + merge_dist as i64) * 5 * 60)),
                 )]),
                 Some(
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:20:00' AS TIMESTAMP)))",
-                )
+                ),
             ),
             // complex overlapping
             (
@@ -648,71 +643,59 @@ mod test {
                 (chrono::Duration::seconds(3), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        (merge_dist as i64) * 7
-                    )),
+                    Some(Timestamp::new_second((merge_dist as i64) * 7)),
                 )]),
                 Some(
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:00:21' AS TIMESTAMP)))",
-                )
+                ),
             ),
             // split range
             (
-                Vec::from_iter((0..20).map(|i|Timestamp::new_second(i*3)).chain(std::iter::once(
-                    Timestamp::new_second(60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1)),
-                ))),
+                Vec::from_iter((0..20).map(|i| Timestamp::new_second(i * 3)).chain(
+                    std::iter::once(Timestamp::new_second(
+                        60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1),
+                    )),
+                )),
                 (chrono::Duration::seconds(3), None),
                 BTreeMap::from([
-                (
-                    Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        60
-                    )),
-                ),
-                (
-                    Timestamp::new_second(60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1)),
-                    Some(Timestamp::new_second(
-                        60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1) + 3
-                    )),
-                )]),
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(60))),
+                    (
+                        Timestamp::new_second(60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1)),
+                        Some(Timestamp::new_second(
+                            60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1) + 3,
+                        )),
+                    ),
+                ]),
                 Some(
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:00' AS TIMESTAMP)))",
-                )
+                ),
             ),
             // split 2 min into 1 min
             (
-                Vec::from_iter((0..40).map(|i|Timestamp::new_second(i*3))),
+                Vec::from_iter((0..40).map(|i| Timestamp::new_second(i * 3))),
                 (chrono::Duration::seconds(3), None),
-                BTreeMap::from([
-                (
+                BTreeMap::from([(
                     Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        40 * 3
-                    )),
+                    Some(Timestamp::new_second(40 * 3)),
                 )]),
                 Some(
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:00' AS TIMESTAMP)))",
-                )
+                ),
             ),
             // split 3s + 1min into 3s + 57s
             (
-                Vec::from_iter(std::iter::once(Timestamp::new_second(0)).chain((0..40).map(|i|Timestamp::new_second(20+i*3)))),
+                Vec::from_iter(
+                    std::iter::once(Timestamp::new_second(0))
+                        .chain((0..40).map(|i| Timestamp::new_second(20 + i * 3))),
+                ),
                 (chrono::Duration::seconds(3), None),
                 BTreeMap::from([
-                (
-                    Timestamp::new_second(0),
-                    Some(Timestamp::new_second(
-                        3
-                    )),
-                ),(
-                    Timestamp::new_second(20),
-                    Some(Timestamp::new_second(
-                        140
-                    )),
-                )]),
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(3))),
+                    (Timestamp::new_second(20), Some(Timestamp::new_second(140))),
+                ]),
                 Some(
                     "(((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:00:03' AS TIMESTAMP))) OR ((ts >= CAST('1970-01-01 00:00:20' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:17' AS TIMESTAMP))))",
-                )
+                ),
             ),
             // expired
             (
@@ -722,12 +705,10 @@ mod test {
                 ],
                 (
                     chrono::Duration::seconds(5 * 60),
-                    Some(Timestamp::new_second(
-                        (merge_dist as i64) * 6 * 60,
-                    )),
+                    Some(Timestamp::new_second((merge_dist as i64) * 6 * 60)),
                 ),
                 BTreeMap::from([]),
-                None
+                None,
             ),
         ];
         // let len = testcases.len();

@@ -24,8 +24,8 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_serv
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;
-use tonic::service::interceptor::InterceptedService;
 use tonic::service::RoutesBuilder;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Identity, ServerTlsConfig};
 
 use crate::grpc::database::DatabaseService;

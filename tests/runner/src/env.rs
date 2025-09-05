@@ -28,7 +28,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client::error::ServerSnafu;
 use client::{
-    Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
+    Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database as DB, Error as ClientError,
 };
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
@@ -45,8 +45,8 @@ use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 use crate::server_mode::ServerMode;
-use crate::util::{get_workspace_root, maybe_pull_binary, PROGRAM};
-use crate::{util, ServerAddr};
+use crate::util::{PROGRAM, get_workspace_root, maybe_pull_binary};
+use crate::{ServerAddr, util};
 
 // standalone mode
 const SERVER_MODE_STANDALONE_IDX: usize = 0;
@@ -177,13 +177,17 @@ impl Env {
             // start a distributed GreptimeDB
             let meta_server_mode = ServerMode::random_metasrv();
             let metasrv_port = match &meta_server_mode {
-                ServerMode::Metasrv { rpc_server_addr, .. } => rpc_server_addr
+                ServerMode::Metasrv {
+                    rpc_server_addr, ..
+                } => rpc_server_addr
                     .split(':')
                     .nth(1)
                     .unwrap()
                     .parse::<u16>()
                     .unwrap(),
-                _ => panic!("metasrv mode not set, maybe running in remote mode which doesn't support restart?"),
+                _ => panic!(
+                    "metasrv mode not set, maybe running in remote mode which doesn't support restart?"
+                ),
             };
             db_ctx.set_server_mode(meta_server_mode.clone(), SERVER_MODE_METASRV_IDX);
             let meta_server = self.start_server(meta_server_mode, &db_ctx, id, true).await;
@@ -612,7 +616,7 @@ impl GreptimeDB {
                     match row {
                         Ok(r) => rows.push(r),
                         Err(e) => {
-                            return Box::new(format!("Failed to parse query result, err: {:?}", e))
+                            return Box::new(format!("Failed to parse query result, err: {:?}", e));
                         }
                     }
                 }

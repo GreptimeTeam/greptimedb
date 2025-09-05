@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use api::v1::region::{
-    region_request, CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest,
-    RegionRequest, RegionRequestHeader,
+    CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest, RegionRequest,
+    RegionRequestHeader, region_request,
 };
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -30,15 +30,15 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
 use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{
-    find_follower_regions, find_followers, find_leader_regions, find_leaders,
-    operating_leader_regions, RegionRoute,
+    RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
+    operating_leader_regions,
 };
 
 /// [Control] indicated to the caller whether to go to the next step.
@@ -328,10 +328,10 @@ mod tests {
     use super::*;
     use crate::ddl::test_util::columns::TestColumnDefBuilder;
     use crate::ddl::test_util::create_table::{
-        build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+        TestCreateTableExprBuilder, build_raw_table_info_from_expr,
     };
     use crate::key::table_route::TableRouteValue;
-    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     fn test_create_raw_table_info(name: &str) -> RawTableInfo {
         let create_table = TestCreateTableExprBuilder::default()

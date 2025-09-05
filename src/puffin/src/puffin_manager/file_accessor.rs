@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use common_base::range_read::{FileReader, SizeAwareRangeReader};
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use futures::AsyncWrite;
 use tokio::fs::File;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};

@@ -339,18 +339,22 @@ mod tests {
         assert!(!p.eval(&wrong_row).unwrap());
         assert!(p.eval(&[]).is_none());
         assert!(p.eval(&[("c", &a_value)]).is_none());
-        assert!(!p
-            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
-            .unwrap());
-        assert!(!p
-            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
-            .unwrap());
-        assert!(p
-            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
-            .is_none());
-        assert!(!p
-            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
-            .unwrap());
+        assert!(
+            !p.eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
+                .unwrap()
+        );
+        assert!(
+            !p.eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
+                .unwrap()
+        );
+        assert!(
+            p.eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
+                .is_none()
+        );
+        assert!(
+            !p.eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
+                .unwrap()
+        );
 
         //Predicate::Or
         let p = Predicate::Or(Box::new(p1), Box::new(p2));
@@ -358,18 +362,22 @@ mod tests {
         assert!(p.eval(&wrong_row).unwrap());
         assert!(p.eval(&[]).is_none());
         assert!(p.eval(&[("c", &a_value)]).is_none());
-        assert!(!p
-            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
-            .unwrap());
-        assert!(p
-            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
-            .unwrap());
-        assert!(p
-            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
-            .unwrap());
-        assert!(p
-            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
-            .is_none());
+        assert!(
+            !p.eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
+                .unwrap()
+        );
+        assert!(
+            p.eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
+                .unwrap()
+        );
+        assert!(
+            p.eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
+                .unwrap()
+        );
+        assert!(
+            p.eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
+                .is_none()
+        );
     }
 
     #[test]

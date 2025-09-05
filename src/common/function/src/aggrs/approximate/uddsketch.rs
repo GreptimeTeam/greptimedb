@@ -98,11 +98,11 @@ impl UddSketchState {
                 {
                     return Err(DataFusionError::Plan(format!(
                         "Merging UDDSketch with different parameters: arguments={:?} vs actual input={:?}",
+                        (self.uddsketch.max_allowed_buckets(), self.error_rate),
                         (
-                            self.uddsketch.max_allowed_buckets(),
-                            self.error_rate
-                        ),
-                        (uddsketch.uddsketch.max_allowed_buckets(), uddsketch.error_rate)
+                            uddsketch.uddsketch.max_allowed_buckets(),
+                            uddsketch.error_rate
+                        )
                     )));
                 }
                 self.uddsketch.merge_sketch(&uddsketch.uddsketch);
@@ -130,7 +130,7 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
                 "{} not supported for bucket size: {}",
                 UDDSKETCH_STATE_NAME,
                 &args.exprs[0]
-            )
+            );
         }
     };
 
@@ -145,7 +145,7 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
                 "{} not supported for error rate: {}",
                 UDDSKETCH_STATE_NAME,
                 &args.exprs[1]
-            )
+            );
         }
     };
 
@@ -168,7 +168,7 @@ impl DfAccumulator for UddSketchState {
                 return not_impl_err!(
                     "UDDSketch functions do not support data type: {}",
                     array.data_type()
-                )
+                );
             }
         }
 

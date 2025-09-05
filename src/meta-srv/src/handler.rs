@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, ResponseHeader, Role,
-    PROTOCOL_VERSION,
+    HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION, RegionLease,
+    ResponseHeader, Role,
 };
 use check_leader_handler::CheckLeaderHandler;
 use collect_cluster_info_handler::{
@@ -50,7 +50,7 @@ use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{oneshot, watch, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, oneshot, watch};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
@@ -430,11 +430,7 @@ impl HeartbeatMailbox {
                 .iter()
                 .filter_map(|entry| {
                     let (id, deadline) = entry.pair();
-                    if deadline < &now {
-                        Some(*id)
-                    } else {
-                        None
-                    }
+                    if deadline < &now { Some(*id) } else { None }
                 })
                 .collect::<Vec<_>>();
 

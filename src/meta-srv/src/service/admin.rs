@@ -27,9 +27,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::{routing, Router as AxumRouter};
+use axum::{Router as AxumRouter, routing};
 use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
+use tonic::codegen::{BoxFuture, Service, http};
 use tonic::server::NamedService;
 
 use crate::metasrv::Metasrv;
@@ -207,7 +207,7 @@ impl Router {
                 return Ok(http::Response::builder()
                     .status(http::StatusCode::NOT_FOUND)
                     .body(Body::empty())
-                    .unwrap())
+                    .unwrap());
             }
         };
 
@@ -312,13 +312,13 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
 
 #[cfg(test)]
 mod tests {
-    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     use super::*;
-    use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::MetasrvOptions;
+    use crate::metasrv::builder::MetasrvBuilder;
     use crate::{bootstrap, error};
 
     struct MockOkHandler;
@@ -650,14 +650,14 @@ mod tests {
 mod axum_admin_tests {
     use std::sync::Arc;
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use tower::ServiceExt; // for `oneshot`
 
     use super::*;
-    use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::MetasrvOptions;
+    use crate::metasrv::builder::MetasrvBuilder;
     use crate::service::admin::sequencer::NextTableIdResponse;
 
     async fn setup_axum_app() -> AxumRouter {

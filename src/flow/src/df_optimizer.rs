@@ -40,10 +40,10 @@ use datafusion_expr::{
     BinaryExpr, ColumnarValue, Expr, Literal, Operator, Projection, ScalarFunctionArgs,
     ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
+use query::QueryEngine;
 use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
-use query::QueryEngine;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
@@ -560,7 +560,11 @@ fn check_group_by_analyzer(
                     .names_for_alias
                     .contains(&expr.name_for_alias()?)
                 {
-                    return Err(DataFusionError::Plan(format!("Expect {} expr in group by also exist in select list, but select list only contain {:?}",expr.name_for_alias()?, found_column_used.names_for_alias)));
+                    return Err(DataFusionError::Plan(format!(
+                        "Expect {} expr in group by also exist in select list, but select list only contain {:?}",
+                        expr.name_for_alias()?,
+                        found_column_used.names_for_alias
+                    )));
                 }
             }
         }

@@ -14,8 +14,8 @@
 
 //! Handling flush related requests.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;

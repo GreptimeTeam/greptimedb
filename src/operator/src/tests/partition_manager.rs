@@ -15,9 +15,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use common_meta::cache::{new_table_route_cache, TableRouteCacheRef};
-use common_meta::key::table_route::TableRouteValue;
+use common_meta::cache::{TableRouteCacheRef, new_table_route_cache};
 use common_meta::key::TableMetadataManager;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{LegacyPartition, Region, RegionRoute};

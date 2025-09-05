@@ -27,8 +27,8 @@ use api::v1::{
 use common_base::BitVec;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
-use snafu::prelude::*;
 use snafu::ResultExt;
+use snafu::prelude::*;
 use table::metadata::TableInfo;
 
 use crate::error::{

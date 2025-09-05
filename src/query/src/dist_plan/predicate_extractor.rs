@@ -501,7 +501,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::Column;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{col, lit, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datatypes::value::Value;
     use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 

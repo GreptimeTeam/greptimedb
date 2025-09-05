@@ -22,8 +22,8 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::OrderOption;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::ExecutionPlan;
@@ -36,9 +36,9 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
-use table::TableRef;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 

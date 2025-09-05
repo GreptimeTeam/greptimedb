@@ -175,8 +175,10 @@ mod tests {
                 .unwrap(),
             region_2_indexes,
         );
-        assert!(datanode_index
-            .provider(&KafkaProvider::new("my_topic_3".to_string()))
-            .is_none());
+        assert!(
+            datanode_index
+                .provider(&KafkaProvider::new("my_topic_3".to_string()))
+                .is_none()
+        );
     }
 }

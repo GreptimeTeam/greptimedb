@@ -21,7 +21,7 @@ use arrow_flight::FlightData;
 use common_error::ext::ErrorExt;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing::{info_span, Instrument};
+use common_telemetry::tracing::{Instrument, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
 use futures::channel::mpsc;
@@ -33,8 +33,8 @@ use snafu::ResultExt;
 use tokio::task::JoinHandle;
 
 use crate::error;
-use crate::grpc::flight::TonicResult;
 use crate::grpc::FlightCompression;
+use crate::grpc::flight::TonicResult;
 
 /// Metrics collector for Flight stream with RAII logging pattern
 struct StreamMetrics {

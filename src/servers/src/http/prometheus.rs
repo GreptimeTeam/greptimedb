@@ -30,17 +30,17 @@ use common_version::OwnedBuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::Float64Vector;
-use futures::future::join_all;
 use futures::StreamExt;
+use futures::future::join_all;
 use itertools::Itertools;
-use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
+use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::{self};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
     SubqueryExpr, UnaryExpr, VectorSelector,
 };
-use query::parser::{PromQuery, QueryLanguageParser, DEFAULT_LOOKBACK_STRING};
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser};
 use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -1064,10 +1064,14 @@ pub async fn label_values_query(
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let mut label_values = HashSet::new();
 
-    let start = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&start)
-        .context(ParseTimestampSnafu { timestamp: &start }));
-    let end = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&end)
-        .context(ParseTimestampSnafu { timestamp: &end }));
+    let start = try_call_return_response!(
+        QueryLanguageParser::parse_promql_timestamp(&start)
+            .context(ParseTimestampSnafu { timestamp: &start })
+    );
+    let end = try_call_return_response!(
+        QueryLanguageParser::parse_promql_timestamp(&end)
+            .context(ParseTimestampSnafu { timestamp: &end })
+    );
 
     for query in queries {
         let promql_expr = try_call_return_response!(promql_parser::parser::parse(&query));

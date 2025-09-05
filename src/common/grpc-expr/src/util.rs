@@ -21,7 +21,7 @@ use api::v1::{
     ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
 };
 use datatypes::schema::Schema;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableId;
 use table::table_reference::TableReference;
 
@@ -444,9 +444,11 @@ mod tests {
 
         let schema = Arc::new(SchemaBuilder::try_from(columns).unwrap().build().unwrap());
 
-        assert!(extract_new_columns(&schema, ColumnExpr::from_columns(&[]))
-            .unwrap()
-            .is_none());
+        assert!(
+            extract_new_columns(&schema, ColumnExpr::from_columns(&[]))
+                .unwrap()
+                .is_none()
+        );
 
         let insert_batch = mock_insert_batch();
 

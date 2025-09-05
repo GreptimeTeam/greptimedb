@@ -35,14 +35,14 @@ use common_telemetry::{error, info, warn};
 use futures::FutureExt;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::service::interceptor::InterceptedService;
+use tokio::sync::oneshot::{self, Receiver, Sender};
 use tonic::service::Routes;
-use tonic::transport::server::TcpIncoming;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::ServerTlsConfig;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 

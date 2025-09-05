@@ -21,9 +21,9 @@ use api::v1::helper::time_index_column_schema;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
-    identity_pipeline, unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline,
-    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput,
-    TransformerMode, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode,
+    identity_pipeline, unwrap_or_continue_if_err,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;

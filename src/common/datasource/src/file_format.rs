@@ -42,11 +42,11 @@ use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "compression_type";
 pub const FORMAT_DELIMITER: &str = "delimiter";

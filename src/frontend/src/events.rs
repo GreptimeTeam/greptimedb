@@ -20,8 +20,8 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
 use common_event_recorder::{
-    build_row_inserts_request, group_events_by_type, Event, EventHandler,
-    DEFAULT_COMPACTION_TIME_WINDOW,
+    DEFAULT_COMPACTION_TIME_WINDOW, Event, EventHandler, build_row_inserts_request,
+    group_events_by_type,
 };
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
 use datafusion::common::HashMap;

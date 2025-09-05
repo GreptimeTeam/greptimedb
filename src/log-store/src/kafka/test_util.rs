@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use common_wal::config::kafka::common::KafkaConnectionConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use common_wal::config::kafka::common::KafkaConnectionConfig;
 use dashmap::DashMap;
 use rskafka::client::ClientBuilder;
 use rskafka::record::Record;

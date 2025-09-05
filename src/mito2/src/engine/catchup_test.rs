@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::logstore::provider::RaftEngineProvider;
@@ -33,9 +33,10 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::error::Error;
 use crate::test_util::{
-    build_rows, flush_region, kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
+    kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
     raft_engine_log_store_factory, rows_schema, single_kafka_log_store_factory,
-    single_raft_engine_log_store_factory, CreateRequestBuilder, LogStoreFactory, TestEnv,
+    single_raft_engine_log_store_factory,
 };
 use crate::wal::EntryId;
 

@@ -15,8 +15,8 @@
 use std::collections::HashSet;
 
 use datafusion::datasource::DefaultTableSource;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::TableReference;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::{Expr, LogicalPlan};
 use session::context::QueryContextRef;
 pub use table::metadata::TableType;
@@ -144,7 +144,7 @@ pub(crate) mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use datafusion::logical_expr::builder::LogicalTableSource;
-    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
     use session::context::QueryContextBuilder;
 
     use super::*;

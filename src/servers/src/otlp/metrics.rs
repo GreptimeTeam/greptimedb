@@ -19,7 +19,7 @@ use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
-use otel_arrow_rust::proto::opentelemetry::common::v1::{any_value, AnyValue, KeyValue};
+use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
 use regex::Regex;
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
@@ -849,8 +849,8 @@ fn encode_summary(
 
 #[cfg(test)]
 mod tests {
-    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
     use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::summary_data_point::ValueAtQuantile;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{

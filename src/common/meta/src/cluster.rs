@@ -20,7 +20,7 @@ use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::datanode::RegionStat;
 use crate::error::{

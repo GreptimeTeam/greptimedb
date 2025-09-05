@@ -17,7 +17,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
@@ -31,9 +31,9 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
     TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::kv_backend::txn::Txn;
+use crate::rpc::router::{RegionRoute, region_distribution};
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores table routes

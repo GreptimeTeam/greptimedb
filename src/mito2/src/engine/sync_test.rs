@@ -31,7 +31,7 @@ use super::MitoEngine;
 use crate::config::MitoConfig;
 use crate::error::Error;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 
 fn add_tag1() -> RegionAlterRequest {

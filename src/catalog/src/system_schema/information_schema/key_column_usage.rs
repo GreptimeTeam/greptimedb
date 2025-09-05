@@ -20,9 +20,9 @@ use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, FulltextBackend, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -31,11 +31,11 @@ use futures_util::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates, KEY_COLUMN_USAGE};
-use crate::CatalogManager;
+use crate::system_schema::information_schema::{InformationTable, KEY_COLUMN_USAGE, Predicates};
 
 pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
 pub const CONSTRAINT_NAME: &str = "constraint_name";

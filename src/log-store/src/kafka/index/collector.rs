@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_telemetry::{error, info};
@@ -22,16 +22,16 @@ use futures::future::try_join_all;
 use object_store::ErrorKind;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use store_api::logstore::provider::KafkaProvider;
 use store_api::logstore::EntryId;
+use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
 use tokio::select;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::Sender;
 
 use crate::error::{self, Result};
 use crate::kafka::index::encoder::{DatanodeWalIndexes, IndexEncoder};
-use crate::kafka::index::{default_index_file, JsonIndexEncoder};
+use crate::kafka::index::{JsonIndexEncoder, default_index_file};
 use crate::kafka::worker::{DumpIndexRequest, TruncateIndexRequest, WorkerRequest};
 
 /// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.
@@ -333,10 +333,10 @@ mod tests {
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;
 
+    use crate::kafka::index::JsonIndexEncoder;
     use crate::kafka::index::collector::RegionIndexes;
     use crate::kafka::index::encoder::IndexEncoder;
-    use crate::kafka::index::JsonIndexEncoder;
-    use crate::kafka::{default_index_file, GlobalIndexCollector};
+    use crate::kafka::{GlobalIndexCollector, default_index_file};
 
     #[tokio::test]
     async fn test_read_remote_region_index() {

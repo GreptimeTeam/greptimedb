@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
 use datafusion_common::ScalarValue;
-use datafusion_expr::{create_udf, ColumnarValue, ScalarUDF, Volatility};
+use datafusion_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf};
 use datatypes::arrow::array::{AsArray, Float64Array, PrimitiveArray};
 use datatypes::arrow::datatypes::{DataType, Float64Type};
 use datatypes::arrow::error::ArrowError;

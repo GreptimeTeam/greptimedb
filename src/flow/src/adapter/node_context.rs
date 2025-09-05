@@ -15,8 +15,8 @@
 //! Node context, prone to change with every incoming requests
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
@@ -24,7 +24,7 @@ use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::adapter::table_source::FlowTableSource;
 use crate::adapter::{FlowId, ManagedTableSource, TableName};
@@ -33,7 +33,7 @@ use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
 use crate::plan::TypedPlan;
-use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
+use crate::repr::{BATCH_SIZE, BROADCAST_CAP, DiffRow, RelationDesc, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
 #[derive(Debug)]

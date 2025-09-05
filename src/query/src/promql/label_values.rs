@@ -14,11 +14,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 

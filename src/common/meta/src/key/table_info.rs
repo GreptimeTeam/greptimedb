@@ -29,8 +29,8 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PATTERN,
     TABLE_INFO_KEY_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores the metadata of the table.

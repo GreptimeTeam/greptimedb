@@ -21,8 +21,8 @@ mod tests {
     use frontend::instance::Instance;
     use itertools::Itertools;
     use servers::opentsdb::codec::DataPoint;
-    use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpentsdbProtocolHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;

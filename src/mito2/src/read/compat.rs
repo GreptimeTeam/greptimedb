@@ -21,7 +21,7 @@ use api::v1::SemanticType;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
 };
-use datatypes::arrow::compute::{take, TakeOptions};
+use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
@@ -29,10 +29,10 @@ use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use mito_codec::row_converter::{
-    build_primary_key_codec, build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec,
-    SortField,
+    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
+    build_primary_key_codec_with_fields,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
@@ -40,11 +40,11 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::read::flat_projection::{flat_projected_columns, FlatProjectionMapper};
+use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{FormatProjection, PrimaryKeyArray, INTERNAL_COLUMN_NUM};
+use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray};
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Reader to adapt schema of underlying reader to expected schema.
@@ -397,11 +397,12 @@ impl CompatFields {
     #[must_use]
     fn compat(&self, batch: Batch) -> Batch {
         debug_assert_eq!(self.actual_fields.len(), batch.fields().len());
-        debug_assert!(self
-            .actual_fields
-            .iter()
-            .zip(batch.fields())
-            .all(|((id, _), batch_column)| *id == batch_column.column_id));
+        debug_assert!(
+            self.actual_fields
+                .iter()
+                .zip(batch.fields())
+                .all(|((id, _), batch_column)| *id == batch_column.column_id)
+        );
 
         let len = batch.num_rows();
         let fields = self
@@ -906,14 +907,14 @@ mod tests {
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt64Array, UInt8Array,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
-    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt8Vector, UInt64Vector};
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
@@ -924,8 +925,8 @@ mod tests {
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::sst::parquet::flat_format::FlatReadFormat;
-    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
-    use crate::test_util::{check_reader_result, VecBatchReader};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::{VecBatchReader, check_reader_result};
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
@@ -1100,9 +1101,11 @@ mod tests {
             ],
             &[1],
         );
-        assert!(may_compat_primary_key(&reader_meta, &reader_meta)
-            .unwrap()
-            .is_none());
+        assert!(
+            may_compat_primary_key(&reader_meta, &reader_meta)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1119,9 +1122,11 @@ mod tests {
             &[1],
         ));
 
-        assert!(may_compat_primary_key(&reader_meta, &reader_meta)
-            .unwrap()
-            .is_none());
+        assert!(
+            may_compat_primary_key(&reader_meta, &reader_meta)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

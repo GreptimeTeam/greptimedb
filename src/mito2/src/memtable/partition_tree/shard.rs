@@ -23,7 +23,7 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::partition_tree::data::{
-    DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder, DATA_INIT_CAP,
+    DATA_INIT_CAP, DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder,
 };
 use crate::memtable::partition_tree::dict::KeyDictRef;
 use crate::memtable::partition_tree::merger::{Merger, Node};
@@ -429,11 +429,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::memtable::KeyValues;
+    use crate::memtable::partition_tree::PkIndex;
     use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::partition_tree::dict::KeyDictBuilder;
-    use crate::memtable::partition_tree::PkIndex;
     use crate::memtable::stats::WriteMetrics;
-    use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_keys, metadata_for_test,
     };

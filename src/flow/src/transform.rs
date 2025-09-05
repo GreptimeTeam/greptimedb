@@ -27,8 +27,8 @@ use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
 use substrait::substrait_proto_df as substrait_proto;
-use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 
 use crate::adapter::FlownodeContext;
 use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
@@ -176,14 +176,14 @@ mod test {
     use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
     use itertools::Itertools;
     use prost::Message;
+    use query::QueryEngine;
     use query::options::QueryOptions;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
-    use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
     use substrait_proto::proto;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::test_util::MemTable;
 
     use super::*;

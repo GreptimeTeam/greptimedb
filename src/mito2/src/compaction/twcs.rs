@@ -19,19 +19,19 @@ use std::num::NonZeroU64;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{
-    find_sorted_runs, merge_seq_files, reduce_runs, FileGroup, Item, Ranged,
+    FileGroup, Item, Ranged, find_sorted_runs, merge_seq_files, reduce_runs,
 };
-use crate::compaction::{get_expired_ssts, CompactionOutput};
-use crate::sst::file::{overlaps, FileHandle, Level};
+use crate::compaction::{CompactionOutput, get_expired_ssts};
+use crate::sst::file::{FileHandle, Level, overlaps};
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;

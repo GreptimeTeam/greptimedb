@@ -127,7 +127,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use futures::{stream, TryStreamExt};
+    use futures::{TryStreamExt, stream};
     use store_api::logstore::entry::{Entry, NaiveEntry};
     use store_api::logstore::{
         AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex,

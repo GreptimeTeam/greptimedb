@@ -16,8 +16,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
-use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
+use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;

@@ -30,7 +30,7 @@ use datatypes::data_type::ConcreteDataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
-use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
+use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
@@ -39,15 +39,15 @@ use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::CacheStrategy;
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
 };
 use crate::metrics::{
-    PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
-    READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
+    PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
+    READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
@@ -56,7 +56,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
-use crate::sst::parquet::format::{need_override_sequence, ReadFormat};
+use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;

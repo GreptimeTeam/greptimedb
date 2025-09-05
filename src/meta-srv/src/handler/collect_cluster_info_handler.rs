@@ -21,10 +21,10 @@ use common_meta::rpc::store::PutRequest;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 
+use crate::Result;
 use crate::error::{InvalidClusterInfoFormatSnafu, SaveClusterInfoSnafu};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::Result;
 
 /// The handler to collect cluster info from the heartbeat request of frontend.
 pub struct CollectFrontendClusterInfoHandler;

@@ -22,13 +22,13 @@ use common_meta::key::flow::flow_state::FlowStat;
 use common_telemetry::trace;
 use datatypes::value::Value;
 use get_size2::GetSize;
-use smallvec::{smallvec, SmallVec};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use smallvec::{SmallVec, smallvec};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
-use crate::repr::{value_to_internal_ts, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
+use crate::repr::{DiffRow, Duration, KeyValDiffRow, Row, Timestamp, value_to_internal_ts};
 
 /// A batch of updates, arranged by key
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
@@ -370,9 +370,7 @@ impl Arrangement {
                     max_expired_by = max_expired_by.max(Some(expired_by));
                     trace!(
                         "Expired key: {:?}, expired by: {:?} with time being now={}",
-                        key,
-                        expired_by,
-                        now
+                        key, expired_by, now
                     );
                     continue;
                 }

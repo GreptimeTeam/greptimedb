@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use common_meta::DatanodeId;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -26,19 +27,18 @@ use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_meta::peer::{Peer, PeerLookupServiceRef};
-use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::store::RangeRequest;
-use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use error::Error::{LeaderPeerChanged, MigrationRunning, RegionMigrated, TableRouteNotFound};
 use futures::{StreamExt, TryStreamExt};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-use tokio::time::{interval, interval_at, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval, interval_at};
 
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
@@ -47,7 +47,7 @@ use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason,
 };
 use crate::procedure::region_migration::{
-    RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
+    DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
@@ -206,7 +206,9 @@ impl RegionSupervisorTicker {
                     initialization_interval.tick().await;
                     let (tx, rx) = oneshot::channel();
                     if sender.send(Event::InitializeAllRegions(tx)).await.is_err() {
-                        info!("EventReceiver is dropped, region failure detectors initialization loop is stopped");
+                        info!(
+                            "EventReceiver is dropped, region failure detectors initialization loop is stopped"
+                        );
                         break;
                     }
                     if rx.await.is_ok() {
@@ -381,7 +383,9 @@ impl RegionSupervisor {
                     match self.is_maintenance_mode_enabled().await {
                         Ok(false) => {}
                         Ok(true) => {
-                            warn!("Skipping initialize all regions since maintenance mode is enabled.");
+                            warn!(
+                                "Skipping initialize all regions since maintenance mode is enabled."
+                            );
                             continue;
                         }
                         Err(err) => {
@@ -764,14 +768,14 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::ddl::test_util::{
         test_create_logical_table_task, test_create_physical_table_task,
     };
-    use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::key::table_route::{
         LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
     };
-    use common_meta::key::{runtime_switch, TableMetadataManager};
+    use common_meta::key::{TableMetadataManager, runtime_switch};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::NoopPeerLookupService;
@@ -790,7 +794,7 @@ pub(crate) mod tests {
         DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
         RegionSupervisorTicker,
     };
-    use crate::selector::test_utils::{new_test_selector_context, RandomNodeSelector};
+    use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
     pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
         let env = TestingEnv::new();

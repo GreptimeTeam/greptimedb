@@ -17,13 +17,13 @@ use std::sync::Arc;
 use common_base::secrets::SecretString;
 use digest::Digest;
 use sha1::Sha1;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
 use crate::user_info::DefaultUserInfo;
-use crate::user_provider::static_user_provider::{StaticUserProvider, STATIC_USER_PROVIDER};
+use crate::user_provider::static_user_provider::{STATIC_USER_PROVIDER, StaticUserProvider};
 use crate::user_provider::watch_file_user_provider::{
-    WatchFileUserProvider, WATCH_FILE_USER_PROVIDER,
+    WATCH_FILE_USER_PROVIDER, WatchFileUserProvider,
 };
 use crate::{UserInfoRef, UserProviderRef};
 

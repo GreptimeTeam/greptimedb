@@ -32,30 +32,30 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use catalog::CatalogManagerRef;
 use catalog::process_manager::{
     ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
 };
-use catalog::CatalogManagerRef;
 use client::OutputData;
-use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
+use common_base::cancellation::CancellableFuture;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_meta::state_store::KvStateStore;
+use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
-use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
+use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, info, tracing};
 use dashmap::DashMap;
@@ -70,11 +70,11 @@ use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
+use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::QueryEngineRef;
+use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
     OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
@@ -548,10 +548,12 @@ impl SqlQueryHandler for Instance {
         {
             Ok(stmts) => {
                 if stmts.is_empty() {
-                    return vec![InvalidSqlSnafu {
-                        err_msg: "empty statements",
-                    }
-                    .fail()];
+                    return vec![
+                        InvalidSqlSnafu {
+                            err_msg: "empty statements",
+                        }
+                        .fail(),
+                    ];
                 }
 
                 let mut results = Vec::with_capacity(stmts.len());

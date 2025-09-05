@@ -16,7 +16,7 @@ use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
-use client::{OutputData, DEFAULT_SCHEMA_NAME};
+use client::{DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
@@ -32,9 +32,10 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
 use crate::tests::test_util::{
-    both_instances_cases, both_instances_cases_with_custom_storages, check_unordered_output_stream,
-    distributed, distributed_with_multiple_object_stores, find_testing_resource, prepare_path,
-    standalone, standalone_instance_case, standalone_with_multiple_object_stores, MockInstance,
+    MockInstance, both_instances_cases, both_instances_cases_with_custom_storages,
+    check_unordered_output_stream, distributed, distributed_with_multiple_object_stores,
+    find_testing_resource, prepare_path, standalone, standalone_instance_case,
+    standalone_with_multiple_object_stores,
 };
 
 #[apply(both_instances_cases)]
@@ -1624,7 +1625,10 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
             let root = uuid::Uuid::new_v4().to_string();
 
             // exports
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
+            let copy_to_stmt = format!(
+                "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+                bucket, root, key_id, key, region
+            );
 
             let output = execute_sql(&instance, &copy_to_stmt).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
@@ -1665,7 +1669,10 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
             let key = env::var("GT_S3_ACCESS_KEY").unwrap();
             let region = env::var("GT_S3_REGION").unwrap();
 
-            let copy_to_stmt = format!("Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')", bucket, root, key_id, key, region);
+            let copy_to_stmt = format!(
+                "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+                bucket, root, key_id, key, region
+            );
 
             let output = execute_sql(&instance, &copy_to_stmt).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));

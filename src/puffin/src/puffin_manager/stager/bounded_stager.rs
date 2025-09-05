@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
-use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE;
 use common_base::range_read::FileReader;
 use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{info, warn};

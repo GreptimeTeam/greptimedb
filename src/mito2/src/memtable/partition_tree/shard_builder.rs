@@ -24,7 +24,7 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
 use crate::memtable::partition_tree::data::{
-    DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
+    DATA_INIT_CAP, DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts,
 };
 use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
 use crate::memtable::partition_tree::shard::Shard;
@@ -317,8 +317,8 @@ impl Drop for ShardBuilderReader {
 mod tests {
 
     use super::*;
-    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
     use crate::memtable::KeyValues;
+    use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
     };
@@ -359,10 +359,12 @@ mod tests {
         let config = PartitionTreeConfig::default();
         let mut shard_builder = ShardBuilder::new(metadata.clone(), &config, 1);
         let mut metrics = WriteMetrics::default();
-        assert!(shard_builder
-            .finish(metadata.clone(), &mut HashMap::new())
-            .unwrap()
-            .is_none());
+        assert!(
+            shard_builder
+                .finish(metadata.clone(), &mut HashMap::new())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(1, shard_builder.current_shard_id);
 
         for key_values in &input {

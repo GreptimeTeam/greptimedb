@@ -27,10 +27,10 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::table_name::TableName;
 
+use crate::DatanodeId;
 use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
-use crate::DatanodeId;
 
 /// Returns the distribution of regions to datanodes.
 ///

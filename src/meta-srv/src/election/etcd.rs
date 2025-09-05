@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
@@ -22,14 +22,14 @@ use common_telemetry::{error, info, warn};
 use etcd_client::{
     Client, GetOptions, LeaderKey as EtcdLeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
-use tokio::time::{timeout, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, timeout};
 
 use crate::election::{
-    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
-    LeaderKey, CANDIDATE_LEASE_SECS, KEEP_ALIVE_INTERVAL_SECS,
+    CANDIDATE_LEASE_SECS, Election, KEEP_ALIVE_INTERVAL_SECS, LeaderChangeMessage, LeaderKey,
+    listen_leader_change, send_leader_change_and_set_flags,
 };
 use crate::error;
 use crate::error::Result;

@@ -22,10 +22,10 @@ use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
@@ -235,8 +235,8 @@ mod tests {
     use arrow::array::{ArrayRef, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_function::scalars::matches_term::MatchesTermFunction;
     use common_function::scalars::udf::create_udf;
@@ -249,7 +249,7 @@ mod tests {
     use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{Expr, Literal, ScalarUDF};
-    use datafusion_physical_expr::{create_physical_expr, ScalarFunctionExpr};
+    use datafusion_physical_expr::{ScalarFunctionExpr, create_physical_expr};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use session::context::QueryContext;
@@ -304,15 +304,17 @@ mod tests {
             .unwrap();
         let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        assert!(catalog_list
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name,
-                table_id: 1024,
-                table,
-            })
-            .is_ok());
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name,
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
         QueryEngineFactory::new(
             catalog_list,
             None,
@@ -476,8 +478,10 @@ mod tests {
             "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo_rld\"]"
         ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
-        assert!(plan_str
-            .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]"));
+        assert!(
+            plan_str
+                .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]")
+        );
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"there\", probes: [\"there\"]"));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"42\", probes: [\"42\"]"));
         assert!(!plan_str.contains("matches_term"))

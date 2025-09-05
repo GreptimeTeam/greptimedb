@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType};
+use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType, column};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 
 use crate::error::{self, Result};
@@ -63,7 +63,7 @@ impl DataPoint {
                 return error::InvalidQuerySnafu {
                     reason: format!("put: invalid timestamp: {}", tokens[2]),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -73,7 +73,7 @@ impl DataPoint {
                 return error::InvalidQuerySnafu {
                     reason: format!("put: invalid value: {}", tokens[3]),
                 }
-                .fail()
+                .fail();
             }
         };
 

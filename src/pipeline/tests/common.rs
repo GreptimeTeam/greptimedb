@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{parse, setup_pipeline, Content, Pipeline, PipelineContext};
+use pipeline::{Content, Pipeline, PipelineContext, parse, setup_pipeline};
 use vrl::value::Value as VrlValue;
 
 /// test util function to parse and execute pipeline

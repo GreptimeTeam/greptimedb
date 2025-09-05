@@ -15,14 +15,14 @@
 use std::sync::Arc;
 use std::vec;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use datatypes::arrow::array::{ArrayRef, Int32Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
-use partition::expr::{col, Operand};
-use partition::multi_dim::MultiDimPartitionRule;
 use partition::PartitionRule;
+use partition::expr::{Operand, col};
+use partition::multi_dim::MultiDimPartitionRule;
 use rand::Rng;
 use store_api::storage::RegionNumber;
 

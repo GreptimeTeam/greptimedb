@@ -26,9 +26,9 @@ use tokio::runtime::Handle;
 pub use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 
+use crate::Builder;
 use crate::error::{BuildRuntimeRateLimiterSnafu, Result};
 use crate::runtime::{Dropper, Priority, RuntimeTrait};
-use crate::Builder;
 
 struct RuntimeRateLimiter {
     pub ratelimiter: Option<Ratelimiter>,

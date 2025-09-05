@@ -16,9 +16,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
+use axum::Json;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
@@ -34,9 +34,9 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu,
+    CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
 };
-use crate::http::header::{collect_plan_metrics, GREPTIME_DB_HEADER_METRICS};
+use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };

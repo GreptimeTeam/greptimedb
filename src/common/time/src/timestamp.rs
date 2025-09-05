@@ -29,7 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
 use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
-use crate::timezone::{get_timezone, Timezone};
+use crate::timezone::{Timezone, get_timezone};
 use crate::util::{datetime_to_utc, div_ceil};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
@@ -1018,9 +1018,11 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(Timestamp::new(i64::MAX, TimeUnit::Second)
-            .convert_to(TimeUnit::Millisecond)
-            .is_none());
+        assert!(
+            Timestamp::new(i64::MAX, TimeUnit::Second)
+                .convert_to(TimeUnit::Millisecond)
+                .is_none()
+        );
     }
 
     #[test]

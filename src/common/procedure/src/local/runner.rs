@@ -593,8 +593,8 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use async_trait::async_trait;
     use common_error::ext::{ErrorExt, PlainError};
@@ -602,14 +602,14 @@ mod tests {
     use common_error::status_code::StatusCode;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::future::join_all;
-    use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
+    use futures_util::future::BoxFuture;
     use object_store::{EntryMode, ObjectStore};
     use tokio::sync::mpsc;
     use tokio::sync::watch::Receiver;
 
     use super::*;
-    use crate::local::{test_util, DynamicKeyLockGuard};
+    use crate::local::{DynamicKeyLockGuard, test_util};
     use crate::procedure::PoisonKeys;
     use crate::store::proc_path;
     use crate::test_util::InMemoryPoisonStore;

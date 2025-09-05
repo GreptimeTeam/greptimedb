@@ -25,8 +25,8 @@ use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::peer::Peer;
 use crate::DatanodeId;
+use crate::peer::Peer;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]

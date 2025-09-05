@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use deadpool_postgres::{Manager, Pool};
-use snafu::{ensure, OptionExt, ResultExt};
-use tokio::sync::{broadcast, RwLock};
+use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::MissedTickBehavior;
-use tokio_postgres::types::ToSql;
 use tokio_postgres::Row;
+use tokio_postgres::types::ToSql;
 
-use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
+use crate::election::rds::{LEASE_SEP, Lease, RdsLeaderKey, parse_value_and_expire_time};
 use crate::election::{
-    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
+    Election, LeaderChangeMessage, listen_leader_change, send_leader_change_and_set_flags,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, GetPostgresClientSnafu, NoLeaderSnafu, PostgresExecutionSnafu,
@@ -691,7 +691,9 @@ impl PgElection {
                         }
                         // Case 1.3
                         (false, _) => {
-                            warn!("Leader lease not found, but still hold the lock. Now stepping down.");
+                            warn!(
+                                "Leader lease not found, but still hold the lock. Now stepping down."
+                            );
                             self.step_down().await?;
                         }
                     }
@@ -1607,20 +1609,25 @@ mod tests {
         let f = ElectionSqlFactory::new(42, Some("test_schema"), "greptime_metakv");
         let s = f.build();
         assert!(s.campaign.contains("pg_try_advisory_lock"));
-        assert!(s
-            .put_value_with_lease
-            .contains("\"test_schema\".\"greptime_metakv\""));
-        assert!(s
-            .update_value_with_lease
-            .contains("\"test_schema\".\"greptime_metakv\""));
-        assert!(s
-            .get_value_with_lease
-            .contains("\"test_schema\".\"greptime_metakv\""));
-        assert!(s
-            .get_value_with_lease_by_prefix
-            .contains("\"test_schema\".\"greptime_metakv\""));
-        assert!(s
-            .delete_value
-            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(
+            s.put_value_with_lease
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
+        assert!(
+            s.update_value_with_lease
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
+        assert!(
+            s.get_value_with_lease
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
+        assert!(
+            s.get_value_with_lease_by_prefix
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
+        assert!(
+            s.delete_value
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
     }
 }

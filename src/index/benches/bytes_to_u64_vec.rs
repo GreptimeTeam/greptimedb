@@ -15,7 +15,7 @@
 use std::hint::black_box;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use index::bloom_filter::reader::bytes_to_u64_vec;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

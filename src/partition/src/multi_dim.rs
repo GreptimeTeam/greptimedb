@@ -14,8 +14,8 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock};
 
 use datafusion_expr::ColumnarValue;
@@ -27,14 +27,14 @@ use datatypes::arrow::datatypes::Schema;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionNumber;
 
+use crate::PartitionRule;
 use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::partition::RegionMask;
-use crate::PartitionRule;
 
 /// The default region number when no partition exprs are matched.
 const DEFAULT_REGION: RegionNumber = 0;

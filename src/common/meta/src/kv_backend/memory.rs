@@ -23,12 +23,12 @@ use common_error::ext::ErrorExt;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use crate::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
-use crate::rpc::KeyValue;
 
 pub struct MemoryKvBackend<T> {
     kvs: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,

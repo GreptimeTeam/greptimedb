@@ -16,16 +16,16 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use mito2::memtable::{KeyValues, Memtable, MemtableRanges};
 use mito2::read;
+use mito2::read::Source;
 use mito2::read::dedup::DedupReader;
 use mito2::read::merge::MergeReaderBuilder;
 use mito2::read::scan_region::PredicateGroup;
-use mito2::read::Source;
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};

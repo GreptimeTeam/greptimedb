@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_plugins::GREPTIME_EXEC_PREFIX;
-use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricValue;
 use headers::{Header, HeaderName, HeaderValue};
 use hyper::HeaderMap;
 use serde_json::Value;

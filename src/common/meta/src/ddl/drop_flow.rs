@@ -14,7 +14,7 @@
 
 mod metadata;
 
-use api::v1::flow::{flow_request, DropRequest, FlowRequest};
+use api::v1::flow::{DropRequest, FlowRequest, flow_request};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_error::ext::ErrorExt;
@@ -26,12 +26,12 @@ use common_procedure::{
 use common_telemetry::info;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::flow_name::FlowName;
 use crate::instruction::{CacheIdent, DropFlow};

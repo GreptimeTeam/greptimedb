@@ -21,8 +21,8 @@ use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{
-    DataType as ArrowDataType, Int16Type, Int32Type, Int64Type, Int8Type, TimeUnit, UInt16Type,
-    UInt32Type, UInt64Type, UInt8Type,
+    DataType as ArrowDataType, Int8Type, Int16Type, Int32Type, Int64Type, TimeUnit, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_array::{DictionaryArray, StructArray};
 use arrow_schema::IntervalUnit;
@@ -38,12 +38,12 @@ use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
-    DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
-    Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+    DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
+    Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
     ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
-    UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
+    UInt16Vector, UInt32Vector, UInt64Vector, Vector, VectorRef,
 };
 
 /// Helper functions for `Vector`.
@@ -254,7 +254,7 @@ impl Helper {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
-                .fail()
+                .fail();
             }
         };
 
@@ -385,7 +385,7 @@ impl Helper {
                         return error::UnsupportedArrowTypeSnafu {
                             arrow_type: array.as_ref().data_type().clone(),
                         }
-                        .fail()
+                        .fail();
                     }
                 }
             }
@@ -413,7 +413,7 @@ impl Helper {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }
-                .fail()
+                .fail();
             }
         })
     }
@@ -458,11 +458,11 @@ impl Helper {
 #[cfg(test)]
 mod tests {
     use arrow::array::{
-        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
-        Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
+        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int8Array, Int16Array,
+        Int32Array, Int64Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
         Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Int32Type, IntervalMonthDayNano};

@@ -39,7 +39,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use datafusion_common::utils::bisect;
-use datafusion_common::{internal_err, DataFusionError};
+use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::value::Value;
 use futures::Stream;
@@ -491,13 +491,17 @@ impl WindowedSortStream {
                         error!("Invalid range: {:?} > {:?}", cur_range, working_range);
                         #[cfg(debug_assertions)]
                         self.check_subset_ranges(&cur_range);
-                        internal_err!("Current batch have data on the right side of working range, something is very wrong")?;
+                        internal_err!(
+                            "Current batch have data on the right side of working range, something is very wrong"
+                        )?;
                     }
                 } else if cur_range.start < working_range.start {
                     error!("Invalid range: {:?} < {:?}", cur_range, working_range);
                     #[cfg(debug_assertions)]
                     self.check_subset_ranges(&cur_range);
-                    internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                    internal_err!(
+                        "Current batch have data on the left side of working range, something is very wrong"
+                    )?;
                 }
 
                 if cur_range.is_subset(&working_range) {
@@ -516,7 +520,9 @@ impl WindowedSortStream {
                     )?;
 
                     if offset != 0 {
-                        internal_err!("Current batch have data on the left side of working range, something is very wrong")?;
+                        internal_err!(
+                            "Current batch have data on the left side of working range, something is very wrong"
+                        )?;
                     }
 
                     let sliced_rb = sorted_rb.slice(offset, len);
@@ -848,11 +854,7 @@ fn cmp_with_opts<T: Ord>(
     let opt = opt.unwrap_or_default();
 
     if let (Some(a), Some(b)) = (a, b) {
-        if opt.descending {
-            b.cmp(a)
-        } else {
-            a.cmp(b)
-        }
+        if opt.descending { b.cmp(a) } else { a.cmp(b) }
     } else if opt.nulls_first {
         // now we know at leatst one of them is None
         // in rust None < Some(_)
@@ -1255,7 +1257,7 @@ mod test {
     use serde_json::json;
 
     use super::*;
-    use crate::test_util::{new_ts_array, MockInputExec};
+    use crate::test_util::{MockInputExec, new_ts_array};
 
     #[test]
     fn test_overlapping() {

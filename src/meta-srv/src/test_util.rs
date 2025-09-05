@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::DatanodeWorkloads;
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};

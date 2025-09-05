@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
 use crate::error::{self, Result};
-use crate::wal::entry_reader::{decode_raw_entry, WalEntryReader};
+use crate::wal::entry_reader::{WalEntryReader, decode_raw_entry};
 use crate::wal::raw_entry_reader::RawEntryReader;
 use crate::wal::{EntryId, WalEntryStream};
 
@@ -221,14 +221,14 @@ pub fn build_wal_entry_distributor_and_receivers(
 mod tests {
 
     use api::v1::{Mutation, OpType, WalEntry};
-    use futures::{stream, TryStreamExt};
+    use futures::{TryStreamExt, stream};
     use prost::Message;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
 
     use super::*;
     use crate::test_util::wal_util::generate_tail_corrupted_stream;
-    use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
     use crate::wal::EntryId;
+    use crate::wal::raw_entry_reader::{EntryStream, RawEntryReader};
 
     struct MockRawEntryReader {
         entries: Vec<Entry>,

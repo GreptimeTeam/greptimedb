@@ -20,7 +20,7 @@ use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;

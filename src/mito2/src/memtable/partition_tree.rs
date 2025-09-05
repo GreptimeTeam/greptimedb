@@ -24,12 +24,12 @@ mod shard_builder;
 mod tree;
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use common_base::readable_size::ReadableSize;
 use mito_codec::key_values::KeyValue;
-use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};

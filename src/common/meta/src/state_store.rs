@@ -21,20 +21,20 @@ use common_procedure::error::{
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::store::state_store::{KeySet, KeyValueStream, StateStore};
 use common_procedure::store::util::multiple_value_stream;
-use futures::future::try_join_all;
 use futures::StreamExt;
+use futures::future::try_join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{ProcedurePoisonConflictSnafu, Result, UnexpectedSnafu};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataValue};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::range_stream::PaginationStream;
-use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
 
 const DELIMITER: &str = "/";
 

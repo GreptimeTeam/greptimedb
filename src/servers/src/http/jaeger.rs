@@ -17,10 +17,10 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
-use axum::Extension;
 use chrono::Utc;
 use common_catalog::consts::{PARENT_SPAN_ID_COLUMN, TRACE_TABLE_NAME};
 use common_error::ext::ErrorExt;
@@ -28,16 +28,16 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result,
+    CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result, status_code_to_http_status,
 };
-use crate::http::extractor::TraceTableName;
 use crate::http::HttpRecordsOutput;
+use crate::http::extractor::TraceTableName;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
@@ -1154,7 +1154,7 @@ fn parse_jaeger_time_range_for_operations(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Number, Value as JsonValue};
+    use serde_json::{Number, Value as JsonValue, json};
 
     use super::*;
     use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};

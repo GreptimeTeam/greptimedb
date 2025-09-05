@@ -27,11 +27,11 @@ use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{json_type_value_to_string, IntervalType, TimestampType};
+use datatypes::types::{IntervalType, TimestampType, json_type_value_to_string};
 use datatypes::value::ListValue;
+use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
-use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
@@ -41,9 +41,9 @@ use self::bytea::{EscapeOutputBytea, HexOutputBytea};
 use self::datetime::{StylingDate, StylingDateTime};
 pub use self::error::{PgErrorCode, PgErrorSeverity};
 use self::interval::PgInterval;
+use crate::SqlPlan;
 use crate::error::{self as server_error, DataFusionSnafu, Error, Result};
 use crate::postgres::utils::convert_err;
-use crate::SqlPlan;
 
 pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Vec<FieldInfo>> {
     origin
@@ -648,7 +648,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -664,7 +664,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -690,7 +690,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -716,7 +716,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -742,7 +742,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -769,7 +769,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -796,7 +796,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -829,7 +829,7 @@ pub(super) fn parameters_to_scalar_values(
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
                                 Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ))
+                            ));
                         }
                     }
                 } else {
@@ -1026,13 +1026,13 @@ pub(super) fn param_types_to_pg_types(
 mod test {
     use std::sync::Arc;
 
+    use common_time::Timestamp;
     use common_time::interval::IntervalUnit;
     use common_time::timestamp::TimeUnit;
-    use common_time::Timestamp;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::ListValue;
-    use pgwire::api::results::{FieldFormat, FieldInfo};
     use pgwire::api::Type;
+    use pgwire::api::results::{FieldFormat, FieldInfo};
     use session::context::QueryContextBuilder;
 
     use super::*;

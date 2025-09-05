@@ -35,11 +35,11 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::EntryId;
 
+use crate::Result;
 use crate::error::{self};
 use crate::procedure::wal_prune::utils::{
     delete_records, get_offsets_for_topic, get_partition_client, update_pruned_entry_id,
 };
-use crate::Result;
 
 pub type KafkaClientRef = Arc<Client>;
 
@@ -114,10 +114,7 @@ impl WalPruneProcedure {
         if self.data.prunable_entry_id <= earliest_offset {
             warn!(
                 "The prunable entry id is less or equal to the earliest offset, topic: {}, prunable entry id: {}, earliest offset: {}, latest offset: {}",
-                self.data.topic,
-                self.data.prunable_entry_id,
-                earliest_offset,
-                latest_offset
+                self.data.topic, self.data.prunable_entry_id, earliest_offset, latest_offset
             );
             return Ok(Status::done());
         }

@@ -19,7 +19,7 @@ use chrono::{NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::timestamp::TimeUnit;
-use crate::timezone::{get_timezone, Timezone};
+use crate::timezone::{Timezone, get_timezone};
 
 /// Time value, represents the elapsed time since midnight in the unit of `TimeUnit`.
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]

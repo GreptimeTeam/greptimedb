@@ -46,7 +46,7 @@ lazy_static::lazy_static! {
 /// wait for the close signal, for unix platform it's SIGINT or SIGTERM
 #[cfg(unix)]
 async fn start_wait_for_close_signal() -> std::io::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 

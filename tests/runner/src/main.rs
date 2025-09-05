@@ -156,7 +156,9 @@ async fn main() {
         || args.test_filter != ".*"
     {
         args.jobs = 1;
-        println!("Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage");
+        println!(
+            "Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage"
+        );
     }
 
     let config = ConfigBuilder::default()
