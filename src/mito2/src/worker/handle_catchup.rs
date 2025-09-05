@@ -157,6 +157,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.puffin_manager_factory.clone(),
                 self.intermediate_manager.clone(),
                 self.time_provider.clone(),
+                self.file_ref_manager.clone(),
             )
             .cache(Some(self.cache_manager.clone()))
             .options(region.version().options.clone())?

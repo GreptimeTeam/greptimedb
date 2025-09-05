@@ -103,6 +103,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
+            self.file_ref_manager.clone(),
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))

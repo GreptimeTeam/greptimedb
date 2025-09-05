@@ -36,7 +36,7 @@ use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
+use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
@@ -195,21 +195,21 @@ impl AccessLayer {
     }
 
     /// Deletes a SST file (and its index file if it has one) with given file id.
-    pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
-        let path = location::sst_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
+    pub(crate) async fn delete_sst(&self, region_file_id: &RegionFileId) -> Result<()> {
+        let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
         self.object_store
             .delete(&path)
             .await
             .context(DeleteSstSnafu {
-                file_id: file_meta.file_id,
+                file_id: region_file_id.file_id(),
             })?;
 
-        let path = location::index_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
+        let path = location::index_file_path(&self.table_dir, *region_file_id, self.path_type);
         self.object_store
             .delete(&path)
             .await
             .context(DeleteIndexSnafu {
-                file_id: file_meta.file_id,
+                file_id: region_file_id.file_id(),
             })?;
 
         Ok(())

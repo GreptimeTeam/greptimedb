@@ -780,7 +780,6 @@ impl ManifestContext {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
         self.manifest_manager.read().await.manifest()
     }

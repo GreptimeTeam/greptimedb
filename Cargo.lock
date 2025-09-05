@@ -7593,6 +7593,7 @@ dependencies = [
  "crc32fast",
  "criterion 0.4.0",
  "crossbeam-utils",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

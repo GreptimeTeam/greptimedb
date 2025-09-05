@@ -39,6 +39,7 @@ use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
+use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
@@ -238,8 +239,13 @@ impl DatanodeBuilder {
             table_id_schema_cache,
             schema_cache,
         ));
+        let file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
         let region_server = self
-            .new_region_server(schema_metadata_manager, region_event_listener)
+            .new_region_server(
+                schema_metadata_manager,
+                region_event_listener,
+                file_ref_manager,
+            )
             .await?;
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
@@ -361,6 +367,7 @@ impl DatanodeBuilder {
         &mut self,
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
+        file_ref_manager: FileReferenceManagerRef,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
@@ -399,6 +406,7 @@ impl DatanodeBuilder {
             .build_store_engines(
                 object_store_manager,
                 schema_metadata_manager,
+                file_ref_manager,
                 self.plugins.clone(),
             )
             .await?;
@@ -419,6 +427,7 @@ impl DatanodeBuilder {
         &mut self,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
@@ -444,6 +453,7 @@ impl DatanodeBuilder {
                 object_store_manager.clone(),
                 mito_engine_config,
                 schema_metadata_manager.clone(),
+                file_ref_manager.clone(),
                 plugins.clone(),
             )
             .await?;
@@ -469,6 +479,7 @@ impl DatanodeBuilder {
         object_store_manager: ObjectStoreManagerRef,
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let opts = &self.opts;
@@ -490,6 +501,7 @@ impl DatanodeBuilder {
                     log_store,
                     object_store_manager,
                     schema_metadata_manager,
+                    file_ref_manager,
                     plugins,
                 );
 
@@ -530,6 +542,7 @@ impl DatanodeBuilder {
                     log_store,
                     object_store_manager,
                     schema_metadata_manager,
+                    file_ref_manager,
                     plugins,
                 );
 
