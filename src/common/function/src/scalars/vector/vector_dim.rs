@@ -16,8 +16,8 @@ use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::InvalidFuncArgsSnafu;
+use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
 use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, UInt64VectorBuilder, VectorRef};
@@ -59,8 +59,8 @@ impl Function for VectorDimFunction {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![DataType::Utf8]),
-                TypeSignature::Exact(vec![DataType::Binary]),
+                TypeSignature::Uniform(1, STRINGS.to_vec()),
+                TypeSignature::Uniform(1, BINARYS.to_vec()),
             ],
             Volatility::Immutable,
         )

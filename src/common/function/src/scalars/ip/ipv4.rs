@@ -107,10 +107,7 @@ impl Function for Ipv4StringToNum {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8]),
-            Volatility::Immutable,
-        )
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

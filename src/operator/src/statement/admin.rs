@@ -223,7 +223,10 @@ fn args_to_vector(
             .fail()
         }
 
-        _ => Ok(vec![]),
+        _ => error::BuildAdminFunctionArgsSnafu {
+            msg: format!("unknown function type signature: {type_signature:?}"),
+        }
+        .fail(),
     }
 }
 

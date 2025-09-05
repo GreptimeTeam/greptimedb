@@ -63,7 +63,7 @@ impl Function for MatchesFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![DataType::Utf8, DataType::Utf8], Volatility::Immutable)
+        Signature::string(2, Volatility::Immutable)
     }
 
     // TODO: read case-sensitive config

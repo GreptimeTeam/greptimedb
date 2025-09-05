@@ -15,8 +15,7 @@
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
@@ -45,10 +44,7 @@ impl Function for STDistance {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(2, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -96,10 +92,7 @@ impl Function for STDistanceSphere {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(2, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -157,10 +150,7 @@ impl Function for STArea {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(1, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

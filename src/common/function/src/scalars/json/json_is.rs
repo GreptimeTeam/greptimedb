@@ -42,6 +42,7 @@ macro_rules! json_is {
                 }
 
                 fn signature(&self) -> Signature {
+                    // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
                     Signature::exact(vec![DataType::Binary], Volatility::Immutable)
                 }
 

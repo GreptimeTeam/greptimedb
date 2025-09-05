@@ -16,7 +16,6 @@ use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -41,7 +40,7 @@ impl Function for ParseJsonFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![DataType::Utf8], Volatility::Immutable)
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -109,6 +108,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion_expr::TypeSignature;
+    use datatypes::arrow::datatypes::DataType;
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::StringVector;
 

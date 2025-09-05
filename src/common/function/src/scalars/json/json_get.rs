@@ -63,6 +63,7 @@ macro_rules! json_get {
                 }
 
                 fn signature(&self) -> Signature {
+                    // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
                     Signature::exact(
                         vec![DataType::Binary, DataType::Utf8],
                         Volatility::Immutable,
@@ -163,6 +164,7 @@ impl Function for JsonGetString {
     }
 
     fn signature(&self) -> Signature {
+        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
         Signature::exact(
             vec![DataType::Binary, DataType::Utf8],
             Volatility::Immutable,

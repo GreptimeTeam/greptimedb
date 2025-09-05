@@ -50,10 +50,7 @@ impl Function for Ipv4ToCidr {
 
     fn signature(&self) -> Signature {
         Signature::one_of(
-            vec![
-                TypeSignature::Exact(vec![DataType::Utf8]),
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::UInt8]),
-            ],
+            vec![TypeSignature::String(1), TypeSignature::String(2)],
             Volatility::Immutable,
         )
     }
@@ -177,7 +174,7 @@ impl Function for Ipv6ToCidr {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![DataType::Utf8]),
+                TypeSignature::String(1),
                 TypeSignature::Exact(vec![DataType::Utf8, DataType::UInt8]),
             ],
             Volatility::Immutable,

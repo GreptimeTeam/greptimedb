@@ -16,8 +16,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
@@ -49,10 +48,7 @@ impl Function for Ipv4InRange {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Immutable,
-        )
+        Signature::string(2, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -141,10 +137,7 @@ impl Function for Ipv6InRange {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Immutable,
-        )
+        Signature::string(2, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

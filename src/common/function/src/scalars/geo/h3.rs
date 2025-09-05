@@ -240,10 +240,7 @@ impl Function for H3StringToCell {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(1, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

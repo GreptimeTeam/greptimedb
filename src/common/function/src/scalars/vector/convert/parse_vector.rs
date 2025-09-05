@@ -16,7 +16,6 @@ use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, InvalidVectorStringSnafu, Result};
 use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::parse_string_to_vector_type_value;
@@ -40,7 +39,7 @@ impl Function for ParseVectorFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![DataType::Utf8], Volatility::Immutable)
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

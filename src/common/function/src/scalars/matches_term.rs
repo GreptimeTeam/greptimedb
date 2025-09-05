@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
@@ -98,7 +97,7 @@ impl Function for MatchesTermFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![DataType::Utf8, DataType::Utf8], Volatility::Immutable)
+        Signature::string(2, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use common_query::error::Result;
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
@@ -42,10 +41,7 @@ impl Function for STContains {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(2, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -93,10 +89,7 @@ impl Function for STWithin {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(2, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -144,10 +137,7 @@ impl Function for STIntersects {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
-            Volatility::Stable,
-        )
+        Signature::string(2, Volatility::Stable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
