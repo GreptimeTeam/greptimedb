@@ -425,8 +425,7 @@ impl MitoRegion {
             }
         }
 
-        // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata
-        // and trigger a manifest checkpoint.
+        // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
             let manifest_meta = &manager.manifest().metadata;
@@ -435,12 +434,24 @@ impl MitoRegion {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
                 });
-                let _ = manager
+                let result = manager
                     .update(
                         RegionMetaActionList::with_action(action),
                         RegionRoleState::Leader(RegionLeaderState::Writable),
                     )
                     .await;
+
+                match result {
+                    Ok(version) => {
+                        info!(
+                            "Successfully persisted backfilled metadata for region {}, version: {}",
+                            self.region_id, version
+                        );
+                    }
+                    Err(e) => {
+                        warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
+                    }
+                }
             }
         }
 
