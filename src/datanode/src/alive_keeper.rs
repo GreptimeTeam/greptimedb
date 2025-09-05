@@ -26,7 +26,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
-use store_api::region_engine::RegionRole;
+use store_api::region_engine::{RegionRole, SettableRegionRoleState};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
@@ -429,11 +429,20 @@ impl CountdownTask {
                                     // The datanode may still receive lease renewal responses that depend on the metadata
                                     // during the short period before it is removed.
                                     warn!(err; "Failed to set region role to {role} for region {region_id}");
-                                }else{
+                                } else {
                                     error!(err; "Failed to set region role to {role} for region {region_id}");
                                 }
 
+                            // Finalize leadership: persist backfilled metadata.
+                            } else if role == RegionRole::Leader
+                                && let Err(err) = self
+                                    .region_server
+                                    .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
+                                    .await
+                            {
+                                error!(err; "Failed to set region role state gracefully to {role} for region {region_id}");
                             }
+
                             if let Some(ext_handler) = self.handler_ext.as_ref() {
                                 ext_handler.reset_deadline(
                                     &self.region_server,
