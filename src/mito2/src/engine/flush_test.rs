@@ -99,6 +99,7 @@ async fn test_flush_engine() {
             MitoConfig::default(),
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -169,6 +170,7 @@ async fn test_write_stall() {
             MitoConfig::default(),
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -242,6 +244,7 @@ async fn test_flush_empty() {
         .create_engine_with(
             MitoConfig::default(),
             Some(write_buffer_manager.clone()),
+            None,
             None,
         )
         .await;
@@ -478,6 +481,7 @@ async fn test_flush_workers() {
             },
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
 
@@ -560,6 +564,7 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
             MitoConfig::default(),
             Some(write_buffer_manager.clone()),
             Some(listener.clone()),
+            None,
         )
         .await;
     let region_id = RegionId::new(1, 1);

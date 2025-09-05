@@ -73,6 +73,7 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
+use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
@@ -103,6 +104,19 @@ pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
     Some(LogStoreFactory::Kafka(KafkaLogStoreFactory {
         broker_endpoints,
     }))
+}
+
+pub(crate) fn noop_partition_expr_fetcher() -> PartitionExprFetcherRef {
+    struct NoopPartitionExprFetcher;
+
+    #[async_trait::async_trait]
+    impl PartitionExprFetcher for NoopPartitionExprFetcher {
+        async fn fetch_expr(&self, _region_id: RegionId) -> Option<String> {
+            None
+        }
+    }
+
+    Arc::new(NoopPartitionExprFetcher)
 }
 
 #[template]
@@ -212,6 +226,7 @@ pub struct TestEnv {
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
     kv_backend: KvBackendRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl TestEnv {
@@ -247,6 +262,7 @@ impl TestEnv {
             schema_metadata_manager,
             file_ref_manager: Arc::new(FileReferenceManager::new(None)),
             kv_backend,
+            partition_expr_fetcher: noop_partition_expr_fetcher(),
         }
     }
 
@@ -284,6 +300,7 @@ impl TestEnv {
                 zelf.object_store_manager.as_ref().unwrap().clone(),
                 zelf.schema_metadata_manager.clone(),
                 zelf.file_ref_manager.clone(),
+                zelf.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
@@ -318,6 +335,7 @@ impl TestEnv {
         config: MitoConfig,
         manager: Option<WriteBufferManagerRef>,
         listener: Option<EventListenerRef>,
+        partition_expr_fetcher: Option<PartitionExprFetcherRef>,
     ) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
@@ -326,6 +344,10 @@ impl TestEnv {
         self.object_store_manager = Some(object_store_manager.clone());
 
         let data_home = self.data_home().display().to_string();
+
+        let partition_expr_fetcher =
+            partition_expr_fetcher.unwrap_or_else(noop_partition_expr_fetcher);
+        self.partition_expr_fetcher = partition_expr_fetcher;
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new_for_test(
@@ -338,6 +360,7 @@ impl TestEnv {
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -351,6 +374,7 @@ impl TestEnv {
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -395,6 +419,7 @@ impl TestEnv {
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -408,6 +433,7 @@ impl TestEnv {
                 Arc::new(StdTimeProvider),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -441,6 +467,7 @@ impl TestEnv {
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -454,6 +481,7 @@ impl TestEnv {
                 time_provider.clone(),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
             )
             .await
             .unwrap(),
@@ -491,6 +519,7 @@ impl TestEnv {
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
@@ -501,6 +530,7 @@ impl TestEnv {
                 Arc::new(object_store_manager),
                 self.schema_metadata_manager.clone(),
                 self.file_ref_manager.clone(),
+                self.partition_expr_fetcher.clone(),
                 Plugins::new(),
             )
             .await
