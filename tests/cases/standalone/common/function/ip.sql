@@ -28,7 +28,7 @@ CREATE TABLE network_traffic (
     `time` TIMESTAMP DEFAULT 0,
     source_ip STRING,
     dest_ip STRING,
-    bytes_sent UINT64, 
+    bytes_sent UINT64,
     PRIMARY KEY(`id`),
     TIME INDEX(`time`)
 );
@@ -66,17 +66,27 @@ INSERT INTO network_traffic (`id`, source_ip, dest_ip, bytes_sent) VALUES
 
 -- Test IPv4 string/number conversion functions
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
-    `id`, 
-    ip_addr, 
+SELECT
+    `id`,
+    ip_addr,
     ip_numeric,
     ipv4_string_to_num(ip_addr) AS computed_numeric,
     ipv4_num_to_string(ip_numeric) AS computed_addr
 FROM ip_v4_data;
 
+-- Test IPv4 string/number conversion functions, by the function alias
+-- SQLNESS SORT_RESULT 3 1
+SELECT
+    `id`,
+    ip_addr,
+    ip_numeric,
+    ipv4_string_to_num(ip_addr) AS computed_numeric,
+    inet_ntoa(ip_numeric) AS computed_addr
+FROM ip_v4_data;
+
 -- Test IPv4 CIDR functions
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     `id`,
     ip_addr,
     subnet_mask,
@@ -87,7 +97,7 @@ FROM ip_v4_data;
 
 -- Test IPv4 range checks
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     t.`id`,
     t.source_ip,
     t.dest_ip,
@@ -102,16 +112,16 @@ WHERE t.source_ip NOT LIKE '%:%';
 
 -- Test IPv6 string/hex conversion functions
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
-    `id`, 
-    ip_addr, 
+SELECT
+    `id`,
+    ip_addr,
     ip_hex,
     ipv6_num_to_string(ip_hex) AS computed_addr
 FROM ip_v6_data;
 
 -- Test IPv6 CIDR functions
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     `id`,
     ip_addr,
     subnet_mask,
@@ -122,7 +132,7 @@ FROM ip_v6_data;
 
 -- Test IPv6 range checks
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     t.`id`,
     t.source_ip,
     t.dest_ip,
@@ -138,14 +148,14 @@ WHERE t.source_ip LIKE '%:%';
 -- Combined IPv4/IPv6 example - Security analysis
 -- Find all traffic from the same network to specific IPs
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     source_ip,
     dest_ip,
     bytes_sent,
-    CASE 
-        WHEN source_ip LIKE '%:%' THEN 
+    CASE
+        WHEN source_ip LIKE '%:%' THEN
             ipv6_to_cidr(source_ip, arrow_cast(64, 'UInt8'))
-        ELSE 
+        ELSE
             ipv4_to_cidr(source_ip, arrow_cast(24, 'UInt8'))
     END AS source_network,
     CASE
@@ -159,7 +169,7 @@ ORDER BY bytes_sent DESC;
 
 -- Subnet analysis - IPv4
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     ipv4_to_cidr(source_ip, arrow_cast(24,'UInt8')) AS subnet,
     COUNT(*) AS device_count,
     SUM(bytes_sent) AS total_bytes
@@ -170,7 +180,7 @@ ORDER BY total_bytes DESC;
 
 -- Subnet analysis - IPv6
 -- SQLNESS SORT_RESULT 3 1
-SELECT 
+SELECT
     ipv6_to_cidr(source_ip, arrow_cast(48,'UInt8')) AS subnet,
     COUNT(*) AS device_count,
     SUM(bytes_sent) AS total_bytes
