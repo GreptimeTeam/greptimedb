@@ -27,35 +27,34 @@ use libfuzzer_sys::fuzz_target;
 use rand::seq::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::{ChaCha20Rng, ChaChaRng};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
 use tests_fuzz::generator::{Generator, Random};
 use tests_fuzz::ir::{
-    generate_random_value, generate_unique_timestamp_for_mysql, CreateTableExpr, Ident,
-    InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    CreateTableExpr, Ident, InsertIntoExpr, MySQLTsColumnTypeGenerator, generate_random_value,
+    generate_unique_timestamp_for_mysql,
 };
+use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
-use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::cluster_info::wait_for_all_datanode_online;
 use tests_fuzz::utils::partition::{
-    fetch_partitions, pretty_print_region_distribution, region_distribution,
-    wait_for_all_regions_evicted, Partition,
+    Partition, fetch_partitions, pretty_print_region_distribution, region_distribution,
+    wait_for_all_regions_evicted,
 };
 use tests_fuzz::utils::pod_failure::{inject_datanode_pod_failure, recover_pod_failure};
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, get_gt_fuzz_input_max_columns,
-    get_gt_fuzz_input_max_insert_actions, get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables,
-    init_greptime_connections_via_env, Connections, GT_FUZZ_CLUSTER_NAME,
-    GT_FUZZ_CLUSTER_NAMESPACE,
+    Connections, GT_FUZZ_CLUSTER_NAME, GT_FUZZ_CLUSTER_NAMESPACE, compact_table, flush_memtable,
+    get_gt_fuzz_input_max_columns, get_gt_fuzz_input_max_insert_actions,
+    get_gt_fuzz_input_max_rows, get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator::row::count_values;
 use tokio::sync::Semaphore;
@@ -114,7 +113,7 @@ fn generate_create_exprs<R: Rng + 'static>(
         merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
     );
 
-    let base_table_name = name_generator.gen(rng);
+    let base_table_name = name_generator.r#gen(rng);
     let min_column = columns / 2;
     let columns = rng.random_range(min_column..columns);
     let mut exprs = Vec::with_capacity(tables);

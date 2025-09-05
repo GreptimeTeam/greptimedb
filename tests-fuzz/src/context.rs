@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_query::AddColumnLocation;
 use datatypes::types::cast;
 use rand::Rng;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::error::{self, Result};
 use crate::generator::Random;
@@ -175,9 +175,9 @@ impl TableContext {
         rng: &mut R,
         generator: &dyn Random<Ident, R>,
     ) -> Ident {
-        let mut name = generator.gen(rng);
+        let mut name = generator.r#gen(rng);
         while self.columns.iter().any(|col| col.name.value == name.value) {
-            name = generator.gen(rng);
+            name = generator.r#gen(rng);
         }
         name
     }
@@ -187,9 +187,9 @@ impl TableContext {
         rng: &mut R,
         generator: &dyn Random<Ident, R>,
     ) -> Ident {
-        let mut name = generator.gen(rng);
+        let mut name = generator.r#gen(rng);
         while self.name.value == name.value {
-            name = generator.gen(rng);
+            name = generator.r#gen(rng);
         }
         name
     }
