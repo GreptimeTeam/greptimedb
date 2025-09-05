@@ -87,6 +87,10 @@ async fn build_cache_layer(
     store_config: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
+    if !store_config.enable_read_cache() {
+        return Ok(None);
+    }
+
     let (name, mut cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
             let path = s3_config.cache.cache_path.clone();
@@ -127,10 +131,8 @@ async fn build_cache_layer(
         _ => unreachable!("Already checked above"),
     };
 
-    // Enable object cache by default
-    // Set the cache_path to be `${data_home}` by default
-    // if it's not present
-    if cache_path.is_none() {
+    // If `cache_path` is unset or an empty string, default to use `${data_home}` as the local read cache directory.
+    if cache_path.as_ref().is_none_or(|p| p.is_empty()) {
         let read_cache_path = data_home.to_string();
         tokio::fs::create_dir_all(Path::new(&read_cache_path))
             .await
