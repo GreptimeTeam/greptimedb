@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::*;
 use datatypes::vectors::{StringVector, VectorRef};
 

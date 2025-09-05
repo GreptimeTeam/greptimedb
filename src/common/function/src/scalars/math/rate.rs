@@ -15,8 +15,9 @@
 use std::fmt;
 
 use common_query::error::{self, Result};
-use common_query::prelude::{Signature, Volatility};
 use datafusion::arrow::compute::kernels::numeric;
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::compute::kernels::cast;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::*;
@@ -45,7 +46,7 @@ impl Function for RateFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -75,7 +76,7 @@ impl Function for RateFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
+    use datafusion_expr::TypeSignature;
     use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector};
 
     use super::*;
@@ -91,7 +92,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Uniform(2, valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == ConcreteDataType::numerics()
+                         } if  valid_types == NUMERICS
         ));
         let values = vec![1.0, 3.0, 6.0];
         let ts = vec![0, 1, 2];

@@ -2192,7 +2192,6 @@ dependencies = [
  "nalgebra",
  "num",
  "num-traits",
- "once_cell",
  "paste",
  "pretty_assertions",
  "s2",

@@ -89,7 +89,7 @@ pub fn create_udf(
     query_ctx: QueryContextRef,
     state: Arc<FunctionState>,
 ) -> ScalarUDF {
-    let signature = func.signature().into();
+    let signature = func.signature();
     let udf = ScalarUdf {
         function: func,
         signature,
@@ -139,7 +139,7 @@ mod tests {
         let udf = create_udf(f.clone(), query_ctx, Arc::new(FunctionState::default()));
 
         assert_eq!("test_and", udf.name());
-        let expected_signature: datafusion_expr::Signature = f.signature().into();
+        let expected_signature: datafusion_expr::Signature = f.signature();
         assert_eq!(udf.signature(), &expected_signature);
         assert_eq!(
             ConcreteDataType::boolean_datatype(),

@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
-use common_query::prelude::TypeSignature;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::tracing;
 use common_time::Timezone;
+use datafusion_expr::TypeSignature;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -81,8 +82,7 @@ impl StatementExecutor {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let type_sig = (&signature.type_signature).into();
-        let args = args_to_vector(&type_sig, &arg_values, &query_ctx)?;
+        let args = args_to_vector(&signature.type_signature, &arg_values, &query_ctx)?;
         let arg_types = args
             .iter()
             .map(|arg| arg.data_type().as_arrow_type())
@@ -223,19 +223,23 @@ fn args_to_vector(
             .fail()
         }
 
-        TypeSignature::NullAry => Ok(vec![]),
+        _ => error::BuildAdminFunctionArgsSnafu {
+            msg: format!("unknown function type signature: {type_signature:?}"),
+        }
+        .fail(),
     }
 }
 
 /// Try to cast sql values to vectors by exact data types.
 fn values_to_vectors_by_exact_types(
-    exact_types: &[ConcreteDataType],
+    exact_types: &[ArrowDataType],
     args: &[&SqlValue],
     tz: Option<&Timezone>,
 ) -> Result<Vec<VectorRef>> {
     args.iter()
         .zip(exact_types.iter())
         .map(|(value, data_type)| {
+            let data_type = &ConcreteDataType::from_arrow_type(data_type);
             let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
                 .context(error::SqlCommonSnafu)?;
 
@@ -246,13 +250,14 @@ fn values_to_vectors_by_exact_types(
 
 /// Try to cast sql values to vectors by valid data types.
 fn values_to_vectors_by_valid_types(
-    valid_types: &[ConcreteDataType],
+    valid_types: &[ArrowDataType],
     args: &[&SqlValue],
     tz: Option<&Timezone>,
 ) -> Result<Vec<VectorRef>> {
     args.iter()
         .map(|value| {
             for data_type in valid_types {
+                let data_type = &ConcreteDataType::from_arrow_type(data_type);
                 if let Ok(value) =
                     sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
                 {
@@ -278,14 +283,14 @@ fn value_to_vector(value: Value) -> VectorRef {
 }
 
 /// Try to infer the data type from sql value.
-fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ConcreteDataType> {
+fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
     match value {
-        SqlValue::Number(_, _) => Ok(ConcreteDataType::float64_datatype()),
-        SqlValue::Null => Ok(ConcreteDataType::null_datatype()),
-        SqlValue::Boolean(_) => Ok(ConcreteDataType::boolean_datatype()),
+        SqlValue::Number(_, _) => Ok(ArrowDataType::Float64),
+        SqlValue::Null => Ok(ArrowDataType::Null),
+        SqlValue::Boolean(_) => Ok(ArrowDataType::Boolean),
         SqlValue::HexStringLiteral(_)
         | SqlValue::DoubleQuotedString(_)
-        | SqlValue::SingleQuotedString(_) => Ok(ConcreteDataType::string_datatype()),
+        | SqlValue::SingleQuotedString(_) => Ok(ArrowDataType::Utf8),
         _ => error::BuildAdminFunctionArgsSnafu {
             msg: format!("unsupported sql value: {value}"),
         }

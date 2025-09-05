@@ -16,7 +16,8 @@ use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
+use datafusion_expr::Signature;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
@@ -57,14 +58,8 @@ impl Function for VectorDivFunction {
 
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::binary_datatype(),
-            ],
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::binary_datatype(),
-            ],
+            vec![DataType::Utf8, DataType::Binary],
+            vec![DataType::Utf8, DataType::Binary],
         )
     }
 

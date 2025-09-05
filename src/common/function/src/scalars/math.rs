@@ -20,9 +20,8 @@ use std::fmt;
 
 pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
 use common_query::error::{GeneralDataFusionSnafu, Result};
-use common_query::prelude::Signature;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 pub use rate::RateFunction;

@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_function::function::{FunctionContext, FunctionRef};
+use datafusion_expr::{Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
 use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
@@ -145,8 +146,8 @@ impl common_function::function::Function for TumbleFunction {
         Ok(CDT::timestamp_millisecond_datatype())
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::variadic_any(common_query::prelude::Volatility::Immutable)
+    fn signature(&self) -> Signature {
+        Signature::variadic_any(Volatility::Immutable)
     }
 
     fn eval(

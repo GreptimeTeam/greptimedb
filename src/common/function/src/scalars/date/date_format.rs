@@ -16,7 +16,8 @@ use std::fmt;
 
 use common_error::ext::BoxedError;
 use common_query::error::{self, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
+use datafusion_expr::Signature;
+use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{ensure, ResultExt};
@@ -42,13 +43,13 @@ impl Function for DateFormatFunction {
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
             vec![
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::timestamp_second_datatype(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                ConcreteDataType::timestamp_microsecond_datatype(),
-                ConcreteDataType::timestamp_nanosecond_datatype(),
+                DataType::Date32,
+                DataType::Timestamp(TimeUnit::Second, None),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
             ],
-            vec![ConcreteDataType::string_datatype()],
+            vec![DataType::Utf8],
         )
     }
 
@@ -127,7 +128,7 @@ impl fmt::Display for DateFormatFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::{TypeSignature, Volatility};
+    use datafusion_expr::{TypeSignature, Volatility};
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::value::Value;
     use datatypes::vectors::{DateVector, StringVector, TimestampSecondVector};

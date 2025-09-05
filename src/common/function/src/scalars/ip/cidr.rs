@@ -16,8 +16,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_common::types;
+use datafusion_expr::{Coercion, Signature, TypeSignature, TypeSignatureClass, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
@@ -51,10 +52,10 @@ impl Function for Ipv4ToCidr {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::string_datatype(),
-                    ConcreteDataType::uint8_datatype(),
+                TypeSignature::String(1),
+                TypeSignature::Coercible(vec![
+                    Coercion::new_exact(TypeSignatureClass::Native(types::logical_string())),
+                    Coercion::new_exact(TypeSignatureClass::Integer),
                 ]),
             ],
             Volatility::Immutable,
@@ -180,11 +181,8 @@ impl Function for Ipv6ToCidr {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::string_datatype(),
-                    ConcreteDataType::uint8_datatype(),
-                ]),
+                TypeSignature::String(1),
+                TypeSignature::Exact(vec![DataType::Utf8, DataType::UInt8]),
             ],
             Volatility::Immutable,
         )

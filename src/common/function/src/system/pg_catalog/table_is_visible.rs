@@ -16,7 +16,7 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::with_match_primitive_type_id;
@@ -48,7 +48,7 @@ impl Function for PGTableIsVisibleFunction {
     fn signature(&self) -> Signature {
         Signature::uniform(
             1,
-            vec![ConcreteDataType::uint32_datatype()],
+            vec![arrow::datatypes::DataType::UInt32],
             Volatility::Immutable,
         )
     }

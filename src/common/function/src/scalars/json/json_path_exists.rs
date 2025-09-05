@@ -15,8 +15,8 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -41,24 +41,13 @@ impl Function for JsonPathExistsFunction {
     }
 
     fn signature(&self) -> Signature {
+        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::string_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ]),
-                TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::null_datatype(),
-                ]),
+                TypeSignature::Exact(vec![DataType::Binary, DataType::Utf8]),
+                TypeSignature::Exact(vec![DataType::Null, DataType::Utf8]),
+                TypeSignature::Exact(vec![DataType::Binary, DataType::Null]),
+                TypeSignature::Exact(vec![DataType::Null, DataType::Null]),
             ],
             Volatility::Immutable,
         )
@@ -134,7 +123,6 @@ impl Display for JsonPathExistsFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
     use datatypes::prelude::ScalarVector;
     use datatypes::vectors::{BinaryVector, NullVector, StringVector};
 
@@ -159,20 +147,20 @@ mod tests {
                          } if valid_types ==
             vec![
                 TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype(),
+                    DataType::Binary,
+                    DataType::Utf8,
                 ]),
                 TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::string_datatype(),
+                    DataType::Null,
+                    DataType::Utf8,
                 ]),
                 TypeSignature::Exact(vec![
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::null_datatype(),
+                    DataType::Binary,
+                    DataType::Null,
                 ]),
                 TypeSignature::Exact(vec![
-                    ConcreteDataType::null_datatype(),
-                    ConcreteDataType::null_datatype(),
+                    DataType::Null,
+                    DataType::Null,
                 ]),
             ],
         ));
