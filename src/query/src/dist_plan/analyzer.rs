@@ -32,6 +32,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::analyzer::utils::LayeredAliasTracker;
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
@@ -46,7 +47,7 @@ mod test;
 mod fallback;
 mod utils;
 
-pub(crate) use utils::{AliasMapping, AliasTracker};
+pub(crate) use utils::AliasMapping;
 
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
@@ -230,7 +231,7 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
-    alias_tracker: Option<AliasTracker>,
+    layered_alias_tracker: Option<LayeredAliasTracker>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
     /// ```ignore
@@ -311,7 +312,8 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns());
+            let comm =
+                Categorizer::check_plan(plan, self.get_aliased_partition_columns(self.level));
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -333,7 +335,7 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(plan, self.get_aliased_partition_columns()) {
+        match Categorizer::check_plan(plan, self.get_aliased_partition_columns(self.level)) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -427,39 +429,19 @@ impl PlanRewriter {
         self.status = RewriterStatus::Unexpanded;
     }
 
-    /// Maybe update alias for original table columns in the plan
-    fn maybe_update_alias(&mut self, node: &LogicalPlan) {
-        if let Some(alias_tracker) = &mut self.alias_tracker {
-            alias_tracker.update_alias(node);
-            debug!(
-                "Current partition columns are: {:?}",
-                self.get_aliased_partition_columns()
-            );
-        } else if let LogicalPlan::TableScan(table_scan) = node {
-            self.alias_tracker = AliasTracker::from_table_scan(table_scan);
-            debug!(
-                "Initialize partition columns: {:?} with table={}",
-                self.get_aliased_partition_columns(),
-                table_scan.table_name
-            );
-        }
-    }
-
-    fn get_aliased_partition_columns(&self) -> Option<AliasMapping> {
+    /// Get the aliased partition columns at given level
+    fn get_aliased_partition_columns(&self, at_level: usize) -> Option<AliasMapping> {
         if let Some(part_cols) = self.partition_cols.as_ref() {
-            let Some(alias_tracker) = &self.alias_tracker else {
-                // no alias tracker meaning no table scan encountered
+            let Some(tracker) = &self.layered_alias_tracker else {
                 return None;
             };
             let mut aliased = HashMap::new();
             for part_col in part_cols {
-                let all_alias = alias_tracker
-                    .get_all_alias_for_col(part_col)
-                    .cloned()
-                    .unwrap_or_default();
+                let all_alias = tracker.query_alias_at(at_level, None, &Column::from(part_col));
 
                 aliased.insert(part_col.clone(), all_alias);
             }
+            common_telemetry::debug!("At level {at_level}, aliased partition columns: {aliased:?}");
             Some(aliased)
         } else {
             None
@@ -673,13 +655,31 @@ impl TreeNodeRewriter for PlanRewriter {
 
     /// descend
     fn f_down<'a>(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        // if previous tracker is not valid, re-construct the layered alias tracker
+        // notice use `self.level` before inc it to make sure the level is correct
+        if !self
+            .layered_alias_tracker
+            .as_ref()
+            .map(|t| t.is_valid())
+            .unwrap_or(false)
+        {
+            self.layered_alias_tracker = {
+                let mut tracker = LayeredAliasTracker::new(self.level);
+                node.visit(&mut tracker)?;
+                if tracker.is_valid() {
+                    Some(tracker)
+                } else {
+                    None
+                }
+            };
+        }
+
         self.level += 1;
         self.stack.push((node.clone(), self.level));
         // decendening will clear the stage
         self.stage.clear();
         self.set_unexpanded();
         self.partition_cols = None;
-        self.alias_tracker = None;
         Ok(Transformed::no(node))
     }
 
@@ -701,8 +701,6 @@ impl TreeNodeRewriter for PlanRewriter {
         }
 
         self.maybe_set_partitions(&node);
-
-        self.maybe_update_alias(&node);
 
         let Some(parent) = self.get_parent() else {
             debug!("Plan Rewriter: expand now for no parent found for node: {node}");

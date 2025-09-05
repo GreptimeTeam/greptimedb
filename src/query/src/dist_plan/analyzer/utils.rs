@@ -28,7 +28,7 @@ use table::table::adapter::DfTableProviderAdapter;
 /// Every plan given to it should only have at most one children
 ///
 /// TODO(discord9): only handle `Projection` and `SubqueryAlias` nodes now, is `Aggregate` needed?
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct LayeredAliasTracker {
     /// current distance from the root
     cur_level: usize,
@@ -37,13 +37,76 @@ pub struct LayeredAliasTracker {
     /// the inner map is a Mapping
     /// from `new_column after alias` to `old_column before alias`
     alias_scopes: BTreeMap<usize, AliasLayer>,
+    /// if the tracker is valid, i.e. all plans given to it are valid
+    /// if not valid, the results from querying it are not reliable
+    /// e.g. if a plan has more than one child
+    /// the tracker will be marked as invalid
+    is_valid: bool,
 }
 
-#[derive(Debug, Default, Clone)]
+impl Default for LayeredAliasTracker {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl LayeredAliasTracker {
+    /// Create a new LayeredAliasTracker starting from `starting_level`
+    ///
+    /// if starting with a root node(def as level 1), use 0
+    /// or if starting after a node at level n, use n - 1
+    pub fn new(starting_level: usize) -> Self {
+        Self {
+            cur_level: starting_level,
+            alias_scopes: BTreeMap::new(),
+            is_valid: true,
+        }
+    }
+
+    /// Tracker is only valid if all plans given to it are valid
+    ///
+    /// that is all plan given to it has at most one child
+    pub fn is_valid(&self) -> bool {
+        self.is_valid
+    }
+}
+
+#[derive(Default, Clone)]
 struct AliasLayer {
     /// for convenient of querying, key is field's name
     old_to_new: BTreeMap<String, Vec<(Column, HashSet<Column>)>>,
-    new_to_old: BTreeMap<Column, Column>,
+    /// (field name, (new column, old column))
+    new_to_old: BTreeMap<String, Vec<(Column, Column)>>,
+}
+
+/// a much less verbose debug impl for AliasLayer
+impl std::fmt::Debug for AliasLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = BTreeMap::new();
+        for (_, mappings) in &self.old_to_new {
+            let new_cols: HashMap<String, String> = mappings
+                .iter()
+                .flat_map(|(old_column, new_cols)| {
+                    new_cols
+                        .iter()
+                        .map(|c| (old_column.to_string(), c.to_string()))
+                })
+                .collect();
+            map.extend(new_cols);
+        }
+        let mut new_to_old_map = BTreeMap::new();
+        for (new_col_name, mappings) in &self.new_to_old {
+            let old_cols: HashMap<String, String> = mappings
+                .iter()
+                .map(|(new, old)| (new.to_string(), old.to_string()))
+                .collect();
+            new_to_old_map.insert(new_col_name, old_cols);
+        }
+        f.debug_struct("AliasLayer")
+            .field("old_to_new", &map)
+            .field("new_to_old", &new_to_old_map)
+            .finish()
+    }
 }
 
 impl AliasLayer {
@@ -54,7 +117,9 @@ impl AliasLayer {
             .push((old_column.clone().into(), new_columns.clone()));
         for new_column in new_columns {
             self.new_to_old
-                .insert(new_column.into(), old_column.clone());
+                .entry(new_column.name().to_string())
+                .or_default()
+                .push((new_column, old_column.clone()));
         }
     }
 
@@ -70,6 +135,28 @@ impl AliasLayer {
                 _ => {
                     // if any of the two relation is None, meaning not fully qualified, just match name
                     return Some(new_cols.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_old_from_new(&self, new_column: Column) -> Option<Column> {
+        for (new, old) in self
+            .new_to_old
+            .get(new_column.name())
+            .cloned()
+            .unwrap_or_default()
+        {
+            match (&new.relation, &new_column.relation) {
+                (Some(n), Some(c)) => {
+                    if n.resolved_eq(c) {
+                        return Some(old);
+                    }
+                }
+                _ => {
+                    // if any of the two relation is None, meaning not fully qualified, just match name
+                    return Some(old);
                 }
             }
         }
@@ -129,12 +216,19 @@ impl LayeredAliasTracker {
         };
         // tracking old column's final aliased column by traversing `ranges`
         let mut cur_aliases = HashSet::from([old_column.clone()]);
-        for (_level, alias_scope) in ranges {
+        for (level, alias_scope) in ranges {
             let mut new_aliases = HashSet::new();
             for cur_alias in &cur_aliases {
                 let new_alias_set = alias_scope
                     .get_new_from_old(cur_alias.clone())
                     .unwrap_or_default();
+                common_telemetry::debug!(
+                    "At level {}, column {} has new aliases: {:?} with layer: {:?}",
+                    level,
+                    cur_alias,
+                    new_alias_set,
+                    alias_scope
+                );
                 new_aliases.extend(new_alias_set);
             }
 
@@ -155,11 +249,17 @@ impl LayeredAliasTracker {
     ) -> Option<Column> {
         let ranges = self.alias_scopes.range(new_level..=to_old_level);
 
+        let mut cur_column = new_column.clone();
+
         for (_level, alias_scope) in ranges {
-            todo!()
+            if let Some(old_column) = alias_scope.get_old_from_new(cur_column.clone()) {
+                cur_column = old_column;
+            } else {
+                return None;
+            }
         }
 
-        None
+        Some(cur_column)
     }
 
     fn update_alias_for_projection(&mut self, projection: &datafusion_expr::Projection) {
@@ -241,6 +341,9 @@ impl TreeNodeVisitor<'_> for LayeredAliasTracker {
         _node: &LogicalPlan,
     ) -> datafusion::error::Result<datafusion_common::tree_node::TreeNodeRecursion> {
         self.cur_level -= 1;
+        if self.cur_level == 0 {
+            common_telemetry::debug!("Final layered alias tracker: {:?}", self);
+        }
         Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
     }
 
@@ -263,10 +366,8 @@ impl TreeNodeVisitor<'_> for LayeredAliasTracker {
                 // only accept at most one child plan, and if not one of the above nodes,
                 // also shouldn't modify the schema or else alias scope tracker can't support them
                 if node.inputs().len() > 1 {
-                    return Err(datafusion::error::DataFusionError::Internal(format!(
-                        "AliasScopeTracker only accept plan with at most one child, found {}",
-                        node,
-                    )));
+                    self.is_valid = false;
+                    return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
                 } else if node.inputs().len() == 1 {
                     let input_schema = node.inputs()[0].schema();
                     let output_schema = node.schema();
@@ -478,6 +579,7 @@ mod tests {
 
     use common_telemetry::init_default_ut_logging;
     use datafusion::error::Result as DfResult;
+    use datafusion::functions_aggregate::min_max::{max, min};
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
     use datafusion_expr::{col, LogicalPlanBuilder};
     use pretty_assertions::assert_eq;
@@ -531,81 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn proj_alias_tracker() {
-        // use logging for better debugging
-        init_default_ut_logging();
-        let test_table = TestTable::table_with_name(0, "t".to_string());
-        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(test_table),
-        )));
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .project(vec![
-                col("number"),
-                col("pk3").alias("pk1"),
-                col("pk2").alias("pk3"),
-            ])
-            .unwrap()
-            .project(vec![
-                col("number"),
-                col("pk1").alias("pk2"),
-                col("pk3").alias("pk1"),
-            ])
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let mut tracker_tester = TrackerTester {
-            alias_tracker: None,
-            mapping_at_each_level: Vec::new(),
-        };
-        plan.visit(&mut tracker_tester).unwrap();
-
-        assert_eq!(
-            tracker_tester.mapping_at_each_level,
-            vec![
-                BTreeMap::from([
-                    (
-                        "number".to_string(),
-                        BTreeSet::from(["greptime.public.t.number".into()])
-                    ),
-                    (
-                        "pk1".to_string(),
-                        BTreeSet::from(["greptime.public.t.pk1".into()])
-                    ),
-                    (
-                        "pk2".to_string(),
-                        BTreeSet::from(["greptime.public.t.pk2".into()])
-                    ),
-                    (
-                        "pk3".to_string(),
-                        BTreeSet::from(["greptime.public.t.pk3".into()])
-                    ),
-                    (
-                        "ts".to_string(),
-                        BTreeSet::from(["greptime.public.t.ts".into()])
-                    )
-                ]),
-                BTreeMap::from([
-                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
-                    ("pk1".to_string(), BTreeSet::from([])),
-                    ("pk2".to_string(), BTreeSet::from(["pk3".into()])),
-                    ("pk3".to_string(), BTreeSet::from(["pk1".into()])),
-                    ("ts".to_string(), BTreeSet::from([]))
-                ]),
-                BTreeMap::from([
-                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
-                    ("pk1".to_string(), BTreeSet::from([])),
-                    ("pk2".to_string(), BTreeSet::from(["pk1".into()])),
-                    ("pk3".to_string(), BTreeSet::from(["pk2".into()])),
-                    ("ts".to_string(), BTreeSet::from([]))
-                ])
-            ]
-        );
-    }
-
-    #[test]
-    fn proj_multi_alias_tracker() {
+    fn proj_multi_layered_alias_tracker() {
         // use logging for better debugging
         init_default_ut_logging();
         let test_table = TestTable::table_with_name(0, "t".to_string());
@@ -782,7 +810,35 @@ mod tests {
 
         let mut scope_tracker = LayeredAliasTracker::default();
         plan.visit(&mut scope_tracker).unwrap();
-        dbg!(&scope_tracker);
+
+        assert_eq!(
+            scope_tracker.query_alias_at(
+                1,
+                Some(3),
+                &Column::from_qualified_name("greptime.public.t.number"),
+            ),
+            HashSet::from([Column::from_qualified_name("a.number")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(1, Some(2), &Column::from_qualified_name("t.number"),),
+            HashSet::from([Column::from_qualified_name("a.number")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(1, None, &Column::from_qualified_name("t.number"),),
+            HashSet::from([Column::from_qualified_name("a.number")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_original_column(1, 3, &Column::from_qualified_name("a.number")),
+            Some(Column::from_qualified_name("greptime.public.t.number"))
+        );
+
+        assert_eq!(
+            scope_tracker.query_original_column(1, 2, &Column::from_qualified_name("a.number")),
+            Some(Column::from_qualified_name("t.number"))
+        );
     }
 
     #[test]
@@ -812,6 +868,21 @@ mod tests {
 
         let mut scope_tracker = LayeredAliasTracker::default();
         plan.visit(&mut scope_tracker).unwrap();
+
+        assert_eq!(
+            scope_tracker.query_original_column(1, 3, &Column::from_qualified_name("pk1")),
+            Some(Column::from_qualified_name("greptime.public.t.pk2"))
+        );
+
+        assert_eq!(
+            scope_tracker.query_original_column(1, 2, &Column::from_qualified_name("pk1")),
+            Some(Column::from_qualified_name("t.pk2"))
+        );
+
+        assert_eq!(
+            scope_tracker.query_original_column(1, 1, &Column::from_qualified_name("pk1")),
+            Some(Column::from_qualified_name("pk3"))
+        );
 
         assert_eq!(
             scope_tracker.query_alias_at(
@@ -888,6 +959,98 @@ mod tests {
         let mut scope_tracker = LayeredAliasTracker::default();
         plan.visit(&mut scope_tracker).unwrap();
 
-        dbg!(&scope_tracker);
+        assert_eq!(
+            scope_tracker.query_alias_at(
+                1,
+                Some(2),
+                &Column::from_qualified_name("greptime.public.t.pk2"),
+            ),
+            HashSet::from([Column::from_qualified_name("a.pk1")])
+        );
+    }
+
+    #[test]
+    fn proj_alias_aliased_aggr() {
+        // use logging for better debugging
+        init_default_ut_logging();
+        let test_table = TestTable::table_with_name(0, "t".to_string());
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(test_table),
+        )));
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .project(vec![
+                col("number"),
+                col("pk1").alias("pk3"),
+                col("pk2").alias("pk4"),
+            ])
+            .unwrap()
+            .project(vec![
+                col("number"),
+                col("pk3").alias("pk42"),
+                col("pk4").alias("pk43"),
+            ])
+            .unwrap()
+            .aggregate(vec![col("pk42"), col("pk43")], vec![min(col("number"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut scope_tracker = LayeredAliasTracker::default();
+        plan.visit(&mut scope_tracker).unwrap();
+
+        assert_eq!(
+            scope_tracker.query_alias_at(4, None, &Column::from_name("pk1")),
+            HashSet::from([Column::from_qualified_name("greptime.public.t.pk1")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(3, None, &Column::from_name("pk1")),
+            HashSet::from([Column::from_qualified_name("pk3")])
+        );
+    }
+
+    #[test]
+    fn aggr_aggr_alias() {
+        // use logging for better debugging
+        init_default_ut_logging();
+        let test_table = TestTable::table_with_name(0, "t".to_string());
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(test_table),
+        )));
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .aggregate(vec![col("pk1"), col("pk2")], vec![max(col("number"))])
+            .unwrap()
+            .aggregate(
+                vec![col("pk1"), col("pk2")],
+                vec![min(col("max(t.number)"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut scope_tracker = LayeredAliasTracker::default();
+        plan.visit(&mut scope_tracker).unwrap();
+
+        assert_eq!(
+            scope_tracker.query_alias_at(4, None, &Column::from_qualified_name("t.pk1")),
+            HashSet::from([Column::from_qualified_name("t.pk1")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(3, None, &Column::from_name("pk1")),
+            HashSet::from([Column::from_qualified_name("greptime.public.t.pk1")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(2, None, &Column::from_name("pk1")),
+            HashSet::from([Column::from_qualified_name("t.pk1")])
+        );
+
+        assert_eq!(
+            scope_tracker.query_alias_at(1, None, &Column::from_name("pk1")),
+            HashSet::from([Column::from_qualified_name("t.pk1")])
+        );
     }
 }
