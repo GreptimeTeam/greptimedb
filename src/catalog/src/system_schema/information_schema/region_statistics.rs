@@ -40,7 +40,7 @@ const REGION_ID: &str = "region_id";
 const TABLE_ID: &str = "table_id";
 const REGION_NUMBER: &str = "region_number";
 const REGION_ROWS: &str = "region_rows";
-const WRITTEN_BYTES: &str = "written_bytes";
+const WRITTEN_BYTES: &str = "written_bytes_since_open";
 const DISK_SIZE: &str = "disk_size";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
@@ -58,7 +58,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `table_id`: The table id.
 /// - `region_number`: The region number.
 /// - `region_rows`: The number of rows in region.
-/// - `written_bytes`: The total bytes written of the region since region opened.
+/// - `written_bytes_since_open`: The total bytes written of the region since region opened.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
 /// - `manifest_size`: The manifest size in bytes.

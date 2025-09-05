@@ -259,9 +259,8 @@ impl RegionWriteCtx {
 
         if let Some(written_bytes) = &self.written_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
-            let written_bytes =
-                new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            written_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
+            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
@@ -335,9 +334,8 @@ impl RegionWriteCtx {
 
         if let Some(written_bytes) = &self.written_bytes {
             let new_memory_usage = mutable_memtable.memory_usage();
-            let written_bytes =
-                new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
-            written_bytes.fetch_add(written_bytes as u64, Ordering::Relaxed);
+            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
