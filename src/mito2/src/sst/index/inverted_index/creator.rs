@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::vectors::Helper;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
@@ -73,6 +75,12 @@ pub struct InvertedIndexer {
 
     /// Ids of indexed columns and their names (`to_string` of the column id).
     indexed_column_ids: Vec<(ColumnId, String)>,
+
+    /// Region metadata for column lookups.
+    metadata: RegionMetadataRef,
+    /// Cache for mapping indexed column positions to their indices in the RecordBatch.
+    /// Aligns with indexed_column_ids. Initialized lazily when first batch is processed.
+    column_index_cache: Option<Vec<Option<usize>>>,
 }
 
 impl InvertedIndexer {
@@ -121,6 +129,8 @@ impl InvertedIndexer {
             aborted: false,
             memory_usage,
             indexed_column_ids,
+            metadata: metadata.clone(),
+            column_index_cache: None,
         }
     }
 
@@ -146,6 +156,93 @@ impl InvertedIndexer {
         }
 
         Ok(())
+    }
+
+    /// Updates the inverted index with the given flat format RecordBatch.
+    pub async fn update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        self.do_update_flat(batch).await
+    }
+
+    async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
+        // Initialize column index cache if not already done
+        if self.column_index_cache.is_none() {
+            self.initialize_column_index_cache(batch);
+        }
+
+        let mut guard = self.stats.record_update();
+
+        let n = batch.num_rows();
+        guard.inc_row_count(n);
+
+        let column_indices = self.column_index_cache.as_ref().unwrap();
+
+        for ((col_id, col_id_str), &column_index) in
+            self.indexed_column_ids.iter().zip(column_indices.iter())
+        {
+            if let Some(index) = column_index {
+                let column_array = batch.column(index);
+                // Convert Arrow array to VectorRef using Helper
+                let vector = Helper::try_into_vector(column_array.clone())
+                    .context(crate::error::ConvertVectorSnafu)?;
+                let sort_field = SortField::new(vector.data_type());
+
+                for row in 0..n {
+                    self.value_buf.clear();
+                    let value_ref = vector.get_ref(row);
+
+                    if value_ref.is_null() {
+                        self.index_creator
+                            .push_with_name(col_id_str, None)
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                    } else {
+                        IndexValueCodec::encode_nonnull_value(
+                            value_ref,
+                            &sort_field,
+                            &mut self.value_buf,
+                        )
+                        .context(EncodeSnafu)?;
+                        self.index_creator
+                            .push_with_name(col_id_str, Some(&self.value_buf))
+                            .await
+                            .context(PushIndexValueSnafu)?;
+                    }
+                }
+            } else {
+                debug!(
+                    "Column {} not found in the batch during building inverted index",
+                    col_id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Initializes the column index cache by mapping indexed column ids to their positions in the RecordBatch.
+    fn initialize_column_index_cache(&mut self, batch: &RecordBatch) {
+        let mut column_indices = Vec::with_capacity(self.indexed_column_ids.len());
+
+        for (col_id, _) in &self.indexed_column_ids {
+            let column_index = if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
+                let column_name = &column_meta.column_schema.name;
+                batch
+                    .schema()
+                    .column_with_name(column_name)
+                    .map(|(index, _)| index)
+            } else {
+                None
+            };
+            column_indices.push(column_index);
+        }
+
+        self.column_index_cache = Some(column_indices);
     }
 
     /// Finishes index creation and cleans up garbage.

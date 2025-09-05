@@ -67,6 +67,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::FileId;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -131,6 +132,8 @@ pub(crate) struct WorkerGroup {
     purge_scheduler: SchedulerRef,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// File reference manager.
+    file_ref_manager: FileReferenceManagerRef,
 }
 
 impl WorkerGroup {
@@ -142,8 +145,9 @@ impl WorkerGroup {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
-        plugins: Plugins,
+        file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
+        plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = Arc::new(
@@ -206,6 +210,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
@@ -218,6 +223,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 
@@ -269,6 +275,10 @@ impl WorkerGroup {
         self.cache_manager.clone()
     }
 
+    pub(crate) fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.file_ref_manager.clone()
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
@@ -297,6 +307,7 @@ impl WorkerGroup {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         time_provider: TimeProviderRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
@@ -355,6 +366,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
@@ -367,6 +379,7 @@ impl WorkerGroup {
             compact_job_pool,
             purge_scheduler,
             cache_manager,
+            file_ref_manager,
         })
     }
 
@@ -434,6 +447,7 @@ struct WorkerStarter<S> {
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
@@ -487,6 +501,7 @@ impl<S: LogStore> WorkerStarter<S> {
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
+            file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
         };
         let handle = common_runtime::spawn_global(async move {
@@ -737,6 +752,8 @@ struct RegionWorkerLoop<S> {
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Datanode level file references manager.
+    file_ref_manager: FileReferenceManagerRef,
     /// Partition expr fetcher used to backfill partition expr on open for compatibility.
     partition_expr_fetcher: PartitionExprFetcherRef,
 }

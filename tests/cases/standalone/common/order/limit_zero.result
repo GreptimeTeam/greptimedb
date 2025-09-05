@@ -1,0 +1,33 @@
+-- Migrated from DuckDB test: test/sql/limit/test_limit0.test
+-- Description: Test limit 0
+CREATE TABLE test_data(i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test_data VALUES (1, 1000), (2, 2000), (3, 3000);
+
+Affected Rows: 3
+
+-- Test LIMIT 0 returns empty result
+SELECT * FROM test_data LIMIT 0;
+
+++
+++
+
+-- Test LIMIT 0 with aggregation
+SELECT SUM(i) FROM test_data LIMIT 0;
+
+++
+++
+
+-- Test LIMIT 0 with WHERE clause
+SELECT * FROM test_data WHERE i > 0 LIMIT 0;
+
+++
+++
+
+-- Clean up
+DROP TABLE test_data;
+
+Affected Rows: 0
+

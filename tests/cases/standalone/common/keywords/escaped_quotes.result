@@ -1,0 +1,41 @@
+-- Migrated from DuckDB test: test/sql/keywords/escaped_quotes_expressions.test
+-- Note: Schema names don't support escaped quotes in GreptimeDB
+CREATE TABLE test_table("COL""UMN" VARCHAR, "NA""ME" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test_table VALUES ('ALL', 'test', 1000);
+
+Affected Rows: 1
+
+-- Column references with escaped quotes
+SELECT "COL""UMN" FROM test_table;
+
++---------+
+| COL"UMN |
++---------+
+| ALL     |
++---------+
+
+-- Multiple escaped quote columns
+SELECT "COL""UMN", "NA""ME" FROM test_table;
+
++---------+-------+
+| COL"UMN | NA"ME |
++---------+-------+
+| ALL     | test  |
++---------+-------+
+
+-- Table-qualified references
+SELECT test_table."COL""UMN", test_table."NA""ME" FROM test_table;
+
++---------+-------+
+| COL"UMN | NA"ME |
++---------+-------+
+| ALL     | test  |
++---------+-------+
+
+DROP TABLE test_table;
+
+Affected Rows: 0
+

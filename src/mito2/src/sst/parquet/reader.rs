@@ -56,7 +56,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
-use crate::sst::parquet::format::{need_override_sequence, PrimaryKeyReadFormat, ReadFormat};
+use crate::sst::parquet::format::{need_override_sequence, ReadFormat};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
@@ -113,6 +113,8 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
+    /// Whether to use flat format for reading.
+    flat_format: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -135,6 +137,7 @@ impl ParquetReaderBuilder {
             bloom_filter_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
+            flat_format: false,
         }
     }
 
@@ -198,6 +201,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Sets the flat format flag.
+    #[must_use]
+    pub fn flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -227,23 +237,27 @@ impl ParquetReaderBuilder {
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
         let mut read_format = if let Some(column_ids) = &self.projection {
-            PrimaryKeyReadFormat::new(region_meta.clone(), column_ids.iter().copied())
+            ReadFormat::new(
+                region_meta.clone(),
+                column_ids.iter().copied(),
+                self.flat_format,
+            )
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            PrimaryKeyReadFormat::new(
+            ReadFormat::new(
                 region_meta.clone(),
                 expected_meta
                     .column_metadatas
                     .iter()
                     .map(|col| col.column_id),
+                self.flat_format,
             )
         };
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
-        let read_format = ReadFormat::PrimaryKey(read_format);
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();

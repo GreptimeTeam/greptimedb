@@ -20,6 +20,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_base::readable_size::ReadableSize;
+use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
@@ -443,6 +445,20 @@ pub struct RecordBatchMetrics {
     pub plan_metrics: Vec<PlanMetrics>,
 }
 
+/// Determines if a metric name represents a time measurement that should be formatted.
+fn is_time_metric(metric_name: &str) -> bool {
+    metric_name.contains("elapsed") || metric_name.contains("time") || metric_name.contains("cost")
+}
+
+/// Determines if a metric name represents a bytes measurement that should be formatted.
+fn is_bytes_metric(metric_name: &str) -> bool {
+    metric_name.contains("bytes") || metric_name.contains("mem")
+}
+
+fn format_bytes_human_readable(bytes: usize) -> String {
+    format!("{}", ReadableSize(bytes as u64))
+}
+
 /// Only display `plan_metrics` with indent `  ` (2 spaces).
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -455,7 +471,18 @@ impl Display for RecordBatchMetrics {
                 indent = metric.level * 2,
             )?;
             for (label, value) in &metric.metrics {
-                write!(f, "{}: {}, ", label, value)?;
+                if is_time_metric(label) {
+                    write!(
+                        f,
+                        "{}: {}, ",
+                        label,
+                        format_nanoseconds_human_readable(*value),
+                    )?;
+                } else if is_bytes_metric(label) {
+                    write!(f, "{}: {}, ", label, format_bytes_human_readable(*value),)?;
+                } else {
+                    write!(f, "{}: {}, ", label, value)?;
+                }
             }
             writeln!(f, "]")?;
         }

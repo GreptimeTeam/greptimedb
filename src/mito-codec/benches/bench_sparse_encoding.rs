@@ -72,7 +72,7 @@ fn encode_sparse(c: &mut Criterion) {
                 .unwrap();
             codec
                 .encode_raw_tag_value(
-                    tags.iter().map(|(c, b)| (*c, b)),
+                    tags.iter().map(|(c, b)| (*c, &b[..])),
                     &mut buffer_by_raw_encoding,
                 )
                 .unwrap();

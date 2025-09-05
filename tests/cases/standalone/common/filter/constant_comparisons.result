@@ -1,0 +1,125 @@
+-- Migrated from DuckDB test: test/sql/filter/test_constant_comparisons.test
+-- Description: Test expressions with constant comparisons
+CREATE TABLE integers(a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (2, 12, 1000);
+
+Affected Rows: 1
+
+-- Test various constant comparisons
+SELECT * FROM integers WHERE 2=2;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2=3;
+
+++
+++
+
+SELECT * FROM integers WHERE 2<>3;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2<>2;
+
+++
+++
+
+SELECT * FROM integers WHERE 2>1;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2>2;
+
+++
+++
+
+SELECT * FROM integers WHERE 2>=2;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2>=3;
+
+++
+++
+
+SELECT * FROM integers WHERE 2<3;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2<2;
+
+++
+++
+
+SELECT * FROM integers WHERE 2<=2;
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2<=1;
+
+++
+++
+
+-- NULL comparisons
+SELECT a=NULL FROM integers;
+
++-------------------+
+| integers.a = NULL |
++-------------------+
+|                   |
++-------------------+
+
+SELECT NULL=a FROM integers;
+
++-------------------+
+| NULL = integers.a |
++-------------------+
+|                   |
++-------------------+
+
+-- IN clause with constants
+SELECT * FROM integers WHERE 2 IN (2, 3, 4, 5);
+
++---+----+---------------------+
+| a | b  | ts                  |
++---+----+---------------------+
+| 2 | 12 | 1970-01-01T00:00:01 |
++---+----+---------------------+
+
+SELECT * FROM integers WHERE 2 IN (1, 3, 4, 5);
+
+++
+++
+
+-- Clean up
+DROP TABLE integers;
+
+Affected Rows: 0
+

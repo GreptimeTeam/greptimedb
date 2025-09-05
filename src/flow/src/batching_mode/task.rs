@@ -48,8 +48,8 @@ use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::{FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
-    FindGroupByFinalName,
+    gen_plan_with_matching_schema, get_table_info_df_schema, sql_to_df_plan, AddFilterRewriter,
+    ColumnMatcherRewriter, FindGroupByFinalName,
 };
 use crate::batching_mode::BatchingModeOptions;
 use crate::df_optimizer::apply_df_optimizer;
@@ -618,42 +618,63 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let (Some((Some(l), Some(u))), QueryType::Sql) =
-            (expire_time_window_bound, &self.config.query_type)
-        else {
-            // either no time window or not a sql query, then just use the original query
-            // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-            debug!(
-                "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
-            );
-            // clean dirty time window too, this could be from create flow's check_execute
-            self.state.write().unwrap().dirty_time_windows.clean();
+        let (expire_lower_bound, expire_upper_bound) =
+            match (expire_time_window_bound, &self.config.query_type) {
+                (Some((Some(l), Some(u))), QueryType::Sql) => (l, u),
+                (None, QueryType::Sql) => {
+                    // if it's sql query and no time window lower/upper bound is found, just return the original query(with auto columns)
+                    // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
+                    debug!(
+                        "Flow id = {:?}, no time window, using the same query",
+                        self.config.flow_id
+                    );
+                    // clean dirty time window too, this could be from create flow's check_execute
+                    let is_dirty = !self.state.read().unwrap().dirty_time_windows.is_empty();
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-            // TODO(discord9): not add auto column for tql query?
-            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+                    if !is_dirty {
+                        // no dirty data, hence no need to update
+                        debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+                        return Ok(None);
+                    }
 
-            let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
-                .await?;
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
 
-            let plan = plan
-                .clone()
-                .rewrite(&mut add_auto_column)
-                .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan:\n {}\n", plan),
-                })?
-                .data;
+                    return Ok(Some(PlanInfo { plan, filter: None }));
+                }
+                _ => {
+                    // clean for tql have no use for time window
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-            // since no time window lower/upper bound is found, just return the original query(with auto columns)
-            return Ok(Some(PlanInfo { plan, filter: None }));
-        };
+                    let plan = gen_plan_with_matching_schema(
+                        &self.config.query,
+                        query_ctx,
+                        engine,
+                        sink_table_schema.clone(),
+                    )
+                    .await?;
+
+                    return Ok(Some(PlanInfo { plan, filter: None }));
+                }
+            };
 
         debug!(
             "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
-            self.config.flow_id, l, u, self.state.read().unwrap().dirty_time_windows
+            self.config.flow_id, expire_lower_bound, expire_upper_bound, self.state.read().unwrap().dirty_time_windows
         );
-        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
-            reason: format!("Can't get window size from {u:?} - {l:?}"),
-        })?;
+        let window_size = expire_upper_bound
+            .sub(&expire_lower_bound)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Can't get window size from {expire_upper_bound:?} - {expire_lower_bound:?}"
+                ),
+            })?;
         let col_name = self
             .config
             .time_window_expr
@@ -673,7 +694,7 @@ impl BatchingTask {
             .dirty_time_windows
             .gen_filter_exprs(
                 &col_name,
-                Some(l),
+                Some(expire_lower_bound),
                 window_size,
                 max_window_cnt
                     .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query),
@@ -701,7 +722,7 @@ impl BatchingTask {
         };
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
-        let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+        let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema.clone());
 
         let plan =
             sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
@@ -714,7 +735,7 @@ impl BatchingTask {
             })?
             .data;
         // only apply optimize after complex rewrite is done
-        let new_plan = apply_df_optimizer(rewrite).await?;
+        let new_plan = apply_df_optimizer(rewrite, &query_ctx).await?;
 
         let info = PlanInfo {
             plan: new_plan.clone(),
@@ -732,7 +753,25 @@ fn create_table_with_expr(
     sink_table_name: &[String; 3],
     query_type: &QueryType,
 ) -> Result<CreateTableExpr, Error> {
-    let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan)?;
+    let table_def = match query_type {
+        &QueryType::Sql => {
+            if let Some(def) = build_pk_from_aggr(plan)? {
+                def
+            } else {
+                build_by_sql_schema(plan)?
+            }
+        }
+        QueryType::Tql => {
+            // first try build from aggr, then from tql schema because tql query might not have aggr node
+            if let Some(table_def) = build_pk_from_aggr(plan)? {
+                table_def
+            } else {
+                build_by_tql_schema(plan)?
+            }
+        }
+    };
+    let first_time_stamp = table_def.ts_col;
+    let primary_keys = table_def.pks;
 
     let mut column_schemas = Vec::new();
     for field in plan.schema().fields() {
@@ -755,7 +794,7 @@ fn create_table_with_expr(
                 let is_val_column = !is_tag_column && first_time_stamp.as_ref() != Some(name);
                 if is_val_column {
                     let col_schema =
-                        ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true);
+                        ColumnSchema::new(name, ConcreteDataType::float64_datatype(), true);
                     column_schemas.push(col_schema);
                 } else if is_tag_column {
                     let col_schema =
@@ -809,15 +848,63 @@ fn create_table_with_expr(
     })
 }
 
+/// simply build by schema, return first timestamp column and no primary key
+fn build_by_sql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
+    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
+        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
+            Some(f.name().clone())
+        } else {
+            None
+        }
+    });
+    Ok(TableDef {
+        ts_col: first_time_stamp,
+        pks: vec![],
+    })
+}
+
+/// Return first timestamp column found in output schema and all string columns
+fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
+    let first_time_stamp = plan.schema().fields().iter().find_map(|f| {
+        if ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp() {
+            Some(f.name().clone())
+        } else {
+            None
+        }
+    });
+    let string_columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .filter_map(|f| {
+            if ConcreteDataType::from_arrow_type(f.data_type()).is_string() {
+                Some(f.name().clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(TableDef {
+        ts_col: first_time_stamp,
+        pks: string_columns,
+    })
+}
+
+struct TableDef {
+    ts_col: Option<String>,
+    pks: Vec<String>,
+}
+
 /// Return first timestamp column which is in group by clause and other columns which are also in group by clause
 ///
 /// # Returns
 ///
 /// * `Option<String>` - first timestamp column which is in group by clause
 /// * `Vec<String>` - other columns which are also in group by clause
-fn build_primary_key_constraint(
-    plan: &LogicalPlan,
-) -> Result<(Option<String>, Vec<String>), Error> {
+///
+/// if no aggregation found, return None
+fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
     let fields = plan.schema().fields();
     let mut pk_names = FindGroupByFinalName::default();
 
@@ -827,13 +914,18 @@ fn build_primary_key_constraint(
         })?;
 
     // if no group by clause, return empty with first timestamp column found in output schema
-    let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
+    let Some(pk_final_names) = pk_names.get_group_expr_names() else {
+        return Ok(None);
+    };
     if pk_final_names.is_empty() {
         let first_ts_col = fields
             .iter()
             .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
             .map(|f| f.name().clone());
-        return Ok((first_ts_col, Vec::new()));
+        return Ok(Some(TableDef {
+            ts_col: first_ts_col,
+            pks: vec![],
+        }));
     }
 
     let all_pk_cols: Vec<_> = fields
@@ -855,7 +947,10 @@ fn build_primary_key_constraint(
         .filter(|col| first_time_stamp != Some(col.to_string()))
         .collect();
 
-    Ok((first_time_stamp, all_pk_cols))
+    Ok(Some(TableDef {
+        ts_col: first_time_stamp,
+        pks: all_pk_cols,
+    }))
 }
 
 #[cfg(test)]

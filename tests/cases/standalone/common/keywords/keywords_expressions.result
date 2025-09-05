@@ -1,0 +1,78 @@
+-- Migrated from DuckDB test: test/sql/keywords/keywords_in_expressions.test
+CREATE SCHEMA "SCHEMA";
+
+Affected Rows: 1
+
+CREATE TABLE "SCHEMA"."TABLE"("COLUMN" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO "SCHEMA"."TABLE" VALUES ('ALL', 1000);
+
+Affected Rows: 1
+
+-- Column references with quoted keywords
+SELECT "COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+-- Table-qualified column reference
+SELECT "TABLE"."COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+-- Schema-qualified column reference
+SELECT "SCHEMA"."TABLE"."COLUMN" FROM "SCHEMA"."TABLE";
+
++--------+
+| COLUMN |
++--------+
+| ALL    |
++--------+
+
+DROP TABLE "SCHEMA"."TABLE";
+
+Affected Rows: 0
+
+DROP SCHEMA "SCHEMA";
+
+Affected Rows: 0
+
+-- Common reserved keywords
+CREATE TABLE "SELECT"("WHERE" INTEGER, "FROM" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO "SELECT" VALUES (1, 'test', 2000);
+
+Affected Rows: 1
+
+SELECT "WHERE", "FROM" FROM "SELECT";
+
++-------+------+
+| WHERE | FROM |
++-------+------+
+| 1     | test |
++-------+------+
+
+-- Qualified references
+SELECT "SELECT"."WHERE", "SELECT"."FROM" FROM "SELECT";
+
++-------+------+
+| WHERE | FROM |
++-------+------+
+| 1     | test |
++-------+------+
+
+DROP TABLE "SELECT";
+
+Affected Rows: 0
+

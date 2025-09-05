@@ -551,7 +551,7 @@ impl Iterator for FlatMergeIterator {
 /// Iterator to merge multiple sorted iterators into a single sorted iterator.
 ///
 /// All iterators must be sorted by primary key, time index, sequence desc.
-pub struct MergeReader {
+pub struct FlatMergeReader {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<StreamNode>,
     /// Current buffered rows to output.
@@ -564,7 +564,7 @@ pub struct MergeReader {
     batch_size: usize,
 }
 
-impl MergeReader {
+impl FlatMergeReader {
     /// Creates a new iterator to merge sorted `iters`.
     pub async fn new(
         schema: SchemaRef,

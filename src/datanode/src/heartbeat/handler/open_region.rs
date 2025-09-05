@@ -16,7 +16,7 @@ use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_options_allocator::prepare_wal_options;
 use futures_util::future::BoxFuture;
 use store_api::path_utils::table_dir;
-use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest, ReplayCheckpoint};
+use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 
 use crate::heartbeat::handler::HandlerContext;
 
@@ -29,31 +29,18 @@ impl HandlerContext {
             mut region_options,
             region_wal_options,
             skip_wal_replay,
-            replay_entry_id,
-            metadata_replay_entry_id,
         }: OpenRegion,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let region_id = Self::region_ident_to_region_id(&region_ident);
             prepare_wal_options(&mut region_options, region_id, &region_wal_options);
-            let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
-                (Some(replay_entry_id), Some(metadata_replay_entry_id)) => Some(ReplayCheckpoint {
-                    entry_id: replay_entry_id,
-                    metadata_entry_id: Some(metadata_replay_entry_id),
-                }),
-                (Some(replay_entry_id), None) => Some(ReplayCheckpoint {
-                    entry_id: replay_entry_id,
-                    metadata_entry_id: None,
-                }),
-                _ => None,
-            };
             let request = RegionRequest::Open(RegionOpenRequest {
                 engine: region_ident.engine,
                 table_dir: table_dir(&region_storage_path, region_id.table_id()),
                 path_type: PathType::Bare,
                 options: region_options,
                 skip_wal_replay,
-                checkpoint,
+                checkpoint: None,
             });
             let result = self.region_server.handle_request(region_id, request).await;
             let success = result.is_ok();

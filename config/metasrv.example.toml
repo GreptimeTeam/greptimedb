@@ -274,12 +274,15 @@ ttl = "90d"
 
 ## Configuration options for the stats persistence.
 [stats_persistence]
-## TTL for the stats table that will be used to store the stats. Default is `30d`.
+## TTL for the stats table that will be used to store the stats.
 ## Set to `0s` to disable stats persistence.
-ttl = "30d"
-## The interval to persist the stats. Default is `60s`.
-## The minimum value is `60s`, if the value is less than `60s`, it will be overridden to `60s`.
-interval = "60s"
+## Default is `0s`.
+## If you want to enable stats persistence, set the TTL to a value greater than 0.
+## It is recommended to set a small value, e.g., `3h`.
+ttl = "0s"
+## The interval to persist the stats. Default is `10m`.
+## The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`.
+interval = "10m"
 
 ## The logging options.
 [logging]

@@ -21,8 +21,8 @@ runs:
         --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
         --set replicaCount=${{ inputs.postgres-replicas }} \
         --set global.security.allowInsecureImages=true \
-        --set image.registry=public.ecr.aws/i8k6a5e1 \
-        --set image.repository=bitnami/postgresql \
+        --set image.registry=docker.io \
+        --set image.repository=greptime/postgresql \
         --set image.tag=17.5.0-debian-12-r3 \
         --version 16.7.4 \
         --set persistence.size=${{ inputs.storage-size }} \

@@ -812,7 +812,6 @@ impl ManifestContext {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
         self.manifest_manager.read().await.manifest()
     }
@@ -1154,6 +1153,7 @@ mod tests {
         let staging_ctx = {
             let manager = RegionManifestManager::new(
                 version_control.current().version.metadata.clone(),
+                0,
                 RegionManifestOptions {
                     manifest_dir: "".to_string(),
                     object_store: env.access_layer.object_store().clone(),
@@ -1219,6 +1219,7 @@ mod tests {
 
         let manager = RegionManifestManager::new(
             metadata.clone(),
+            0,
             RegionManifestOptions {
                 manifest_dir: "".to_string(),
                 object_store: access_layer.object_store().clone(),

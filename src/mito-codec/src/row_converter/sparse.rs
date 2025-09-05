@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
@@ -179,7 +179,7 @@ impl SparsePrimaryKeyCodec {
 
     pub fn encode_raw_tag_value<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
-        I: Iterator<Item = (ColumnId, &'a Bytes)>,
+        I: Iterator<Item = (ColumnId, &'a [u8])>,
     {
         for (tag_column_id, tag_value) in row {
             let value_len = tag_value.len();
@@ -568,11 +568,11 @@ mod tests {
             .unwrap();
         let tags: Vec<_> = tags
             .into_iter()
-            .map(|(col_id, tag_value)| (col_id, Bytes::from_static(tag_value.as_bytes())))
+            .map(|(col_id, tag_value)| (col_id, tag_value.as_bytes()))
             .collect();
         codec
             .encode_raw_tag_value(
-                tags.iter().map(|(c, b)| (*c, b)),
+                tags.iter().map(|(c, b)| (*c, *b)),
                 &mut buffer_by_raw_encoding,
             )
             .unwrap();

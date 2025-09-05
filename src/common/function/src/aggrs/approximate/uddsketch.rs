@@ -26,7 +26,7 @@ use datafusion::common::cast::{as_binary_array, as_primitive_array};
 use datafusion::common::not_impl_err;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
-use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF};
+use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
 use datatypes::arrow::array::ArrayRef;

@@ -100,7 +100,7 @@ impl EtcdStore {
                     .with_label_values(&["etcd", "txn"])
                     .start_timer();
                 let txn = Txn::new().and_then(part);
-                self.client.kv_client().txn(txn).await
+                self.kv_client().txn(txn).await
             })
             .collect::<Vec<_>>();
 

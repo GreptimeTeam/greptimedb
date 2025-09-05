@@ -14,10 +14,9 @@
 
 //! functions registry
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use datafusion_expr::AggregateUDF;
-use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
 use crate::aggrs::aggr_wrapper::StateMergeHelper;
@@ -102,7 +101,7 @@ impl FunctionRegistry {
     }
 }
 
-pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
+pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(|| {
     let function_registry = FunctionRegistry::default();
 
     // Utility functions

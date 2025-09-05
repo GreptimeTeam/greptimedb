@@ -17,8 +17,9 @@ use std::fmt;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::type_coercion::aggregates::INTEGERS;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
@@ -91,20 +92,8 @@ impl Function for GeohashFunction {
 
     fn signature(&self) -> Signature {
         let mut signatures = Vec::new();
-        for coord_type in &[
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-        ] {
-            for resolution_type in &[
-                ConcreteDataType::int8_datatype(),
-                ConcreteDataType::int16_datatype(),
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::int64_datatype(),
-                ConcreteDataType::uint8_datatype(),
-                ConcreteDataType::uint16_datatype(),
-                ConcreteDataType::uint32_datatype(),
-                ConcreteDataType::uint64_datatype(),
-            ] {
+        for coord_type in &[DataType::Float32, DataType::Float64] {
+            for resolution_type in INTEGERS {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),
@@ -191,20 +180,8 @@ impl Function for GeohashNeighboursFunction {
 
     fn signature(&self) -> Signature {
         let mut signatures = Vec::new();
-        for coord_type in &[
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-        ] {
-            for resolution_type in &[
-                ConcreteDataType::int8_datatype(),
-                ConcreteDataType::int16_datatype(),
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::int64_datatype(),
-                ConcreteDataType::uint8_datatype(),
-                ConcreteDataType::uint16_datatype(),
-                ConcreteDataType::uint32_datatype(),
-                ConcreteDataType::uint64_datatype(),
-            ] {
+        for coord_type in &[DataType::Float32, DataType::Float64] {
+            for resolution_type in INTEGERS {
                 signatures.push(TypeSignature::Exact(vec![
                     // latitude
                     coord_type.clone(),

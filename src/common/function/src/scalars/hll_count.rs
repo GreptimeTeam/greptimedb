@@ -18,7 +18,8 @@ use std::fmt;
 use std::fmt::Display;
 
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Vector;
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
@@ -64,10 +65,7 @@ impl Function for HllCalcFunction {
 
     fn signature(&self) -> Signature {
         // Only argument: HyperLogLogPlus state (binary)
-        Signature::exact(
-            vec![ConcreteDataType::binary_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

@@ -24,6 +24,7 @@ use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
+use datafusion_expr::Signature;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;
@@ -61,14 +62,8 @@ impl Function for MatchesFunction {
         Ok(ConcreteDataType::boolean_datatype())
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::exact(
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> Signature {
+        Signature::string(2, Volatility::Immutable)
     }
 
     // TODO: read case-sensitive config

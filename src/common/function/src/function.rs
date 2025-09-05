@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::Signature;
+use datafusion_expr::Signature;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};

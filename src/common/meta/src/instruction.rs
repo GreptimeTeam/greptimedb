@@ -81,9 +81,91 @@ pub struct SimpleReply {
     pub error: Option<String>,
 }
 
+/// Reply for flush region operations with support for batch results.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct FlushRegionReply {
+    /// Results for each region that was attempted to be flushed.
+    /// For single region flushes, this will contain one result.
+    /// For batch flushes, this contains results for all attempted regions.
+    pub results: Vec<(RegionId, Result<(), String>)>,
+    /// Overall success: true if all regions were flushed successfully.
+    pub overall_success: bool,
+}
+
+impl FlushRegionReply {
+    /// Create a successful single region reply.
+    pub fn success_single(region_id: RegionId) -> Self {
+        Self {
+            results: vec![(region_id, Ok(()))],
+            overall_success: true,
+        }
+    }
+
+    /// Create a failed single region reply.
+    pub fn error_single(region_id: RegionId, error: String) -> Self {
+        Self {
+            results: vec![(region_id, Err(error))],
+            overall_success: false,
+        }
+    }
+
+    /// Create a batch reply from individual results.
+    pub fn from_results(results: Vec<(RegionId, Result<(), String>)>) -> Self {
+        let overall_success = results.iter().all(|(_, result)| result.is_ok());
+        Self {
+            results,
+            overall_success,
+        }
+    }
+
+    /// Convert to SimpleReply for backward compatibility.
+    pub fn to_simple_reply(&self) -> SimpleReply {
+        if self.overall_success {
+            SimpleReply {
+                result: true,
+                error: None,
+            }
+        } else {
+            let errors: Vec<String> = self
+                .results
+                .iter()
+                .filter_map(|(region_id, result)| {
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|err| format!("{}: {}", region_id, err))
+                })
+                .collect();
+            SimpleReply {
+                result: false,
+                error: Some(errors.join("; ")),
+            }
+        }
+    }
+}
+
 impl Display for SimpleReply {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "(result={}, error={:?})", self.result, self.error)
+    }
+}
+
+impl Display for FlushRegionReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let results_str = self
+            .results
+            .iter()
+            .map(|(region_id, result)| match result {
+                Ok(()) => format!("{}:OK", region_id),
+                Err(err) => format!("{}:ERR({})", region_id, err),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "(overall_success={}, results=[{}])",
+            self.overall_success, results_str
+        )
     }
 }
 
@@ -108,10 +190,6 @@ pub struct OpenRegion {
     pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_entry_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata_replay_entry_id: Option<u64>,
 }
 
 impl OpenRegion {
@@ -128,21 +206,7 @@ impl OpenRegion {
             region_options,
             region_wal_options,
             skip_wal_replay,
-            replay_entry_id: None,
-            metadata_replay_entry_id: None,
         }
-    }
-
-    /// Sets the replay entry id.
-    pub fn with_replay_entry_id(mut self, replay_entry_id: Option<u64>) -> Self {
-        self.replay_entry_id = replay_entry_id;
-        self
-    }
-
-    /// Sets the metadata replay entry id.
-    pub fn with_metadata_replay_entry_id(mut self, metadata_replay_entry_id: Option<u64>) -> Self {
-        self.metadata_replay_entry_id = metadata_replay_entry_id;
-        self
     }
 }
 
@@ -169,7 +233,7 @@ impl Display for DowngradeRegion {
 }
 
 /// Upgrades a follower region to leader region.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpgradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
@@ -186,6 +250,24 @@ pub struct UpgradeRegion {
     /// The hint for replaying memtable.
     #[serde(default)]
     pub location_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_entry_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_replay_entry_id: Option<u64>,
+}
+
+impl UpgradeRegion {
+    /// Sets the replay entry id.
+    pub fn with_replay_entry_id(mut self, replay_entry_id: Option<u64>) -> Self {
+        self.replay_entry_id = replay_entry_id;
+        self
+    }
+
+    /// Sets the metadata replay entry id.
+    pub fn with_metadata_replay_entry_id(mut self, metadata_replay_entry_id: Option<u64>) -> Self {
+        self.metadata_replay_entry_id = metadata_replay_entry_id;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,10 +301,107 @@ pub struct DropFlow {
     pub flow_part2node_id: Vec<(FlowPartitionId, FlownodeId)>,
 }
 
-/// Flushes a batch of regions.
+/// Strategy for executing flush operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FlushStrategy {
+    /// Synchronous operation that waits for completion and expects a reply
+    Sync,
+    /// Asynchronous hint operation (fire-and-forget, no reply expected)
+    Async,
+}
+
+/// Error handling strategy for batch flush operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FlushErrorStrategy {
+    /// Abort on first error (fail-fast)
+    FailFast,
+    /// Attempt to flush all regions and collect all errors
+    TryAll,
+}
+
+impl Default for FlushStrategy {
+    fn default() -> Self {
+        Self::Sync
+    }
+}
+
+impl Default for FlushErrorStrategy {
+    fn default() -> Self {
+        Self::FailFast
+    }
+}
+
+/// Unified flush instruction supporting both single and batch operations
+/// with configurable execution strategies and error handling.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlushRegions {
+    /// List of region IDs to flush. Can contain a single region or multiple regions.
     pub region_ids: Vec<RegionId>,
+    /// Execution strategy: Sync (expects reply) or Async (fire-and-forget hint).
+    #[serde(default)]
+    pub strategy: FlushStrategy,
+    /// Error handling strategy for batch operations (only applies when multiple regions and sync strategy).
+    #[serde(default)]
+    pub error_strategy: FlushErrorStrategy,
+}
+
+impl FlushRegions {
+    /// Create synchronous single-region flush
+    pub fn sync_single(region_id: RegionId) -> Self {
+        Self {
+            region_ids: vec![region_id],
+            strategy: FlushStrategy::Sync,
+            error_strategy: FlushErrorStrategy::FailFast,
+        }
+    }
+
+    /// Create asynchronous batch flush (fire-and-forget)
+    pub fn async_batch(region_ids: Vec<RegionId>) -> Self {
+        Self {
+            region_ids,
+            strategy: FlushStrategy::Async,
+            error_strategy: FlushErrorStrategy::TryAll,
+        }
+    }
+
+    /// Create synchronous batch flush with error strategy
+    pub fn sync_batch(region_ids: Vec<RegionId>, error_strategy: FlushErrorStrategy) -> Self {
+        Self {
+            region_ids,
+            strategy: FlushStrategy::Sync,
+            error_strategy,
+        }
+    }
+
+    /// Check if this is a single region flush.
+    pub fn is_single_region(&self) -> bool {
+        self.region_ids.len() == 1
+    }
+
+    /// Get the single region ID if this is a single region flush.
+    pub fn single_region_id(&self) -> Option<RegionId> {
+        if self.is_single_region() {
+            self.region_ids.first().copied()
+        } else {
+            None
+        }
+    }
+
+    /// Check if this is a hint (asynchronous) operation.
+    pub fn is_hint(&self) -> bool {
+        matches!(self.strategy, FlushStrategy::Async)
+    }
+
+    /// Check if this is a synchronous operation.
+    pub fn is_sync(&self) -> bool {
+        matches!(self.strategy, FlushStrategy::Sync)
+    }
+}
+
+impl From<RegionId> for FlushRegions {
+    fn from(region_id: RegionId) -> Self {
+        Self::sync_single(region_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
@@ -243,8 +422,6 @@ pub enum Instruction {
     InvalidateCaches(Vec<CacheIdent>),
     /// Flushes regions.
     FlushRegions(FlushRegions),
-    /// Flushes a single region.
-    FlushRegion(RegionId),
 }
 
 /// The reply of [UpgradeRegion].
@@ -275,7 +452,7 @@ pub enum InstructionReply {
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
-    FlushRegion(SimpleReply),
+    FlushRegions(FlushRegionReply),
 }
 
 impl Display for InstructionReply {
@@ -287,7 +464,7 @@ impl Display for InstructionReply {
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
-            Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
+            Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
         }
     }
 }
@@ -370,9 +547,139 @@ mod tests {
             region_options,
             region_wal_options: HashMap::new(),
             skip_wal_replay: false,
-            replay_entry_id: None,
-            metadata_replay_entry_id: None,
         };
         assert_eq!(expected, deserialized);
+    }
+
+    #[test]
+    fn test_flush_regions_creation() {
+        let region_id = RegionId::new(1024, 1);
+
+        // Single region sync flush
+        let single_sync = FlushRegions::sync_single(region_id);
+        assert_eq!(single_sync.region_ids, vec![region_id]);
+        assert_eq!(single_sync.strategy, FlushStrategy::Sync);
+        assert!(!single_sync.is_hint());
+        assert!(single_sync.is_sync());
+        assert_eq!(single_sync.error_strategy, FlushErrorStrategy::FailFast);
+        assert!(single_sync.is_single_region());
+        assert_eq!(single_sync.single_region_id(), Some(region_id));
+
+        // Batch async flush (hint)
+        let region_ids = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let batch_async = FlushRegions::async_batch(region_ids.clone());
+        assert_eq!(batch_async.region_ids, region_ids);
+        assert_eq!(batch_async.strategy, FlushStrategy::Async);
+        assert!(batch_async.is_hint());
+        assert!(!batch_async.is_sync());
+        assert_eq!(batch_async.error_strategy, FlushErrorStrategy::TryAll);
+        assert!(!batch_async.is_single_region());
+        assert_eq!(batch_async.single_region_id(), None);
+
+        // Batch sync flush
+        let batch_sync = FlushRegions::sync_batch(region_ids.clone(), FlushErrorStrategy::FailFast);
+        assert_eq!(batch_sync.region_ids, region_ids);
+        assert_eq!(batch_sync.strategy, FlushStrategy::Sync);
+        assert!(!batch_sync.is_hint());
+        assert!(batch_sync.is_sync());
+        assert_eq!(batch_sync.error_strategy, FlushErrorStrategy::FailFast);
+    }
+
+    #[test]
+    fn test_flush_regions_conversion() {
+        let region_id = RegionId::new(1024, 1);
+
+        let from_region_id: FlushRegions = region_id.into();
+        assert_eq!(from_region_id.region_ids, vec![region_id]);
+        assert_eq!(from_region_id.strategy, FlushStrategy::Sync);
+        assert!(!from_region_id.is_hint());
+        assert!(from_region_id.is_sync());
+
+        // Test default construction
+        let flush_regions = FlushRegions {
+            region_ids: vec![region_id],
+            strategy: FlushStrategy::Async,
+            error_strategy: FlushErrorStrategy::TryAll,
+        };
+        assert_eq!(flush_regions.region_ids, vec![region_id]);
+        assert_eq!(flush_regions.strategy, FlushStrategy::Async);
+        assert!(flush_regions.is_hint());
+        assert!(!flush_regions.is_sync());
+    }
+
+    #[test]
+    fn test_flush_region_reply() {
+        let region_id = RegionId::new(1024, 1);
+
+        // Successful single region reply
+        let success_reply = FlushRegionReply::success_single(region_id);
+        assert!(success_reply.overall_success);
+        assert_eq!(success_reply.results.len(), 1);
+        assert_eq!(success_reply.results[0].0, region_id);
+        assert!(success_reply.results[0].1.is_ok());
+
+        // Failed single region reply
+        let error_reply = FlushRegionReply::error_single(region_id, "test error".to_string());
+        assert!(!error_reply.overall_success);
+        assert_eq!(error_reply.results.len(), 1);
+        assert_eq!(error_reply.results[0].0, region_id);
+        assert!(error_reply.results[0].1.is_err());
+
+        // Batch reply
+        let region_id2 = RegionId::new(1024, 2);
+        let results = vec![
+            (region_id, Ok(())),
+            (region_id2, Err("flush failed".to_string())),
+        ];
+        let batch_reply = FlushRegionReply::from_results(results);
+        assert!(!batch_reply.overall_success);
+        assert_eq!(batch_reply.results.len(), 2);
+
+        // Conversion to SimpleReply
+        let simple_reply = batch_reply.to_simple_reply();
+        assert!(!simple_reply.result);
+        assert!(simple_reply.error.is_some());
+        assert!(simple_reply.error.unwrap().contains("flush failed"));
+    }
+
+    #[test]
+    fn test_serialize_flush_regions_instruction() {
+        let region_id = RegionId::new(1024, 1);
+        let flush_regions = FlushRegions::sync_single(region_id);
+        let instruction = Instruction::FlushRegions(flush_regions.clone());
+
+        let serialized = serde_json::to_string(&instruction).unwrap();
+        let deserialized: Instruction = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            Instruction::FlushRegions(fr) => {
+                assert_eq!(fr.region_ids, vec![region_id]);
+                assert_eq!(fr.strategy, FlushStrategy::Sync);
+                assert_eq!(fr.error_strategy, FlushErrorStrategy::FailFast);
+            }
+            _ => panic!("Expected FlushRegions instruction"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_flush_regions_batch_instruction() {
+        let region_ids = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let flush_regions =
+            FlushRegions::sync_batch(region_ids.clone(), FlushErrorStrategy::TryAll);
+        let instruction = Instruction::FlushRegions(flush_regions);
+
+        let serialized = serde_json::to_string(&instruction).unwrap();
+        let deserialized: Instruction = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            Instruction::FlushRegions(fr) => {
+                assert_eq!(fr.region_ids, region_ids);
+                assert_eq!(fr.strategy, FlushStrategy::Sync);
+                assert!(!fr.is_hint());
+                assert!(fr.is_sync());
+                assert_eq!(fr.error_strategy, FlushErrorStrategy::TryAll);
+            }
+            _ => panic!("Expected FlushRegions instruction"),
+        }
     }
 }

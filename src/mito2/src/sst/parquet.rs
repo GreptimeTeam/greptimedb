@@ -90,12 +90,16 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    use api::v1::OpType;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{col, lit, BinaryExpr, Expr, Literal, Operator};
     use datatypes::arrow;
-    use datatypes::arrow::array::{RecordBatch, UInt64Array};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
+        TimestampMillisecondArray, UInt64Array, UInt8Array,
+    };
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
@@ -109,7 +113,7 @@ mod tests {
         FilePathProvider, Metrics, OperationType, RegionFilePathFactory, WriteType,
     };
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::read::{BatchBuilder, BatchReader};
+    use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
@@ -119,11 +123,13 @@ mod tests {
     use crate::sst::parquet::format::PrimaryKeyWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
-    use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
+    use crate::sst::{
+        location, to_flat_sst_arrow_schema, FlatSchemaOptions, DEFAULT_WRITE_CONCURRENCY,
+    };
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_binary, new_batch_with_custom_sequence, new_source, sst_file_handle,
-        sst_file_handle_with_file_id, sst_region_metadata,
+        new_batch_with_binary, new_batch_with_custom_sequence, new_primary_key, new_source,
+        sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -967,6 +973,142 @@ mod tests {
         assert!(cached.contains_row_group(1));
         assert!(cached.contains_row_group(2));
         assert!(cached.contains_row_group(3));
+    }
+
+    /// Creates a flat format RecordBatch for testing.
+    /// Similar to `new_batch_by_range` but returns a RecordBatch in flat format.
+    fn new_record_batch_by_range(tags: &[&str], start: usize, end: usize) -> RecordBatch {
+        assert!(end >= start);
+        let metadata = Arc::new(sst_region_metadata());
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        let num_rows = end - start;
+        let mut columns = Vec::new();
+
+        // Add primary key columns (tag_0, tag_1) as dictionary arrays
+        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tag_1_builder = StringDictionaryBuilder::<UInt32Type>::new();
+
+        for _ in 0..num_rows {
+            tag_0_builder.append_value(tags[0]);
+            tag_1_builder.append_value(tags[1]);
+        }
+
+        columns.push(Arc::new(tag_0_builder.finish()) as ArrayRef);
+        columns.push(Arc::new(tag_1_builder.finish()) as ArrayRef);
+
+        // Add field column (field_0)
+        let field_values: Vec<u64> = (start..end).map(|v| v as u64).collect();
+        columns.push(Arc::new(UInt64Array::from(field_values)));
+
+        // Add time index column (ts)
+        let timestamps: Vec<i64> = (start..end).map(|v| v as i64).collect();
+        columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
+
+        // Add encoded primary key column
+        let pk = new_primary_key(tags);
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for _ in 0..num_rows {
+            pk_builder.append(&pk).unwrap();
+        }
+        columns.push(Arc::new(pk_builder.finish()));
+
+        // Add sequence column
+        columns.push(Arc::new(UInt64Array::from_value(1000, num_rows)));
+
+        // Add op_type column
+        columns.push(Arc::new(UInt8Array::from_value(
+            OpType::Put as u8,
+            num_rows,
+        )));
+
+        RecordBatch::try_new(flat_schema, columns).unwrap()
+    }
+
+    /// Creates a FlatSource from flat format RecordBatches.
+    fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
+        FlatSource::Iter(Box::new(batches.into_iter().map(Ok)))
+    }
+
+    #[tokio::test]
+    async fn test_write_flat_with_index() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
+        let metadata = Arc::new(sst_region_metadata());
+        let row_group_size = 50;
+
+        // Create flat format RecordBatches
+        let flat_batches = vec![
+            new_record_batch_by_range(&["a", "d"], 0, 20),
+            new_record_batch_by_range(&["b", "d"], 0, 20),
+            new_record_batch_by_range(&["c", "d"], 0, 20),
+            new_record_batch_by_range(&["c", "f"], 0, 40),
+            new_record_batch_by_range(&["c", "h"], 100, 200),
+        ];
+
+        let flat_source = new_flat_source_from_record_batches(flat_batches);
+
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..Default::default()
+        };
+
+        let puffin_manager = env
+            .get_puffin_manager()
+            .build(object_store.clone(), file_path.clone());
+        let intermediate_manager = env.get_intermediate_manager();
+
+        let indexer_builder = IndexerBuilderImpl {
+            op_type: OperationType::Flush,
+            metadata: metadata.clone(),
+            row_group_size,
+            puffin_manager,
+            intermediate_manager,
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    segment_row_count: 1,
+                    ..Default::default()
+                },
+            },
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+        };
+
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            indexer_builder,
+            file_path.clone(),
+            Metrics::new(WriteType::Flush),
+        )
+        .await;
+
+        let info = writer
+            .write_all_flat(flat_source, &write_opts)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(200, info.num_rows);
+        assert!(info.file_size > 0);
+        assert!(info.index_metadata.file_size > 0);
+
+        assert!(info.index_metadata.inverted_index.index_size > 0);
+        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
+        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+
+        assert!(info.index_metadata.bloom_filter.index_size > 0);
+        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
+        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+
+        assert_eq!(
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(199)
+            ),
+            info.time_range
+        );
     }
 
     #[tokio::test]

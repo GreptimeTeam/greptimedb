@@ -82,7 +82,7 @@ lazy_static! {
     .unwrap();
     /// The triggered region flush total counter.
     pub static ref METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL: IntCounterVec =
-        register_int_counter_vec!("meta_triggered_region_flush_total", "meta triggered region flush total", &["topic_name", "region_type"]).unwrap();
+        register_int_counter_vec!("meta_triggered_region_flush_total", "meta triggered region flush total", &["topic_name"]).unwrap();
 
     /// The triggered region checkpoint total counter.
     pub static ref METRIC_META_TRIGGERED_REGION_CHECKPOINT_TOTAL: IntCounterVec =

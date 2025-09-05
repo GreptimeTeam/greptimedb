@@ -1430,7 +1430,7 @@ write_cache_path = ""
 write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
-max_concurrent_scan_files = 128
+max_concurrent_scan_files = 384
 allow_stale_entries = false
 min_compaction_interval = "0s"
 
@@ -2517,12 +2517,12 @@ dispatcher:
   field: type
   rules:
     - value: http
-      table_suffix: http
+      table_suffix: _http
       pipeline: http
     - value: db
-      table_suffix: db
+      table_suffix: _db
     - value: not_found
-      table_suffix: not_found
+      table_suffix: _not_found
       pipeline: not_found
 
 transform:

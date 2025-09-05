@@ -203,9 +203,19 @@ impl DirtyTimeWindows {
         self.windows.clear();
     }
 
+    /// Set windows to be dirty, only useful for full aggr without time window
+    /// to mark some new data is inserted
+    pub fn set_dirty(&mut self) {
+        self.windows.insert(Timestamp::new_second(0), None);
+    }
+
     /// Number of dirty windows.
     pub fn len(&self) -> usize {
         self.windows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty()
     }
 
     /// Get the effective count of time windows, which is the number of time windows that can be

@@ -83,6 +83,62 @@ pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
     }
 }
 
+/// Formats nanoseconds into human-readable time with dynamic unit selection.
+///
+/// This function automatically chooses the most appropriate unit (seconds, milliseconds,
+/// microseconds, or nanoseconds) to display the time in a readable format.
+///
+/// # Examples
+///
+/// ```
+/// use common_time::util::format_nanoseconds_human_readable;
+///
+/// assert_eq!("1.23s", format_nanoseconds_human_readable(1_234_567_890));
+/// assert_eq!("456ms", format_nanoseconds_human_readable(456_000_000));
+/// assert_eq!("789us", format_nanoseconds_human_readable(789_000));
+/// assert_eq!("123ns", format_nanoseconds_human_readable(123));
+/// ```
+pub fn format_nanoseconds_human_readable(nanos: usize) -> String {
+    if nanos == 0 {
+        return "0ns".to_string();
+    }
+
+    let nanos_i64 = nanos as i64;
+
+    // Try seconds first (if >= 1 second)
+    if nanos_i64 >= 1_000_000_000 {
+        let secs = nanos_i64 as f64 / 1_000_000_000.0;
+        if secs >= 10.0 {
+            return format!("{:.1}s", secs);
+        } else {
+            return format!("{:.2}s", secs);
+        }
+    }
+
+    // Try milliseconds (if >= 1 millisecond)
+    if nanos_i64 >= 1_000_000 {
+        let millis = nanos_i64 as f64 / 1_000_000.0;
+        if millis >= 10.0 {
+            return format!("{:.0}ms", millis);
+        } else {
+            return format!("{:.1}ms", millis);
+        }
+    }
+
+    // Try microseconds (if >= 1 microsecond)
+    if nanos_i64 >= 1_000 {
+        let micros = nanos_i64 as f64 / 1_000.0;
+        if micros >= 10.0 {
+            return format!("{:.0}us", micros);
+        } else {
+            return format!("{:.1}us", micros);
+        }
+    }
+
+    // Less than 1 microsecond, display as nanoseconds
+    format!("{}ns", nanos_i64)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{self, SystemTime};
@@ -113,5 +169,42 @@ mod tests {
     fn test_div_ceil() {
         let v0 = 9223372036854676001;
         assert_eq!(9223372036854677, div_ceil(v0, 1000));
+    }
+
+    #[test]
+    fn test_format_nanoseconds_human_readable() {
+        // Test zero
+        assert_eq!("0ns", format_nanoseconds_human_readable(0));
+
+        // Test nanoseconds (< 1 microsecond)
+        assert_eq!("1ns", format_nanoseconds_human_readable(1));
+        assert_eq!("123ns", format_nanoseconds_human_readable(123));
+        assert_eq!("999ns", format_nanoseconds_human_readable(999));
+
+        // Test microseconds (>= 1 microsecond, < 1 millisecond)
+        assert_eq!("1.0us", format_nanoseconds_human_readable(1_000));
+        assert_eq!("1.5us", format_nanoseconds_human_readable(1_500));
+        assert_eq!("10us", format_nanoseconds_human_readable(10_000));
+        assert_eq!("123us", format_nanoseconds_human_readable(123_000));
+        assert_eq!("999us", format_nanoseconds_human_readable(999_000));
+
+        // Test milliseconds (>= 1 millisecond, < 1 second)
+        assert_eq!("1.0ms", format_nanoseconds_human_readable(1_000_000));
+        assert_eq!("1.5ms", format_nanoseconds_human_readable(1_500_000));
+        assert_eq!("10ms", format_nanoseconds_human_readable(10_000_000));
+        assert_eq!("123ms", format_nanoseconds_human_readable(123_000_000));
+        assert_eq!("999ms", format_nanoseconds_human_readable(999_000_000));
+
+        // Test seconds (>= 1 second)
+        assert_eq!("1.00s", format_nanoseconds_human_readable(1_000_000_000));
+        assert_eq!("1.23s", format_nanoseconds_human_readable(1_234_567_890));
+        assert_eq!("10.0s", format_nanoseconds_human_readable(10_000_000_000));
+        assert_eq!("123.5s", format_nanoseconds_human_readable(123_456_789_012));
+
+        // Test large values
+        assert_eq!(
+            "1234.6s",
+            format_nanoseconds_human_readable(1_234_567_890_123)
+        );
     }
 }

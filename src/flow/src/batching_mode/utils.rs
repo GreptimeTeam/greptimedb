@@ -24,7 +24,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
 use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{
-    Transformed, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
+    Transformed, TreeNode as _, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
@@ -122,16 +122,37 @@ pub async fn sql_to_df_plan(
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx)
+        .plan(&query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
     let plan = if optimize {
-        apply_df_optimizer(plan).await?
+        apply_df_optimizer(plan, &query_ctx).await?
     } else {
         plan
     };
+    Ok(plan)
+}
+
+/// Generate a plan that matches the schema of the sink table
+/// from given sql by alias and adding auto columns
+pub(crate) async fn gen_plan_with_matching_schema(
+    sql: &str,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sink_table_schema: SchemaRef,
+) -> Result<LogicalPlan, Error> {
+    let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
+
+    let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema);
+    let plan = plan
+        .clone()
+        .rewrite(&mut add_auto_column)
+        .with_context(|_| DatafusionSnafu {
+            context: format!("Failed to rewrite plan:\n {}\n", plan),
+        })?
+        .data;
     Ok(plan)
 }
 
@@ -239,19 +260,19 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     }
 }
 
-/// Add to the final select columns like `update_at`
+/// Optionally add to the final select columns like `update_at` if the sink table has such column
 /// (which doesn't necessary need to have exact name just need to be a extra timestamp column)
 /// and `__ts_placeholder`(this column need to have exact this name and be a timestamp)
 /// with values like `now()` and `0`
 ///
 /// it also give existing columns alias to column in sink table if needed
 #[derive(Debug)]
-pub struct AddAutoColumnRewriter {
+pub struct ColumnMatcherRewriter {
     pub schema: SchemaRef,
     pub is_rewritten: bool,
 }
 
-impl AddAutoColumnRewriter {
+impl ColumnMatcherRewriter {
     pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
@@ -348,7 +369,7 @@ impl AddAutoColumnRewriter {
     }
 }
 
-impl TreeNodeRewriter for AddAutoColumnRewriter {
+impl TreeNodeRewriter for ColumnMatcherRewriter {
     type Node = LogicalPlan;
     fn f_down(&mut self, mut node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         if self.is_rewritten {
@@ -696,7 +717,7 @@ mod test {
         let ctx = QueryContext::arc();
         for (before, after, column_schemas) in testcases {
             let schema = Arc::new(Schema::new(column_schemas));
-            let mut add_auto_column_rewriter = AddAutoColumnRewriter::new(schema);
+            let mut add_auto_column_rewriter = ColumnMatcherRewriter::new(schema);
 
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
                 .await

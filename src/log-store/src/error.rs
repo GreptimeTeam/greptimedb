@@ -139,9 +139,6 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
-    ResolveKafkaEndpoint { source: common_wal::error::Error },
-
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",
         topic,
@@ -343,7 +340,6 @@ impl ErrorExt for Error {
             StartWalTask { .. }
             | StopWalTask { .. }
             | IllegalState { .. }
-            | ResolveKafkaEndpoint { .. }
             | NoMaxValue { .. }
             | Cast { .. }
             | EncodeJson { .. }

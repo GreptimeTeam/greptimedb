@@ -29,8 +29,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
-    ComputeArrowSnafu, ConvertVectorSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
-    RecordBatchSnafu, Result, StatsNotPresentSnafu,
+    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
+    Result, StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
@@ -381,10 +381,7 @@ impl RangeBase {
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
                 let column = &input.columns()[idx];
-                // Convert Arrow Array to Vector
-                let vector = datatypes::vectors::Helper::try_into_vector(column.clone())
-                    .context(ConvertVectorSnafu)?;
-                let result = filter.evaluate_vector(&vector).context(RecordBatchSnafu)?;
+                let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else {
                 // Column not found in projection, continue

@@ -18,7 +18,8 @@ use std::fmt;
 use std::fmt::Display;
 
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Vector;
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
@@ -66,10 +67,7 @@ impl Function for UddSketchCalcFunction {
         // First argument: percentile (float64)
         // Second argument: UDDSketch state (binary)
         Signature::exact(
-            vec![
-                ConcreteDataType::float64_datatype(),
-                ConcreteDataType::binary_datatype(),
-            ],
+            vec![DataType::Float64, DataType::Binary],
             Volatility::Immutable,
         )
     }

@@ -1,0 +1,79 @@
+-- Migrated from DuckDB test: Multiple advanced window function tests
+-- Tests complex window function scenarios
+CREATE TABLE window_data(
+  group_id INTEGER,
+  seq_num INTEGER, 
+  "value" DOUBLE,
+  category VARCHAR,
+  ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO window_data VALUES 
+(1, 1, 100.0, 'A', 1000), (1, 2, 150.0, 'A', 2000), (1, 3, 120.0, 'B', 3000),
+(2, 1, 200.0, 'A', 4000), (2, 2, 180.0, 'B', 5000), (2, 3, 220.0, 'A', 6000);
+
+Affected Rows: 6
+
+-- Window with complex partitioning and ordering
+SELECT 
+  group_id, seq_num, "value", category,
+  ROW_NUMBER() OVER (PARTITION BY group_id, category ORDER BY seq_num) as row_in_group_cat,
+  DENSE_RANK() OVER (PARTITION BY group_id ORDER BY "value" DESC) as value_rank,
+  LAG("value", 1, 0) OVER (PARTITION BY group_id ORDER BY seq_num) as prev_value
+FROM window_data ORDER BY group_id, seq_num;
+
++----------+---------+-------+----------+------------------+------------+------------+
+| group_id | seq_num | value | category | row_in_group_cat | value_rank | prev_value |
++----------+---------+-------+----------+------------------+------------+------------+
+| 1        | 1       | 100.0 | A        | 1                | 3          | 0.0        |
+| 1        | 2       | 150.0 | A        | 2                | 1          | 100.0      |
+| 1        | 3       | 120.0 | B        | 1                | 2          | 150.0      |
+| 2        | 1       | 200.0 | A        | 1                | 2          | 0.0        |
+| 2        | 2       | 180.0 | B        | 1                | 3          | 200.0      |
+| 2        | 3       | 220.0 | A        | 2                | 1          | 180.0      |
++----------+---------+-------+----------+------------------+------------+------------+
+
+-- Running calculations with frames
+SELECT 
+  group_id, seq_num, "value",
+  SUM("value") OVER (PARTITION BY group_id ORDER BY seq_num ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) as rolling_sum_2,
+  AVG("value") OVER (PARTITION BY group_id ORDER BY seq_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumulative_avg,
+  MAX("value") OVER (PARTITION BY group_id ORDER BY seq_num ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) as max_next_2
+FROM window_data ORDER BY group_id, seq_num;
+
++----------+---------+-------+---------------+--------------------+------------+
+| group_id | seq_num | value | rolling_sum_2 | cumulative_avg     | max_next_2 |
++----------+---------+-------+---------------+--------------------+------------+
+| 1        | 1       | 100.0 | 100.0         | 100.0              | 150.0      |
+| 1        | 2       | 150.0 | 250.0         | 125.0              | 150.0      |
+| 1        | 3       | 120.0 | 270.0         | 123.33333333333333 | 120.0      |
+| 2        | 1       | 200.0 | 200.0         | 200.0              | 200.0      |
+| 2        | 2       | 180.0 | 380.0         | 190.0              | 220.0      |
+| 2        | 3       | 220.0 | 400.0         | 200.0              | 220.0      |
++----------+---------+-------+---------------+--------------------+------------+
+
+-- Percentage calculations
+SELECT 
+  group_id, "value", category,
+  "value" / SUM("value") OVER (PARTITION BY group_id) * 100 as pct_of_group,
+  PERCENT_RANK() OVER (ORDER BY "value") as percentile_rank,
+  NTILE(3) OVER (ORDER BY "value") as tertile
+FROM window_data ORDER BY "value";
+
++----------+-------+----------+--------------------+-----------------+---------+
+| group_id | value | category | pct_of_group       | percentile_rank | tertile |
++----------+-------+----------+--------------------+-----------------+---------+
+| 1        | 100.0 | A        | 27.027027027027028 | 0.0             | 1       |
+| 1        | 120.0 | B        | 32.432432432432435 | 0.2             | 1       |
+| 1        | 150.0 | A        | 40.54054054054054  | 0.4             | 2       |
+| 2        | 180.0 | B        | 30.0               | 0.6             | 2       |
+| 2        | 200.0 | A        | 33.33333333333333  | 0.8             | 3       |
+| 2        | 220.0 | A        | 36.666666666666664 | 1.0             | 3       |
++----------+-------+----------+--------------------+-----------------+---------+
+
+DROP TABLE window_data;
+
+Affected Rows: 0
+

@@ -16,8 +16,8 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
@@ -49,7 +49,7 @@ impl Function for Ipv4NumToString {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::uint32_datatype()]),
+            TypeSignature::Exact(vec![DataType::UInt32]),
             Volatility::Immutable,
         )
     }
@@ -107,10 +107,7 @@ impl Function for Ipv4StringToNum {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
-            Volatility::Immutable,
-        )
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

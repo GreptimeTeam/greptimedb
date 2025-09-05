@@ -102,9 +102,6 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_regions_instruction(flush_regions)
             })),
-            Instruction::FlushRegion(flush_region) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_region_instruction(flush_region)
-            })),
         }
     }
 }
@@ -118,7 +115,6 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::CloseRegion { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
-                | Some((_, Instruction::FlushRegion { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
         )
     }
@@ -238,10 +234,7 @@ mod tests {
         // Upgrade region
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
-            last_entry_id: None,
-            metadata_last_entry_id: None,
-            replay_timeout: None,
-            location_id: None,
+            ..Default::default()
         });
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))

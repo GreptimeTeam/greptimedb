@@ -15,8 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -41,10 +40,7 @@ impl Function for ParseJsonFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![ConcreteDataType::string_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -111,7 +107,6 @@ impl Display for ParseJsonFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::StringVector;
 
@@ -128,13 +123,6 @@ mod tests {
                 .return_type(&[ConcreteDataType::json_datatype()])
                 .unwrap()
         );
-
-        assert!(matches!(parse_json.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::string_datatype()]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,

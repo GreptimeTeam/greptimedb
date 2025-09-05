@@ -17,7 +17,8 @@ use std::fmt::Display;
 
 use common_query::error;
 use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::compute;
 use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -55,7 +56,7 @@ impl Function for ModuloFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

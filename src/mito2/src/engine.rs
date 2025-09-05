@@ -97,7 +97,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use store_api::ManifestVersion;
 use tokio::sync::{oneshot, Semaphore};
 
-use crate::cache::CacheStrategy;
+use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
@@ -114,6 +114,7 @@ use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -128,21 +129,24 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
-    plugins: Plugins,
+    file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    plugins: Plugins,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
 impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_home: &'a str,
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
-        plugins: Plugins,
+        file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
+        plugins: Plugins,
     ) -> Self {
         Self {
             data_home,
@@ -150,6 +154,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             log_store,
             object_store_manager,
             schema_metadata_manager,
+            file_ref_manager,
             plugins,
             partition_expr_fetcher,
             #[cfg(feature = "enterprise")]
@@ -178,8 +183,9 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.log_store.clone(),
             self.object_store_manager,
             self.schema_metadata_manager,
-            self.plugins.clone(),
+            self.file_ref_manager,
             self.partition_expr_fetcher.clone(),
+            self.plugins,
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
@@ -209,12 +215,14 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new<S: LogStore>(
         data_home: &str,
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
@@ -224,10 +232,23 @@ impl MitoEngine {
             log_store,
             object_store_manager,
             schema_metadata_manager,
-            plugins,
+            file_ref_manager,
             partition_expr_fetcher,
+            plugins,
         );
         builder.try_build().await
+    }
+
+    pub fn mito_config(&self) -> &MitoConfig {
+        &self.inner.config
+    }
+
+    pub fn cache_manager(&self) -> CacheManagerRef {
+        self.inner.workers.cache_manager()
+    }
+
+    pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
+        self.inner.workers.file_ref_manager()
     }
 
     /// Returns true if the specific region exists.
@@ -326,7 +347,7 @@ impl MitoEngine {
         self.find_region(id)
     }
 
-    fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+    pub(crate) fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
     }
 
@@ -651,7 +672,9 @@ impl EngineInner {
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
-        .with_start_time(query_start);
+        .with_start_time(query_start)
+        // TODO(yingwen): Enable it after flat format is supported.
+        .with_flat_format(false);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -931,6 +954,7 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
@@ -946,6 +970,7 @@ impl MitoEngine {
                     write_buffer_manager,
                     listener,
                     schema_metadata_manager,
+                    file_ref_manager,
                     time_provider,
                     partition_expr_fetcher,
                 )

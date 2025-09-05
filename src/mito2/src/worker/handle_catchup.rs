@@ -65,7 +65,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if region.provider.is_remote_wal() {
             let flushed_entry_id = region.version_control.current().last_entry_id;
-            info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");
+            let replay_from_entry_id = request
+                .checkpoint
+                .map(|c| c.entry_id)
+                .unwrap_or_default()
+                .max(flushed_entry_id);
+            info!("Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}", region.provider);
             let timer = Instant::now();
             let wal_entry_reader =
                 self.wal
@@ -75,15 +80,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &region.provider,
                 wal_entry_reader,
                 region_id,
-                flushed_entry_id,
+                replay_from_entry_id,
                 &region.version_control,
                 self.config.allow_stale_entries,
                 on_region_opened,
             )
             .await?;
             info!(
-                "Elapsed: {:?}, region: {region_id} catchup finished. last entry id: {last_entry_id}, expected: {:?}.",
+                "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}.",
                 timer.elapsed(),
+                region.provider,
                 request.entry_id
             );
             if let Some(expected_last_entry_id) = request.entry_id {
@@ -155,6 +161,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.puffin_manager_factory.clone(),
                 self.intermediate_manager.clone(),
                 self.time_provider.clone(),
+                self.file_ref_manager.clone(),
                 self.partition_expr_fetcher.clone(),
             )
             .cache(Some(self.cache_manager.clone()))
