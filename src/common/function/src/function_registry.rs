@@ -33,7 +33,6 @@ use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
-use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
 use crate::system::SystemFunction;
@@ -64,7 +63,18 @@ impl FunctionRegistry {
 
     /// Register a scalar function in the registry.
     pub fn register_scalar(&self, func: impl Function + 'static) {
-        self.register(Arc::new(func) as FunctionRef);
+        let func = Arc::new(func) as FunctionRef;
+
+        for alias in func.aliases() {
+            let func: ScalarFunctionFactory = func.clone().into();
+            let alias = ScalarFunctionFactory {
+                name: alias.to_string(),
+                ..func
+            };
+            self.register(alias);
+        }
+
+        self.register(func)
     }
 
     /// Register an aggregate function in the registry.
@@ -106,7 +116,6 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
 
     // Utility functions
     MathFunction::register(&function_registry);
-    TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);

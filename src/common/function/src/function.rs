@@ -70,6 +70,10 @@ pub trait Function: fmt::Display + Sync + Send {
 
     /// Evaluate the function, e.g. run/execute the function.
     fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef>;
+
+    fn aliases(&self) -> &[String] {
+        &[]
+    }
 }
 
 pub type FunctionRef = Arc<dyn Function>;

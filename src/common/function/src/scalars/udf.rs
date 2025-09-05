@@ -50,6 +50,10 @@ impl ScalarUDFImpl for ScalarUdf {
         self.function.name()
     }
 
+    fn aliases(&self) -> &[String] {
+        self.function.aliases()
+    }
+
     fn signature(&self) -> &datafusion_expr::Signature {
         &self.signature
     }

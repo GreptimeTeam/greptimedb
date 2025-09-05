@@ -24,8 +24,18 @@ use derive_more::Display;
 use crate::function::{Function, FunctionContext};
 
 /// A function to return current schema name.
-#[derive(Clone, Debug, Default)]
-pub struct DatabaseFunction;
+#[derive(Clone, Debug)]
+pub struct DatabaseFunction {
+    aliases: [String; 1],
+}
+
+impl Default for DatabaseFunction {
+    fn default() -> Self {
+        Self {
+            aliases: [CURRENT_SCHEMA_FUNCTION_NAME.to_string()],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct CurrentSchemaFunction;
@@ -66,25 +76,9 @@ impl Function for DatabaseFunction {
 
         Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
     }
-}
 
-impl Function for CurrentSchemaFunction {
-    fn name(&self) -> &str {
-        CURRENT_SCHEMA_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let db = func_ctx.query_ctx.current_schema();
-
-        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
+    fn aliases(&self) -> &[String] {
+        &self.aliases
     }
 }
 
@@ -201,7 +195,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_build_function() {
-        let build = DatabaseFunction;
+        let build = DatabaseFunction::default();
         assert_eq!("database", build.name());
         assert_eq!(
             ConcreteDataType::string_datatype(),

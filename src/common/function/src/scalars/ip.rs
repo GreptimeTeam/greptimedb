@@ -29,7 +29,7 @@ pub(crate) struct IpFunctions;
 impl IpFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // Register IPv4 functions
-        registry.register_scalar(Ipv4NumToString);
+        registry.register_scalar(Ipv4NumToString::default());
         registry.register_scalar(Ipv4StringToNum);
         registry.register_scalar(Ipv4ToCidr);
         registry.register_scalar(Ipv4InRange);
