@@ -16,6 +16,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
@@ -24,6 +25,7 @@ use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray, StringBuilder,
@@ -55,15 +57,18 @@ use table::predicate::Predicate;
 
 use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
-    EncodeSnafu, NewRecordBatchSnafu, Result,
+    EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
+use crate::sst::file::FileId;
+use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
+use crate::sst::parquet::{SstInfo, PARQUET_METADATA_KEY};
 use crate::sst::to_sst_arrow_schema;
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -517,6 +522,39 @@ impl EncodedBulkPart {
         &self.metadata
     }
 
+    /// Returns the size of the encoded data in bytes
+    pub(crate) fn size_bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns the encoded data.
+    pub(crate) fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    /// Converts this `EncodedBulkPart` to `SstInfo`.
+    ///
+    /// # Arguments
+    /// * `file_id` - The SST file ID to assign to this part
+    ///
+    /// # Returns
+    /// Returns a `SstInfo` instance with information derived from this bulk part's metadata
+    pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
+        let unit = self.metadata.region_metadata.time_index_type().unit();
+        SstInfo {
+            file_id,
+            time_range: (
+                Timestamp::new(self.metadata.min_timestamp, unit),
+                Timestamp::new(self.metadata.max_timestamp, unit),
+            ),
+            file_size: self.data.len() as u64,
+            num_rows: self.metadata.num_rows,
+            num_row_groups: self.metadata.parquet_metadata.num_row_groups() as u64,
+            file_metadata: Some(self.metadata.parquet_metadata.clone()),
+            index_metadata: IndexOutput::default(),
+        }
+    }
+
     pub(crate) fn read(
         &self,
         context: BulkIterContextRef,
@@ -562,22 +600,100 @@ pub struct BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    pub(crate) fn new(metadata: RegionMetadataRef, row_group_size: usize) -> BulkPartEncoder {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+    ) -> Result<BulkPartEncoder> {
+        // TODO(yingwen): Skip arrow schema if needed.
+        let json = metadata.to_json().context(InvalidMetadataSnafu)?;
+        let key_value_meta =
+            parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
+
+        // TODO(yingwen): Do we need compression?
         let writer_props = Some(
             WriterProperties::builder()
+                .set_key_value_metadata(Some(vec![key_value_meta]))
                 .set_write_batch_size(row_group_size)
                 .set_max_row_group_size(row_group_size)
                 .build(),
         );
-        Self {
+
+        Ok(Self {
             metadata,
             row_group_size,
             writer_props,
-        }
+        })
     }
 }
 
 impl BulkPartEncoder {
+    /// Encodes [BoxedRecordBatchIterator] into [EncodedBulkPart] with min/max timestamps.
+    pub fn encode_record_batch_iter(
+        &self,
+        iter: BoxedRecordBatchIterator,
+        arrow_schema: SchemaRef,
+        min_timestamp: i64,
+        max_timestamp: i64,
+    ) -> Result<Option<EncodedBulkPart>> {
+        let mut buf = Vec::with_capacity(4096);
+        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
+            .context(EncodeMemtableSnafu)?;
+        let mut total_rows = 0;
+
+        // Process each batch from the iterator
+        let mut iter_cost = Duration::default();
+        let mut write_cost = Duration::default();
+        let mut iter_start = Instant::now();
+        let mut raw_size = 0;
+        for batch_result in iter {
+            iter_cost += iter_start.elapsed();
+            let batch = batch_result?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            raw_size += batch.get_array_memory_size();
+            let writer_start = Instant::now();
+            writer.write(&batch).context(EncodeMemtableSnafu)?;
+            write_cost += writer_start.elapsed();
+            total_rows += batch.num_rows();
+            iter_start = Instant::now();
+        }
+        iter_cost += iter_start.elapsed();
+        iter_start = Instant::now();
+
+        if total_rows == 0 {
+            return Ok(None);
+        }
+
+        let writer_start = Instant::now();
+        let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
+        write_cost += writer_start.elapsed();
+
+        let buf = Bytes::from(buf);
+        let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
+
+        common_telemetry::info!(
+            "Encode record batch iter, total rows: {}, raw size: {}, encoded size: {}, iter_cost: {:?}, write_cost: {:?}",
+            total_rows,
+            raw_size,
+            buf.len(),
+            iter_cost,
+            write_cost
+        );
+
+        Ok(Some(EncodedBulkPart {
+            data: buf,
+            metadata: BulkPartMeta {
+                num_rows: total_rows,
+                max_timestamp,
+                min_timestamp,
+                parquet_metadata,
+                region_metadata: self.metadata.clone(),
+            },
+        }))
+    }
+
     /// Encodes bulk part to a [EncodedBulkPart], returns the encoded data.
     fn encode_part(&self, part: &BulkPart) -> Result<Option<EncodedBulkPart>> {
         if part.batch.num_rows() == 0 {
@@ -1208,7 +1324,7 @@ mod tests {
             converter.append_key_values(&kv).unwrap();
         }
         let part = converter.convert().unwrap();
-        let encoder = BulkPartEncoder::new(metadata, 1024);
+        let encoder = BulkPartEncoder::new(metadata, 1024).unwrap();
         encoder.encode_part(&part).unwrap().unwrap()
     }
 
@@ -1287,7 +1403,7 @@ mod tests {
             converter.append_key_values(&kv).unwrap();
         }
         let part = converter.convert().unwrap();
-        let encoder = BulkPartEncoder::new(metadata, 1024);
+        let encoder = BulkPartEncoder::new(metadata, 1024).unwrap();
         encoder.encode_part(&part).unwrap().unwrap()
     }
 
