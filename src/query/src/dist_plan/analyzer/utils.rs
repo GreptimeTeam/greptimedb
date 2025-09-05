@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::TreeNodeVisitor;
@@ -25,48 +26,53 @@ use datafusion_sql::TableReference;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::Result;
-
 /// Return all the original columns for the given aliased columns at the original node
 pub fn original_column_for(
     aliased_columns: HashSet<Column>,
     aliased_node: LogicalPlan,
     original_node: Option<Arc<LogicalPlan>>,
 ) -> DfResult<HashMap<Column, Column>> {
-    let mut cur_aliases: HashMap<Column, Column> = aliased_columns
+    let cur_aliases: HashMap<Column, Column> = aliased_columns
         .iter()
         .map(|c| (c.clone(), c.clone()))
         .collect();
-    let mut node = &aliased_node;
-    loop {
-        // descend the plan tree to find the original node, which keep track of all the alias in between
-        if let Some(original_node) = &original_node {
-            if *node == **original_node {
-                break;
-            }
-        } else if node.inputs().is_empty() {
-            // leaf node reached
-            break;
-        }
 
-        let layer = get_alias_layer_from_node(&node)?;
-        let mut new_aliases = HashMap::new();
-        for (start_alias, cur_alias) in cur_aliases {
-            if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
-                new_aliases.insert(start_alias, old_column);
-            }
-        }
-        cur_aliases = new_aliases;
+    original_column_for_recursive(cur_aliases, &aliased_node, &original_node)
+}
 
-        if node.inputs().len() != 1 {
-            return Err(datafusion::error::DataFusionError::Internal(
-                "only accept plan with at most one child".to_string(),
-            ));
+fn original_column_for_recursive(
+    cur_aliases: HashMap<Column, Column>,
+    node: &LogicalPlan,
+    original_node: &Option<Arc<LogicalPlan>>,
+) -> DfResult<HashMap<Column, Column>> {
+    // Base case: check if we've reached the target node
+    if let Some(original_node) = original_node {
+        if *node == **original_node {
+            return Ok(cur_aliases);
         }
-        node = node.inputs()[0];
+    } else if node.inputs().is_empty() {
+        // leaf node reached
+        return Ok(cur_aliases);
     }
 
-    Ok(cur_aliases)
+    // Validate node has exactly one child
+    if node.inputs().len() != 1 {
+        return Err(datafusion::error::DataFusionError::Internal(
+            "only accept plan with at most one child".to_string(),
+        ));
+    }
+
+    // Get alias layer and update aliases
+    let layer = get_alias_layer_from_node(node)?;
+    let mut new_aliases = HashMap::new();
+    for (start_alias, cur_alias) in cur_aliases {
+        if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
+            new_aliases.insert(start_alias, old_column);
+        }
+    }
+
+    // Recursive call with child node
+    original_column_for_recursive(new_aliases, node.inputs()[0], original_node)
 }
 
 /// Return all the aliased columns for the given original columns at the alias node
@@ -75,35 +81,53 @@ pub fn aliased_columns_for(
     aliased_node: LogicalPlan,
     original_node: Option<Arc<LogicalPlan>>,
 ) -> DfResult<HashMap<Column, HashSet<Column>>> {
-    let mut cur_aliases: HashMap<Column, HashSet<Column>> = original_columns
+    let initial_aliases: HashMap<Column, HashSet<Column>> = original_columns
         .iter()
         .map(|c| (c.clone(), HashSet::from([c.clone()])))
         .collect();
 
-    // first get a stack of ref nodes from aliased node to original node
-    let mut stack = vec![];
-    let mut node = &aliased_node;
-    loop {
-        stack.push(node);
-        if let Some(original_node) = &original_node {
-            if *node == **original_node {
-                break;
-            }
-        } else if node.inputs().is_empty() {
-            // leaf node reached
-            break;
-        }
+    aliased_columns_for_recursive(initial_aliases, &aliased_node, &original_node)
+}
 
-        if node.inputs().len() != 1 {
-            return Err(datafusion::error::DataFusionError::Internal(
-                "only accept plan with at most one child".to_string(),
-            ));
+fn aliased_columns_for_recursive(
+    cur_aliases: HashMap<Column, HashSet<Column>>,
+    node: &LogicalPlan,
+    original_node: &Option<Arc<LogicalPlan>>,
+) -> DfResult<HashMap<Column, HashSet<Column>>> {
+    // Base case: check if we've reached the target node
+    if let Some(original_node) = original_node {
+        if *node == **original_node {
+            return Ok(cur_aliases);
         }
-        node = node.inputs()[0];
+    } else if node.inputs().is_empty() {
+        // leaf node reached
+        return Ok(cur_aliases);
     }
-    // reverse so we can go from original node to aliased node
-    stack.reverse();
-    todo!()
+
+    // Validate node has exactly one child
+    if node.inputs().len() != 1 {
+        return Err(datafusion::error::DataFusionError::Internal(
+            "only accept plan with at most one child".to_string(),
+        ));
+    }
+
+    // Recursive call to child node first (descend to original node)
+    let child_result = aliased_columns_for_recursive(cur_aliases, node.inputs()[0], original_node)?;
+
+    // Apply alias layer on the way back up (from original to aliased)
+    let layer = get_alias_layer_from_node(node)?;
+    let mut new_aliases = HashMap::new();
+    for (original_column, cur_alias_set) in child_result {
+        let mut new_alias_set = HashSet::new();
+        for cur_alias in cur_alias_set {
+            new_alias_set.extend(layer.get_new_from_old(cur_alias.clone()));
+        }
+        if !new_alias_set.is_empty() {
+            new_aliases.insert(original_column, new_alias_set);
+        }
+    }
+
+    Ok(new_aliases)
 }
 
 /// Return a mapping of original column to all the aliased columns in current node of the plan
@@ -191,93 +215,52 @@ fn get_alias_layer_from_exprs(exprs: &[Expr]) -> AliasLayer {
     layer
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 struct AliasLayer {
     /// for convenient of querying, key is field's name
-    old_to_new: BTreeMap<String, Vec<(Column, HashSet<Column>)>>,
-    /// (field name, (new column, old column))
-    new_to_old: BTreeMap<String, Vec<(Column, Column)>>,
-}
-
-/// a much less verbose debug impl for AliasLayer
-impl std::fmt::Debug for AliasLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut map = BTreeMap::new();
-        for mappings in self.old_to_new.values() {
-            let new_cols: HashMap<String, String> = mappings
-                .iter()
-                .flat_map(|(old_column, new_cols)| {
-                    new_cols
-                        .iter()
-                        .map(|c| (old_column.to_string(), c.to_string()))
-                })
-                .collect();
-            map.extend(new_cols);
-        }
-        let mut new_to_old_map = BTreeMap::new();
-        for (new_col_name, mappings) in &self.new_to_old {
-            let old_cols: HashMap<String, String> = mappings
-                .iter()
-                .map(|(new, old)| (new.to_string(), old.to_string()))
-                .collect();
-            new_to_old_map.insert(new_col_name, old_cols);
-        }
-        f.debug_struct("AliasLayer")
-            .field("old_to_new", &map)
-            .field("new_to_old", &new_to_old_map)
-            .finish()
-    }
+    old_to_new: BTreeMap<Column, HashSet<Column>>,
 }
 
 impl AliasLayer {
     pub fn insert_alias(&mut self, old_column: Column, new_columns: HashSet<Column>) {
         self.old_to_new
-            .entry(old_column.name().to_string())
+            .entry(old_column)
             .or_default()
-            .push((old_column.clone(), new_columns.clone()));
-        for new_column in new_columns {
-            self.new_to_old
-                .entry(new_column.name().to_string())
-                .or_default()
-                .push((new_column, old_column.clone()));
-        }
+            .extend(new_columns.clone());
     }
 
-    pub fn get_new_from_old(&self, old_column: Column) -> Option<HashSet<Column>> {
-        let column_mappings = self.old_to_new.get(old_column.name())?;
-        for (old_col, new_cols) in column_mappings {
-            match (&old_col.relation, &old_column.relation) {
-                (Some(o), Some(c)) => {
-                    if o.resolved_eq(c) {
-                        return Some(new_cols.clone());
+    pub fn get_new_from_old(&self, old_column: Column) -> HashSet<Column> {
+        let mut res_cols = HashSet::new();
+        for (old, new_cols) in self.old_to_new.iter() {
+            if old.name() == old_column.name() {
+                match (&old.relation, &old_column.relation) {
+                    (Some(o), Some(c)) => {
+                        if o.resolved_eq(c) {
+                            res_cols.extend(new_cols.clone());
+                        }
                     }
-                }
-                _ => {
-                    // if any of the two relation is None, meaning not fully qualified, just match name
-                    return Some(new_cols.clone());
+                    _ => {
+                        // if any of the two relation is None, meaning not fully qualified, just match name
+                        res_cols.extend(new_cols.clone());
+                    }
                 }
             }
         }
-        None
+        res_cols
     }
 
     pub fn get_old_from_new(&self, new_column: Column) -> Option<Column> {
-        for (new, old) in self
-            .new_to_old
-            .get(new_column.name())
-            .cloned()
-            .unwrap_or_default()
-        {
-            match (&new.relation, &new_column.relation) {
-                (Some(n), Some(c)) => {
-                    if n.resolved_eq(c) {
-                        return Some(old);
-                    }
+        for (old, new_set) in &self.old_to_new {
+            if new_set.iter().any(|n| {
+                if n.name() != new_column.name() {
+                    return false;
                 }
-                _ => {
-                    // if any of the two relation is None, meaning not fully qualified, just match name
-                    return Some(old);
+                match (&n.relation, &new_column.relation) {
+                    (Some(r1), Some(r2)) => r1.resolved_eq(r2),
+                    _ => true,
                 }
+            }) {
+                return Some(old.clone());
             }
         }
         None
@@ -386,9 +369,7 @@ impl LayeredAliasTracker {
         for (level, alias_scope) in ranges {
             let mut new_aliases = HashSet::new();
             for cur_alias in &cur_aliases {
-                let new_alias_set = alias_scope
-                    .get_new_from_old(cur_alias.clone())
-                    .unwrap_or_default();
+                let new_alias_set = alias_scope.get_new_from_old(cur_alias.clone());
                 common_telemetry::trace!(
                     "At level {}, column {} has new aliases: {:?} with layer: {:?}",
                     level,
@@ -571,6 +552,10 @@ mod tests {
     use super::*;
     use crate::dist_plan::analyzer::test::TestTable;
 
+    fn qcol(name: &str) -> Column {
+        Column::from_qualified_name(name)
+    }
+
     #[test]
     fn proj_multi_layered_alias_tracker() {
         // use logging for better debugging
@@ -596,34 +581,78 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut scope_tracker = LayeredAliasTracker::default();
-        plan.visit(&mut scope_tracker).unwrap();
+        let child = plan.inputs()[0].clone();
 
         assert_eq!(
-            scope_tracker.query_alias_at(1, None, &Column::from_name("pk3")),
-            HashSet::from([
-                Column::from_qualified_name("pk5"),
-                Column::from_qualified_name("pk4")
+            aliased_columns_for(
+                HashSet::from([qcol("pk1"), qcol("pk2")]),
+                plan.clone(),
+                Some(Arc::new(child.clone()))
+            )
+            .unwrap(),
+            HashMap::from([
+                (qcol("pk1"), HashSet::from([qcol("pk5")])),
+                (qcol("pk2"), HashSet::from([qcol("pk4")]))
             ])
         );
 
         assert_eq!(
-            scope_tracker.query_alias_at(2, None, &Column::from_name("pk3")),
-            HashSet::from([
-                Column::from_qualified_name("pk1"),
-                Column::from_qualified_name("pk2")
-            ])
-        );
-
-        // also test query original column
-        assert_eq!(
-            scope_tracker.query_original_column(1, 2, &Column::from_name("pk5")),
-            Some(Column::from_qualified_name("t.pk3"))
+            aliased_columns_for(
+                HashSet::from([qcol("pk1"), qcol("pk2")]),
+                plan.clone(),
+                Some(Arc::new(plan.clone()))
+            )
+            .unwrap(),
+            HashMap::from([])
         );
 
         assert_eq!(
-            scope_tracker.query_original_column(1, 1, &Column::from_name("pk5")),
-            Some(Column::from_name("pk1"))
+            aliased_columns_for(
+                HashSet::from([qcol("t.pk3")]),
+                plan.clone(),
+                Some(Arc::new(child.clone()))
+            )
+            .unwrap(),
+            HashMap::from([(qcol("t.pk3"), HashSet::from([qcol("pk5"), qcol("pk4")]))])
+        );
+
+        assert_eq!(
+            original_column_for(
+                HashSet::from([qcol("pk5"), qcol("pk4")]),
+                plan.clone(),
+                None
+            )
+            .unwrap(),
+            HashMap::from([(qcol("pk5"), qcol("t.pk3")), (qcol("pk4"), qcol("t.pk3"))])
+        );
+
+        assert_eq!(
+            aliased_columns_for(HashSet::from([qcol("pk3")]), plan.clone(), None).unwrap(),
+            HashMap::from([(qcol("pk3"), HashSet::from([qcol("pk5"), qcol("pk4")]))])
+        );
+        assert_eq!(
+            original_column_for(
+                HashSet::from([qcol("pk1"), qcol("pk2")]),
+                child.clone(),
+                None
+            )
+            .unwrap(),
+            HashMap::from([(qcol("pk1"), qcol("t.pk3")), (qcol("pk2"), qcol("t.pk3"))])
+        );
+
+        assert_eq!(
+            aliased_columns_for(HashSet::from([qcol("pk3")]), child.clone(), None).unwrap(),
+            HashMap::from([(qcol("pk3"), HashSet::from([qcol("pk1"), qcol("pk2")]))])
+        );
+
+        assert_eq!(
+            original_column_for(
+                HashSet::from([qcol("pk4"), qcol("pk5")]),
+                plan.clone(),
+                Some(Arc::new(child.clone()))
+            )
+            .unwrap(),
+            HashMap::from([(qcol("pk4"), qcol("pk2")), (qcol("pk5"), qcol("pk1"))])
         );
     }
 
