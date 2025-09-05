@@ -102,7 +102,7 @@ pub struct RegionStat {
     pub index_size: u64,
     /// The manifest infoof the region.
     pub region_manifest: RegionManifestInfo,
-    /// The write bytes.
+    /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
