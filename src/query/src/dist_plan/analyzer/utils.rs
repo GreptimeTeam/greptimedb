@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::Column;
 use datafusion_expr::{Expr, LogicalPlan, TableScan};
+use datafusion_sql::TableReference;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -24,7 +25,11 @@ use table::table::adapter::DfTableProviderAdapter;
 pub type AliasMapping = HashMap<String, HashSet<Column>>;
 
 /// tracking aliases for the source table columns in the plan
-#[derive(Debug, Clone)]
+///
+/// TODO(discord9): change to be able to track all aliases in different levels,
+/// and be able to answer if any column in any level is an alias to
+/// another columns in any level(below the previous level)
+#[derive(Debug, Default, Clone)]
 pub struct AliasTracker {
     /// mapping from the original table name to the alias used in the plan
     /// notice how one column might have multiple aliases in the plan
@@ -33,7 +38,15 @@ pub struct AliasTracker {
 }
 
 impl AliasTracker {
-    pub fn new(table_scan: &TableScan) -> Option<Self> {
+    pub fn from_table_scan(table_scan: &TableScan) -> Option<Self> {
+        let mut zelf = Self {
+            mapping: HashMap::new(),
+        };
+        zelf.init_alias_for_table_scan(table_scan);
+        Some(zelf)
+    }
+
+    fn init_alias_for_table_scan(&mut self, table_scan: &TableScan) {
         if let Some(source) = table_scan
             .source
             .as_any()
@@ -46,6 +59,11 @@ impl AliasTracker {
             {
                 if provider.table().table_type() == TableType::Base {
                     let info = provider.table().table_info();
+                    let table_ref = TableReference::full(
+                        info.catalog_name.clone(),
+                        info.schema_name.clone(),
+                        info.name.clone(),
+                    );
                     let schema = info.meta.schema.clone();
                     let col_schema = schema.column_schemas();
                     let mapping = col_schema
@@ -53,84 +71,127 @@ impl AliasTracker {
                         .map(|col| {
                             (
                                 col.name.clone(),
-                                HashSet::from_iter(std::iter::once(Column::new_unqualified(
+                                HashSet::from_iter(std::iter::once(Column::new(
+                                    Some(table_ref.clone()),
                                     col.name.clone(),
                                 ))),
                             )
                         })
                         .collect();
-                    return Some(Self { mapping });
+                    self.mapping = mapping
                 }
             }
         }
+    }
 
-        None
+    /// update alias for original columns in projection node
+    ///
+    fn update_alias_for_projection(&mut self, projection: &datafusion_expr::Projection) {
+        // first collect all the alias mapping in current node, i.e. the col_a AS b AS c AS d become `a->d`
+        // notice one column might have multiple aliases
+        // notice since only at most one table can be projected and tracked here, we only use column name as key
+        let mut alias_mapping: AliasMapping = HashMap::new();
+        for expr in &projection.expr {
+            if let Expr::Alias(alias) = expr {
+                let outer_alias = alias.clone();
+                let mut cur_alias = alias.clone();
+                while let Expr::Alias(alias) = *cur_alias.expr {
+                    cur_alias = alias;
+                }
+                if let Expr::Column(column) = *cur_alias.expr {
+                    alias_mapping
+                        .entry(column.name.clone())
+                        .or_default()
+                        .insert(Column::new(outer_alias.relation, outer_alias.name));
+                }
+            } else if let Expr::Column(column) = expr {
+                // identity mapping
+                alias_mapping
+                    .entry(column.name.clone())
+                    .or_default()
+                    .insert(column.clone());
+            }
+        }
+
+        // update mapping using `alias_mapping`
+        let mut new_mapping = HashMap::new();
+        for (table_col_name, cur_columns) in std::mem::take(&mut self.mapping) {
+            let new_aliases = {
+                let mut new_aliases = HashSet::new();
+                for cur_column in &cur_columns {
+                    let new_alias_for_cur_column = alias_mapping
+                        .get(cur_column.name())
+                        .cloned()
+                        .unwrap_or_default();
+                    for new_alias in new_alias_for_cur_column {
+                        let is_table_ref_eq = match (&new_alias.relation, &cur_column.relation) {
+                            (Some(o), Some(c)) => o.resolved_eq(c),
+                            _ => true,
+                        };
+                        // is the same column if both name and table ref is eq
+                        if is_table_ref_eq {
+                            new_aliases.insert(new_alias.clone());
+                        }
+                    }
+                }
+                new_aliases
+            };
+
+            new_mapping.insert(table_col_name, new_aliases);
+        }
+
+        self.mapping = new_mapping;
+        common_telemetry::debug!(
+            "Updating alias tracker to {:?} using project node: \n{}",
+            self.mapping,
+            LogicalPlan::Projection(projection.clone())
+        );
+    }
+
+    /// update alias for original columns in subquery alias node
+    /// by replacing all columns' relation with subquery alias's table ref
+    fn update_alias_for_subquery_alias(&mut self, subquery_alias: &datafusion_expr::SubqueryAlias) {
+        for (_, cur_columns) in self.mapping.iter_mut() {
+            let new_columns: HashSet<Column> = cur_columns
+                .iter()
+                .map(|col| {
+                    Column::new(
+                        Some(subquery_alias.alias.clone()),
+                        col.name.clone(), // keep the name unchanged
+                    )
+                })
+                .collect();
+            *cur_columns = new_columns;
+        }
     }
 
     /// update alias for original columns
     ///
-    /// only handle `Alias` with column in `Projection` node
+    /// only handle `Alias` with column in `Projection` node and `SubqueryAlias` node
+    /// doesn't handle other nodes especially `TableScan` node`
     pub fn update_alias(&mut self, node: &LogicalPlan) {
-        if let LogicalPlan::Projection(projection) = node {
-            // first collect all the alias mapping, i.e. the col_a AS b AS c AS d become `a->d`
-            // notice one column might have multiple aliases
-            let mut alias_mapping: AliasMapping = HashMap::new();
-            for expr in &projection.expr {
-                if let Expr::Alias(alias) = expr {
-                    let outer_alias = alias.clone();
-                    let mut cur_alias = alias.clone();
-                    while let Expr::Alias(alias) = *cur_alias.expr {
-                        cur_alias = alias;
-                    }
-                    if let Expr::Column(column) = *cur_alias.expr {
-                        alias_mapping
-                            .entry(column.name.clone())
-                            .or_default()
-                            .insert(Column::new(outer_alias.relation, outer_alias.name));
-                    }
-                } else if let Expr::Column(column) = expr {
-                    // identity mapping
-                    alias_mapping
-                        .entry(column.name.clone())
-                        .or_default()
-                        .insert(column.clone());
+        match node {
+            LogicalPlan::Projection(projection) => self.update_alias_for_projection(projection),
+            LogicalPlan::SubqueryAlias(subquery_alias) => {
+                self.update_alias_for_subquery_alias(subquery_alias)
+            }
+            _ => {}
+        }
+    }
+
+    /// update or init alias tracker using the logical plan node
+    pub fn update_or_init_alias(&mut self, node: &LogicalPlan) {
+        match node {
+            LogicalPlan::TableScan(table_scan) => {
+                if self.mapping.is_empty() {
+                    self.init_alias_for_table_scan(table_scan);
                 }
             }
-
-            // update mapping using `alias_mapping`
-            let mut new_mapping = HashMap::new();
-            for (table_col_name, cur_columns) in std::mem::take(&mut self.mapping) {
-                let new_aliases = {
-                    let mut new_aliases = HashSet::new();
-                    for cur_column in &cur_columns {
-                        let new_alias_for_cur_column = alias_mapping
-                            .get(cur_column.name())
-                            .cloned()
-                            .unwrap_or_default();
-
-                        for new_alias in new_alias_for_cur_column {
-                            let is_table_ref_eq = match (&new_alias.relation, &cur_column.relation)
-                            {
-                                (Some(o), Some(c)) => o.resolved_eq(c),
-                                _ => true,
-                            };
-                            // is the same column if both name and table ref is eq
-                            if is_table_ref_eq {
-                                new_aliases.insert(new_alias.clone());
-                            }
-                        }
-                    }
-                    new_aliases
-                };
-
-                new_mapping.insert(table_col_name, new_aliases);
+            LogicalPlan::Projection(projection) => self.update_alias_for_projection(projection),
+            LogicalPlan::SubqueryAlias(subquery_alias) => {
+                self.update_alias_for_subquery_alias(subquery_alias)
             }
-
-            self.mapping = new_mapping;
-            common_telemetry::debug!(
-                "Updating alias tracker to {:?} using node: \n{node}",
-                self.mapping
-            );
+            _ => {}
         }
     }
 
@@ -149,12 +210,14 @@ impl AliasTracker {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use common_telemetry::init_default_ut_logging;
     use datafusion::error::Result as DfResult;
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
     use datafusion_expr::{col, LogicalPlanBuilder};
+    use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::dist_plan::analyzer::test::TestTable;
@@ -162,7 +225,7 @@ mod tests {
     #[derive(Debug)]
     struct TrackerTester {
         alias_tracker: Option<AliasTracker>,
-        mapping_at_each_level: Vec<AliasMapping>,
+        mapping_at_each_level: Vec<BTreeMap<String, BTreeSet<Column>>>,
     }
 
     impl TreeNodeVisitor<'_> for TrackerTester {
@@ -174,16 +237,28 @@ mod tests {
                 self.mapping_at_each_level.push(
                     self.alias_tracker
                         .as_ref()
-                        .map(|a| a.mapping.clone())
+                        .map(|a| {
+                            a.mapping
+                                .clone()
+                                .into_iter()
+                                .map(|(k, v)| (k, v.into_iter().collect()))
+                                .collect::<BTreeMap<String, BTreeSet<Column>>>()
+                        })
                         .unwrap_or_default()
                         .clone(),
                 );
             } else if let LogicalPlan::TableScan(table_scan) = node {
-                self.alias_tracker = AliasTracker::new(table_scan);
+                self.alias_tracker = AliasTracker::from_table_scan(table_scan);
                 self.mapping_at_each_level.push(
                     self.alias_tracker
                         .as_ref()
-                        .map(|a| a.mapping.clone())
+                        .map(|a| {
+                            a.mapping
+                                .clone()
+                                .into_iter()
+                                .map(|(k, v)| (k, v.into_iter().collect()))
+                                .collect::<BTreeMap<String, BTreeSet<Column>>>()
+                        })
                         .unwrap_or_default()
                         .clone(),
                 );
@@ -196,7 +271,7 @@ mod tests {
     fn proj_alias_tracker() {
         // use logging for better debugging
         init_default_ut_logging();
-        let test_table = TestTable::table_with_name(0, "numbers".to_string());
+        let test_table = TestTable::table_with_name(0, "t".to_string());
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(test_table),
         )));
@@ -226,27 +301,122 @@ mod tests {
         assert_eq!(
             tracker_tester.mapping_at_each_level,
             vec![
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["number".into()])),
-                    ("pk1".to_string(), HashSet::from(["pk1".into()])),
-                    ("pk2".to_string(), HashSet::from(["pk2".into()])),
-                    ("pk3".to_string(), HashSet::from(["pk3".into()])),
-                    ("ts".to_string(), HashSet::from(["ts".into()]))
+                BTreeMap::from([
+                    (
+                        "number".to_string(),
+                        BTreeSet::from(["greptime.public.t.number".into()])
+                    ),
+                    (
+                        "pk1".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk1".into()])
+                    ),
+                    (
+                        "pk2".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk2".into()])
+                    ),
+                    (
+                        "pk3".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk3".into()])
+                    ),
+                    (
+                        "ts".to_string(),
+                        BTreeSet::from(["greptime.public.t.ts".into()])
+                    )
                 ]),
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["t.number".into()])),
-                    ("pk1".to_string(), HashSet::from([])),
-                    ("pk2".to_string(), HashSet::from(["pk3".into()])),
-                    ("pk3".to_string(), HashSet::from(["pk1".into()])),
-                    ("ts".to_string(), HashSet::from([]))
+                BTreeMap::from([
+                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
+                    ("pk1".to_string(), BTreeSet::from([])),
+                    ("pk2".to_string(), BTreeSet::from(["pk3".into()])),
+                    ("pk3".to_string(), BTreeSet::from(["pk1".into()])),
+                    ("ts".to_string(), BTreeSet::from([]))
                 ]),
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["t.number".into()])),
-                    ("pk1".to_string(), HashSet::from([])),
-                    ("pk2".to_string(), HashSet::from(["pk1".into()])),
-                    ("pk3".to_string(), HashSet::from(["pk2".into()])),
-                    ("ts".to_string(), HashSet::from([]))
+                BTreeMap::from([
+                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
+                    ("pk1".to_string(), BTreeSet::from([])),
+                    ("pk2".to_string(), BTreeSet::from(["pk1".into()])),
+                    ("pk3".to_string(), BTreeSet::from(["pk2".into()])),
+                    ("ts".to_string(), BTreeSet::from([]))
                 ])
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_subquery_alias() {
+        let test_table = TestTable::table_with_name(0, "t".to_string());
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(test_table),
+        )));
+
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("t.number").sort(true, false)])
+            .unwrap()
+            .alias("a")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut tracker_tester = TrackerTester {
+            alias_tracker: None,
+            mapping_at_each_level: Vec::new(),
+        };
+        plan.visit(&mut tracker_tester).unwrap();
+
+        assert_eq!(
+            tracker_tester.mapping_at_each_level,
+            vec![
+                BTreeMap::from([
+                    (
+                        "number".to_string(),
+                        BTreeSet::from(["greptime.public.t.number".into()])
+                    ),
+                    (
+                        "pk1".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk1".into()])
+                    ),
+                    (
+                        "pk2".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk2".into()])
+                    ),
+                    (
+                        "pk3".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk3".into()])
+                    ),
+                    (
+                        "ts".to_string(),
+                        BTreeSet::from(["greptime.public.t.ts".into()])
+                    )
+                ]),
+                BTreeMap::from([
+                    (
+                        "number".to_string(),
+                        BTreeSet::from(["greptime.public.t.number".into()])
+                    ),
+                    (
+                        "pk1".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk1".into()])
+                    ),
+                    (
+                        "pk2".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk2".into()])
+                    ),
+                    (
+                        "pk3".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk3".into()])
+                    ),
+                    (
+                        "ts".to_string(),
+                        BTreeSet::from(["greptime.public.t.ts".into()])
+                    )
+                ]),
+                BTreeMap::from([
+                    ("number".to_string(), BTreeSet::from(["a.number".into()])),
+                    ("pk1".to_string(), BTreeSet::from(["a.pk1".into()])),
+                    ("pk2".to_string(), BTreeSet::from(["a.pk2".into()])),
+                    ("pk3".to_string(), BTreeSet::from(["a.pk3".into()])),
+                    ("ts".to_string(), BTreeSet::from(["a.ts".into()]))
+                ]),
             ]
         );
     }
@@ -255,7 +425,7 @@ mod tests {
     fn proj_multi_alias_tracker() {
         // use logging for better debugging
         init_default_ut_logging();
-        let test_table = TestTable::table_with_name(0, "numbers".to_string());
+        let test_table = TestTable::table_with_name(0, "t".to_string());
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(test_table),
         )));
@@ -285,32 +455,47 @@ mod tests {
         assert_eq!(
             tracker_tester.mapping_at_each_level,
             vec![
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["number".into()])),
-                    ("pk1".to_string(), HashSet::from(["pk1".into()])),
-                    ("pk2".to_string(), HashSet::from(["pk2".into()])),
-                    ("pk3".to_string(), HashSet::from(["pk3".into()])),
-                    ("ts".to_string(), HashSet::from(["ts".into()]))
-                ]),
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["t.number".into()])),
-                    ("pk1".to_string(), HashSet::from([])),
-                    ("pk2".to_string(), HashSet::from([])),
+                BTreeMap::from([
+                    (
+                        "number".to_string(),
+                        BTreeSet::from(["greptime.public.t.number".into()])
+                    ),
+                    (
+                        "pk1".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk1".into()])
+                    ),
+                    (
+                        "pk2".to_string(),
+                        BTreeSet::from(["greptime.public.t.pk2".into()])
+                    ),
                     (
                         "pk3".to_string(),
-                        HashSet::from(["pk1".into(), "pk2".into()])
+                        BTreeSet::from(["greptime.public.t.pk3".into()])
                     ),
-                    ("ts".to_string(), HashSet::from([]))
+                    (
+                        "ts".to_string(),
+                        BTreeSet::from(["greptime.public.t.ts".into()])
+                    )
                 ]),
-                HashMap::from([
-                    ("number".to_string(), HashSet::from(["t.number".into()])),
-                    ("pk1".to_string(), HashSet::from([])),
-                    ("pk2".to_string(), HashSet::from([])),
+                BTreeMap::from([
+                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
+                    ("pk1".to_string(), BTreeSet::from([])),
+                    ("pk2".to_string(), BTreeSet::from([])),
                     (
                         "pk3".to_string(),
-                        HashSet::from(["pk4".into(), "pk5".into()])
+                        BTreeSet::from(["pk1".into(), "pk2".into()])
                     ),
-                    ("ts".to_string(), HashSet::from([]))
+                    ("ts".to_string(), BTreeSet::from([]))
+                ]),
+                BTreeMap::from([
+                    ("number".to_string(), BTreeSet::from(["t.number".into()])),
+                    ("pk1".to_string(), BTreeSet::from([])),
+                    ("pk2".to_string(), BTreeSet::from([])),
+                    (
+                        "pk3".to_string(),
+                        BTreeSet::from(["pk4".into(), "pk5".into()])
+                    ),
+                    ("ts".to_string(), BTreeSet::from([]))
                 ])
             ]
         );

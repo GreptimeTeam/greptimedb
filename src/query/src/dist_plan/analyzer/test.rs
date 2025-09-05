@@ -1293,7 +1293,8 @@ Limit: skip=0, fetch=1
 }
 
 #[test]
-fn transform_unalighed_join_with_alias() {
+fn transform_unaligned_join_with_alias() {
+    init_default_ut_logging();
     let left = NumbersTable::table(0);
     let right = NumbersTable::table(1);
     let left_source = Arc::new(DefaultTableSource::new(Arc::new(
@@ -1332,10 +1333,73 @@ fn transform_unalighed_join_with_alias() {
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
         "]]",
-        "    SubqueryAlias: right",
-        "      Projection: t.number",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "TableScan: t",
+        "    Projection: right.number",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "SubqueryAlias: right",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn transform_subquery_sort_alias() {
+    init_default_ut_logging();
+
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .alias("a")
+        .unwrap()
+        .sort(vec![col("a.number").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
+        "  MergeSort: a.number ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: a.number ASC NULLS LAST",
+        "  SubqueryAlias: a",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn transform_sort_subquery_alias() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("t.number").sort(true, false)])
+        .unwrap()
+        .alias("a")
+        .unwrap()
+        .build()
+        .unwrap();
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: a.pk1, a.pk2, a.pk3, a.ts, a.number",
+        "  MergeSort: a.number ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "SubqueryAlias: a",
+        "  Sort: t.number ASC NULLS LAST",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
