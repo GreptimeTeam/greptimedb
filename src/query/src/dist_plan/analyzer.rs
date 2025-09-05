@@ -313,7 +313,7 @@ impl PlanRewriter {
         if self.expand_on_next_part_cond_trans_commutative {
             // since `plan` is parent to current node, and partition columns to be checked
             // should come from `plan`'s child, so `at_level` should be `self.level` which is current node's level
-            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns()?);
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -427,11 +427,6 @@ impl PlanRewriter {
 
     fn set_unexpanded(&mut self) {
         self.status = RewriterStatus::Unexpanded;
-    }
-
-    /// Get the aliased partition columns at given node's input position
-    fn get_aliased_partition_columns(&self) -> DfResult<Option<AliasMapping>> {
-        Ok(self.partition_cols.clone())
     }
 
     fn maybe_set_partitions(&mut self, plan: &LogicalPlan) -> DfResult<()> {
