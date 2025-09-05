@@ -248,7 +248,7 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             &region.version_control,
                             region.provider.clone(),
-                            Some(region.write_bytes.clone()),
+                            Some(region.written_bytes.clone()),
                         );
 
                         e.insert(region_ctx);
@@ -352,7 +352,7 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id,
                             &region.version_control,
                             region.provider.clone(),
-                            Some(region.write_bytes.clone()),
+                            Some(region.written_bytes.clone()),
                         );
 
                         e.insert(region_ctx);

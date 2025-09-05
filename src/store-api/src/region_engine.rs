@@ -481,7 +481,7 @@ pub struct RegionStatistic {
     pub manifest: RegionManifestInfo,
     /// The write throughput of the region.
     #[serde(default)]
-    pub write_bytes: u64,
+    pub written_bytes: u64,
     /// The latest entry id of the region's remote WAL since last flush.
     /// For metric engine, there're two latest entry ids, one for data and one for metadata.
     /// TODO(weny): remove this two fields and use single instead.
