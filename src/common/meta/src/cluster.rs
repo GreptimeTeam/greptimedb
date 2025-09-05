@@ -118,6 +118,12 @@ pub struct NodeInfo {
     pub git_commit: String,
     // The node star timestamp
     pub start_time_ms: u64,
+    // The node build cpus
+    #[serde(default)]
+    pub cpus: u32,
+    // The node build memory bytes
+    #[serde(default)]
+    pub memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -324,6 +330,8 @@ mod tests {
             version: "".to_string(),
             git_commit: "".to_string(),
             start_time_ms: 1,
+            cpus: 0,
+            memory_bytes: 0,
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();

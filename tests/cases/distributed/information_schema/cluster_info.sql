@@ -9,7 +9,7 @@ DESC TABLE CLUSTER_INFO;
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE (\s127\.0\.0\.1:\d+\s) Address
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO ORDER BY peer_type;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO ORDER BY peer_type;
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -18,7 +18,7 @@ SELECT * FROM CLUSTER_INFO ORDER BY peer_type;
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE (\s127\.0\.0\.1:\d+\s) Address
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -27,7 +27,7 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE (\s127\.0\.0\.1:\d+\s) Address
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -36,7 +36,7 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE (\s127\.0\.0\.1:\d+\s) Address
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -45,6 +45,11 @@ SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
 -- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
 -- SQLNESS REPLACE (\s127\.0\.0\.1:\d+\s) Address
 -- SQLNESS REPLACE [\s\-]+
-SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 1 ORDER BY peer_type;
+SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID > 1 ORDER BY peer_type;
+
+-- SQLNESS REPLACE (:\s*(\".*?\"|\[.*?\]|\{.*?\}|[0-9]+|true|false|null)) PLACEHOLDER
+SELECT peer_id, node_status FROM CLUSTER_INFO WHERE PEER_TYPE = 'DATANODE' ORDER BY peer_id;
+
+SELECT peer_type, cpus!=0, memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
 USE PUBLIC;

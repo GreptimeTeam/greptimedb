@@ -98,6 +98,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
+            cpus: common_config::utils::get_cpus() as u32,
+            memory_bytes: common_config::utils::get_sys_total_memory()
+                .unwrap_or_default()
+                .as_bytes(),
         }
         .into()
     }
