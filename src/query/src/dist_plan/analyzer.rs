@@ -312,6 +312,8 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
+            // since `plan` is parent to current node, and partition columns to be checked
+            // should come from `plan`'s child, so `at_level` should be `self.level` which is current node's level
             let comm =
                 Categorizer::check_plan(plan, self.get_aliased_partition_columns(self.level));
             match comm {
