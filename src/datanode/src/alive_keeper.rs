@@ -423,6 +423,7 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                            let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
                             if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
                                 if err.status_code() == StatusCode::RegionNotFound {
                                     // Table metadata in metasrv is deleted after its regions are dropped.
@@ -434,7 +435,7 @@ impl CountdownTask {
                                 }
 
                             // Finalize leadership: persist backfilled metadata.
-                            } else if role == RegionRole::Leader
+                            } else if !prev_role_leader && role == RegionRole::Leader
                                 && let Err(err) = self
                                     .region_server
                                     .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
