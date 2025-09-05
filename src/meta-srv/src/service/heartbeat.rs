@@ -27,10 +27,9 @@ use snafu::OptionExt;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Streaming};
+use tonic::{Request, Response, Status, Streaming};
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
 use crate::metasrv::{Context, Metasrv};
 use crate::metrics::METRIC_META_HEARTBEAT_RECV;
@@ -109,6 +108,12 @@ impl heartbeat_server::Heartbeat for Metasrv {
 
                 if is_not_leader {
                     warn!("Quit because it is no longer the leader");
+                    let _ = tx
+                        .send(Err(Status::aborted(format!(
+                            "The requested metasrv node is not leader, node addr: {}",
+                            ctx.server_addr
+                        ))))
+                        .await;
                     break;
                 }
             }

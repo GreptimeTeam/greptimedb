@@ -21,6 +21,7 @@ impl Indexer {
         self.do_abort_inverted_index().await;
         self.do_abort_fulltext_index().await;
         self.do_abort_bloom_filter().await;
+        self.do_prune_intm_sst_dir().await;
         self.puffin_manager = None;
     }
 

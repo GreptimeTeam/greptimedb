@@ -110,6 +110,7 @@ pub struct Indexer {
     last_mem_fulltext_index: usize,
     bloom_filter_indexer: Option<BloomFilterIndexer>,
     last_mem_bloom_filter: usize,
+    intermediate_manager: Option<IntermediateManager>,
 }
 
 impl Indexer {
@@ -196,6 +197,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.inverted_indexer = self.build_inverted_indexer(file_id);
         indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
         indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
+        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
         if indexer.inverted_indexer.is_none()
             && indexer.fulltext_indexer.is_none()
             && indexer.bloom_filter_indexer.is_none()

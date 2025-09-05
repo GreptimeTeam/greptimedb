@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
@@ -106,6 +107,8 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) put_num: usize,
     /// Rows to delete.
     pub(crate) delete_num: usize,
+    /// The total bytes written to the region.
+    pub(crate) written_bytes: Option<Arc<AtomicU64>>,
 }
 
 impl RegionWriteCtx {
@@ -114,6 +117,7 @@ impl RegionWriteCtx {
         region_id: RegionId,
         version_control: &VersionControlRef,
         provider: Provider,
+        written_bytes: Option<Arc<AtomicU64>>,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -136,6 +140,7 @@ impl RegionWriteCtx {
             put_num: 0,
             delete_num: 0,
             bulk_parts: vec![],
+            written_bytes,
         }
     }
 
@@ -214,6 +219,12 @@ impl RegionWriteCtx {
         }
 
         let mutable = self.version.memtables.mutable.clone();
+        let prev_memory_usage = if self.written_bytes.is_some() {
+            Some(mutable.memory_usage())
+        } else {
+            None
+        };
+
         let mutations = mem::take(&mut self.wal_entry.mutations)
             .into_iter()
             .enumerate()
@@ -246,6 +257,11 @@ impl RegionWriteCtx {
             }
         }
 
+        if let Some(written_bytes) = &self.written_bytes {
+            let new_memory_usage = mutable.memory_usage();
+            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
         self.version_control
@@ -270,6 +286,13 @@ impl RegionWriteCtx {
         let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["write_bulk"])
             .start_timer();
+
+        let mutable_memtable = &self.version.memtables.mutable;
+        let prev_memory_usage = if self.written_bytes.is_some() {
+            Some(mutable_memtable.memory_usage())
+        } else {
+            None
+        };
 
         if self.bulk_parts.len() == 1 {
             let part = self.bulk_parts.swap_remove(0);
@@ -300,6 +323,11 @@ impl RegionWriteCtx {
             }
         }
 
+        if let Some(written_bytes) = &self.written_bytes {
+            let new_memory_usage = mutable_memtable.memory_usage();
+            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }

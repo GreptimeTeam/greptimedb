@@ -129,6 +129,8 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
+    /// The total bytes written to the region.
+    pub(crate) written_bytes: Arc<AtomicU64>,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -313,6 +315,7 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
+        let written_bytes = self.written_bytes.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -327,6 +330,7 @@ impl MitoRegion {
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
+            written_bytes,
         }
     }
 
