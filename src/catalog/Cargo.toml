@@ -34,6 +34,7 @@ common-time.workspace = true
 common-version.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
+datafusion-postgres.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 futures-util.workspace = true
