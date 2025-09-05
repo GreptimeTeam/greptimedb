@@ -56,6 +56,12 @@ WITH host_metrics AS (
 )
 SELECT count(*) as host1_points FROM host_metrics;
 
+-- TQL CTE with column reference
+WITH host_metrics AS (
+    TQL EVAL (0, 40, '10s') labels{host="host1"}
+)
+SELECT host_metrics.ts, host_metrics.host FROM host_metrics;
+
 -- Multiple TQL CTEs referencing different tables
 WITH 
     metric_data(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
