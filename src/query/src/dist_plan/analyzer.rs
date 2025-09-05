@@ -288,7 +288,7 @@ impl PlanRewriter {
     }
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
-    fn should_expand(&mut self, plan: &LogicalPlan) -> DfResult<bool> {
+    fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
         debug!(
             "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
@@ -302,12 +302,12 @@ impl PlanRewriter {
             .encode(plan, DefaultSerializer)
             .is_err()
         {
-            return Ok(true);
+            return true;
         }
 
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
-            return Ok(true);
+            return true;
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
@@ -329,7 +329,7 @@ impl PlanRewriter {
                     // again a new node that can be push down, we should just
                     // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
-                    return Ok(true);
+                    return true;
                 }
                 _ => (),
             }
@@ -389,11 +389,11 @@ impl PlanRewriter {
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
-                return Ok(true);
+                return true;
             }
         }
 
-        Ok(false)
+        false
     }
 
     /// Update the column requirements for the current plan, plan_level is the level of the plan
@@ -716,7 +716,7 @@ impl TreeNodeRewriter for PlanRewriter {
         let parent = parent.clone();
 
         // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent)? {
+        if self.should_expand(&parent) {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
                 "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",
