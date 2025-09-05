@@ -2471,9 +2471,11 @@ name = "common-recordbatch"
 version = "0.18.0"
 dependencies = [
  "arc-swap",
+ "common-base",
  "common-error",
  "common-macro",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datafusion-common",
  "datatypes",
