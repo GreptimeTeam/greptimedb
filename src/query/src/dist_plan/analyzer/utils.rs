@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use datafusion::datasource::DefaultTableSource;
+use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_common::Column;
 use datafusion_expr::expr::Alias;
@@ -22,6 +24,172 @@ use datafusion_expr::{Expr, LogicalPlan, TableScan};
 use datafusion_sql::TableReference;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+
+use crate::error::Result;
+
+/// Return all the original columns for the given aliased columns at the original node
+pub fn original_column_for(
+    aliased_columns: HashSet<Column>,
+    aliased_node: LogicalPlan,
+    original_node: Option<Arc<LogicalPlan>>,
+) -> DfResult<HashMap<Column, Column>> {
+    let mut cur_aliases: HashMap<Column, Column> = aliased_columns
+        .iter()
+        .map(|c| (c.clone(), c.clone()))
+        .collect();
+    let mut node = &aliased_node;
+    loop {
+        // descend the plan tree to find the original node, which keep track of all the alias in between
+        if let Some(original_node) = &original_node {
+            if *node == **original_node {
+                break;
+            }
+        } else if node.inputs().is_empty() {
+            // leaf node reached
+            break;
+        }
+
+        let layer = get_alias_layer_from_node(&node)?;
+        let mut new_aliases = HashMap::new();
+        for (start_alias, cur_alias) in cur_aliases {
+            if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
+                new_aliases.insert(start_alias, old_column);
+            }
+        }
+        cur_aliases = new_aliases;
+
+        if node.inputs().len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "only accept plan with at most one child".to_string(),
+            ));
+        }
+        node = node.inputs()[0];
+    }
+
+    Ok(cur_aliases)
+}
+
+/// Return all the aliased columns for the given original columns at the alias node
+pub fn aliased_columns_for(
+    original_columns: HashSet<Column>,
+    aliased_node: LogicalPlan,
+    original_node: Option<Arc<LogicalPlan>>,
+) -> DfResult<HashMap<Column, HashSet<Column>>> {
+    let mut cur_aliases: HashMap<Column, HashSet<Column>> = original_columns
+        .iter()
+        .map(|c| (c.clone(), HashSet::from([c.clone()])))
+        .collect();
+
+    // first get a stack of ref nodes from aliased node to original node
+    let mut stack = vec![];
+    let mut node = &aliased_node;
+    loop {
+        stack.push(node);
+        if let Some(original_node) = &original_node {
+            if *node == **original_node {
+                break;
+            }
+        } else if node.inputs().is_empty() {
+            // leaf node reached
+            break;
+        }
+
+        if node.inputs().len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "only accept plan with at most one child".to_string(),
+            ));
+        }
+        node = node.inputs()[0];
+    }
+    // reverse so we can go from original node to aliased node
+    stack.reverse();
+    todo!()
+}
+
+/// Return a mapping of original column to all the aliased columns in current node of the plan
+pub fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
+    match node {
+        LogicalPlan::Projection(proj) => Ok(get_alias_layer_from_exprs(&proj.expr)),
+        LogicalPlan::Aggregate(aggr) => Ok(get_alias_layer_from_exprs(&aggr.group_expr)),
+        LogicalPlan::SubqueryAlias(subquery_alias) => {
+            let mut layer = AliasLayer::default();
+            let old_columns = subquery_alias.input.schema().columns();
+            for old_column in old_columns {
+                let new_column = Column::new(
+                    Some(subquery_alias.alias.clone()),
+                    old_column.name().to_string(),
+                );
+                // mapping from old_column to new_column
+                layer.insert_alias(old_column, HashSet::from([new_column]));
+            }
+            Ok(layer)
+        }
+        LogicalPlan::TableScan(scan) => {
+            let columns = scan.projected_schema.columns();
+            let mut layer = AliasLayer::default();
+            for col in columns {
+                layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+            }
+            Ok(layer)
+        }
+        _ => {
+            let input_schema = node.inputs()[0].schema();
+            let output_schema = node.schema();
+            // only accept at most one child plan, and if not one of the above nodes,
+            // also shouldn't modify the schema or else alias scope tracker can't support them
+            if node.inputs().len() > 1 {
+                return Err(datafusion::error::DataFusionError::Internal(
+                    "only accept plan with at most one child".to_string(),
+                ));
+            } else if node.inputs().len() == 1 {
+                if input_schema != output_schema {
+                    return Err(datafusion::error::DataFusionError::Internal(format!(
+                        "AliasScopeTracker only accept plan that doesn't modify schema, found {}",
+                        node
+                    )));
+                } else {
+                    // identity mapping
+                    let mut layer = AliasLayer::default();
+                    for col in output_schema.columns() {
+                        layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                    }
+                    Ok(layer)
+                }
+            } else {
+                // unknown plan with no input, error msg
+                Err(datafusion::error::DataFusionError::Internal(format!(
+                    "Unsupported plan with no input: {}",
+                    node
+                )))
+            }
+        }
+    }
+}
+
+fn get_alias_layer_from_exprs(exprs: &[Expr]) -> AliasLayer {
+    let mut alias_mapping: HashMap<Column, HashSet<Column>> = HashMap::new();
+    for expr in exprs {
+        if let Expr::Alias(alias) = expr {
+            if let Some(column) = get_alias_original_column(alias) {
+                alias_mapping
+                    .entry(column.clone())
+                    .or_default()
+                    .insert(Column::new(alias.relation.clone(), alias.name.clone()));
+            }
+        } else if let Expr::Column(column) = expr {
+            // identity mapping
+            alias_mapping
+                .entry(column.clone())
+                .or_default()
+                .insert(column.clone());
+        }
+    }
+    let mut layer = AliasLayer::default();
+    for (old_column, new_columns) in alias_mapping {
+        layer.insert_alias(old_column, new_columns);
+    }
+    layer
+}
 
 #[derive(Default, Clone)]
 struct AliasLayer {
