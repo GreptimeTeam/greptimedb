@@ -547,7 +547,7 @@ impl RegionManifestManager {
 
         let streamer =
             self.store
-                .manifest_lister()
+                .manifest_lister(false)
                 .await?
                 .context(error::EmptyManifestDirSnafu {
                     manifest_dir: self.store.manifest_dir(),
