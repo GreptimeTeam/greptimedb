@@ -17,7 +17,9 @@ INSERT INTO test VALUES
        (21, 'c', 21);
 
 -- SQLNESS SLEEP 3s
-SELECT SUM(region_rows), SUM(disk_size), SUM(sst_size), SUM(index_size)
+-- For regions using different WAL implementations, the manifest size may vary.
+-- The remote WAL implementation additionally stores a flushed entry ID when creating the manifest.
+SELECT SUM(region_rows),SUM(written_bytes_since_open), SUM(memtable_size), SUM(sst_size), SUM(index_size)
        FROM INFORMATION_SCHEMA.REGION_STATISTICS WHERE table_id
        IN (SELECT TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test' and table_schema = 'public');
 
