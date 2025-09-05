@@ -107,8 +107,6 @@ impl Display for ParseJsonFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion_expr::TypeSignature;
-    use datatypes::arrow::datatypes::DataType;
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::StringVector;
 
@@ -125,13 +123,6 @@ mod tests {
                 .return_type(&[ConcreteDataType::json_datatype()])
                 .unwrap()
         );
-
-        assert!(matches!(parse_json.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Utf8]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,

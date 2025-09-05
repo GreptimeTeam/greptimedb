@@ -16,7 +16,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datafusion_common::types;
+use datafusion_expr::{Coercion, Signature, TypeSignature, TypeSignatureClass, Volatility};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::scalars::ScalarVectorBuilder;
@@ -50,7 +51,13 @@ impl Function for Ipv4ToCidr {
 
     fn signature(&self) -> Signature {
         Signature::one_of(
-            vec![TypeSignature::String(1), TypeSignature::String(2)],
+            vec![
+                TypeSignature::String(1),
+                TypeSignature::Coercible(vec![
+                    Coercion::new_exact(TypeSignatureClass::Native(types::logical_string())),
+                    Coercion::new_exact(TypeSignatureClass::Integer),
+                ]),
+            ],
             Volatility::Immutable,
         )
     }
