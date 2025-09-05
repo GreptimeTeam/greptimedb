@@ -55,7 +55,11 @@ pub const FORMAT_HAS_HEADER: &str = "has_header";
 pub const FORMAT_TYPE: &str = "format";
 pub const FILE_PATTERN: &str = "pattern";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub const FORMAT_DATE: &str = "date_format";
+pub const FORMAT_DATETIME: &str = "datetime_format";
+pub const FORMAT_TIMESTAMP: &str = "timestamp_format";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Format {
     Csv(CsvFormat),
     Json(JsonFormat),

@@ -66,10 +66,11 @@ impl StatementExecutor {
             map_json_type_to_string_schema,
         ));
         match format {
-            Format::Csv(_) => stream_to_csv(
+            Format::Csv(format) => stream_to_csv(
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),
                 object_store,
                 path,
+                format,
                 threshold,
                 WRITE_CONCURRENCY,
             )
@@ -96,7 +97,10 @@ impl StatementExecutor {
                 .await
                 .context(error::WriteStreamToFileSnafu { path })
             }
-            _ => error::UnsupportedFormatSnafu { format: *format }.fail(),
+            _ => error::UnsupportedFormatSnafu {
+                format: format.clone(),
+            }
+            .fail(),
         }
     }
 
