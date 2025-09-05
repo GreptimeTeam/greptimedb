@@ -277,6 +277,7 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
+            written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
         })
     }
@@ -455,6 +456,7 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
+            written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
             stats: self.stats.clone(),
         };
@@ -634,7 +636,7 @@ where
         last_entry_id = last_entry_id.max(entry_id);
 
         let mut region_write_ctx =
-            RegionWriteCtx::new(region_id, version_control, provider.clone());
+            RegionWriteCtx::new(region_id, version_control, provider.clone(), None);
         for mutation in entry.mutations {
             rows_replayed += mutation
                 .rows
