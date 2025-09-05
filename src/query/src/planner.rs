@@ -282,6 +282,16 @@ impl DfLogicalPlanner {
                             .build()
                             .context(PlanSqlSnafu)?;
                     }
+
+                    // Wrap in SubqueryAlias to ensure proper table qualification for CTE
+                    logical_plan = LogicalPlan::SubqueryAlias(
+                        datafusion_expr::SubqueryAlias::try_new(
+                            Arc::new(logical_plan),
+                            cte.name.value.clone(),
+                        )
+                        .context(PlanSqlSnafu)?,
+                    );
+
                     planner_context.insert_cte(&cte.name.value, logical_plan);
                 }
                 CteContent::Sql(_) => {
