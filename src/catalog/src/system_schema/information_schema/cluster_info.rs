@@ -18,10 +18,11 @@ use std::time::Duration;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::cluster::NodeInfo;
+use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeStatus};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::timestamp::Timestamp;
+use common_workload::DatanodeWorkloadType;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
@@ -34,6 +35,7 @@ use datatypes::vectors::{
     Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
     UInt32VectorBuilder, UInt64VectorBuilder,
 };
+use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -41,6 +43,9 @@ use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::information_schema::{CLUSTER_INFO, InformationTable, Predicates};
 use crate::system_schema::utils;
+
+const PEER_TYPE_FRONTEND: &str = "FRONTEND";
+const PEER_TYPE_METASRV: &str = "METASRV";
 
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";
@@ -52,6 +57,7 @@ const GIT_COMMIT: &str = "git_commit";
 const START_TIME: &str = "start_time";
 const UPTIME: &str = "uptime";
 const ACTIVE_TIME: &str = "active_time";
+const NODE_STATUS: &str = "node_status";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -67,6 +73,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `start_time`: the starting time of the peer.
 /// - `uptime`: the uptime of the peer.
 /// - `active_time`: the time since the last activity of the peer.
+/// - `node_status`: the status info of the peer.
 ///
 #[derive(Debug)]
 pub(super) struct InformationSchemaClusterInfo {
@@ -98,6 +105,7 @@ impl InformationSchemaClusterInfo {
             ),
             ColumnSchema::new(UPTIME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(ACTIVE_TIME, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(NODE_STATUS, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -154,6 +162,7 @@ struct InformationSchemaClusterInfoBuilder {
     start_times: TimestampMillisecondVectorBuilder,
     uptimes: StringVectorBuilder,
     active_times: StringVectorBuilder,
+    node_status: StringVectorBuilder,
 }
 
 impl InformationSchemaClusterInfoBuilder {
@@ -171,6 +180,7 @@ impl InformationSchemaClusterInfoBuilder {
             start_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             active_times: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            node_status: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -187,9 +197,10 @@ impl InformationSchemaClusterInfoBuilder {
 
     fn add_node_info(&mut self, predicates: &Predicates, node_info: NodeInfo) {
         let peer_type = node_info.status.role_name();
+        let peer_id = peer_id(peer_type, node_info.peer.id);
 
         let row = [
-            (PEER_ID, &Value::from(node_info.peer.id)),
+            (PEER_ID, &Value::from(peer_id)),
             (PEER_TYPE, &Value::from(peer_type)),
             (PEER_ADDR, &Value::from(node_info.peer.addr.as_str())),
             (VERSION, &Value::from(node_info.version.as_str())),
@@ -200,13 +211,7 @@ impl InformationSchemaClusterInfoBuilder {
             return;
         }
 
-        if peer_type == "FRONTEND" || peer_type == "METASRV" {
-            // Always set peer_id to be -1 for frontends and metasrvs
-            self.peer_ids.push(Some(-1));
-        } else {
-            self.peer_ids.push(Some(node_info.peer.id as i64));
-        }
-
+        self.peer_ids.push(Some(peer_id));
         self.peer_types.push(Some(peer_type));
         self.peer_addrs.push(Some(&node_info.peer.addr));
         self.versions.push(Some(&node_info.version));
@@ -233,6 +238,8 @@ impl InformationSchemaClusterInfoBuilder {
         } else {
             self.active_times.push(None);
         }
+        self.node_status
+            .push(format_node_status(&node_info).as_deref());
     }
 
     fn format_duration_since(ts: u64) -> String {
@@ -253,6 +260,7 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.start_times.finish()),
             Arc::new(self.uptimes.finish()),
             Arc::new(self.active_times.finish()),
+            Arc::new(self.node_status.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
@@ -276,5 +284,58 @@ impl DfPartitionStream for InformationSchemaClusterInfo {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+fn peer_id(peer_type: &str, peer_id: u64) -> i64 {
+    if peer_type == PEER_TYPE_FRONTEND || peer_type == PEER_TYPE_METASRV {
+        -1
+    } else {
+        peer_id as i64
+    }
+}
+
+#[derive(Serialize)]
+struct DisplayMetasrvStatus {
+    is_leader: bool,
+}
+
+#[derive(Serialize)]
+struct DisplayDatanodeStatus {
+    workloads: Vec<DatanodeWorkloadType>,
+    leader_regions: usize,
+    follower_regions: usize,
+}
+
+impl From<&DatanodeStatus> for DisplayDatanodeStatus {
+    fn from(status: &DatanodeStatus) -> Self {
+        Self {
+            workloads: status
+                .workloads
+                .types
+                .iter()
+                .flat_map(|w| DatanodeWorkloadType::from_i32(*w))
+                .collect(),
+            leader_regions: status.leader_regions,
+            follower_regions: status.follower_regions,
+        }
+    }
+}
+
+fn format_node_status(node_info: &NodeInfo) -> Option<String> {
+    match &node_info.status {
+        NodeStatus::Datanode(datanode_status) => {
+            serde_json::to_string(&DisplayDatanodeStatus::from(datanode_status)).ok()
+        }
+        NodeStatus::Frontend(_) => None,
+        NodeStatus::Flownode(_) => None,
+        NodeStatus::Metasrv(metasrv_status) => {
+            if metasrv_status.is_leader {
+                serde_json::to_string(&DisplayMetasrvStatus { is_leader: true }).ok()
+            } else {
+                None
+            }
+        }
+        NodeStatus::Standalone => None,
     }
 }
