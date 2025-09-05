@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["try_into_resolution"],"macro":["ensure_resolution_usize"],"struct":["GeohashFunction","GeohashNeighboursFunction"]};

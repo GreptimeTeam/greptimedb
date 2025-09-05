@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_DECODING_SIZE"],"struct":["BatchDelete","BatchGet","BatchPut","Delete","EtcdStore","Get","Put"]};

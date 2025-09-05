@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TIME_PRECISION","INFLUXDB_API_PATH_NAME","INFLUXDB_API_V2_PATH_NAME","INFLUXDB_TIMESTAMP_COLUMN_NAME"],"fn":["is_influxdb_request","is_influxdb_v2_request","unwrap_or_default_precision"],"struct":["InfluxdbRequest"]};

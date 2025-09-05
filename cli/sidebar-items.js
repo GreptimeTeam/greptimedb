@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DataCommand","MetadataCommand"],"mod":["bench","data","database","error","metadata"],"struct":["AttachCommand","BenchTableMetadataCommand","DatabaseClient"],"trait":["Tool"]};

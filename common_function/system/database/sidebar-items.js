@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CONNECTION_ID","CURRENT_SCHEMA_FUNCTION_NAME","DATABASE_FUNCTION_NAME","PG_BACKEND_PID","READ_PREFERENCE_FUNCTION_NAME","SESSION_USER_FUNCTION_NAME"],"struct":["ConnectionIdFunction","CurrentSchemaFunction","DatabaseFunction","PgBackendPidFunction","ReadPreferenceFunction","SessionUserFunction"]};
