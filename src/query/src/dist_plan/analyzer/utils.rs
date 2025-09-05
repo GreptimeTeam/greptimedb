@@ -726,4 +726,47 @@ mod tests {
             HashSet::from([Column::from_qualified_name("t.pk1")])
         );
     }
+
+    #[test]
+    fn aggr_aggr_alias_projection() {
+        // use logging for better debugging
+        init_default_ut_logging();
+        let test_table = TestTable::table_with_name(0, "t".to_string());
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(test_table),
+        )));
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .aggregate(vec![col("pk1"), col("pk2")], vec![max(col("number"))])
+            .unwrap()
+            .aggregate(
+                vec![col("pk1"), col("pk2")],
+                vec![min(col("max(t.number)"))],
+            )
+            .unwrap()
+            .project(vec![
+                col("pk1").alias("pk11"),
+                col("pk2").alias("pk22"),
+                col("min(max(t.number))").alias("min_max_number"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut scope_tracker = LayeredAliasTracker::default();
+        plan.visit(&mut scope_tracker).unwrap();
+
+        // query original column from aliased column for aggr gen column
+        assert_eq!(
+            scope_tracker.query_original_column(1, 1, &Column::from_name("min_max_number")),
+            Some(Column::from_name("min(max(t.number))"))
+        );
+
+        // because at level 2, min(max(t.number)) is already not an alias of any original column
+        // so query original column from aliased column will return None
+        assert_eq!(
+            scope_tracker.query_original_column(1, 2, &Column::from_name("min_max_number")),
+            None
+        );
+    }
 }
