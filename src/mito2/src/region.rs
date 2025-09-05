@@ -35,6 +35,7 @@ use store_api::region_engine::{
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
 use store_api::ManifestVersion;
+use tokio::sync::RwLockWriteGuard;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
@@ -297,9 +298,19 @@ impl MitoRegion {
     }
 
     /// Sets the staging state.
+    ///
     /// You should call this method in the worker loop.
     /// Transitions from Writable to Staging state.
-    pub(crate) fn set_staging(&self) -> Result<()> {
+    /// Cleans any existing staging manifests before entering staging mode.
+    pub(crate) async fn set_staging<'a, 'b>(
+        &'a self,
+        manager: RwLockWriteGuard<'b, RegionManifestManager>,
+    ) -> Result<()>
+    where
+        'a: 'b,
+    {
+        manager.store().clear_staging_manifests().await?;
+
         self.compare_exchange_state(
             RegionLeaderState::Writable,
             RegionRoleState::Leader(RegionLeaderState::Staging),
@@ -352,10 +363,11 @@ impl MitoRegion {
             SettableRegionRoleState::StagingLeader => {
                 // Enter staging mode from normal writable leader
                 // Only allowed from writable leader state
+                let manager = self.manifest_ctx.manifest_manager.write().await;
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Entering staging mode for region {}", self.region_id);
-                        self.set_staging()?;
+                        self.set_staging(manager).await?;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         // Already in desired state - no-op
@@ -1044,6 +1056,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::access_layer::AccessLayer;
+    use crate::manifest::action::RegionMetaActionList;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
@@ -1211,7 +1224,7 @@ mod tests {
             region_id: metadata.region_id,
             version_control,
             access_layer,
-            manifest_ctx,
+            manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),
             provider: Provider::noop_provider(),
             last_flush_millis: Default::default(),
@@ -1231,7 +1244,8 @@ mod tests {
         assert!(!region.is_staging());
 
         // Test transition to staging
-        region.set_staging().unwrap();
+        let manager = manifest_ctx.manifest_manager.write().await;
+        region.set_staging(manager).await.unwrap();
         assert_eq!(
             region.state(),
             RegionRoleState::Leader(RegionLeaderState::Staging)
@@ -1246,9 +1260,43 @@ mod tests {
         );
         assert!(!region.is_staging());
 
+        // Test staging directory cleanup: Create dirty staging files before entering staging mode
+        {
+            // Create some dummy staging manifest files to simulate interrupted session
+            let manager = manifest_ctx.manifest_manager.write().await;
+            let dummy_actions = RegionMetaActionList::new(vec![]);
+            let dummy_bytes = dummy_actions.encode().unwrap();
+            
+            // Create dirty staging files with versions 100 and 101
+            manager.store().save(100, &dummy_bytes, true).await.unwrap();
+            manager.store().save(101, &dummy_bytes, true).await.unwrap();
+            drop(manager);
+
+            // Verify dirty files exist before entering staging
+            let manager = manifest_ctx.manifest_manager.read().await;
+            let dirty_manifests = manager.store().fetch_staging_manifests().await.unwrap();
+            assert_eq!(dirty_manifests.len(), 2, "Should have 2 dirty staging files");
+            drop(manager);
+
+            // Enter staging mode - this should clean up the dirty files
+            let manager = manifest_ctx.manifest_manager.write().await;
+            region.set_staging(manager).await.unwrap();
+            
+            // Verify dirty files are cleaned up after entering staging
+            let manager = manifest_ctx.manifest_manager.read().await;
+            let cleaned_manifests = manager.store().fetch_staging_manifests().await.unwrap();
+            assert_eq!(cleaned_manifests.len(), 0, "Dirty staging files should be cleaned up");
+            drop(manager);
+
+            // Exit staging to restore normal state for remaining tests
+            region.exit_staging().unwrap();
+        }
+
         // Test invalid transitions
-        assert!(region.set_staging().is_ok()); // Writable -> Staging should work
-        assert!(region.set_staging().is_err()); // Staging -> Staging should fail
+        let manager = manifest_ctx.manifest_manager.write().await;
+        assert!(region.set_staging(manager).await.is_ok()); // Writable -> Staging should work
+        let manager = manifest_ctx.manifest_manager.write().await;
+        assert!(region.set_staging(manager).await.is_err()); // Staging -> Staging should fail
         assert!(region.exit_staging().is_ok()); // Staging -> Writable should work
         assert!(region.exit_staging().is_err()); // Writable -> Writable should fail
     }
