@@ -113,7 +113,7 @@ fn generate_create_exprs<R: Rng + 'static>(
         merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
     );
 
-    let base_table_name = name_generator.r#gen(rng);
+    let base_table_name = name_generator.generate(rng);
     let min_column = columns / 2;
     let columns = rng.random_range(min_column..columns);
     let mut exprs = Vec::with_capacity(tables);

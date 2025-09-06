@@ -175,9 +175,9 @@ impl TableContext {
         rng: &mut R,
         generator: &dyn Random<Ident, R>,
     ) -> Ident {
-        let mut name = generator.r#gen(rng);
+        let mut name = generator.generate(rng);
         while self.columns.iter().any(|col| col.name.value == name.value) {
-            name = generator.r#gen(rng);
+            name = generator.generate(rng);
         }
         name
     }
@@ -187,9 +187,9 @@ impl TableContext {
         rng: &mut R,
         generator: &dyn Random<Ident, R>,
     ) -> Ident {
-        let mut name = generator.r#gen(rng);
+        let mut name = generator.generate(rng);
         while self.name.value == name.value {
-            name = generator.r#gen(rng);
+            name = generator.generate(rng);
         }
         name
     }

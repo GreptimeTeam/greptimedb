@@ -240,7 +240,7 @@ impl KvStateStore {
         value: &PoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult + use<>,
     )> {
         let key = key.as_bytes().to_vec();
         let value = value.try_as_raw_value()?;
@@ -260,7 +260,7 @@ impl KvStateStore {
         value: PoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult + use<>,
     )> {
         let key = key.as_bytes().to_vec();
         let value = value.try_as_raw_value()?;
