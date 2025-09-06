@@ -23,7 +23,7 @@ use syn::{
     Path, PathArguments, PathSegment, Result, Type, TypePath, TypeReference,
 };
 
-use crate::row::attribute::{find_column_attribute, parse_column_attribute, ColumnAttribute};
+use crate::row::attribute::{ColumnAttribute, find_column_attribute, parse_column_attribute};
 
 static SEMANTIC_TYPES: Lazy<HashMap<&'static str, SemanticType>> = Lazy::new(|| {
     HashMap::from([

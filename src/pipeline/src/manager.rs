@@ -289,7 +289,11 @@ impl IdentityTimeIndex {
                         );
                     }
                     None => {
-                        return if_ignore_errors(*ignore_errors, *unit, "missing field".to_string());
+                        return if_ignore_errors(
+                            *ignore_errors,
+                            *unit,
+                            "missing field".to_string(),
+                        );
                     }
                 };
                 Ok(time_unit_to_value_data(*unit, v))

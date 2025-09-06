@@ -483,7 +483,9 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    unsafe { std::env::set_var("TZ", "UTC"); }
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
 
     let instance = setup_standalone_instance(name, store_type).await;
 
