@@ -61,7 +61,7 @@ impl Helper {
     }
 
     pub fn check_get_scalar<T: Scalar>(vector: &VectorRef) -> Result<&<T as Scalar>::VectorType> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<<T as Scalar>::VectorType>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -70,12 +70,11 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get<T: 'static + Vector>(vector: &VectorRef) -> Result<&T> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<T>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -84,15 +83,14 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get_mutable_vector<T: 'static + MutableVector>(
         vector: &mut dyn MutableVector,
     ) -> Result<&mut T> {
         let ty = vector.data_type();
-        let arr = vector
+        vector
             .as_mut_any()
             .downcast_mut()
             .with_context(|| error::UnknownVectorSnafu {
@@ -101,14 +99,13 @@ impl Helper {
                     ty,
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     pub fn check_get_scalar_vector<T: Scalar>(
         vector: &VectorRef,
     ) -> Result<&<T as Scalar>::VectorType> {
-        let arr = vector
+        vector
             .as_any()
             .downcast_ref::<<T as Scalar>::VectorType>()
             .with_context(|| error::UnknownVectorSnafu {
@@ -117,8 +114,7 @@ impl Helper {
                     vector.vector_type_name(),
                     std::any::type_name::<T>(),
                 ),
-            });
-        arr
+            })
     }
 
     /// Try to cast an arrow scalar value into vector

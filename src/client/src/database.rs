@@ -379,11 +379,10 @@ impl Database {
                 tonic_code,
                 e
             );
-            let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+            Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
                 addr: client.addr().to_string(),
                 tonic_code,
-            });
-            error
+            })
         })?;
 
         let flight_data_stream = response.into_inner();

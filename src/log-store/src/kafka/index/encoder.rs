@@ -51,12 +51,9 @@ pub struct DeltaEncodedRegionIndexes {
 impl DeltaEncodedRegionIndexes {
     /// Retrieves the original (decoded) index values for a given region.
     pub(crate) fn region(&self, region_id: RegionId) -> Option<BTreeSet<u64>> {
-        let decoded = self
-            .regions
+        self.regions
             .get(&region_id)
-            .map(|delta| delta.iter().copied().original().collect::<BTreeSet<_>>());
-
-        decoded
+            .map(|delta| delta.iter().copied().original().collect::<BTreeSet<_>>())
     }
 
     /// Retrieves the last index.

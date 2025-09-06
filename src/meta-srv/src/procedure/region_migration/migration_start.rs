@@ -127,12 +127,10 @@ impl RegionMigrationStart {
     /// Checks whether the candidate region on region has been opened.
     /// Returns true if it's been opened.
     fn check_candidate_region_on_peer(&self, region_route: &RegionRoute, to_peer: &Peer) -> bool {
-        let region_opened = region_route
+        region_route
             .follower_peers
             .iter()
-            .any(|peer| peer.id == to_peer.id);
-
-        region_opened
+            .any(|peer| peer.id == to_peer.id)
     }
 
     /// Returns true if the region leader is not the `from_peer`.

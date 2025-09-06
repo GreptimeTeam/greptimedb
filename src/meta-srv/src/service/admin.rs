@@ -431,8 +431,7 @@ mod tests {
             .options(opts)
             .kv_backend(kv_backend.clone());
 
-        let metasrv = builder.build().await.unwrap();
-        metasrv
+        builder.build().await.unwrap()
     }
 
     async fn send_request(client: &mut DuplexStream, request: &[u8]) -> String {
