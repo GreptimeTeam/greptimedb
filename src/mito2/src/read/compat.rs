@@ -628,17 +628,15 @@ struct RewritePrimaryKey {
 impl RewritePrimaryKey {
     /// Make primary key of the `batch` compatible.
     fn compat(&self, mut batch: Batch) -> Result<Batch> {
-        let values = if let Some(pk_values) = batch.pk_values() {
-            pk_values
-        } else {
+        if batch.pk_values().is_none() {
             let new_pk_values = self
                 .original
                 .decode(batch.primary_key())
                 .context(DecodeSnafu)?;
             batch.set_pk_values(new_pk_values);
-            // Safety: We ensure pk_values is not None.
-            batch.pk_values().as_ref().unwrap()
-        };
+        }
+        // Safety: We ensure pk_values is not None.
+        let values = batch.pk_values().unwrap();
 
         let mut buffer = Vec::with_capacity(
             batch.primary_key().len() + self.new.estimated_size().unwrap_or_default(),
