@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function_factory::ScalarFunctionFactory;
+use common_function::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
@@ -72,6 +72,7 @@ pub struct QueryEngineState {
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
+    table_functions: Arc<RwLock<HashMap<String, TableFunctionFactory>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -196,6 +197,7 @@ impl QueryEngineState {
                 flow_service_handler,
             }),
             aggr_functions: Arc::new(RwLock::new(HashMap::new())),
+            table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
@@ -265,6 +267,25 @@ impl QueryEngineState {
             .collect()
     }
 
+    /// Retrieve table function by name
+    pub fn table_function(&self, function_name: &str) -> Option<TableFunctionFactory> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve table function names.
+    pub fn table_function_named(&self) -> Vec<String> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Register an scalar function.
     /// Will override if the function with same name is already registered.
     pub fn register_scalar_function(&self, func: ScalarFunctionFactory) {
@@ -299,6 +320,19 @@ impl QueryEngineState {
             x.is_none(),
             "Already registered aggregate function '{name}'"
         );
+    }
+
+    pub fn register_table_function(&self, func: TableFunctionFactory) {
+        let name = func.name.clone();
+        let x = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(name.clone(), func);
+
+        if x.is_some() {
+            warn!("Already registered table function '{name}");
+        }
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

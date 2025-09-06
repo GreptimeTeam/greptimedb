@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use datafusion::catalog::TableFunctionImpl;
 use datafusion_expr::ScalarUDF;
 
 use crate::function::{FunctionContext, FunctionRef};
@@ -58,6 +59,24 @@ impl From<FunctionRef> for ScalarFunctionFactory {
         Self {
             name,
             factory: func,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TableFunctionFactory {
+    pub name: String,
+    pub func: Arc<dyn TableFunctionImpl>,
+}
+
+impl TableFunctionFactory {
+    pub fn new<S>(name: S, func: Arc<dyn TableFunctionImpl>) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            name: name.into(),
+            func,
         }
     }
 }

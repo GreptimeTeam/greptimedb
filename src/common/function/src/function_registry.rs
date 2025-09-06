@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
+use datafusion::catalog::TableFunctionImpl;
 use datafusion_expr::AggregateUDF;
 
 use crate::admin::AdminFunction;
@@ -24,7 +25,7 @@ use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
-use crate::function_factory::ScalarFunctionFactory;
+use crate::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -42,6 +43,7 @@ use crate::system::SystemFunction;
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
+    table_functions: RwLock<HashMap<String, TableFunctionFactory>>,
 }
 
 impl FunctionRegistry {
@@ -88,6 +90,15 @@ impl FunctionRegistry {
     /// Returns a list of all aggregate functions registered in the registry.
     pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
         self.aggregate_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn table_functions(&self) -> Vec<TableFunctionFactory> {
+        self.table_functions
             .read()
             .unwrap()
             .values()

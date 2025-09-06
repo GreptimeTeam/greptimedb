@@ -22,7 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function_factory::ScalarFunctionFactory;
+use common_function::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
@@ -84,6 +84,9 @@ pub trait QueryEngine: Send + Sync {
     /// Register a scalar function.
     /// Will override if the function with same name is already registered.
     fn register_scalar_function(&self, func: ScalarFunctionFactory);
+
+    /// Register table function
+    fn register_table_function(&self, func: TableFunctionFactory);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
@@ -163,6 +166,10 @@ fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
 
     for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
         query_engine.register_aggregate_function(accumulator);
+    }
+
+    for table_function in FUNCTION_REGISTRY.table_functions() {
+        query_engine.register_table_function(table_function);
     }
 }
 
