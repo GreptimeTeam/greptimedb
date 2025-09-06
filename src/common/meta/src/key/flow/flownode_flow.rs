@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::OptionExt;
 
-use crate::error::{self, Result};
-use crate::key::flow::flow_info::FlowInfoValue;
-use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
-use crate::kv_backend::txn::{Txn, TxnOp};
-use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::RangeRequest;
-use crate::rpc::KeyValue;
 use crate::FlownodeId;
+use crate::error::{self, Result};
+use crate::key::flow::FlowScoped;
+use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::{BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
+use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::RangeRequest;
 
 lazy_static! {
     static ref FLOWNODE_FLOW_KEY_PATTERN: Regex = Regex::new(&format!(
@@ -245,8 +245,8 @@ impl FlownodeFlowManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::key::flow::flownode_flow::FlownodeFlowKey;
     use crate::key::MetadataKey;
+    use crate::key::flow::flownode_flow::FlownodeFlowKey;
 
     #[test]
     fn test_key_serialization() {

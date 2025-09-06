@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use common_time::Timestamp;
-use datafusion_expr::{col, lit, Expr};
+use datafusion_expr::{Expr, col, lit};
 use datatypes::timestamp::TimestampNanosecond;
 
+use crate::PipelineVersion;
 use crate::error::{InvalidPipelineVersionSnafu, Result};
 use crate::table::{
     PIPELINE_TABLE_CREATED_AT_COLUMN_NAME, PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME,
 };
-use crate::PipelineVersion;
 
 pub fn to_pipeline_version(version_str: Option<&str>) -> Result<PipelineVersion> {
     match version_str {

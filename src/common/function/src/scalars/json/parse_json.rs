@@ -75,7 +75,7 @@ impl Function for ParseJsonFunction {
                                         json_string
                                     ),
                                 }
-                                .fail()
+                                .fail();
                             }
                         },
                         _ => None,

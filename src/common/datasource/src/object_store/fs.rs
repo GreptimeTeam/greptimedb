@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use object_store::ObjectStore;
 use object_store::services::Fs;
 use object_store::util::DefaultLoggingInterceptor;
-use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::error::{BuildBackendSnafu, Result};

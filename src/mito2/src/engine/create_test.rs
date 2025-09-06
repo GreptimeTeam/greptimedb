@@ -23,7 +23,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::region::options::MemtableOptions;
 use crate::test_util::{
-    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
@@ -191,17 +191,21 @@ async fn test_engine_create_with_custom_store() {
     let region_dir = region.access_layer.build_region_dir(region_id);
 
     let object_store_manager = env.get_object_store_manager().unwrap();
-    assert!(object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&region_dir)
-        .await
-        .unwrap());
-    assert!(!object_store_manager
-        .default_object_store()
-        .exists(&region_dir)
-        .await
-        .unwrap());
+    assert!(
+        object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&region_dir)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !object_store_manager
+            .default_object_store()
+            .exists(&region_dir)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

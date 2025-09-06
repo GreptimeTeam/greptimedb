@@ -14,7 +14,7 @@
 
 use catalog::memory::MemoryCatalogManager;
 use common_query::OutputData;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, util};
 use session::context::QueryContext;
 use table::TableRef;
 

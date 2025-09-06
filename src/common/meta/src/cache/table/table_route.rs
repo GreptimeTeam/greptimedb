@@ -116,8 +116,8 @@ mod tests {
 
     use super::*;
     use crate::ddl::test_util::create_table::test_create_table_task;
-    use crate::key::table_route::TableRouteValue;
     use crate::key::TableMetadataManager;
+    use crate::key::table_route::TableRouteValue;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{Region, RegionRoute};

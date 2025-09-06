@@ -20,12 +20,12 @@ use common_grpc::channel_manager::ChannelManager;
 use common_meta::util;
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{ensure, OptionExt, ResultExt};
-use tokio::sync::{mpsc, RwLock};
+use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::Streaming;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tonic::Streaming;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef};

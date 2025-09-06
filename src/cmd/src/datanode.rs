@@ -20,20 +20,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_config::Configurable;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::Datanode;
 use meta_client::MetaClientOptions;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
+use crate::App;
 use crate::datanode::builder::InstanceBuilder;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::App;
 
 pub const APP_NAME: &str = "greptime-datanode";
 
@@ -187,29 +187,39 @@ impl StartCommand {
         if let Some(addr) = &self.rpc_bind_addr {
             opts.grpc.bind_addr.clone_from(addr);
         } else if let Some(addr) = &opts.rpc_addr {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead."
+            );
             opts.grpc.bind_addr.clone_from(addr);
         }
 
         if let Some(server_addr) = &self.rpc_server_addr {
             opts.grpc.server_addr.clone_from(server_addr);
         } else if let Some(server_addr) = &opts.rpc_hostname {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead."
+            );
             opts.grpc.server_addr.clone_from(server_addr);
         }
 
         if let Some(runtime_size) = opts.rpc_runtime_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_runtime_size`, please use `grpc.runtime_size` instead."
+            );
             opts.grpc.runtime_size = runtime_size;
         }
 
         if let Some(max_recv_message_size) = opts.rpc_max_recv_message_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_max_recv_message_size`, please use `grpc.max_recv_message_size` instead."
+            );
             opts.grpc.max_recv_message_size = max_recv_message_size;
         }
 
         if let Some(max_send_message_size) = opts.rpc_max_send_message_size {
-            warn!("Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead.");
+            warn!(
+                "Use the deprecated attribute `DatanodeOptions.rpc_max_send_message_size`, please use `grpc.max_send_message_size` instead."
+            );
             opts.grpc.max_send_message_size = max_send_message_size;
         }
 
@@ -430,20 +440,24 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        assert!((StartCommand {
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .is_err());
+        assert!(
+            (StartCommand {
+                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                ..Default::default()
+            })
+            .load_options(&GlobalOptions::default())
+            .is_err()
+        );
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        assert!((StartCommand {
-            node_id: Some(42),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .is_ok());
+        assert!(
+            (StartCommand {
+                node_id: Some(42),
+                ..Default::default()
+            })
+            .load_options(&GlobalOptions::default())
+            .is_ok()
+        );
     }
 
     #[test]

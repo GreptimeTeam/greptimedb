@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::flow_name::FlowName;
 use crate::instruction::{CacheIdent, DropFlow};
+use crate::key::MetadataKey;
 use crate::key::flow::flow_info::FlowInfoKey;
 use crate::key::flow::flow_name::FlowNameKey;
 use crate::key::flow::flow_route::FlowRouteKey;
@@ -28,7 +29,6 @@ use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
 use crate::key::view_info::ViewInfoKey;
-use crate::key::MetadataKey;
 
 /// KvBackend cache invalidator
 #[async_trait::async_trait]

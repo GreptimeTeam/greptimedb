@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::{Output, OutputData};
-use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_recordbatch::RecordBatches;
+use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_telemetry::tracing;
 use query::parser::QueryStatement;
 use session::context::QueryContextRef;

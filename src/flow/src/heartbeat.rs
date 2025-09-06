@@ -14,8 +14,8 @@
 
 //! Send heartbeat from flownode to metasrv
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::{HeartbeatRequest, Peer};
 use common_error::ext::BoxedError;

@@ -20,22 +20,22 @@ use std::sync::Arc;
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::CsvFormat;
-use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
+use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{build_backend, parse_url, FS_SCHEMA};
+use common_datasource::object_store::{FS_SCHEMA, build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::{OutputCost, OutputRows};
-use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
+use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
     CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStream, JsonSource,
 };
-use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
+use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
@@ -45,7 +45,7 @@ use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -467,10 +467,10 @@ impl StatementExecutor {
                     insert_cost += cost;
                 }
 
-                if let Some(max_insert_rows) = max_insert_rows {
-                    if rows_inserted >= max_insert_rows {
-                        return Ok(gen_insert_output(rows_inserted, insert_cost));
-                    }
+                if let Some(max_insert_rows) = max_insert_rows
+                    && rows_inserted >= max_insert_rows
+                {
+                    return Ok(gen_insert_output(rows_inserted, insert_cost));
                 }
             }
 
@@ -511,10 +511,10 @@ async fn batch_insert(
 /// Custom type compatibility check for GreptimeDB that handles Map -> Binary (JSON) conversion
 fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool {
     // Handle Map -> Binary conversion for JSON types
-    if let ArrowDataType::Map(_, _) = from {
-        if let ArrowDataType::Binary = to {
-            return true;
-        }
+    if let ArrowDataType::Map(_, _) = from
+        && let ArrowDataType::Binary = to
+    {
+        return true;
     }
 
     // For all other cases, use Arrow's built-in can_cast_types

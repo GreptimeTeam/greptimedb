@@ -21,8 +21,8 @@ use datatypes::vectors::UInt32Vector;
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::cache::{
-    selector_result_cache_hit, selector_result_cache_miss, CacheStrategy, SelectorResultKey,
-    SelectorResultValue,
+    CacheStrategy, SelectorResultKey, SelectorResultValue, selector_result_cache_hit,
+    selector_result_cache_miss,
 };
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
@@ -287,7 +287,7 @@ mod tests {
     use api::v1::OpType;
 
     use super::*;
-    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
+    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
 
     #[tokio::test]
     async fn test_last_row_one_batch() {

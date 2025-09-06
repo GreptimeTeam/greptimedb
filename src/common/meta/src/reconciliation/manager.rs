@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_procedure::{
-    watcher, BoxedProcedure, ProcedureId, ProcedureManagerRef, ProcedureWithId,
+    BoxedProcedure, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
 };
 use common_telemetry::{error, info, warn};
 use snafu::{OptionExt, ResultExt};
@@ -25,14 +25,14 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{self, Result, TableNotFoundSnafu};
-use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
+use crate::key::table_name::TableNameKey;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_catalog::ReconcileCatalogProcedure;
-use crate::reconciliation::reconcile_database::{ReconcileDatabaseProcedure, DEFAULT_PARALLELISM};
+use crate::reconciliation::reconcile_database::{DEFAULT_PARALLELISM, ReconcileDatabaseProcedure};
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
-use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
+use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::Context;
 
 pub type ReconciliationManagerRef = Arc<ReconciliationManager>;

@@ -26,7 +26,7 @@ use crate::statements::alter::AlterTableOperation;
 use crate::statements::create::{CreateExternalTable, CreateTable};
 use crate::statements::statement::Statement;
 use crate::statements::transform::TransformRule;
-use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
+use crate::statements::{TimezoneInfo, sql_data_type_to_concrete_data_type};
 
 /// SQL data type alias transformer:
 ///  - `TimestampSecond`, `Timestamp_s`, `Timestamp_sec` for `Timestamp(0)`.
@@ -337,7 +337,12 @@ mod tests {
         transform_statements(&mut stmts).unwrap();
 
         match &stmts[0] {
-            Statement::Query(q) => assert_eq!(format!("SELECT arrow_cast(TIMESTAMP '2020-01-01 01:23:45.12345678', 'Timestamp({expected}, None)')"), q.to_string()),
+            Statement::Query(q) => assert_eq!(
+                format!(
+                    "SELECT arrow_cast(TIMESTAMP '2020-01-01 01:23:45.12345678', 'Timestamp({expected}, None)')"
+                ),
+                q.to_string()
+            ),
             _ => unreachable!(),
         }
     }
@@ -355,7 +360,10 @@ mod tests {
         transform_statements(&mut stmts).unwrap();
 
         match &stmts[0] {
-            Statement::CreateTable(c) => assert_eq!("CREATE TABLE test (\n  b BOOLEAN,\n  ts TIMESTAMP NOT NULL,\n  TIME INDEX (ts)\n)\nENGINE=mito\n", c.to_string()),
+            Statement::CreateTable(c) => assert_eq!(
+                "CREATE TABLE test (\n  b BOOLEAN,\n  ts TIMESTAMP NOT NULL,\n  TIME INDEX (ts)\n)\nENGINE=mito\n",
+                c.to_string()
+            ),
             _ => unreachable!(),
         }
     }

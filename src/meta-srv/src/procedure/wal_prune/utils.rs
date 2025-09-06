@@ -20,8 +20,8 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_telemetry::warn;
 use itertools::{Itertools, MinMaxResult};
-use rskafka::client::partition::{OffsetAt, PartitionClient, UnknownTopicHandling};
 use rskafka::client::Client;
+use rskafka::client::partition::{OffsetAt, PartitionClient, UnknownTopicHandling};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 

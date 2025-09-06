@@ -20,13 +20,13 @@ use substrait::substrait_proto_df::proto::{FilterRel, ReadRel};
 use substrait_proto::proto::expression::MaskExpression;
 use substrait_proto::proto::read_rel::ReadType;
 use substrait_proto::proto::rel::RelType;
-use substrait_proto::proto::{plan_rel, Plan as SubPlan, ProjectRel, Rel};
+use substrait_proto::proto::{Plan as SubPlan, ProjectRel, Rel, plan_rel};
 
 use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::expr::{MapFilterProject, TypedExpr};
 use crate::plan::{Plan, TypedPlan};
 use crate::repr::{self, RelationType};
-use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
+use crate::transform::{FlownodeContext, FunctionExtensions, substrait_proto};
 
 impl TypedPlan {
     /// Convert Substrait Plan into Flow's TypedPlan
@@ -39,18 +39,18 @@ impl TypedPlan {
 
         // Parse relations
         match plan.relations.len() {
-        1 => {
-            match plan.relations[0].rel_type.as_ref() {
+            1 => match plan.relations[0].rel_type.as_ref() {
                 Some(rt) => match rt {
                     plan_rel::RelType::Rel(rel) => {
                         Ok(TypedPlan::from_substrait_rel(ctx, rel, &function_extension).await?)
-                    },
+                    }
                     plan_rel::RelType::Root(root) => {
                         let input = root.input.as_ref().with_context(|| InvalidQuerySnafu {
                             reason: "Root relation without input",
                         })?;
 
-                        let mut ret = TypedPlan::from_substrait_rel(ctx, input, &function_extension).await?;
+                        let mut ret =
+                            TypedPlan::from_substrait_rel(ctx, input, &function_extension).await?;
 
                         if !root.names.is_empty() {
                             ret.schema = ret.schema.clone().try_with_names(root.names.clone())?;
@@ -59,14 +59,13 @@ impl TypedPlan {
                         Ok(ret)
                     }
                 },
-                None => plan_err!("Cannot parse plan relation: None")
-            }
-        },
-        _ => not_impl_err!(
-            "Substrait plan with more than 1 relation trees not supported. Number of relation trees: {:?}",
-            plan.relations.len()
-        )
-    }
+                None => plan_err!("Cannot parse plan relation: None"),
+            },
+            _ => not_impl_err!(
+                "Substrait plan with more than 1 relation trees not supported. Number of relation trees: {:?}",
+                plan.relations.len()
+            ),
+        }
     }
 
     #[async_recursion::async_recursion]
@@ -240,8 +239,8 @@ mod test {
     use crate::expr::GlobalId;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
-    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]
     async fn test_select() {

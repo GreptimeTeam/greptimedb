@@ -24,8 +24,8 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::test_util::{
-    build_delete_rows_for_key, build_rows_for_key, delete_rows, delete_rows_schema, flush_region,
-    put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_delete_rows_for_key, build_rows_for_key, delete_rows,
+    delete_rows_schema, flush_region, put_rows, rows_schema,
 };
 
 async fn scan_in_parallel(

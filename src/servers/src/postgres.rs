@@ -36,8 +36,8 @@ use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
-use session::context::Channel;
 use session::Session;
+use session::context::Channel;
 
 use self::auth_handler::PgLoginVerifier;
 use self::handler::DefaultQueryParser;

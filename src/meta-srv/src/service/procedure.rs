@@ -17,11 +17,10 @@ use std::time::Duration;
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
-    procedure_service_server, DdlTaskRequest as PbDdlTaskRequest,
-    DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
-    ReconcileCatalog, ReconcileDatabase, ReconcileRequest, ReconcileResponse, ReconcileTable,
-    ResolveStrategy,
+    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest,
+    MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
+    QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
+    ReconcileResponse, ReconcileTable, ResolveStrategy, procedure_service_server,
 };
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};

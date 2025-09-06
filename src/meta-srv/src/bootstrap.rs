@@ -28,14 +28,14 @@ use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::create_postgres_tls_connector;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::{TlsMode as PgTlsMode, TlsOption as PgTlsOption};
 #[cfg(feature = "mysql_kvbackend")]
 use common_meta::kv_backend::rds::MySqlStore;
 #[cfg(feature = "pg_kvbackend")]
 use common_meta::kv_backend::rds::PgStore;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::rds::postgres::create_postgres_tls_connector;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::rds::postgres::{TlsMode as PgTlsMode, TlsOption as PgTlsOption};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
@@ -57,30 +57,30 @@ use sqlx::mysql::MySqlConnectOptions;
 use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 #[cfg(feature = "pg_kvbackend")]
 use tokio_postgres::NoTls;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "mysql_kvbackend")]
 use crate::election::rds::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::rds::postgres::PgElection;
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
 use crate::node_excluder::NodeExcluderRef;
+use crate::selector::SelectorType;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
-use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
-use crate::{error, Result};
+use crate::{Result, error};
 
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
@@ -180,10 +180,10 @@ impl MetasrvInstance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        if let Some(mut rx) = self.serve_state.lock().await.take() {
-            if let Ok(Err(err)) = rx.try_recv() {
-                common_telemetry::error!(err; "Metasrv start failed")
-            }
+        if let Some(mut rx) = self.serve_state.lock().await.take()
+            && let Ok(Err(err)) = rx.try_recv()
+        {
+            common_telemetry::error!(err; "Metasrv start failed")
         }
         if let Some(signal) = &self.signal_sender {
             signal

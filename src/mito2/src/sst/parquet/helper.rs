@@ -20,7 +20,7 @@ use object_store::ObjectStore;
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
 use parquet::format;
-use parquet::schema::types::{from_thrift, SchemaDescriptor};
+use parquet::schema::types::{SchemaDescriptor, from_thrift};
 use snafu::ResultExt;
 
 use crate::error;

@@ -223,12 +223,12 @@ impl<S: LogStore> WalWriter<S> {
 mod tests {
     use api::v1::helper::{tag_column_schema, time_index_column_schema};
     use api::v1::{
-        bulk_wal_entry, value, ArrowIpc, BulkWalEntry, ColumnDataType, Mutation, OpType, Row, Rows,
-        Value,
+        ArrowIpc, BulkWalEntry, ColumnDataType, Mutation, OpType, Row, Rows, Value, bulk_wal_entry,
+        value,
     };
     use common_recordbatch::DfRecordBatch;
     use common_test_util::flight::encode_to_flight_data;
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use datatypes::arrow;
     use datatypes::arrow::array::{ArrayRef, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::Field;

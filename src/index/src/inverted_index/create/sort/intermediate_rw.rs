@@ -33,15 +33,15 @@
 mod codec_v1;
 
 use asynchronous_codec::{FramedRead, FramedWrite};
-use futures::{stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt, stream};
 use snafu::ResultExt;
 
+use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::{
     CloseSnafu, FlushSnafu, ReadSnafu, Result, UnknownIntermediateCodecMagicSnafu, WriteSnafu,
 };
-use crate::Bytes;
 
 /// `IntermediateWriter` serializes and writes intermediate data to the wrapped `writer`
 pub struct IntermediateWriter<W> {

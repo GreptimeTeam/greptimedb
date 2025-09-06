@@ -15,15 +15,15 @@
 use std::collections::HashMap;
 
 use api::region::RegionResponse;
-use api::v1::region::region_request::Body;
-use api::v1::region::{alter_request, AlterRequest, RegionRequest, RegionRequestHeader};
 use api::v1::AlterTableExpr;
+use api::v1::region::region_request::Body;
+use api::v1::region::{AlterRequest, RegionRequest, RegionRequestHeader, alter_request};
 use common_catalog::format_full_table_name;
 use common_grpc_expr::alter_expr_to_request;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, TableInfo};
@@ -38,7 +38,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution, TableMetadataManagerRef};
 use crate::node_manager::NodeManagerRef;
-use crate::rpc::router::{find_leaders, region_distribution, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// [AlterTableExecutor] performs:
 /// - Alters the metadata of the table.

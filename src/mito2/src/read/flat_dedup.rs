@@ -19,15 +19,15 @@ use std::ops::Range;
 use api::v1::OpType;
 use async_stream::try_stream;
 use datatypes::arrow::array::{
-    make_comparator, Array, ArrayRef, BinaryArray, BooleanArray, BooleanBufferBuilder, UInt64Array,
-    UInt8Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, BooleanBufferBuilder, UInt8Array, UInt64Array,
+    make_comparator,
 };
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::compute::kernels::cmp::distinct;
-use datatypes::arrow::compute::kernels::partition::{partition, Partitions};
+use datatypes::arrow::compute::kernels::partition::{Partitions, partition};
 use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::compute::{
-    concat_batches, filter_record_batch, take_record_batch, SortOptions, TakeOptions,
+    SortOptions, TakeOptions, concat_batches, filter_record_batch, take_record_batch,
 };
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -40,7 +40,7 @@ use crate::read::dedup::DedupMetrics;
 use crate::sst::parquet::flat_format::{
     op_type_column_index, primary_key_column_index, time_index_column_index,
 };
-use crate::sst::parquet::format::{PrimaryKeyArray, FIXED_POS_COLUMN_NUM};
+use crate::sst::parquet::format::{FIXED_POS_COLUMN_NUM, PrimaryKeyArray};
 
 /// An iterator to dedup sorted batches from an iterator based on the dedup strategy.
 pub struct FlatDedupIterator<I, S> {
@@ -671,7 +671,7 @@ mod tests {
     use api::v1::OpType;
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt64Array, UInt8Array,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use build_data::{format_timestamp, get_source_time};
 use cargo_manifest::Manifest;
-use shadow_rs::{BuildPattern, ShadowBuilder, CARGO_METADATA, CARGO_TREE};
+use shadow_rs::{BuildPattern, CARGO_METADATA, CARGO_TREE, ShadowBuilder};
 
 fn main() -> shadow_rs::SdResult<()> {
     println!(

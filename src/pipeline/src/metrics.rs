@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use lazy_static::lazy_static;
-use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
+use prometheus::{CounterVec, HistogramVec, register_counter_vec, register_histogram_vec};
 
 lazy_static! {
     pub static ref METRIC_PIPELINE_CREATE_HISTOGRAM: HistogramVec = register_histogram_vec!(

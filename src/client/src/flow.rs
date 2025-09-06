@@ -18,8 +18,8 @@ use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
 use snafu::ResultExt;
 
-use crate::error::{FlowServerSnafu, Result};
 use crate::Client;
+use crate::error::{FlowServerSnafu, Result};
 
 #[derive(Debug)]
 pub struct FlowRequester {

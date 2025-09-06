@@ -20,12 +20,12 @@ use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
-use tokio::sync::{oneshot, Barrier};
+use tokio::sync::{Barrier, oneshot};
 
 use crate::config::MitoConfig;
+use crate::engine::MitoEngine;
 use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
-use crate::engine::MitoEngine;
 use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
 use crate::sst::file::{FileId, FileMeta};

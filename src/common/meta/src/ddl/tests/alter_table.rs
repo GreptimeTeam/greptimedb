@@ -19,7 +19,7 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{region_request, RegionRequest};
+use api::v1::region::{RegionRequest, region_request};
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
     DropColumns, SemanticType, SetTableOptions,
@@ -58,7 +58,7 @@ use crate::peer::Peer;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 fn prepare_table_route(table_id: u32) -> TableRouteValue {
     TableRouteValue::physical(vec![

@@ -19,18 +19,18 @@ use clap::{Parser, Subcommand};
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
+use common_meta::key::TableMetadataManager;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_route::TableRouteKey;
-use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::store::RangeRequest;
 use futures::TryStreamExt;
 
+use crate::Tool;
 use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
 use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_fromatter};
-use crate::Tool;
 
 /// Getting metadata from metadata store.
 #[derive(Subcommand)]

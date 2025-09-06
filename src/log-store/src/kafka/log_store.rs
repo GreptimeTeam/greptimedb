@@ -38,12 +38,12 @@ use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProvi
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
 use crate::kafka::index::{
-    build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
+    GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE, build_region_wal_index_iterator,
 };
 use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
+    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, maybe_emit_entry, remaining_entries,
 };
 use crate::metrics;
 
@@ -348,9 +348,9 @@ impl LogStore for KafkaLogStore {
 
             if entry_id as i64 <= start_offset {
                 warn!(
-                "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
-                entry_id, start_offset, &provider.topic
-            );
+                    "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
+                    entry_id, start_offset, &provider.topic
+                );
 
                 entry_id = start_offset as u64;
             }
@@ -559,16 +559,16 @@ mod tests {
     use common_meta::datanode::TopicStatsReporter;
     use common_telemetry::info;
     use common_telemetry::tracing::warn;
-    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::config::kafka::DatanodeKafkaConfig;
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use dashmap::DashMap;
     use futures::TryStreamExt;
-    use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rand::prelude::SliceRandom;
     use rskafka::client::partition::OffsetAt;
+    use store_api::logstore::LogStore;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
-    use store_api::logstore::LogStore;
     use store_api::storage::RegionId;
 
     use super::build_entry;

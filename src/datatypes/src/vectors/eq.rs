@@ -164,9 +164,10 @@ mod tests {
 
     use super::*;
     use crate::vectors::{
-        list, DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
-        DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
-        Int8Vector, NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
+        DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
+        Int64Vector, NullVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+        list,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {

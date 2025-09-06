@@ -33,8 +33,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
-    FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, PATTERN_NAME, Processor, yaml_bool,
+    yaml_new_field, yaml_new_fields, yaml_string, yaml_strings,
 };
 
 lazy_static! {

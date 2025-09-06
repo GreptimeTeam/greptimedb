@@ -17,16 +17,16 @@ use std::sync::Arc;
 
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
+use crate::DatanodeId;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
+use crate::key::TableMetadataManagerRef;
 use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
-use crate::DatanodeId;
 
 pub mod alter_database;
 pub mod alter_logical_tables;
@@ -36,7 +36,7 @@ pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
-pub(crate) use create_table_template::{build_template_from_raw_table_info, CreateRequestBuilder};
+pub(crate) use create_table_template::{CreateRequestBuilder, build_template_from_raw_table_info};
 pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;

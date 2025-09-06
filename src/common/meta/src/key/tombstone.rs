@@ -19,8 +19,8 @@ use snafu::ensure;
 
 use crate::error::{self, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest};
 
 /// [TombstoneManager] provides the ability to:
@@ -257,8 +257,8 @@ mod tests {
 
     use crate::error::Error;
     use crate::key::tombstone::TombstoneManager;
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     #[derive(Debug, Clone)]
@@ -685,9 +685,10 @@ mod tests {
             .move_values(keys, dest_keys)
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("The length of keys(2) does not match the length of dest_keys(3)."),);
+        assert!(
+            err.to_string()
+                .contains("The length of keys(2) does not match the length of dest_keys(3)."),
+        );
 
         let moved_keys = tombstone_manager.move_values(vec![], vec![]).await.unwrap();
         assert_eq!(0, moved_keys);

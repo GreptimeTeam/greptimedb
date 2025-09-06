@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use greptime_proto::v1::value::ValueData::{U16Value, U8Value};
+use greptime_proto::v1::value::ValueData::{U8Value, U16Value};
 use greptime_proto::v1::{ColumnDataType, SemanticType};
 
 mod common;

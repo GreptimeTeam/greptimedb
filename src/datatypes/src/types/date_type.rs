@@ -98,8 +98,8 @@ impl LogicalPrimitiveType for DateType {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
-    use common_time::timezone::set_default_timezone;
     use common_time::Timestamp;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 

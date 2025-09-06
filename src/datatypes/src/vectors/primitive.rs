@@ -25,8 +25,8 @@ use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, LogicalPrimitiveType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type, WrapperType,
 };
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
@@ -554,9 +554,11 @@ mod tests {
 
         let input = Int64Vector::from_slice([7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();
-        assert!(builder
-            .extend_slice_of(&Int32Vector::from_slice([13]), 0, 1)
-            .is_err());
+        assert!(
+            builder
+                .extend_slice_of(&Int32Vector::from_slice([13]), 0, 1)
+                .is_err()
+        );
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(Int64Vector::from_slice([123, 8, 9]));

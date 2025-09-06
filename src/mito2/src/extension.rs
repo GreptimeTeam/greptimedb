@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use common_time::range::TimestampRange;
 use store_api::storage::{ScanRequest, SequenceNumber};
 
 use crate::error::Result;
+use crate::read::BoxedBatchStream;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
-use crate::read::BoxedBatchStream;
 use crate::region::MitoRegionRef;
 
 pub type InclusiveTimeRange = (Timestamp, Timestamp);
@@ -72,7 +72,7 @@ pub type BoxedExtensionRangeProvider = Box<dyn ExtensionRangeProvider>;
 /// The factory to create an [`ExtensionRangeProvider`], injecting some utilities.
 pub trait ExtensionRangeProviderFactory: Send + Sync {
     fn create_extension_range_provider(&self, region: MitoRegionRef)
-        -> BoxedExtensionRangeProvider;
+    -> BoxedExtensionRangeProvider;
 }
 
 pub type BoxedExtensionRangeProviderFactory = Box<dyn ExtensionRangeProviderFactory>;

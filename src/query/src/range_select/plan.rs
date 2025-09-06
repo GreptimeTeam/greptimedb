@@ -22,13 +22,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use arrow::compute::{self, cast_with_options, take_arrays, CastOptions};
+use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
 use datafusion::execution::TaskContext;
+use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -37,14 +37,14 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
-use datafusion_expr::utils::{exprlist_to_fields, COUNT_STAR_EXPANSION};
+use datafusion_expr::utils::{COUNT_STAR_EXPANSION, exprlist_to_fields};
 use datafusion_expr::{
-    lit, Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore,
+    Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore, lit,
 };
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::{
-    create_physical_expr, create_physical_sort_expr, Distribution, EquivalenceProperties,
-    Partitioning, PhysicalExpr, PhysicalSortExpr,
+    Distribution, EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+    create_physical_expr, create_physical_sort_expr,
 };
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
@@ -52,7 +52,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow::row::{OwnedRow, RowConverter, SortField};
-use futures::{ready, Stream};
+use futures::{Stream, ready};
 use futures_util::StreamExt;
 use snafu::ensure;
 
@@ -1175,7 +1175,9 @@ impl Stream for RangeSelectStream {
                         Some(Ok(batch)) => {
                             if let Err(e) = self.update_range_context(batch) {
                                 common_telemetry::debug!(
-                                    "RangeSelectStream cannot update range context, schema: {:?}, err: {:?}", self.schema, e
+                                    "RangeSelectStream cannot update range context, schema: {:?}, err: {:?}",
+                                    self.schema,
+                                    e
                                 );
                                 return Poll::Ready(Some(Err(e)));
                             }
@@ -1247,8 +1249,8 @@ mod test {
     use datafusion::functions_aggregate::min_max;
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::prelude::SessionContext;
-    use datafusion_physical_expr::expressions::Column;
     use datafusion_physical_expr::PhysicalSortExpr;
+    use datafusion_physical_expr::expressions::Column;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow_array::StringArray;
 
@@ -1712,13 +1714,13 @@ mod test {
             Fill::try_from_str("WHAT", &DataType::UInt8)
                 .unwrap_err()
                 .to_string(),
-                "Error during planning: WHAT is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string 'WHAT' to value of UInt8 type }"
+            "Error during planning: WHAT is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string 'WHAT' to value of UInt8 type }"
         );
         assert_eq!(
             Fill::try_from_str("8.0", &DataType::UInt8)
                 .unwrap_err()
                 .to_string(),
-                "Error during planning: 8.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '8.0' to value of UInt8 type }"
+            "Error during planning: 8.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '8.0' to value of UInt8 type }"
         );
         assert!(
             Fill::try_from_str("8", &DataType::UInt8).unwrap()

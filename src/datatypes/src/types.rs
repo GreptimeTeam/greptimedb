@@ -44,13 +44,13 @@ pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
 pub use json_type::{
-    json_type_value_to_string, parse_string_to_json_type_value, JsonType, JSON_TYPE_NAME,
+    JSON_TYPE_NAME, JsonType, json_type_value_to_string, parse_string_to_json_type_value,
 };
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    OrdPrimitive, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, LogicalPrimitiveType,
+    OrdPrimitive, UInt8Type, UInt16Type, UInt32Type, UInt64Type, WrapperType,
 };
 pub use string_type::StringType;
 pub use struct_type::{StructField, StructType};
@@ -61,4 +61,4 @@ pub use timestamp_type::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType,
 };
-pub use vector_type::{parse_string_to_vector_type_value, vector_type_value_to_string, VectorType};
+pub use vector_type::{VectorType, parse_string_to_vector_type_value, vector_type_value_to_string};

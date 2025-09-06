@@ -14,12 +14,12 @@
 
 //! parse expr like "ts <= now() - interval '5 m'"
 
+use nom::IResult;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case};
 use nom::character::complete::{alphanumeric1, digit0, multispace0};
 use nom::combinator::peek;
 use nom::sequence::tuple;
-use nom::IResult;
 
 use crate::repr;
 
@@ -137,7 +137,7 @@ fn infix_binding_power(op: &str) -> IResult<&str, (u8, u8)> {
             return Err(nom::Err::Error(nom::error::Error::new(
                 op,
                 nom::error::ErrorKind::Fail,
-            )))
+            )));
         }
     };
     Ok((op, ret))

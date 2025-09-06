@@ -16,8 +16,8 @@ mod finalize_segment;
 mod intermediate_codec;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use finalize_segment::FinalizedBloomFilterStorage;
 use futures::{AsyncWrite, AsyncWriteExt, StreamExt};
@@ -25,10 +25,10 @@ use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use prost::Message;
 use snafu::ResultExt;
 
-use crate::bloom_filter::error::{IoSnafu, Result};
-use crate::bloom_filter::SEED;
-use crate::external_provider::ExternalTempFileProvider;
 use crate::Bytes;
+use crate::bloom_filter::SEED;
+use crate::bloom_filter::error::{IoSnafu, Result};
+use crate::external_provider::ExternalTempFileProvider;
 
 /// `BloomFilterCreator` is responsible for creating and managing bloom filters
 /// for a set of elements. It divides the rows into segments and creates

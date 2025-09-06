@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::string::ToString;
 
 use api::prom_store::remote::Sample;
@@ -207,8 +207,8 @@ impl TableBuilder {
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
-    use api::v1::value::ValueData;
     use api::v1::Value;
+    use api::v1::value::ValueData;
     use arrow::datatypes::ToByteSlice;
     use bytes::Bytes;
     use prost::DecodeError;

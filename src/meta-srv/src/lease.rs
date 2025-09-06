@@ -26,7 +26,7 @@ use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::rpc::store::RangeRequest;
-use common_meta::{util, DatanodeId, FlownodeId};
+use common_meta::{DatanodeId, FlownodeId, util};
 use common_time::util as time_util;
 use common_workload::DatanodeWorkloadType;
 use snafu::ResultExt;
@@ -325,8 +325,8 @@ impl PeerLookupService for MetaPeerLookupService {
 mod tests {
     use std::time::Duration;
 
-    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use api::v1::meta::DatanodeWorkloads;
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
     use common_meta::kv_backend::ResettableKvBackendRef;
@@ -337,8 +337,8 @@ mod tests {
 
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::lease::{
-        alive_datanodes, is_datanode_accept_ingest_workload, lookup_frontends, ClusterRole,
-        MetaPeerLookupService,
+        ClusterRole, MetaPeerLookupService, alive_datanodes, is_datanode_accept_ingest_workload,
+        lookup_frontends,
     };
     use crate::test_util::create_meta_peer_client;
 

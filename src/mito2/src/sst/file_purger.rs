@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_telemetry::{error, info};
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
@@ -219,8 +219,8 @@ mod tests {
     use std::num::NonZeroU64;
 
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
     use smallvec::SmallVec;
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;

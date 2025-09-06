@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
 use crate::key_values::KeyValue;
@@ -140,10 +140,10 @@ impl SparsePrimaryKeyCodec {
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
         // if the `columns` is not specified, all unknown columns is primary key(label field).
-        if let Some(columns) = &self.inner.columns {
-            if !columns.contains(&column_id) {
-                return None;
-            }
+        if let Some(columns) = &self.inner.columns
+            && !columns.contains(&column_id)
+        {
+            return None;
         }
 
         match column_id {
@@ -385,8 +385,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, Value};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};

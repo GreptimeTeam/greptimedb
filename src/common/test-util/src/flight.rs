@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch;
 
 /// Encodes record batch to a Schema message and a RecordBatch message.

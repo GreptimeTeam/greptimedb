@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
-use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 use index::Bytes;
+use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;

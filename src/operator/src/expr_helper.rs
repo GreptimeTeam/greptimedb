@@ -22,20 +22,21 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
-    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
-    SetDefaults, SetFulltext, SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
+    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
+    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetDefaults, SetFulltext,
+    SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
     SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions, set_index,
+    unset_index,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
-    ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SkippingIndexType, COMMENT_KEY,
+    COMMENT_KEY, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SkippingIndexType,
 };
 use file_engine::FileOptions;
 use query::sql::{
@@ -44,7 +45,7 @@ use query::sql::{
 };
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{ColumnOption, ObjectName, ObjectNamePartExt};
 use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
@@ -56,7 +57,7 @@ use sql::statements::{
     column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
 };
 use sql::util::extract_tables_from_query;
-use table::requests::{TableOptions, FILE_TABLE_META_KEY};
+use table::requests::{FILE_TABLE_META_KEY, TableOptions};
 use table::table_reference::TableReference;
 #[cfg(feature = "enterprise")]
 pub use trigger::to_create_trigger_task_expr;
@@ -968,10 +969,11 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let res = to_create_flow_task_expr(create_flow, &QueryContext::arc());
 
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid flow name: abc.`task_2`"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Invalid flow name: abc.`task_2`")
+        );
     }
 
     #[test]
@@ -1002,7 +1004,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             // duplicate primary key
             "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, some_column STRING, PRIMARY KEY (some_column, host, some_column));",
             // time index is primary key
-            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));"
+            "CREATE TABLE monitor (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY (host, ts));",
         ];
 
         for sql in cases {

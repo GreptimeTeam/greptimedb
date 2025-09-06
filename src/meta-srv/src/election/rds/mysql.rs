@@ -12,24 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlx::mysql::{MySqlArguments, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::query::Query;
 use sqlx::{MySql, MySqlPool, MySqlTransaction, Row};
-use tokio::sync::{broadcast, Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tokio::time::MissedTickBehavior;
 
-use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
+use crate::election::rds::{LEASE_SEP, Lease, RdsLeaderKey, parse_value_and_expire_time};
 use crate::election::{
-    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
+    Election, LeaderChangeMessage, listen_leader_change, send_leader_change_and_set_flags,
 };
 use crate::error::{
     AcquireMySqlClientSnafu, DecodeSqlValueSnafu, DeserializeFromJsonSnafu,

@@ -23,7 +23,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -38,7 +38,7 @@ use crate::error::{
     InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
-use crate::parser::{ParserContext, FLOW};
+use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
@@ -49,7 +49,7 @@ use crate::statements::create::{
 };
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
-use crate::statements::{sql_data_type_to_concrete_data_type, OptionMap};
+use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 use crate::util::{location_to_index, parse_option_string};
 
 pub const ENGINE: &str = "ENGINE";
@@ -213,13 +213,14 @@ impl<'a> ParserContext<'a> {
                 }
             );
         }
-        if let Some(append_mode) = options.get("append_mode") {
-            if append_mode == "true" && options.contains_key("merge_mode") {
-                return InvalidDatabaseOptionSnafu {
-                    key: "merge_mode".to_string(),
-                }
-                .fail();
+        if let Some(append_mode) = options.get("append_mode")
+            && append_mode == "true"
+            && options.contains_key("merge_mode")
+        {
+            return InvalidDatabaseOptionSnafu {
+                key: "merge_mode".to_string(),
             }
+            .fail();
         }
 
         Ok(Statement::CreateDatabase(CreateDatabase {
@@ -320,7 +321,7 @@ impl<'a> ParserContext<'a> {
                     return self
                         .parser
                         .expected("string", unexpected)
-                        .context(SyntaxSnafu)
+                        .context(SyntaxSnafu);
                 }
             }
         } else {
@@ -554,8 +555,8 @@ impl<'a> ParserContext<'a> {
 
         let mut time_index_opt_idx = None;
         for (index, opt) in column.options().iter().enumerate() {
-            if let ColumnOption::DialectSpecific(tokens) = &opt.option {
-                if matches!(
+            if let ColumnOption::DialectSpecific(tokens) = &opt.option
+                && matches!(
                     &tokens[..],
                     [
                         Token::Word(Word {
@@ -567,21 +568,21 @@ impl<'a> ParserContext<'a> {
                             ..
                         })
                     ]
-                ) {
-                    ensure!(
-                        time_index_opt_idx.is_none(),
-                        InvalidColumnOptionSnafu {
-                            name: column.name().to_string(),
-                            msg: "duplicated time index",
-                        }
-                    );
-                    time_index_opt_idx = Some(index);
+                )
+            {
+                ensure!(
+                    time_index_opt_idx.is_none(),
+                    InvalidColumnOptionSnafu {
+                        name: column.name().to_string(),
+                        msg: "duplicated time index",
+                    }
+                );
+                time_index_opt_idx = Some(index);
 
-                    let constraint = TableConstraint::TimeIndex {
-                        column: Ident::new(column.name().value.clone()),
-                    };
-                    constraints.push(constraint);
-                }
+                let constraint = TableConstraint::TimeIndex {
+                    column: Ident::new(column.name().value.clone()),
+                };
+                constraints.push(constraint);
             }
         }
 
@@ -1310,10 +1311,12 @@ mod tests {
         let sql = "create database";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unexpected token while parsing SQL statement"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unexpected token while parsing SQL statement")
+        );
 
         let sql = "create database prometheus";
         let stmts =
@@ -1735,10 +1738,12 @@ PARTITION ON COLUMNS(x) ()
 ENGINE=mito";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Partition column \"x\" not defined"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Partition column \"x\" not defined")
+        );
     }
 
     #[test]
@@ -1990,10 +1995,12 @@ ENGINE=mito";
             ParseOptions::default(),
         );
 
-        assert!(result1
-            .unwrap_err()
-            .to_string()
-            .contains("time index column data type should be timestamp"));
+        assert!(
+            result1
+                .unwrap_err()
+                .to_string()
+                .contains("time index column data type should be timestamp")
+        );
     }
 
     #[test]
@@ -2146,10 +2153,12 @@ PARTITION COLUMNS(c, a) (
 ENGINE=mito";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result
-            .unwrap_err()
-            .output_msg()
-            .contains("sql parser error: Expected: ON, found: COLUMNS"));
+        assert!(
+            result
+                .unwrap_err()
+                .output_msg()
+                .contains("sql parser error: Expected: ON, found: COLUMNS")
+        );
     }
 
     #[test]
@@ -2395,12 +2404,13 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result1[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg" {
-                    assert!(col
-                        .extensions
-                        .fulltext_index_options
-                        .as_ref()
-                        .unwrap()
-                        .is_empty());
+                    assert!(
+                        col.extensions
+                            .fulltext_index_options
+                            .as_ref()
+                            .unwrap()
+                            .is_empty()
+                    );
                 }
             });
         } else {
@@ -2474,10 +2484,12 @@ CREATE TABLE log (
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("FULLTEXT index only supports string type"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("FULLTEXT index only supports string type")
+        );
     }
 
     #[test]
@@ -2490,10 +2502,12 @@ CREATE TABLE log (
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("duplicated FULLTEXT INDEX option"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicated FULLTEXT INDEX option")
+        );
     }
 
     #[test]
@@ -2506,10 +2520,12 @@ CREATE TABLE log (
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid FULLTEXT INDEX option"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid FULLTEXT INDEX option")
+        );
     }
 
     #[test]
@@ -2526,12 +2542,13 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg" {
-                    assert!(!col
-                        .extensions
-                        .skipping_index_options
-                        .as_ref()
-                        .unwrap()
-                        .is_empty());
+                    assert!(
+                        !col.extensions
+                            .skipping_index_options
+                            .as_ref()
+                            .unwrap()
+                            .is_empty()
+                    );
                 }
             });
         } else {
@@ -2550,12 +2567,13 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg" {
-                    assert!(col
-                        .extensions
-                        .skipping_index_options
-                        .as_ref()
-                        .unwrap()
-                        .is_empty());
+                    assert!(
+                        col.extensions
+                            .skipping_index_options
+                            .as_ref()
+                            .unwrap()
+                            .is_empty()
+                    );
                 }
             });
         } else {
@@ -2748,10 +2766,12 @@ CREATE TABLE log (
                 &mut extensions,
             );
             assert!(result.is_err());
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("FULLTEXT index only supports string type"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("FULLTEXT index only supports string type")
+            );
         }
 
         // Test fulltext index with invalid option (won't fail, the parser doesn't check the option's content)
@@ -2810,10 +2830,12 @@ CREATE TABLE log (
                 &mut extensions,
             );
             assert!(result.is_err());
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("INVERTED index doesn't support options"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("INVERTED index doesn't support options")
+            );
         }
 
         // Test multiple indices

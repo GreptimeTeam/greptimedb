@@ -14,7 +14,7 @@
 
 mod error;
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::io::BufReader;
 use std::path::PathBuf;
 
@@ -23,8 +23,8 @@ use error::{
     OpenTempFileSnafu, ProfilingNotEnabledSnafu, ReadOptProfSnafu, ReadProfActiveSnafu,
 };
 use jemalloc_pprof_mappings::MAPPINGS;
-use jemalloc_pprof_utils::{parse_jeheap, FlamegraphOptions, StackProfile};
-use snafu::{ensure, ResultExt};
+use jemalloc_pprof_utils::{FlamegraphOptions, StackProfile, parse_jeheap};
+use snafu::{ResultExt, ensure};
 use tokio::io::AsyncReadExt;
 
 use crate::error::{FlamegraphSnafu, ParseJeHeapSnafu, Result};

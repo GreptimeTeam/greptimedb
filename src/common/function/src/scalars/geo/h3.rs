@@ -26,7 +26,7 @@ use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{
     BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
-    MutableVector, StringVectorBuilder, UInt64VectorBuilder, UInt8VectorBuilder, VectorRef,
+    MutableVector, StringVectorBuilder, UInt8VectorBuilder, UInt64VectorBuilder, VectorRef,
 };
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
@@ -967,11 +967,11 @@ impl Function for H3CellContains {
                     // get cell resolution, and find cell_this's parent at
                     //  this solution, test if cell_that equals the parent
                     let resolution = cell_that.resolution();
-                    if let Some(cell_this_parent) = cell_this.parent(resolution) {
-                        if cell_this_parent == *cell_that {
-                            result = Some(true);
-                            break;
-                        }
+                    if let Some(cell_this_parent) = cell_this.parent(resolution)
+                        && cell_this_parent == *cell_that
+                    {
+                        result = Some(true);
+                        break;
                     }
                 }
             }

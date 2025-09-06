@@ -35,12 +35,12 @@ use store_api::region_request::{
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::engine::MitoEngine;
+use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::error;
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
-    TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
+    rows_schema,
 };
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
@@ -702,14 +702,16 @@ async fn test_alter_column_set_inverted_index() {
     alter_job.await.unwrap();
 
     let check_inverted_index_set = |engine: &MitoEngine| {
-        assert!(engine
-            .get_region(region_id)
-            .unwrap()
-            .metadata()
-            .column_by_name("tag_0")
-            .unwrap()
-            .column_schema
-            .is_inverted_indexed())
+        assert!(
+            engine
+                .get_region(region_id)
+                .unwrap()
+                .metadata()
+                .column_by_name("tag_0")
+                .unwrap()
+                .column_schema
+                .is_inverted_indexed()
+        )
     };
     check_inverted_index_set(&engine);
     check_region_version(&engine, region_id, 1, 3, 1, 3);

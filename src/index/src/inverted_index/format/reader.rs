@@ -22,9 +22,9 @@ use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::ResultExt;
 
 use crate::bitmap::{Bitmap, BitmapType};
+use crate::inverted_index::FstMap;
 use crate::inverted_index::error::{DecodeBitmapSnafu, DecodeFstSnafu, Result};
 pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
-use crate::inverted_index::FstMap;
 
 mod blob;
 mod footer;

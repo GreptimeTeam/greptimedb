@@ -14,22 +14,22 @@
 
 use std::assert_matches::assert_matches;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::DatanodeId;
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::DatanodeId;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManagerRef, Status};
@@ -56,7 +56,7 @@ use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandida
 use crate::procedure::region_migration::{
     Context, ContextFactory, DefaultContextFactory, PersistentContext, State, VolatileContext,
 };
-use crate::procedure::test_util::{send_mock_reply, MailboxContext};
+use crate::procedure::test_util::{MailboxContext, send_mock_reply};
 use crate::service::mailbox::Channel;
 
 /// `TestingEnv` provides components during the tests.
@@ -331,10 +331,12 @@ impl ProcedureMigrationTestSuite {
             region_route.leader_peer.as_ref().unwrap().id,
             expected_leader_id
         );
-        assert!(!region_route
-            .follower_peers
-            .iter()
-            .any(|route| route.id == removed_follower_id))
+        assert!(
+            !region_route
+                .follower_peers
+                .iter()
+                .any(|route| route.id == removed_follower_id)
+        )
     }
 }
 

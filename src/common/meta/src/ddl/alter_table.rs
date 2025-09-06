@@ -19,8 +19,8 @@ mod region_request;
 use std::vec;
 
 use api::region::RegionResponse;
-use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
+use api::v1::alter_table_expr::Kind;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
@@ -30,19 +30,19 @@ use common_procedure::{
 };
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
+use crate::ddl::DdlContext;
 use crate::ddl::alter_table::executor::AlterTableExecutor;
 use crate::ddl::utils::{
-    extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
-    sync_follower_regions, MultipleResults,
+    MultipleResults, extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
+    sync_follower_regions,
 };
-use crate::ddl::DdlContext;
 use crate::error::{AbortProcedureSnafu, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -50,7 +50,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leaders, region_distribution, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -232,7 +232,9 @@ impl AlterTableProcedure {
         {
             self.data.column_metadatas = column_metadatas;
         } else {
-            warn!("altering table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
+            warn!(
+                "altering table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged"
+            );
         }
         self.data.state = AlterTableState::UpdateMetadata;
         Ok(())
@@ -291,7 +293,9 @@ impl AlterTableProcedure {
             )
             .await?;
 
-        info!("Updated table metadata for table {table_ref}, table_id: {table_id}, kind: {alter_kind:?}");
+        info!(
+            "Updated table metadata for table {table_ref}, table_id: {table_id}, kind: {alter_kind:?}"
+        );
         self.data.state = AlterTableState::InvalidateTableCache;
         Ok(Status::executing(true))
     }

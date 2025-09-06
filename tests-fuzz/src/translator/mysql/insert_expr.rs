@@ -74,8 +74,8 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     use super::*;
-    use crate::generator::insert_expr::InsertExprGeneratorBuilder;
     use crate::generator::Generator;
+    use crate::generator::insert_expr::InsertExprGeneratorBuilder;
     use crate::test_utils;
     use crate::translator::DslTranslator;
 

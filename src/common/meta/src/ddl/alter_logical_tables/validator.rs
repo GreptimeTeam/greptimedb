@@ -14,9 +14,9 @@
 
 use std::collections::HashSet;
 
-use api::v1::alter_table_expr::Kind;
 use api::v1::AlterTableExpr;
-use snafu::{ensure, OptionExt};
+use api::v1::alter_table_expr::Kind;
+use snafu::{OptionExt, ensure};
 use store_api::storage::TableId;
 use table::table_reference::TableReference;
 

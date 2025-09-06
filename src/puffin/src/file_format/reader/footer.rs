@@ -15,13 +15,13 @@
 use std::io::Cursor;
 
 use common_base::range_read::RangeReader;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{
     DeserializeJsonSnafu, InvalidPuffinFooterSnafu, Lz4DecompressionSnafu, MagicNotMatchedSnafu,
     ReadSnafu, Result, UnexpectedFooterPayloadSizeSnafu,
 };
-use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
+use crate::file_format::{FLAGS_SIZE, Flags, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
 use crate::file_metadata::FileMetadata;
 
 /// The default prefetch size for the footer reader.

@@ -14,7 +14,7 @@
 
 use common_telemetry::{debug, error, info};
 use common_wal::config::kafka::common::{
-    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_BACKOFF_CONFIG,
+    DEFAULT_BACKOFF_CONFIG, KafkaConnectionConfig, KafkaTopicConfig,
 };
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +22,7 @@ use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{debug, error, info};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::entry::{Entry, Id as EntryId, NaiveEntry};
 use store_api::logstore::provider::{Provider, RaftEngineProvider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
@@ -528,7 +528,7 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use futures_util::StreamExt;
     use store_api::logstore::{LogStore, SendableEntryStream};
 
@@ -627,10 +627,12 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(logstore
-                .append(EntryImpl::create(1, 1, "1".as_bytes().to_vec()).into())
-                .await
-                .is_ok());
+            assert!(
+                logstore
+                    .append(EntryImpl::create(1, 1, "1".as_bytes().to_vec()).into())
+                    .await
+                    .is_ok()
+            );
             let entries = logstore
                 .read(&Provider::raft_engine_provider(1), 1, None)
                 .await

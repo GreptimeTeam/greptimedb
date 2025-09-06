@@ -23,7 +23,7 @@ use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
 use processor::{Processor, Processors};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use transform::Transforms;
 use vrl::core::Value as VrlValue;
 use yaml_rust::{Yaml, YamlLoader};

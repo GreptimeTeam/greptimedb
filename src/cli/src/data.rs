@@ -18,9 +18,9 @@ mod import;
 use clap::Subcommand;
 use common_error::ext::BoxedError;
 
+use crate::Tool;
 use crate::data::export::ExportCommand;
 use crate::data::import::ImportCommand;
-use crate::Tool;
 
 /// Command for data operations including exporting data from and importing data into GreptimeDB.
 #[derive(Subcommand)]

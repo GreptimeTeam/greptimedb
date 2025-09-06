@@ -18,9 +18,9 @@ use common_error::define_from_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{location, Location, Snafu};
-use tonic::metadata::errors::InvalidMetadataValue;
+use snafu::{Location, Snafu, location};
 use tonic::Code;
+use tonic::metadata::errors::InvalidMetadataValue;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]

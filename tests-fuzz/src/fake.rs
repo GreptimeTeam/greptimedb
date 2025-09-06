@@ -16,9 +16,9 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use lazy_static::lazy_static;
+use rand::Rng;
 use rand::prelude::IndexedRandom;
 use rand::seq::{IteratorRandom, SliceRandom};
-use rand::Rng;
 
 use crate::generator::Random;
 use crate::impl_random;

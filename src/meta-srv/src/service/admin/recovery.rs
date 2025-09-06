@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use serde::{Deserialize, Serialize};
 

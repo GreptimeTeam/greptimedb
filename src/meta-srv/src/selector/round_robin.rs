@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use common_meta::peer::Peer;

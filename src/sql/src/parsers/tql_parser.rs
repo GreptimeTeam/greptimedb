@@ -325,7 +325,10 @@ mod tests {
                 assert_eq!(eval.end, "10");
                 assert_eq!(eval.step, "1s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         };
@@ -352,7 +355,10 @@ mod tests {
                 assert_eq!(eval.end, "10");
                 assert_eq!(eval.step, "1s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         };
@@ -366,7 +372,10 @@ mod tests {
                 assert_eq!(eval.end, "15");
                 assert_eq!(eval.step, "1s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         };
@@ -382,7 +391,10 @@ mod tests {
                 assert_eq!(eval.end, "10");
                 assert_eq!(eval.step, "1s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -394,7 +406,10 @@ mod tests {
                 assert_eq!(eval.end, "1200");
                 assert_eq!(eval.step, "1m");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -414,7 +429,10 @@ mod tests {
                 assert_eq!(eval.end, "1676887659");
                 assert_eq!(eval.step, "1m");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -428,7 +446,10 @@ mod tests {
                 assert_eq!(eval.end, "1676887659.5");
                 assert_eq!(eval.step, "30.3");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -444,7 +465,10 @@ mod tests {
                 assert_eq!(eval.end, "2015-07-01T20:11:00.781Z");
                 assert_eq!(eval.step, "30s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -459,7 +483,10 @@ mod tests {
                 assert_eq!(eval.end, "1676887659");
                 assert_eq!(eval.step, "1m".to_string());
                 assert_eq!(eval.lookback, Some("5m".to_string()));
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -471,7 +498,10 @@ mod tests {
                 assert_eq!(eval.end, "1200");
                 assert_eq!(eval.step, "1m");
                 assert_eq!(eval.lookback, Some("7m".to_string()));
-                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
             }
             _ => unreachable!(),
         }
@@ -479,7 +509,10 @@ mod tests {
         let sql = "TQL EXPLAIN (20, 100, 10, '3m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -492,7 +525,10 @@ mod tests {
         let sql = "TQL EXPLAIN VERBOSE (20, 100, 10, '3m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -509,7 +545,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659");
                 assert_eq!(analyze.step, "1m");
                 assert_eq!(analyze.lookback, Some("9m".to_string()));
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(!analyze.is_verbose);
             }
             _ => unreachable!(),
@@ -522,7 +561,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659");
                 assert_eq!(analyze.step, "1m");
                 assert_eq!(analyze.lookback, Some("9m".to_string()));
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(analyze.is_verbose);
             }
             _ => unreachable!(),
@@ -534,7 +576,10 @@ mod tests {
         let sql = "TQL EXPLAIN http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
@@ -548,7 +593,10 @@ mod tests {
         let sql = "TQL EXPLAIN VERBOSE http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
@@ -562,7 +610,10 @@ mod tests {
         let sql = "TQL EXPLAIN FORMAT JSON http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
@@ -576,7 +627,10 @@ mod tests {
         let sql = "TQL EXPLAIN VERBOSE FORMAT JSON http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "0");
                 assert_eq!(explain.end, "0");
                 assert_eq!(explain.step, "5m");
@@ -590,7 +644,10 @@ mod tests {
         let sql = "TQL EXPLAIN FORMAT TEXT (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -604,7 +661,10 @@ mod tests {
         let sql = "TQL EXPLAIN (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -618,7 +678,10 @@ mod tests {
         let sql = "TQL EXPLAIN ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "300");
                 assert_eq!(explain.end, "1200");
                 assert_eq!(explain.step, "10");
@@ -632,7 +695,10 @@ mod tests {
         let sql = "TQL EXPLAIN VERBOSE (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -646,7 +712,10 @@ mod tests {
         let sql = "TQL EXPLAIN verbose (20,100,10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "20");
                 assert_eq!(explain.end, "100");
                 assert_eq!(explain.step, "10");
@@ -660,7 +729,10 @@ mod tests {
         let sql = "TQL EXPLAIN VERBOSE ('1970-01-01T00:05:00'::timestamp, '1970-01-01T00:10:00'::timestamp + '10 minutes'::interval, 10) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Explain(explain)) => {
-                assert_eq!(explain.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    explain.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert_eq!(explain.start, "300");
                 assert_eq!(explain.end, "1200");
                 assert_eq!(explain.step, "10");
@@ -681,7 +753,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(!analyze.is_verbose);
                 assert_eq!(analyze.format, None);
             }
@@ -695,7 +770,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(!analyze.is_verbose);
                 assert_eq!(analyze.format, Some(AnalyzeFormat::JSON));
             }
@@ -709,7 +787,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(analyze.is_verbose);
                 assert_eq!(analyze.format, Some(AnalyzeFormat::JSON));
             }
@@ -723,7 +804,10 @@ mod tests {
                 assert_eq!(analyze.end, "1200");
                 assert_eq!(analyze.step, "10");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(!analyze.is_verbose);
                 assert_eq!(analyze.format, None);
             }
@@ -737,7 +821,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(analyze.is_verbose);
                 assert_eq!(analyze.format, None);
             }
@@ -751,7 +838,10 @@ mod tests {
                 assert_eq!(analyze.end, "1676887659.5");
                 assert_eq!(analyze.step, "30.3");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(analyze.is_verbose);
                 assert_eq!(analyze.format, None);
             }
@@ -765,7 +855,10 @@ mod tests {
                 assert_eq!(analyze.end, "1200");
                 assert_eq!(analyze.step, "10");
                 assert_eq!(analyze.lookback, None);
-                assert_eq!(analyze.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+                assert_eq!(
+                    analyze.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
                 assert!(analyze.is_verbose);
                 assert_eq!(analyze.format, None);
             }
@@ -874,7 +967,10 @@ mod tests {
                 assert_eq!(eval.end, "30");
                 assert_eq!(eval.step, "10s");
                 assert_eq!(eval.lookback, None);
-                assert_eq!(eval.query, "(sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100");
+                assert_eq!(
+                    eval.query,
+                    "(sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100"
+                );
             }
             _ => unreachable!(),
         }
@@ -901,17 +997,21 @@ mod tests {
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
-        assert!(result
-            .output_msg()
-            .contains("Failed to extract a timestamp value"));
+        assert!(
+            result
+                .output_msg()
+                .contains("Failed to extract a timestamp value")
+        );
 
         // missing end
         let sql = "TQL EVAL (1676887657, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
-        assert!(result
-            .output_msg()
-            .contains("Failed to extract a timestamp value"));
+        assert!(
+            result
+                .output_msg()
+                .contains("Failed to extract a timestamp value")
+        );
 
         // empty TQL query
         let sql = "TQL EVAL (0, 30, '10s')";

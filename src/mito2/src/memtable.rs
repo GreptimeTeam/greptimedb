@@ -35,9 +35,9 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
+use crate::read::Batch;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
 
@@ -260,15 +260,13 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
-        if let Some(write_buffer_manager) = &self.write_buffer_manager {
-            if self
+        if let Some(write_buffer_manager) = &self.write_buffer_manager
+            && self
                 .is_done_allocating
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-            {
-                write_buffer_manager
-                    .schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
-            }
+        {
+            write_buffer_manager.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
         }
     }
 

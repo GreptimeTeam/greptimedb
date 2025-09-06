@@ -13,19 +13,19 @@
 // limitations under the License.
 
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
-use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{Error, Result, WriteGroupSnafu};
-use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::KeyValues;
+use crate::memtable::bulk::part::BulkPart;
 use crate::metrics;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;

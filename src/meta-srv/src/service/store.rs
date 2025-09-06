@@ -15,14 +15,14 @@
 pub mod cached_kv;
 
 use api::v1::meta::{
-    store_server, BatchDeleteRequest as PbBatchDeleteRequest,
-    BatchDeleteResponse as PbBatchDeleteResponse, BatchGetRequest as PbBatchGetRequest,
-    BatchGetResponse as PbBatchGetResponse, BatchPutRequest as PbBatchPutRequest,
-    BatchPutResponse as PbBatchPutResponse, CompareAndPutRequest as PbCompareAndPutRequest,
+    BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
+    BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
+    CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
     DeleteRangeResponse as PbDeleteRangeResponse, PutRequest as PbPutRequest,
     PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
-    ResponseHeader,
+    ResponseHeader, store_server,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
@@ -189,8 +189,8 @@ mod tests {
     use common_telemetry::tracing_context::W3cTrace;
     use tonic::IntoRequest;
 
-    use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::Metasrv;
+    use crate::metasrv::builder::MetasrvBuilder;
 
     async fn new_metasrv() -> Metasrv {
         MetasrvBuilder::new()

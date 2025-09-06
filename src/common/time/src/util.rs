@@ -17,8 +17,8 @@ use std::str::FromStr;
 use chrono::{LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 
-use crate::timezone::get_timezone;
 use crate::Timezone;
+use crate::timezone::get_timezone;
 
 pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
     match get_timezone(None) {
@@ -76,11 +76,7 @@ pub fn yesterday_rfc3339() -> String {
 pub(crate) fn div_ceil(this: i64, rhs: i64) -> i64 {
     let d = this / rhs;
     let r = this % rhs;
-    if r > 0 && rhs > 0 {
-        d + 1
-    } else {
-        d
-    }
+    if r > 0 && rhs > 0 { d + 1 } else { d }
 }
 
 /// Formats nanoseconds into human-readable time with dynamic unit selection.

@@ -18,16 +18,16 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use api::v1::region::RegionRequestHeader;
 use api::v1::ExplainOptions;
+use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_telemetry::warn;
-use common_time::timezone::parse_timezone;
 use common_time::Timezone;
+use common_time::timezone::parse_timezone;
 use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
@@ -662,8 +662,8 @@ mod test {
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
-    use crate::context::Channel;
     use crate::Session;
+    use crate::context::Channel;
 
     #[test]
     fn test_session() {

@@ -19,12 +19,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use catalog::process_manager::ProcessManagerRef;
-use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use opensrv_mysql::{
-    plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
+    AsyncMysqlIntermediary, IntermediaryOptions, plain_run_with_options, secure_run_with_options,
 };
 use snafu::ensure;
 use tokio;
@@ -141,7 +141,7 @@ impl MysqlServer {
         io_runtime: Runtime,
         stream: AbortableStream,
         process_manager: Option<ProcessManagerRef>,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + use<> {
         let spawn_ref = self.spawn_ref.clone();
         let spawn_config = self.spawn_config.clone();
 

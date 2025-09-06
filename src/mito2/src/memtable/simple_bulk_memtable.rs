@@ -38,9 +38,9 @@ use crate::memtable::{
     MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
+use crate::read::Batch;
 use crate::read::dedup::LastNonNullIter;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Batch;
 use crate::region::options::MergeMode;
 use crate::{error, metrics};
 

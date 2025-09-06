@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::options::GlobalOptions;
-use crate::{error, App, Result};
+use crate::{App, Result, error};
 pub const APP_NAME: &str = "greptime-cli";
 use async_trait::async_trait;
 
@@ -109,7 +109,7 @@ mod tests {
 
     use crate::error::Result as CmdResult;
     use crate::options::GlobalOptions;
-    use crate::{cli, standalone, App};
+    use crate::{App, cli, standalone};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {

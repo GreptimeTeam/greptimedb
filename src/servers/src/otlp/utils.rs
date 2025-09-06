@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use api::v1::value::ValueData;
 use itertools::Itertools;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
-use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 
 pub fn bytes_to_hex_string(bs: &[u8]) -> String {
     bs.iter().map(|b| format!("{:02x}", b)).join("")

@@ -15,12 +15,12 @@
 use api::v1::value::ValueData;
 use api::v1::{Rows, Value};
 use common_telemetry::tracing::info;
+use greptime_proto::v1::Value as GreptimeValue;
 use greptime_proto::v1::value::ValueData::{
     BinaryValue, BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue,
-    U32Value, U64Value, U8Value,
+    U8Value, U32Value, U64Value,
 };
-use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{parse, setup_pipeline, Content, Pipeline, PipelineContext};
+use pipeline::{Content, Pipeline, PipelineContext, parse, setup_pipeline};
 
 #[test]
 fn test_complex_data() {

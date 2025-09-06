@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
@@ -24,9 +25,8 @@ use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;

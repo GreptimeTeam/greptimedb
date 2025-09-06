@@ -17,8 +17,8 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;

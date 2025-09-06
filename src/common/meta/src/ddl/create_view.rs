@@ -17,7 +17,7 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;

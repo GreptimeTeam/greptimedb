@@ -26,12 +26,12 @@ use common_meta::cache::{
     LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRoute, TableRouteCacheRef,
     ViewInfoCacheRef,
 };
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
@@ -41,15 +41,16 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
-use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table::PartitionRules;
+use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 use table::table_name::TableName;
-use table::TableRef;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::CatalogManager;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
@@ -59,9 +60,8 @@ use crate::information_schema::InformationSchemaTableFactoryRef;
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
-use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
-use crate::CatalogManager;
+use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 /// Access all existing catalog, schema and tables.
 ///

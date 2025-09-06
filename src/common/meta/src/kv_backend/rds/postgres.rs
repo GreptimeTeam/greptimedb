@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
+// TLS-related imports (feature-gated)
+use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-// TLS-related imports (feature-gated)
-use rustls::ClientConfig;
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 use snafu::ResultExt;
@@ -36,17 +36,17 @@ use crate::error::{
     CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, LoadTlsCertificateSnafu,
     PostgresExecutionSnafu, PostgresTlsConfigSnafu, PostgresTransactionSnafu, Result,
 };
-use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
-    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
-    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT,
-};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::rds::{
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
+    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
+    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
+};
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
-use crate::rpc::KeyValue;
 
 /// TLS mode configuration for PostgreSQL connections.
 /// This mirrors the TlsMode from servers::tls to avoid circular dependencies.
@@ -832,7 +832,9 @@ impl PgStore {
                     Err(e) => {
                         if tls_config.mode == TlsMode::Prefer {
                             // Fallback to insecure connection if TLS fails
-                            common_telemetry::info!("Failed to create TLS connector, falling back to insecure connection");
+                            common_telemetry::info!(
+                                "Failed to create TLS connector, falling back to insecure connection"
+                            );
                             cfg.create_pool(Some(Runtime::Tokio1), NoTls)
                                 .context(CreatePostgresPoolSnafu)?
                         } else {
@@ -901,7 +903,7 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
-    use crate::{maybe_skip_postgres15_integration_test, maybe_skip_postgres_integration_test};
+    use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -1097,9 +1099,10 @@ mod tests {
     fn test_pg_template_with_schema() {
         let factory = PgSqlTemplateFactory::new(Some("test_schema"), "greptime_metakv");
         let t = factory.build();
-        assert!(t
-            .create_table_statement
-            .contains("\"test_schema\".\"greptime_metakv\""));
+        assert!(
+            t.create_table_statement
+                .contains("\"test_schema\".\"greptime_metakv\"")
+        );
         let upsert = t.generate_batch_upsert_query(1);
         assert!(upsert.contains("\"test_schema\".\"greptime_metakv\""));
         let get = t.generate_batch_get_query(1);

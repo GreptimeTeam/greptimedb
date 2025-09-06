@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
-use syn::{parse_macro_input, ItemFn, LitInt};
+use quote::{ToTokens, quote};
+use syn::{ItemFn, LitInt, parse_macro_input};
 
 pub(crate) fn process_print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut depth = 1;

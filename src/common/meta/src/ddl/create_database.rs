@@ -18,12 +18,12 @@ use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DefaultOnNull};
-use snafu::{ensure, ResultExt};
+use serde_with::{DefaultOnNull, serde_as};
+use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{self, Result};
 use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};

@@ -24,7 +24,7 @@ use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssC
 use crate::error::{self, Result};
 use crate::services::Azblob;
 use crate::util::{build_http_client, clean_temp_dir, join_dir, normalize_dir};
-use crate::{util, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
+use crate::{ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR, ObjectStore, util};
 
 pub async fn new_raw_object_store(
     store: &ObjectStoreConfig,

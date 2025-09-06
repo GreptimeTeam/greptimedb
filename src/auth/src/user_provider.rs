@@ -22,7 +22,7 @@ use std::io::BufRead;
 use std::path::Path;
 
 use common_base::secrets::ExposeSecret;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::common::{Identity, Password};
 use crate::error::{
@@ -30,7 +30,7 @@ use crate::error::{
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::DefaultUserInfo;
-use crate::{auth_mysql, UserInfoRef};
+use crate::{UserInfoRef, auth_mysql};
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {

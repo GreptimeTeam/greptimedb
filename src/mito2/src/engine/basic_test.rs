@@ -40,10 +40,10 @@ use store_api::storage::RegionId;
 use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
-    build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, kafka_log_store_factory, multiple_log_store_factories,
-    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
-    rows_schema, CreateRequestBuilder, LogStoreFactory, TestEnv,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_delete_rows_for_key, build_rows,
+    build_rows_for_key, delete_rows, delete_rows_schema, flush_region, kafka_log_store_factory,
+    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
+    raft_engine_log_store_factory, reopen_region, rows_schema,
 };
 
 #[tokio::test]

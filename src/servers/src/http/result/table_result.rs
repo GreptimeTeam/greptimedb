@@ -15,7 +15,7 @@
 use std::cmp::max;
 use std::fmt::{Display, Write};
 
-use axum::http::{header, HeaderValue};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
+use crate::http::{GreptimeQueryOutput, HttpResponse, ResponseFormat, handler, process_with_limit};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TableResponse {

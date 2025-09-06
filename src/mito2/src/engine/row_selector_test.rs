@@ -21,7 +21,7 @@ use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 use crate::config::MitoConfig;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
 };
 
 async fn test_last_row(append_mode: bool) {

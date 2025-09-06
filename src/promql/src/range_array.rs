@@ -20,7 +20,7 @@ use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 

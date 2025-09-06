@@ -231,7 +231,7 @@ mod test {
     use prometheus::{Counter, Gauge, Histogram, HistogramOpts, Opts};
 
     use super::convert_label;
-    use crate::metric::{convert_metric_to_write_request, MetricFilter};
+    use crate::metric::{MetricFilter, convert_metric_to_write_request};
 
     #[test]
     fn test_convert_label() {

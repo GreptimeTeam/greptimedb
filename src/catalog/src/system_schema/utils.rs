@@ -17,10 +17,10 @@ use std::sync::Weak;
 use common_meta::key::TableMetadataManagerRef;
 use snafu::OptionExt;
 
+use crate::CatalogManager;
 use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
 use crate::information_schema::InformationExtensionRef;
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::CatalogManager;
 
 pub mod tables;
 

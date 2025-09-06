@@ -33,11 +33,7 @@ pub fn cos(lhs: &[f32], rhs: &[f32]) -> f32 {
 
     let cos_similar = dot_product / (lhs_norm * rhs_norm);
     let res = 1.0 - cos_similar;
-    if res.abs() < f32::EPSILON {
-        0.0
-    } else {
-        res
-    }
+    if res.abs() < f32::EPSILON { 0.0 } else { res }
 }
 
 #[cfg(test)]

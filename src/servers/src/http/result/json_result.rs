@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::{header, HeaderValue};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use mime_guess::mime;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
+use crate::http::{GreptimeQueryOutput, HttpResponse, ResponseFormat, handler, process_with_limit};
 
 /// The json format here is different from the default json output of `GreptimedbV1` result.
 /// `JsonResponse` is intended to make it easier for user to consume data.

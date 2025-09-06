@@ -28,30 +28,30 @@ use cache::{
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use catalog::process_manager::ProcessManager;
-use client::client_manager::NodeClients;
 use client::Client;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::DatanodeId;
-use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
+use common_runtime::runtime::BuilderBuild;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
-use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::Instance as FeInstance;
+use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
@@ -60,9 +60,9 @@ use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
+use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
-use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
@@ -72,8 +72,8 @@ use tower::service_fn;
 use uuid::Uuid;
 
 use crate::test_util::{
-    self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageType,
-    TestGuard, PEER_PLACEHOLDER_ADDR,
+    self, FileDirGuard, PEER_PLACEHOLDER_ADDR, StorageType, TestGuard, create_datanode_opts,
+    create_tmp_dir_and_datanode_opts,
 };
 
 pub struct GreptimeDbCluster {

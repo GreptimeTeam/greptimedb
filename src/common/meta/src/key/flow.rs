@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use common_telemetry::info;
 use flow_route::{FlowRouteKey, FlowRouteManager, FlowRouteValue};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use table_flow::TableFlowValue;
 
 use self::flow_info::{FlowInfoKey, FlowInfoValue};
@@ -40,8 +40,8 @@ use crate::key::flow::flownode_flow::FlownodeFlowManager;
 pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchDeleteRequest;
 
 /// The key of `__flow/` scope.
@@ -399,11 +399,11 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
-    use crate::key::flow::table_flow::TableFlowKey;
+    use crate::FlownodeId;
     use crate::key::FlowPartitionId;
+    use crate::key::flow::table_flow::TableFlowKey;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::FlownodeId;
 
     #[derive(Debug)]
     struct MockKey {
@@ -970,9 +970,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::Unexpected { .. });
-        assert!(err
-            .to_string()
-            .contains("Reads different flow id when updating flow"));
+        assert!(
+            err.to_string()
+                .contains("Reads different flow id when updating flow")
+        );
     }
 
     #[tokio::test]

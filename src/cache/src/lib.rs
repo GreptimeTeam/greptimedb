@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use catalog::kvbackend::new_table_cache;
 use common_meta::cache::{
-    new_schema_cache, new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
-    new_table_route_cache, new_table_schema_cache, new_view_info_cache, CacheRegistry,
-    CacheRegistryBuilder, LayeredCacheRegistryBuilder,
+    CacheRegistry, CacheRegistryBuilder, LayeredCacheRegistryBuilder, new_schema_cache,
+    new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
+    new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::CacheBuilder;

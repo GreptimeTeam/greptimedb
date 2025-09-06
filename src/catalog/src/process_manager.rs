@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -30,7 +30,7 @@ use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
 use rand::random;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::statements::statement::Statement;
 
 use crate::error;

@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::CsvFormat;
 use common_datasource::file_format::parquet::DefaultParquetFileReaderFactory;
-use common_datasource::file_format::Format;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
@@ -28,8 +28,8 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::utils::conjunction;

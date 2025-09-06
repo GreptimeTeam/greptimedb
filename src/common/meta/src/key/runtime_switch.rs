@@ -154,8 +154,8 @@ mod tests {
 
     use crate::key::runtime_switch::RuntimeSwitchManager;
     use crate::key::{LEGACY_MAINTENANCE_KEY, MAINTENANCE_KEY};
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     #[tokio::test]

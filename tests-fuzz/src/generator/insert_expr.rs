@@ -16,8 +16,8 @@ use std::marker::PhantomData;
 
 use datatypes::value::Value;
 use derive_builder::Builder;
-use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 
 use super::TsValueGenerator;
 use crate::context::TableContextRef;
@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{Generator, Random, ValueGenerator};
 use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
-use crate::ir::{generate_random_timestamp, generate_random_value, Ident};
+use crate::ir::{Ident, generate_random_timestamp, generate_random_value};
 
 /// Generates [InsertIntoExpr].
 #[derive(Builder)]

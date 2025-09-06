@@ -21,15 +21,15 @@ use common_procedure_test::execute_procedure_until_done;
 use session::context::QueryContext as SessionQueryContext;
 use table::table_name::TableName;
 
+use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{CreateFlowData, CreateFlowProcedure, CreateFlowState, FlowType};
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
-use crate::ddl::DdlContext;
 use crate::error;
-use crate::key::table_route::TableRouteValue;
 use crate::key::FlowId;
+use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
-use crate::test_util::{new_ddl_context, MockFlownodeManager};
+use crate::test_util::{MockFlownodeManager, new_ddl_context};
 
 pub(crate) fn test_create_flow_task(
     name: &str,

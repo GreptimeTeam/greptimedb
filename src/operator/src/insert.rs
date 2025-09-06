@@ -28,15 +28,15 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, trace_services_table_name, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
-    TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
+    PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
@@ -44,8 +44,8 @@ use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::prelude::*;
 use snafu::ResultExt;
+use snafu::prelude::*;
 use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
@@ -56,13 +56,13 @@ use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TWCS_TIME_WINDOW,
 };
 use store_api::storage::{RegionId, TableId};
+use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{
-    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
+    AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, TABLE_DATA_MODEL,
     TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
 };
 use table::table_reference::TableReference;
-use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
@@ -72,7 +72,7 @@ use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
-    fill_reqs_with_impure_default, ColumnToRow, RowToRegion, StatementToRegion, TableToRegion,
+    ColumnToRow, RowToRegion, StatementToRegion, TableToRegion, fill_reqs_with_impure_default,
 };
 use crate::statement::StatementExecutor;
 
@@ -849,17 +849,17 @@ impl Inserter {
                 for col in &mut rows.schema {
                     match col.semantic_type {
                         x if x == SemanticType::Timestamp as i32 => {
-                            if let Some(ref ts_name) = ts_col_name {
-                                if col.column_name != *ts_name {
-                                    col.column_name = ts_name.clone();
-                                }
+                            if let Some(ref ts_name) = ts_col_name
+                                && col.column_name != *ts_name
+                            {
+                                col.column_name = ts_name.clone();
                             }
                         }
                         x if x == SemanticType::Field as i32 => {
-                            if let Some(ref field_name) = field_col_name {
-                                if col.column_name != *field_name {
-                                    col.column_name = field_name.clone();
-                                }
+                            if let Some(ref field_name) = field_col_name
+                                && col.column_name != *field_name
+                            {
+                                col.column_name = field_name.clone();
                             }
                         }
                         _ => {}
@@ -1184,9 +1184,9 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use moka::future::Cache;
     use session::context::QueryContext;
+    use table::TableRef;
     use table::dist_table::DummyDataSource;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
-    use table::TableRef;
 
     use super::*;
     use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};

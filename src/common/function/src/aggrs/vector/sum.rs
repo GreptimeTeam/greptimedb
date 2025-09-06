@@ -117,7 +117,7 @@ impl VectorSum {
                 return Err(datafusion_common::DataFusionError::NotImplemented(format!(
                     "unsupported data type {} for `VEC_SUM`",
                     values[0].data_type()
-                )))
+                )));
             }
         }
         Ok(())
@@ -212,11 +212,13 @@ mod tests {
 
         // test update with constant vector
         let mut vec_sum = VectorSum::default();
-        let v: Vec<ArrayRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
-            4,
-        ))
-        .to_arrow_array()];
+        let v: Vec<ArrayRef> = vec![
+            Arc::new(ConstantVector::new(
+                Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
+                4,
+            ))
+            .to_arrow_array(),
+        ];
         vec_sum.update_batch(&v).unwrap();
         assert_eq!(
             ScalarValue::Binary(Some(veclit_to_binlit(&[4.0, 8.0, 12.0]))),

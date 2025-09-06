@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_error::ext::BoxedError;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
-use common_meta::kv_backend::KvBackendRef;
 use meta_srv::bootstrap::create_etcd_client_with_tls;
 use meta_srv::metasrv::BackendImpl;
 use servers::tls::{TlsMode, TlsOption};

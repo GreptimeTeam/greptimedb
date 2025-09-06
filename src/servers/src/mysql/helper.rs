@@ -25,9 +25,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
-use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
+use opensrv_mysql::{ParamValue, ValueInner, to_naive_datetime};
 use snafu::ResultExt;
-use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, ValueWithSpan, VisitMut};
+use sql::ast::{Expr, Value as ValueExpr, ValueWithSpan, VisitMut, visit_expressions_mut};
 use sql::statements::statement::Statement;
 
 use crate::error::{self, DataFusionSnafu, Result};
@@ -340,7 +340,10 @@ mod tests {
 
         let query = "select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?";
         let (sql, index) = replace_placeholders(query);
-        assert_eq!("select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3", sql);
+        assert_eq!(
+            "select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3",
+            sql
+        );
         assert_eq!(4, index);
     }
 
@@ -371,11 +374,16 @@ mod tests {
             delete.inner.to_string()
         );
 
-        let select = parse_sql("select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
+        let select = parse_sql(
+            "select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?",
+        );
         let Statement::Query(select) = transform_placeholders(select) else {
             unreachable!()
         };
-        assert_eq!("SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+        assert_eq!(
+            "SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3",
+            select.inner.to_string()
+        );
     }
 
     #[test]

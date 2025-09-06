@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use tokio::io::AsyncReadExt as _;
 
 use crate::blob_metadata::CompressionCodec;

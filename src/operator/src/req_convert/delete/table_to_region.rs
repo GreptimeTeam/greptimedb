@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use api::v1::Rows;
+use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use partition::manager::PartitionRuleManager;
 use table::metadata::TableInfo;
 use table::requests::DeleteRequest as TableDeleteRequest;

@@ -141,7 +141,7 @@ mod tests {
 
     use crate::error;
     use crate::heartbeat::handler::HandlerContext;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
     async fn test_region_not_exist() {

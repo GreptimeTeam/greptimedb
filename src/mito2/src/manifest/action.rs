@@ -20,9 +20,9 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
-use store_api::ManifestVersion;
 use strum::Display;
 
 use crate::error::{

@@ -128,26 +128,26 @@ async fn test_fs_backend() -> Result<()> {
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-        if !bucket.is_empty() {
-            info!("Running s3 test.");
+    if let Ok(bucket) = env::var("GT_S3_BUCKET")
+        && !bucket.is_empty()
+    {
+        info!("Running s3 test.");
 
-            let root = uuid::Uuid::new_v4().to_string();
+        let root = uuid::Uuid::new_v4().to_string();
 
-            let builder = S3::default()
-                .root(&root)
-                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
-                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-                .region(&env::var("GT_S3_REGION")?)
-                .bucket(&bucket);
+        let builder = S3::default()
+            .root(&root)
+            .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+            .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+            .region(&env::var("GT_S3_REGION")?)
+            .bucket(&bucket);
 
-            let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap().finish();
 
-            let guard = TempFolder::new(&store, "/");
-            test_object_crud(&store).await?;
-            test_object_list(&store).await?;
-            guard.remove_all().await?;
-        }
+        let guard = TempFolder::new(&store, "/");
+        test_object_crud(&store).await?;
+        test_object_list(&store).await?;
+        guard.remove_all().await?;
     }
 
     Ok(())
@@ -156,25 +156,25 @@ async fn test_s3_backend() -> Result<()> {
 #[tokio::test]
 async fn test_oss_backend() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    if let Ok(bucket) = env::var("GT_OSS_BUCKET") {
-        if !bucket.is_empty() {
-            info!("Running oss test.");
+    if let Ok(bucket) = env::var("GT_OSS_BUCKET")
+        && !bucket.is_empty()
+    {
+        info!("Running oss test.");
 
-            let root = uuid::Uuid::new_v4().to_string();
+        let root = uuid::Uuid::new_v4().to_string();
 
-            let builder = Oss::default()
-                .root(&root)
-                .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
-                .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
-                .bucket(&bucket);
+        let builder = Oss::default()
+            .root(&root)
+            .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
+            .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
+            .bucket(&bucket);
 
-            let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap().finish();
 
-            let guard = TempFolder::new(&store, "/");
-            test_object_crud(&store).await?;
-            test_object_list(&store).await?;
-            guard.remove_all().await?;
-        }
+        let guard = TempFolder::new(&store, "/");
+        test_object_crud(&store).await?;
+        test_object_list(&store).await?;
+        guard.remove_all().await?;
     }
 
     Ok(())
@@ -183,25 +183,25 @@ async fn test_oss_backend() -> Result<()> {
 #[tokio::test]
 async fn test_azblob_backend() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    if let Ok(container) = env::var("GT_AZBLOB_CONTAINER") {
-        if !container.is_empty() {
-            info!("Running azblob test.");
+    if let Ok(container) = env::var("GT_AZBLOB_CONTAINER")
+        && !container.is_empty()
+    {
+        info!("Running azblob test.");
 
-            let root = uuid::Uuid::new_v4().to_string();
+        let root = uuid::Uuid::new_v4().to_string();
 
-            let builder = Azblob::default()
-                .root(&root)
-                .account_name(&env::var("GT_AZBLOB_ACCOUNT_NAME")?)
-                .account_key(&env::var("GT_AZBLOB_ACCOUNT_KEY")?)
-                .container(&container);
+        let builder = Azblob::default()
+            .root(&root)
+            .account_name(&env::var("GT_AZBLOB_ACCOUNT_NAME")?)
+            .account_key(&env::var("GT_AZBLOB_ACCOUNT_KEY")?)
+            .container(&container);
 
-            let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap().finish();
 
-            let guard = TempFolder::new(&store, "/");
-            test_object_crud(&store).await?;
-            test_object_list(&store).await?;
-            guard.remove_all().await?;
-        }
+        let guard = TempFolder::new(&store, "/");
+        test_object_crud(&store).await?;
+        test_object_list(&store).await?;
+        guard.remove_all().await?;
     }
     Ok(())
 }
@@ -209,25 +209,25 @@ async fn test_azblob_backend() -> Result<()> {
 #[tokio::test]
 async fn test_gcs_backend() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    if let Ok(container) = env::var("GT_AZBLOB_CONTAINER") {
-        if !container.is_empty() {
-            info!("Running azblob test.");
+    if let Ok(container) = env::var("GT_AZBLOB_CONTAINER")
+        && !container.is_empty()
+    {
+        info!("Running azblob test.");
 
-            let builder = Gcs::default()
-                .root(&uuid::Uuid::new_v4().to_string())
-                .bucket(&env::var("GT_GCS_BUCKET").unwrap())
-                .scope(&env::var("GT_GCS_SCOPE").unwrap())
-                .credential_path(&env::var("GT_GCS_CREDENTIAL_PATH").unwrap())
-                .credential(&env::var("GT_GCS_CREDENTIAL").unwrap())
-                .endpoint(&env::var("GT_GCS_ENDPOINT").unwrap());
+        let builder = Gcs::default()
+            .root(&uuid::Uuid::new_v4().to_string())
+            .bucket(&env::var("GT_GCS_BUCKET").unwrap())
+            .scope(&env::var("GT_GCS_SCOPE").unwrap())
+            .credential_path(&env::var("GT_GCS_CREDENTIAL_PATH").unwrap())
+            .credential(&env::var("GT_GCS_CREDENTIAL").unwrap())
+            .endpoint(&env::var("GT_GCS_ENDPOINT").unwrap());
 
-            let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap().finish();
 
-            let guard = TempFolder::new(&store, "/");
-            test_object_crud(&store).await?;
-            test_object_list(&store).await?;
-            guard.remove_all().await?;
-        }
+        let guard = TempFolder::new(&store, "/");
+        test_object_crud(&store).await?;
+        test_object_list(&store).await?;
+        guard.remove_all().await?;
     }
     Ok(())
 }

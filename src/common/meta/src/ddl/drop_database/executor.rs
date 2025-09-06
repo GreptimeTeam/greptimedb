@@ -21,15 +21,15 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
+use crate::ddl::DdlContext;
 use crate::ddl::drop_database::cursor::DropDatabaseCursor;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::utils::get_region_wal_options;
-use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::region_keeper::OperatingRegionGuard;
-use crate::rpc::router::{operating_leader_regions, RegionRoute};
+use crate::rpc::router::{RegionRoute, operating_leader_regions};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseExecutor {
@@ -155,7 +155,7 @@ mod tests {
     use crate::key::datanode_table::DatanodeTableKey;
     use crate::peer::Peer;
     use crate::rpc::router::region_distribution;
-    use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeHandler, MockDatanodeManager, new_ddl_context};
 
     #[derive(Clone)]
     pub struct NaiveDatanodeHandler;

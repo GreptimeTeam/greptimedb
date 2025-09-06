@@ -105,8 +105,8 @@ mod tests {
     use greptime_proto::v1::index::BitmapType;
 
     use super::*;
-    use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use crate::Bytes;
+    use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)

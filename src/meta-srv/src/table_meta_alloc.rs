@@ -19,7 +19,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::table_meta::PeerAllocator;
 use common_meta::error::{ExternalSnafu, Result as MetaResult};
 use common_meta::peer::Peer;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};

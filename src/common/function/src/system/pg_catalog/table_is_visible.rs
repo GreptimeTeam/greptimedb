@@ -23,7 +23,7 @@ use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 
 use crate::function::{Function, FunctionContext};
-use crate::scalars::expression::{scalar_unary_op, EvalContext};
+use crate::scalars::expression::{EvalContext, scalar_unary_op};
 
 #[derive(Clone, Debug, Default)]
 pub struct PGTableIsVisibleFunction;

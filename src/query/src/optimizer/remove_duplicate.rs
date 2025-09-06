@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DfResult;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 
 /// This is [PhysicalOptimizerRule] to remove duplicate physical plans such as two
 /// adjoining [CoalesceBatchesExec] or [RepartitionExec]. They won't have any effect

@@ -29,8 +29,8 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PATTERN,
     TABLE_INFO_KEY_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores the metadata of the table.
@@ -155,7 +155,7 @@ impl TableInfoManager {
         table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult + use<>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -177,7 +177,7 @@ impl TableInfoManager {
         new_table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult + use<>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();

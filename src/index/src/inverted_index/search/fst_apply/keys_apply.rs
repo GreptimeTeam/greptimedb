@@ -15,16 +15,16 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
+use crate::Bytes;
+use crate::inverted_index::FstMap;
 use crate::inverted_index::error::{
     EmptyPredicatesSnafu, KeysApplierUnexpectedPredicatesSnafu, KeysApplierWithoutInListSnafu,
     ParseRegexSnafu, Result,
 };
 use crate::inverted_index::search::fst_apply::FstApplier;
 use crate::inverted_index::search::predicate::Predicate;
-use crate::inverted_index::FstMap;
-use crate::Bytes;
 
 /// `KeysFstApplier` is responsible for applying a search using a set of predefined keys
 /// against an FstMap to fetch associated values.

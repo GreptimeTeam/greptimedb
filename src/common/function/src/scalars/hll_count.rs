@@ -160,10 +160,12 @@ mod tests {
         let args: Vec<VectorRef> = vec![];
         let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("hll_count expects 1 argument"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("hll_count expects 1 argument")
+        );
 
         // Test with invalid binary data
         let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])]))]; // Invalid binary data

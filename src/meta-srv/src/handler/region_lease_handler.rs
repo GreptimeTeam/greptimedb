@@ -25,10 +25,10 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
+use crate::region::RegionLeaseKeeper;
 use crate::region::lease_keeper::{
     RegionLeaseInfo, RegionLeaseKeeperRef, RenewRegionLeasesResponse,
 };
-use crate::region::RegionLeaseKeeper;
 
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
@@ -125,9 +125,9 @@ mod test {
 
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::distributed_time_constants;
+    use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
-    use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;

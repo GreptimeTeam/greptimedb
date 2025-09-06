@@ -52,19 +52,21 @@ pub fn set_panic_hook() {
     }));
 
     #[cfg(feature = "deadlock_detection")]
-    let _ = std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(5));
-        let deadlocks = parking_lot::deadlock::check_deadlock();
-        if deadlocks.is_empty() {
-            continue;
-        }
+    let _ = std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
 
-        tracing::info!("{} deadlocks detected", deadlocks.len());
-        for (i, threads) in deadlocks.iter().enumerate() {
-            tracing::info!("Deadlock #{}", i);
-            for t in threads {
-                tracing::info!("Thread Id {:#?}", t.thread_id());
-                tracing::info!("{:#?}", t.backtrace());
+            tracing::info!("{} deadlocks detected", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                tracing::info!("Deadlock #{}", i);
+                for t in threads {
+                    tracing::info!("Thread Id {:#?}", t.thread_id());
+                    tracing::info!("{:#?}", t.backtrace());
+                }
             }
         }
     });

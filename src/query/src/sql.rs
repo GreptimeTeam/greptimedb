@@ -17,31 +17,31 @@ mod show_create_table;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::information_schema::{
-    columns, flows, key_column_usage, process_list, region_peers, schemata, tables, CHARACTER_SETS,
-    COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
-};
 use catalog::CatalogManagerRef;
+use catalog::information_schema::{
+    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES,
+    VIEWS, columns, flows, key_column_usage, process_list, region_peers, schemata, tables,
+};
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
     SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_catalog::format_full_table_name;
-use common_datasource::file_format::{infer_schemas, FileFormat, Format};
+use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
-use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::SchemaOptions;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_recordbatch::RecordBatches;
-use common_time::timezone::get_timezone;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_time::Timestamp;
+use common_time::timezone::get_timezone;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
-use datafusion_expr::{case, col, lit, Expr, SortExpr};
+use datafusion_expr::{Expr, SortExpr, case, col, lit};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -51,25 +51,25 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
+use sql::statements::OptionMap;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
     ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
-use sql::statements::OptionMap;
 use sqlparser::ast::ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
-use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
+use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 
+use crate::QueryEngineRef;
 use crate::dataframe::DataFrame;
 use crate::error::{self, Result, UnsupportedVariableSnafu};
 use crate::planner::DfLogicalPlanner;
-use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Database";
 const OPTIONS_COLUMN: &str = "Options";
@@ -1084,11 +1084,7 @@ fn describe_column_keys(
 fn describe_column_nullables(columns_schemas: &[ColumnSchema]) -> VectorRef {
     Arc::new(StringVector::from_iterator(columns_schemas.iter().map(
         |cs| {
-            if cs.is_nullable() {
-                YES_STR
-            } else {
-                NO_STR
-            }
+            if cs.is_nullable() { YES_STR } else { NO_STR }
         },
     )))
 }
@@ -1321,8 +1317,8 @@ mod test {
 
     use common_query::{Output, OutputData};
     use common_recordbatch::{RecordBatch, RecordBatches};
-    use common_time::timestamp::TimeUnit;
     use common_time::Timezone;
+    use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
@@ -1330,15 +1326,15 @@ mod test {
     use snafu::ResultExt;
     use sql::ast::{Ident, ObjectName};
     use sql::statements::show::ShowVariables;
-    use table::test_util::MemTable;
     use table::TableRef;
+    use table::test_util::MemTable;
 
     use super::show_variable;
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
-        describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD,
-        SEMANTIC_TYPE_TIME_INDEX, YES_STR,
+        DESCRIBE_TABLE_OUTPUT_SCHEMA, NO_STR, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_TIME_INDEX,
+        YES_STR, describe_table,
     };
 
     #[test]

@@ -25,8 +25,8 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
-    new_fs_cache_store, FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray,
-    SstWriteRequest, TempFileCleaner, WriteCachePathProvider, WriteType,
+    FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
+    TempFileCleaner, WriteCachePathProvider, WriteType, new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -34,11 +34,11 @@ use crate::metrics::{
     UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
 use crate::sst::file::RegionFileId;
+use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::index::IndexerBuilderImpl;
-use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// A cache for uploading files to remote object stores.
@@ -436,11 +436,11 @@ mod tests {
     use crate::read::Source;
     use crate::region::options::IndexOptions;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle_with_file_id,
         sst_region_metadata,
     };
-    use crate::test_util::TestEnv;
 
     #[tokio::test]
     async fn test_write_and_upload_sst() {

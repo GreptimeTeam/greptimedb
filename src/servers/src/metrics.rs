@@ -23,8 +23,8 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, register_histogram,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
 };
 use session::context::QueryContext;
 use tonic::body::Body;

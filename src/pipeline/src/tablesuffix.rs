@@ -14,7 +14,7 @@
 
 use dyn_fmt::AsStrFormatExt;
 use regex::Regex;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use vrl::value::Value as VrlValue;
 use yaml_rust::Yaml;
 

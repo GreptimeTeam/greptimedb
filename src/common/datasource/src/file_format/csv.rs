@@ -30,7 +30,7 @@ use tokio_util::io::SyncIoBridge;
 use crate::buffered_writer::DfRecordBatchEncoder;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, stream_to_file, FileFormat};
+use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,8 +160,8 @@ mod tests {
 
     use super::*;
     use crate::file_format::{
-        FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
-        FORMAT_SCHEMA_INFER_MAX_RECORD,
+        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
+        FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat,
     };
     use crate::test_util::{format_schema, test_store};
 

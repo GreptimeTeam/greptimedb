@@ -15,13 +15,13 @@
 use std::fmt::Debug;
 use std::sync::Exclusive;
 
-use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
+use ::auth::{Identity, Password, UserInfoRef, UserProviderRef, userinfo_by_name};
 use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
-use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
+use pgwire::api::{ClientInfo, PgWireConnectionState, auth};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::{Authentication, SecretKey};
@@ -31,9 +31,9 @@ use snafu::IntoError;
 
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
+use crate::postgres::PostgresServerHandlerInner;
 use crate::postgres::types::PgErrorCode;
 use crate::postgres::utils::convert_err;
-use crate::postgres::PostgresServerHandlerInner;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {

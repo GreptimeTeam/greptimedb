@@ -19,7 +19,7 @@ use bytes::Bytes;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
-use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
+use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
@@ -27,10 +27,10 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::context::BulkIterContextRef;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::RowGroupReaderContext;
 use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// Helper for reading specific row group inside Memtable Parquet parts.
 // This is similar to [mito2::sst::parquet::row_group::InMemoryRowGroup] since

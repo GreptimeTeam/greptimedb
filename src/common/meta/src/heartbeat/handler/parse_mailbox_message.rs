@@ -30,11 +30,11 @@ impl HeartbeatResponseHandler for ParseMailboxMessageHandler {
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> Result<HandleControl> {
-        if let Some(message) = &ctx.response.mailbox_message {
-            if message.payload.is_some() {
-                // mailbox_message_to_incoming_message will raise an error if payload is none
-                ctx.incoming_message = Some(mailbox_message_to_incoming_message(message.clone())?)
-            }
+        if let Some(message) = &ctx.response.mailbox_message
+            && message.payload.is_some()
+        {
+            // mailbox_message_to_incoming_message will raise an error if payload is none
+            ctx.incoming_message = Some(mailbox_message_to_incoming_message(message.clone())?)
         }
 
         Ok(HandleControl::Continue)

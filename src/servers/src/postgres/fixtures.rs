@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use futures::stream;
 use once_cell::sync::Lazy;
-use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::Type;
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::error::PgWireResult;
 use pgwire::messages::data::DataRow;
 use regex::Regex;

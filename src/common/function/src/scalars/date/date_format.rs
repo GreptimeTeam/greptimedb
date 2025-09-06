@@ -20,7 +20,7 @@ use datafusion_expr::Signature;
 use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;

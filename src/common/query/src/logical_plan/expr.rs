@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::Expr;
-use datafusion_expr::{and, binary_expr, Operator};
+use datafusion_expr::{Operator, and, binary_expr};
 use datatypes::data_type::DataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;

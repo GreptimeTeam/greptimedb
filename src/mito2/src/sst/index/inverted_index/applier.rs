@@ -40,9 +40,9 @@ use crate::error::{
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionFileId;
+use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
-use crate::sst::index::TYPE_INVERTED_INDEX;
 
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.

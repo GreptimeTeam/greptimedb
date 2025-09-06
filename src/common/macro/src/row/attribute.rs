@@ -20,7 +20,7 @@ use syn::spanned::Spanned;
 use syn::{Attribute, LitStr, Meta, Result};
 
 use crate::row::utils::{
-    column_data_type_from_str, semantic_type_from_str, ColumnDataTypeWithExtension, SemanticType,
+    ColumnDataTypeWithExtension, SemanticType, column_data_type_from_str, semantic_type_from_str,
 };
 use crate::row::{
     META_KEY_COL, META_KEY_DATATYPE, META_KEY_NAME, META_KEY_SEMANTIC, META_KEY_SKIP,
@@ -51,9 +51,7 @@ pub(crate) fn parse_column_attribute(attr: &Attribute) -> Result<ColumnAttribute
     match &attr.meta {
         Meta::List(list) if list.path.is_ident(META_KEY_COL) => {
             let mut attribute = ColumnAttribute::default();
-            list.parse_nested_meta(|meta| {
-                parse_column_attribute_field(&meta, &mut attribute)
-            })?;
+            list.parse_nested_meta(|meta| parse_column_attribute_field(&meta, &mut attribute))?;
             Ok(attribute)
         }
         _ => Err(syn::Error::new(

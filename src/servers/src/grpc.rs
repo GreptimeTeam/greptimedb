@@ -35,14 +35,14 @@ use common_telemetry::{error, info, warn};
 use futures::FutureExt;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::service::interceptor::InterceptedService;
+use tokio::sync::oneshot::{self, Receiver, Sender};
 use tonic::service::Routes;
-use tonic::transport::server::TcpIncoming;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::ServerTlsConfig;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
@@ -282,10 +282,10 @@ pub const GRPC_SERVER: &str = "GRPC_SERVER";
 impl Server for GrpcServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the grpc server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the grpc server has already exited");
         }
         info!("Shutdown grpc server");
 

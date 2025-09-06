@@ -22,13 +22,13 @@ use common_meta::key::flow::flow_state::FlowStat;
 use common_telemetry::trace;
 use datatypes::value::Value;
 use get_size2::GetSize;
-use smallvec::{smallvec, SmallVec};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use smallvec::{SmallVec, smallvec};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
-use crate::repr::{value_to_internal_ts, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
+use crate::repr::{DiffRow, Duration, KeyValDiffRow, Row, Timestamp, value_to_internal_ts};
 
 /// A batch of updates, arranged by key
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
@@ -173,11 +173,11 @@ impl KeyExpiryManager {
             .or_default()
             .insert(row.clone());
 
-        if let Some(expire_time) = self.compute_expiration_timestamp(now) {
-            if expire_time > event_ts {
-                // return how much time it's expired
-                return Ok(Some(expire_time - event_ts));
-            }
+        if let Some(expire_time) = self.compute_expiration_timestamp(now)
+            && expire_time > event_ts
+        {
+            // return how much time it's expired
+            return Ok(Some(expire_time - event_ts));
         }
 
         Ok(None)
@@ -195,11 +195,11 @@ impl KeyExpiryManager {
             return Ok(None);
         };
 
-        if let Some(expire_time) = self.compute_expiration_timestamp(now) {
-            if expire_time > event_ts {
-                // return how much time it's expired
-                return Ok(Some(expire_time - event_ts));
-            }
+        if let Some(expire_time) = self.compute_expiration_timestamp(now)
+            && expire_time > event_ts
+        {
+            // return how much time it's expired
+            return Ok(Some(expire_time - event_ts));
         }
 
         Ok(None)
@@ -365,17 +365,15 @@ impl Arrangement {
 
         for ((key, val), update_ts, diff) in updates {
             // check if the key is expired
-            if let Some(s) = &mut self.expire_state {
-                if let Some(expired_by) = s.get_expire_duration_and_update_event_ts(now, &key)? {
-                    max_expired_by = max_expired_by.max(Some(expired_by));
-                    trace!(
-                        "Expired key: {:?}, expired by: {:?} with time being now={}",
-                        key,
-                        expired_by,
-                        now
-                    );
-                    continue;
-                }
+            if let Some(s) = &mut self.expire_state
+                && let Some(expired_by) = s.get_expire_duration_and_update_event_ts(now, &key)?
+            {
+                max_expired_by = max_expired_by.max(Some(expired_by));
+                trace!(
+                    "Expired key: {:?}, expired by: {:?} with time being now={}",
+                    key, expired_by, now
+                );
+                continue;
             }
 
             // If the `highest_ts` is less than `update_ts`, we need to create a new batch with key being `update_ts`.
@@ -499,13 +497,12 @@ impl Arrangement {
         for (_, batch) in batches_to_compact {
             for (key, updates) in batch {
                 // check if the key is expired
-                if let Some(s) = &mut self.expire_state {
-                    if let Some(expired_by) =
+                if let Some(s) = &mut self.expire_state
+                    && let Some(expired_by) =
                         s.get_expire_duration_and_update_event_ts(now, &key)?
-                    {
-                        max_expired_by = max_expired_by.max(Some(expired_by));
-                        continue;
-                    }
+                {
+                    max_expired_by = max_expired_by.max(Some(expired_by));
+                    continue;
                 }
 
                 let mut row = compacting_batch
@@ -563,12 +560,12 @@ impl Arrangement {
 
     /// Expire keys in now that are older than expire_time, intended for reducing memory usage and limit late data arrive
     pub fn truncate_expired_keys(&mut self, now: Timestamp) {
-        if let Some(s) = &mut self.expire_state {
-            if let Some(expired_keys) = s.remove_expired_keys(now) {
-                for key in expired_keys {
-                    for (_, batch) in self.spine.iter_mut() {
-                        batch.remove(&key);
-                    }
+        if let Some(s) = &mut self.expire_state
+            && let Some(expired_keys) = s.remove_expired_keys(now)
+        {
+            for key in expired_keys {
+                for (_, batch) in self.spine.iter_mut() {
+                    batch.remove(&key);
                 }
             }
         }

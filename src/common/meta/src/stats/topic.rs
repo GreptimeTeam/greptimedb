@@ -19,11 +19,11 @@ use std::time::Duration;
 use common_telemetry::{debug, warn};
 use datafusion_common::HashSet;
 
+use crate::DatanodeId;
 use crate::datanode::TopicStat;
 use crate::distributed_time_constants::{
     TOPIC_STATS_REPORT_INTERVAL_SECS, TOPIC_STATS_RETENTION_SECS,
 };
-use crate::DatanodeId;
 
 pub type TopicStatsRegistryRef = Arc<TopicStatsRegistry>;
 

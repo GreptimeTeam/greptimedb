@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use rskafka::client::{Credentials, SaslConfig};
 use rskafka::BackoffConfig;
+use rskafka::client::{Credentials, SaslConfig};
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -46,7 +46,7 @@ pub const DEFAULT_FLUSH_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(512);
 pub const DEFAULT_CHECKPOINT_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(128);
 
 use crate::error::{self, Result};
-use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
+use crate::{BROKER_ENDPOINT, TOPIC_NAME_PREFIX, TopicSelectorType};
 
 /// The SASL configurations for kafka client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

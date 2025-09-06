@@ -23,9 +23,9 @@ use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, DataType, MutableVector};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -38,12 +38,12 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements;
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::Predicates;
-use crate::system_schema::information_schema::{InformationTable, COLUMNS};
-use crate::CatalogManager;
+use crate::system_schema::information_schema::{COLUMNS, InformationTable};
 
 #[derive(Debug)]
 pub(super) struct InformationSchemaColumns {

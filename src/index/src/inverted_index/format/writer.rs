@@ -20,10 +20,10 @@ use std::num::NonZeroUsize;
 use async_trait::async_trait;
 use futures::Stream;
 
+use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::Result;
 pub use crate::inverted_index::format::writer::blob::InvertedIndexBlobWriter;
-use crate::Bytes;
 
 pub type ValueStream = Box<dyn Stream<Item = Result<(Bytes, Bitmap)>> + Send + Unpin>;
 
@@ -49,5 +49,5 @@ pub trait InvertedIndexWriter: Send {
     /// Finalizes the index writing process, ensuring all data is written.
     /// `total_row_count` and `segment_row_count` is used to fill in the metadata.
     async fn finish(&mut self, total_row_count: u64, segment_row_count: NonZeroUsize)
-        -> Result<()>;
+    -> Result<()>;
 }

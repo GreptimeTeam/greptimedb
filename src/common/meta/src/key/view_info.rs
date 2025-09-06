@@ -27,8 +27,8 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, VIEW_INFO_KEY_PATTERN,
     VIEW_INFO_KEY_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::Txn;
 use crate::rpc::store::BatchGetRequest;
 
 /// The VIEW logical plan encoded bytes

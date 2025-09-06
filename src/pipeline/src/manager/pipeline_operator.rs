@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
-use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
 use common_telemetry::info;
 use datatypes::timestamp::TimestampNanosecond;
 use futures::FutureExt;
@@ -29,14 +29,14 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
+use crate::Pipeline;
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
 use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
 use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
 };
-use crate::table::{PipelineTable, PIPELINE_TABLE_NAME};
-use crate::Pipeline;
+use crate::table::{PIPELINE_TABLE_NAME, PipelineTable};
 
 /// PipelineOperator is responsible for managing pipelines.
 /// It provides the ability to:

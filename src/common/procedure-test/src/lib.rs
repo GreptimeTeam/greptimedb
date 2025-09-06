@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_procedure::local::{acquire_dynamic_key_lock, DynamicKeyLockGuard};
+use common_procedure::local::{DynamicKeyLockGuard, acquire_dynamic_key_lock};
 use common_procedure::rwlock::KeyRwLock;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::test_util::InMemoryPoisonStore;

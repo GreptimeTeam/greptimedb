@@ -19,9 +19,9 @@ use common_meta::key::tombstone::TombstoneManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 
+use crate::Tool;
 use crate::metadata::common::StoreConfig;
 use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
-use crate::Tool;
 
 /// Delete key-value pairs logically from the metadata store.
 #[derive(Debug, Default, Parser)]
@@ -102,8 +102,8 @@ mod tests {
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use common_meta::rpc::store::RangeRequest;
 
-    use crate::metadata::control::del::key::KeyDeleter;
     use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
+    use crate::metadata::control::del::key::KeyDeleter;
     use crate::metadata::control::test_utils::put_key;
 
     #[tokio::test]

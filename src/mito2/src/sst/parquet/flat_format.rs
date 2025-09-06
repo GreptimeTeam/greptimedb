@@ -40,9 +40,9 @@ use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use mito_codec::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -51,9 +51,9 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, PrimaryKeyArray, ReadFormat, StatValues, INTERNAL_COLUMN_NUM,
+    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, ReadFormat, StatValues,
 };
-use crate::sst::{tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::{FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema};
 
 /// Helper for writing the SST format.
 #[allow(dead_code)]

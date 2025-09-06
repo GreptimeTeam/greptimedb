@@ -16,10 +16,10 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::RegionIdent;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};

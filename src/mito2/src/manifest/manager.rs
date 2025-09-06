@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::{ManifestVersion, MAX_VERSION, MIN_VERSION};
+use store_api::{MAX_VERSION, MIN_VERSION, ManifestVersion};
 
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
@@ -32,7 +32,7 @@ use crate::manifest::action::{
 };
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
-    file_version, is_checkpoint_file, is_delta_file, ManifestObjectStore,
+    ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{RegionLeaderState, RegionRoleState};
@@ -656,11 +656,12 @@ mod test {
     async fn open_manifest_manager() {
         let env = TestEnv::new().await;
         // Try to opens an empty manifest.
-        assert!(env
-            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            env.create_manifest_manager(CompressionType::Uncompressed, 10, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Creates a manifest.
         let metadata = Arc::new(basic_region_metadata());

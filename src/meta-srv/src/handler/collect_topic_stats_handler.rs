@@ -81,10 +81,11 @@ mod tests {
             .get_latest_entry_id("test2")
             .unwrap();
         assert_eq!(latest_entry_id, (10, aligned_ts));
-        assert!(ctx
-            .topic_stats_registry
-            .get_latest_entry_id("test3")
-            .is_none());
+        assert!(
+            ctx.topic_stats_registry
+                .get_latest_entry_id("test3")
+                .is_none()
+        );
     }
 
     async fn handle_request_many_times(

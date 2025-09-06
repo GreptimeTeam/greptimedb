@@ -14,15 +14,15 @@
 
 use std::time::Duration;
 
-use base64::engine::general_purpose;
 use base64::Engine;
+use base64::engine::general_purpose;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use humantime::format_duration;
 use serde_json::Value;
+use servers::http::GreptimeQueryOutput;
 use servers::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
-use servers::http::GreptimeQueryOutput;
 use snafu::ResultExt;
 
 use crate::error::{

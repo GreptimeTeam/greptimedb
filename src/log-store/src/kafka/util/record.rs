@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
 use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::storage::RegionId;
@@ -274,8 +274,7 @@ pub(crate) fn maybe_emit_entry(
                     IllegalSequenceSnafu {
                         error: format!(
                             "Illegal sequence of a middle record, last record: {:?}, incoming record: {:?}",
-                            last_record.meta.tp,
-                            record.meta.tp
+                            last_record.meta.tp, record.meta.tp
                         )
                     }
                 );
@@ -355,9 +354,11 @@ mod tests {
         // `First` overwrite `First`
         let mut buffer = HashMap::new();
         let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
-        assert!(maybe_emit_entry(&provider, record, &mut buffer)
-            .unwrap()
-            .is_none());
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
         let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![2; 100]);
         let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
@@ -395,9 +396,11 @@ mod tests {
         // `First` overwrite `Middle(0)`
         let mut buffer = HashMap::new();
         let record = new_test_record(RecordType::Middle(0), 1, region_id.as_u64(), vec![1; 100]);
-        assert!(maybe_emit_entry(&provider, record, &mut buffer)
-            .unwrap()
-            .is_none());
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
         let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![2; 100]);
         let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
@@ -421,22 +424,28 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let mut buffer = HashMap::new();
         let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
-        assert!(maybe_emit_entry(&provider, record, &mut buffer)
-            .unwrap()
-            .is_none());
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
         let record = new_test_record(RecordType::Middle(2), 1, region_id.as_u64(), vec![2; 100]);
         let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
         assert_matches!(err, error::Error::IllegalSequence { .. });
 
         let mut buffer = HashMap::new();
         let record = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
-        assert!(maybe_emit_entry(&provider, record, &mut buffer)
-            .unwrap()
-            .is_none());
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
         let record = new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]);
-        assert!(maybe_emit_entry(&provider, record, &mut buffer)
-            .unwrap()
-            .is_none());
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
         let record = new_test_record(RecordType::Middle(3), 1, region_id.as_u64(), vec![2; 100]);
         let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
         assert_matches!(err, error::Error::IllegalSequence { .. });

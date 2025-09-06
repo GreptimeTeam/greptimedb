@@ -14,7 +14,7 @@
 
 use common_telemetry::debug;
 use datatypes::data_type::DataType;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::MySqlPool;
 
 use crate::error::{self, Result, UnexpectedSnafu};

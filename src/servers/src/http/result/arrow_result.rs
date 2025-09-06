@@ -16,9 +16,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
-use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
-use axum::http::{header, HeaderValue};
+use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};

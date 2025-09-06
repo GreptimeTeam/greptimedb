@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_meta::datanode::DatanodeStatValue;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -25,7 +25,7 @@ use tonic::codegen::http;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::service::admin::util::ErrorHandler;
-use crate::service::admin::{util, HttpHandler};
+use crate::service::admin::{HttpHandler, util};
 
 #[derive(Clone)]
 pub struct HeartBeatHandler {
@@ -127,16 +127,16 @@ fn filter_by_addr(stat_vals: Vec<DatanodeStatValue>, addr: &str) -> Vec<Datanode
 mod tests {
     use std::sync::Arc;
 
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{self, Request};
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
-    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::rpc::store::PutRequest;
     use tower::ServiceExt;
 
     use crate::cluster::MetaPeerClientBuilder;
-    use crate::service::admin::heartbeat::{self, filter_by_addr, HeartBeatHandler};
+    use crate::service::admin::heartbeat::{self, HeartBeatHandler, filter_by_addr};
 
     #[tokio::test]
     async fn test_filter_by_addr() {

@@ -26,7 +26,7 @@ use meta_client::MetaClientType;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::datanode::{DatanodeOptions, Instance, APP_NAME};
+use crate::datanode::{APP_NAME, DatanodeOptions, Instance};
 use crate::error::{MetaClientInitSnafu, MissingConfigSnafu, Result, StartDatanodeSnafu};
 use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 

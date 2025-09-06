@@ -35,7 +35,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
+use crate::memtable::partition_tree::data::{DataBatch, DataBuffer, timestamp_array_to_i64_slice};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,

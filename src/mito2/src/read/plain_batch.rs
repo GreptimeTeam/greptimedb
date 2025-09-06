@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::OpType;
-use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array, UInt8Array};
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt8Array, UInt64Array};
 use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -249,8 +249,8 @@ mod tests {
         Float64Array, Int32Array, StringArray, TimestampMillisecondArray,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-    use datatypes::schema::constraint::ColumnDefaultConstraint;
     use datatypes::schema::ColumnSchema;
+    use datatypes::schema::constraint::ColumnDefaultConstraint;
     use datatypes::value::Value;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};

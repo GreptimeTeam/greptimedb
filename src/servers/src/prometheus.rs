@@ -16,7 +16,7 @@ use catalog::system_schema::information_schema::tables::{
     ENGINE as TABLE_ENGINE, TABLE_CATALOG, TABLE_NAME, TABLE_SCHEMA,
 };
 use common_telemetry::tracing;
-use datafusion::prelude::{col, lit, regexp_match, Expr};
+use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_expr::LogicalPlan;
 use promql_parser::label::{MatchOp, Matcher};
 use query::dataframe::DataFrame;

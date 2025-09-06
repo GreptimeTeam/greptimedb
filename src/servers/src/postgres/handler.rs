@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::{Output, OutputData};
-use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -34,18 +34,18 @@ use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
-use session::context::QueryContextRef;
 use session::Session;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
+use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
-use crate::postgres::{fixtures, PostgresServerHandlerInner};
+use crate::postgres::{PostgresServerHandlerInner, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
@@ -356,13 +356,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribeStatementResponse::new(
-                        param_types,
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribeStatementResponse::new(
+                    param_types,
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribeStatementResponse::new(param_types, vec![]))
@@ -387,12 +386,11 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribePortalResponse::new(
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribePortalResponse::new(
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribePortalResponse::new(vec![]))

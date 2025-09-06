@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use api::v1::HealthCheckRequest;
 use api::v1::flow::flow_client::FlowClient as PbFlowClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
-use api::v1::HealthCheckRequest;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, ClientTlsOption};
 use parking_lot::RwLock;
@@ -27,7 +27,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::load_balance::{LoadBalance, Loadbalancer};
-use crate::{error, Result};
+use crate::{Result, error};
 
 pub struct FlightClient {
     addr: String,

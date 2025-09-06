@@ -27,7 +27,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{StreamExt, TryStreamExt};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
@@ -44,12 +44,12 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::{RangeBuilderList, RangeMeta};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    scan_file_ranges, scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
-    PartitionMetrics, PartitionMetricsList,
+    PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
+    scan_flat_mem_ranges, scan_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{
-    scan_util, Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, ScannerMetrics, Source,
+    Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, ScannerMetrics, Source, scan_util,
 };
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;

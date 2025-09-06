@@ -15,8 +15,8 @@
 use datatypes::data_type::ConcreteDataType;
 
 use crate::context::TableContext;
-use crate::ir::create_expr::ColumnOption;
 use crate::ir::Column;
+use crate::ir::create_expr::ColumnOption;
 
 pub fn new_test_ctx() -> TableContext {
     TableContext {

@@ -19,9 +19,9 @@ use fastbloom::BloomFilter;
 use greptime_proto::v1::index::BloomFilterMeta;
 use itertools::Itertools;
 
+use crate::Bytes;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
-use crate::Bytes;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
@@ -202,8 +202,8 @@ fn intersect_ranges(lhs: &[Range<usize>], rhs: &[Range<usize>]) -> Vec<Range<usi
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use futures::io::Cursor;
 

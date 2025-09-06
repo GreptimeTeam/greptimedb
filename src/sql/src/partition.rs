@@ -222,10 +222,9 @@ mod tests {
                         value: Value::SingleQuotedString(leftmost),
                         ..
                     }) = *right.clone()
+                        && uuid < leftmost
                     {
-                        if uuid < leftmost {
-                            return i;
-                        }
+                        return i;
                     }
                 } else if i == rules.len() - 1 {
                     // Hit the rightmost rule.
@@ -233,10 +232,9 @@ mod tests {
                         value: Value::SingleQuotedString(rightmost),
                         ..
                     }) = *right.clone()
+                        && uuid >= rightmost
                     {
-                        if uuid >= rightmost {
-                            return i;
-                        }
+                        return i;
                     }
                 } else {
                     // Hit the middle rules.
@@ -245,29 +243,23 @@ mod tests {
                         op: _,
                         right: inner_right,
                     } = *left.clone()
-                    {
-                        if let Expr::Value(ValueWithSpan {
+                        && let Expr::Value(ValueWithSpan {
                             value: Value::SingleQuotedString(lower),
                             ..
                         }) = *inner_right.clone()
-                        {
-                            if let Expr::BinaryOp {
-                                left: _,
-                                op: _,
-                                right: inner_right,
-                            } = *right.clone()
-                            {
-                                if let Expr::Value(ValueWithSpan {
-                                    value: Value::SingleQuotedString(upper),
-                                    ..
-                                }) = *inner_right.clone()
-                                {
-                                    if uuid >= lower && uuid < upper {
-                                        return i;
-                                    }
-                                }
-                            }
-                        }
+                        && let Expr::BinaryOp {
+                            left: _,
+                            op: _,
+                            right: inner_right,
+                        } = *right.clone()
+                        && let Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(upper),
+                            ..
+                        }) = *inner_right.clone()
+                        && uuid >= lower
+                        && uuid < upper
+                    {
+                        return i;
                     }
                 }
             }

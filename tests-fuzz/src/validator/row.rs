@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime, Utc};
-use common_time::date::Date;
 use common_time::Timestamp;
+use common_time::date::Date;
 use datatypes::value::Value;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::mysql::MySqlRow;
 use sqlx::{Column, ColumnIndex, Database, MySqlPool, Row, TypeInfo, ValueRef};
 

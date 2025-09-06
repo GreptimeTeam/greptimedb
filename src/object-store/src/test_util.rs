@@ -48,16 +48,16 @@ pub struct TestS3Config {
 
 /// Returns s3 test config, return None if not found.
 pub fn s3_test_config() -> Option<TestS3Config> {
-    if let Ok(b) = env::var("GT_S3_BUCKET") {
-        if !b.is_empty() {
-            return Some(TestS3Config {
-                root: uuid::Uuid::new_v4().to_string(),
-                access_key_id: env::var("GT_S3_ACCESS_KEY_ID").ok()?,
-                secret_access_key: env::var("GT_S3_ACCESS_KEY").ok()?,
-                bucket: env::var("GT_S3_BUCKET").ok()?,
-                region: Some(env::var("GT_S3_REGION").ok()?),
-            });
-        }
+    if let Ok(b) = env::var("GT_S3_BUCKET")
+        && !b.is_empty()
+    {
+        return Some(TestS3Config {
+            root: uuid::Uuid::new_v4().to_string(),
+            access_key_id: env::var("GT_S3_ACCESS_KEY_ID").ok()?,
+            secret_access_key: env::var("GT_S3_ACCESS_KEY").ok()?,
+            bucket: env::var("GT_S3_BUCKET").ok()?,
+            region: Some(env::var("GT_S3_REGION").ok()?),
+        });
     }
 
     None

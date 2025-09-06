@@ -25,7 +25,7 @@ use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{ListVectorBuilder, MutableVector, StringVectorBuilder, VectorRef};
 use geohash::Coord;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 

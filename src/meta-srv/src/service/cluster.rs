@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
-    MetasrvNodeInfo, MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse, MetasrvNodeInfo,
+    MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
+    RangeResponse as PbRangeResponse, cluster_server,
 };
 use common_telemetry::warn;
 use snafu::ResultExt;

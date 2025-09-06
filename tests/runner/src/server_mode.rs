@@ -20,7 +20,7 @@ use serde::Serialize;
 use tinytemplate::TinyTemplate;
 
 use crate::env::{Env, GreptimeDBContext};
-use crate::{util, ServerAddr};
+use crate::{ServerAddr, util};
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 

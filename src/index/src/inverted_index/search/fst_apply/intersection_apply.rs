@@ -16,19 +16,19 @@ use std::mem::size_of;
 
 use fst::map::OpBuilder;
 use fst::{IntoStreamer, Streamer};
-use regex_automata::dfa::dense::DFA;
+use regex_automata::Anchored;
 use regex_automata::dfa::Automaton;
+use regex_automata::dfa::dense::DFA;
 use regex_automata::util::primitives::StateID;
 use regex_automata::util::start::Config;
-use regex_automata::Anchored;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
+use crate::inverted_index::FstMap;
 use crate::inverted_index::error::{
     EmptyPredicatesSnafu, IntersectionApplierWithInListSnafu, ParseDFASnafu, Result,
 };
 use crate::inverted_index::search::fst_apply::FstApplier;
 use crate::inverted_index::search::predicate::{Predicate, Range};
-use crate::inverted_index::FstMap;
 
 /// `IntersectionFstApplier` applies intersection operations on an FstMap using specified ranges and regex patterns.
 pub struct IntersectionFstApplier {

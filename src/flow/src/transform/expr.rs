@@ -23,26 +23,26 @@ use datafusion::functions::all_default_functions;
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_substrait::logical_plan::consumer::DefaultSubstraitConsumer;
 use datatypes::data_type::ConcreteDataType as CDT;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use substrait_proto::proto::Expression;
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
 use substrait_proto::proto::expression::reference_segment::ReferenceType::StructField;
 use substrait_proto::proto::expression::{IfThen, RexType, ScalarFunction};
 use substrait_proto::proto::function_argument::ArgType;
-use substrait_proto::proto::Expression;
 
 use crate::error::{
     DatafusionSnafu, DatatypesSnafu, Error, EvalSnafu, ExternalSnafu, InvalidQuerySnafu,
     NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
 };
 use crate::expr::{
-    BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TypedExpr, UnaryFunc,
-    UnmaterializableFunc, VariadicFunc, TUMBLE_END, TUMBLE_START,
+    BinaryFunc, DfScalarFunction, RawDfScalarFn, ScalarExpr, TUMBLE_END, TUMBLE_START, TypedExpr,
+    UnaryFunc, UnmaterializableFunc, VariadicFunc,
 };
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::literal::{
     from_substrait_literal, from_substrait_type, to_substrait_literal,
 };
-use crate::transform::{substrait_proto, FunctionExtensions};
+use crate::transform::{FunctionExtensions, substrait_proto};
 
 // TODO(discord9): refactor plan to substrait convert of `arrow_cast` function thus remove this function
 /// ref to `arrow_schema::datatype` for type name
@@ -682,12 +682,14 @@ mod test {
                     ),
                 ),
                 mfp: MapFilterProject::new(1)
-                    .map(vec![ScalarExpr::Column(0)
-                        .call_unary(UnaryFunc::Cast(CDT::int64_datatype()))
-                        .call_binary(
-                            ScalarExpr::Literal(Value::from(1i64), CDT::int64_datatype()),
-                            BinaryFunc::AddInt64,
-                        )])
+                    .map(vec![
+                        ScalarExpr::Column(0)
+                            .call_unary(UnaryFunc::Cast(CDT::int64_datatype()))
+                            .call_binary(
+                                ScalarExpr::Literal(Value::from(1i64), CDT::int64_datatype()),
+                                BinaryFunc::AddInt64,
+                            ),
+                    ])
                     .unwrap()
                     .project(vec![1])
                     .unwrap(),
@@ -744,8 +746,10 @@ mod test {
                     ),
                 ),
                 mfp: MapFilterProject::new(1)
-                    .map(vec![ScalarExpr::Column(0)
-                        .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)])
+                    .map(vec![
+                        ScalarExpr::Column(0)
+                            .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32),
+                    ])
                     .unwrap()
                     .project(vec![1])
                     .unwrap(),

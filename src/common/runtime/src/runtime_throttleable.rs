@@ -26,9 +26,9 @@ use tokio::runtime::Handle;
 pub use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 
+use crate::Builder;
 use crate::error::{BuildRuntimeRateLimiterSnafu, Result};
 use crate::runtime::{Dropper, Priority, RuntimeTrait};
-use crate::Builder;
 
 struct RuntimeRateLimiter {
     pub ratelimiter: Option<Ratelimiter>,
@@ -165,7 +165,7 @@ where
 
         match this.state {
             State::Pollable => {}
-            State::Throttled(ref mut sleep) => match sleep.poll_unpin(cx) {
+            State::Throttled(sleep) => match sleep.poll_unpin(cx) {
                 Poll::Ready(_) => {
                     *this.state = State::Pollable;
                 }
@@ -173,16 +173,16 @@ where
             },
         };
 
-        if let Some(ratelimiter) = &this.handle.ratelimiter {
-            if let Err(wait) = ratelimiter.try_wait() {
-                *this.state = State::Throttled(Box::pin(tokio::time::sleep(wait)));
-                match this.state.unwrap_backoff().poll_unpin(cx) {
-                    Poll::Ready(_) => {
-                        *this.state = State::Pollable;
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
+        if let Some(ratelimiter) = &this.handle.ratelimiter
+            && let Err(wait) = ratelimiter.try_wait()
+        {
+            *this.state = State::Throttled(Box::pin(tokio::time::sleep(wait)));
+            match this.state.unwrap_backoff().poll_unpin(cx) {
+                Poll::Ready(_) => {
+                    *this.state = State::Pollable;
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
                 }
             }
         }

@@ -1,4 +1,4 @@
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::ast::Ident;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -6,13 +6,13 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, DuplicateClauseSnafu, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::trigger::{ANNOTATIONS, LABELS, NOTIFY, ON};
+use crate::statements::OptionMap;
 use crate::statements::alter::trigger::{
     AlterTrigger, AlterTriggerOperation, AnnotationChange, AnnotationOperations, LabelChange,
     LabelOperations, NotifyChannelChange, NotifyChannelOperations,
 };
 use crate::statements::create::trigger::NotifyChannel;
 use crate::statements::statement::Statement;
-use crate::statements::OptionMap;
 
 /// Some keywords about trigger.
 pub const RENAME: &str = "RENAME";
@@ -119,7 +119,7 @@ impl<'a> ParserContext<'a> {
                             return self.expected(
                                 "`LABELS`, `ANNOTATIONS` or `NOTIFY` keyword after `SET`",
                                 next_token,
-                            )
+                            );
                         }
                     }
                 }
@@ -542,10 +542,10 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::parsers::alter_parser::trigger::{apply_label_change, apply_label_replacement};
+    use crate::statements::OptionMap;
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
     use crate::statements::create::trigger::TriggerOn;
     use crate::statements::statement::Statement;
-    use crate::statements::OptionMap;
 
     #[test]
     fn test_parse_alter_without_alter_options() {

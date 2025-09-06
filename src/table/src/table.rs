@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::Cast;
+use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datatypes::data_type::DataType;

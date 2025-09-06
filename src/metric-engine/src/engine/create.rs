@@ -18,12 +18,12 @@ use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
 use common_telemetry::info;
-use common_time::{Timestamp, FOREVER};
+use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
@@ -35,12 +35,12 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, PathType, RegionCreateRequest, RegionRequest};
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
-use crate::engine::create::extract_new_columns::extract_new_columns;
-use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
+use crate::engine::create::extract_new_columns::extract_new_columns;
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -180,7 +180,9 @@ impl MetricEngineInner {
         )?;
         extension_return_value.extend(response.extensions);
 
-        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}");
+        info!(
+            "Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}"
+        );
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
@@ -623,7 +625,7 @@ mod test {
     use super::*;
     use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
-    use crate::test_util::{create_logical_region_request, TestEnv};
+    use crate::test_util::{TestEnv, create_logical_region_request};
 
     #[test]
     fn test_verify_region_create_request() {

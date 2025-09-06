@@ -40,10 +40,10 @@ use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
-use mito_codec::row_converter::{build_primary_key_codec_with_fields, SortField};
+use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -653,12 +653,13 @@ impl PrimaryKeyReadFormat {
         column: &ColumnMetadata,
         is_min: bool,
     ) -> Option<ArrayRef> {
-        debug_assert!(self
-            .metadata
-            .primary_key
-            .first()
-            .map(|id| *id == column.column_id)
-            .unwrap_or(false));
+        debug_assert!(
+            self.metadata
+                .primary_key
+                .first()
+                .map(|id| *id == column.column_id)
+                .unwrap_or(false)
+        );
 
         let primary_key_encoding = self.metadata.primary_key_encoding;
         let converter = build_primary_key_codec_with_fields(
@@ -935,24 +936,24 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        Int64Array, StringArray, TimestampMillisecondArray, UInt64Array, UInt8Array,
+        Int64Array, StringArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
-    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt8Vector, UInt64Vector};
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
-    use crate::sst::parquet::flat_format::{sequence_column_index, FlatWriteFormat};
-    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+    use crate::sst::parquet::flat_format::{FlatWriteFormat, sequence_column_index};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;

@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use cmd::datanode::builder::InstanceBuilder;
 use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
+use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
 use common_version::{verbose_version, version};
 use servers::install_ring_crypto_provider;
@@ -143,8 +143,10 @@ async fn start(cli: Command) -> Result<()> {
 }
 
 fn setup_human_panic() {
-    human_panic::setup_panic!(human_panic::Metadata::new("GreptimeDB", version())
-        .homepage("https://github.com/GreptimeTeam/greptimedb/discussions"));
+    human_panic::setup_panic!(
+        human_panic::Metadata::new("GreptimeDB", version())
+            .homepage("https://github.com/GreptimeTeam/greptimedb/discussions")
+    );
 
     common_telemetry::set_panic_hook();
 }

@@ -41,10 +41,10 @@ use crate::error::{
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionFileId;
-pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
-use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
+use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
+pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 
 pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
@@ -349,17 +349,17 @@ fn is_blob_not_found(err: &Error) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use datafusion_expr::{col, lit, Expr};
+    use datafusion_expr::{Expr, col, lit};
     use futures::future::BoxFuture;
     use puffin::puffin_manager::PuffinWriter;
     use store_api::metadata::RegionMetadata;
 
     use super::*;
     use crate::sst::file::FileId;
+    use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
     };
-    use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
 
     #[allow(clippy::type_complexity)]
     fn tester(
@@ -369,7 +369,7 @@ mod tests {
         puffin_manager_factory: PuffinManagerFactory,
         file_id: RegionFileId,
     ) -> impl Fn(&[Expr], Vec<(usize, bool)>) -> BoxFuture<'static, Vec<(usize, Vec<Range<usize>>)>>
-           + use<'_> {
+    + use<'_> {
         move |exprs, row_groups| {
             let table_dir = table_dir.clone();
             let object_store: ObjectStore = object_store.clone();

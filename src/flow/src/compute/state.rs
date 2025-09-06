@@ -16,8 +16,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use dfir_rs::scheduled::graph::Dfir;
 use dfir_rs::scheduled::SubgraphId;
+use dfir_rs::scheduled::graph::Dfir;
 use get_size2::GetSize;
 
 use crate::compute::types::ErrCollector;

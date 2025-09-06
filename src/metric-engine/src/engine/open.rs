@@ -25,9 +25,9 @@ use store_api::region_engine::{BatchResponses, RegionEngine};
 use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, ReplayCheckpoint};
 use store_api::storage::RegionId;
 
-use crate::engine::create::region_options_for_metadata_region;
-use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
+use crate::engine::create::region_options_for_metadata_region;
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
 use crate::error::{
     BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlness::interceptor::{Interceptor, InterceptorFactory, InterceptorRef};
 use sqlness::SqlnessError;
+use sqlness::interceptor::{Interceptor, InterceptorFactory, InterceptorRef};
 
 pub const PROTOCOL_KEY: &str = "protocol";
 pub const POSTGRES: &str = "postgres";

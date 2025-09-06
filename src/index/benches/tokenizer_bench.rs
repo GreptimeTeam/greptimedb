@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use index::fulltext_index::tokenizer::{EnglishTokenizer, Tokenizer};
 
 fn bench_english_tokenizer(c: &mut Criterion) {
@@ -20,14 +20,38 @@ fn bench_english_tokenizer(c: &mut Criterion) {
 
     let texts = vec![
         ("short", "Hello, world! This is a test."),
-        ("medium", "The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."),
-        ("long", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt."),
-        ("mixed_chars", "Hello123 world!!! This-is_a.test@example.com with various: punctuation; and [brackets] {curly} (parentheses) & symbols* + numbers456."),
-        ("numbers_heavy", "test123 456test test789 abc123def 999888777 hello42world 123 456 789 mix1ng l3tt3rs 4nd numb3rs"),
-        ("punctuation_heavy", "Hello!!! World??? This...is...a...test... With lots of!!! punctuation??? marks!!! And... ellipses???"),
-        ("postgres log", "2025-08-01 21:09:28.928 UTC [27] LOG:  checkpoint complete: wrote 0 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=5 kB; lsn=0/1992868, redo lsn=0/1992868"),
-        ("many_short_words", "a b c d e f g h i j k l m n o p q r s t u v w x y z"),
-        ("with_unicode", "这是，一个测试。🈶一些 Unicøde 字符比如 café and naïve words."),
+        (
+            "medium",
+            "The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+        ),
+        (
+            "long",
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt.",
+        ),
+        (
+            "mixed_chars",
+            "Hello123 world!!! This-is_a.test@example.com with various: punctuation; and [brackets] {curly} (parentheses) & symbols* + numbers456.",
+        ),
+        (
+            "numbers_heavy",
+            "test123 456test test789 abc123def 999888777 hello42world 123 456 789 mix1ng l3tt3rs 4nd numb3rs",
+        ),
+        (
+            "punctuation_heavy",
+            "Hello!!! World??? This...is...a...test... With lots of!!! punctuation??? marks!!! And... ellipses???",
+        ),
+        (
+            "postgres log",
+            "2025-08-01 21:09:28.928 UTC [27] LOG:  checkpoint complete: wrote 0 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=5 kB; lsn=0/1992868, redo lsn=0/1992868",
+        ),
+        (
+            "many_short_words",
+            "a b c d e f g h i j k l m n o p q r s t u v w x y z",
+        ),
+        (
+            "with_unicode",
+            "这是，一个测试。🈶一些 Unicøde 字符比如 café and naïve words.",
+        ),
     ];
 
     let mut group = c.benchmark_group("english_tokenizer");

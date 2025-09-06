@@ -331,7 +331,7 @@ impl FlatPruneReader {
 mod tests {
     use api::v1::OpType;
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{col, lit, Expr};
+    use datafusion_expr::{Expr, col, lit};
 
     use super::*;
     use crate::test_util::new_batch;

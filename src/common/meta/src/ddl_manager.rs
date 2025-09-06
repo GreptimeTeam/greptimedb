@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use common_procedure::{
-    watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
+    BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher,
 };
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use derive_builder::Builder;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::TableId;
 
 use crate::ddl::alter_database::AlterDatabaseProcedure;
@@ -36,7 +36,7 @@ use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
-use crate::ddl::{utils, DdlContext};
+use crate::ddl::{DdlContext, utils};
 use crate::error::{
     EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
@@ -47,10 +47,6 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
-use crate::rpc::ddl::trigger::CreateTriggerTask;
-#[cfg(feature = "enterprise")]
-use crate::rpc::ddl::trigger::DropTriggerTask;
-#[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::DropTrigger;
@@ -59,6 +55,10 @@ use crate::rpc::ddl::DdlTask::{
     CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
     TruncateTable,
 };
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::trigger::CreateTriggerTask;
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::trigger::DropTriggerTask;
 use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask,
     CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
@@ -624,7 +624,9 @@ async fn handle_create_logical_table_tasks(
         .submit_create_logical_table_tasks(create_table_tasks, physical_table_id)
         .await?;
 
-    info!("{num_logical_tables} logical tables on physical table: {physical_table_id:?} is created via procedure_id {id:?}");
+    info!(
+        "{num_logical_tables} logical tables on physical table: {physical_table_id:?} is created via procedure_id {id:?}"
+    );
 
     let procedure_id = id.to_string();
     let output = output.context(ProcedureOutputSnafu {
@@ -856,7 +858,9 @@ async fn handle_alter_logical_table_tasks(
         .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id)
         .await?;
 
-    info!("{num_logical_tables} logical tables on physical table: {physical_table_id:?} is altered via procedure_id {id:?}");
+    info!(
+        "{num_logical_tables} logical tables on physical table: {physical_table_id:?} is altered via procedure_id {id:?}"
+    );
 
     let procedure_id = id.to_string();
 
@@ -908,8 +912,8 @@ mod tests {
     use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-    use crate::key::flow::FlowMetadataManager;
     use crate::key::TableMetadataManager;
+    use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;

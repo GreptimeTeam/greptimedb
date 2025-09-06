@@ -18,12 +18,12 @@ use std::num::NonZeroUsize;
 use async_trait::async_trait;
 use snafu::ensure;
 
+use crate::BytesRef;
 use crate::bitmap::BitmapType;
-use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::create::InvertedIndexCreator;
+use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::BytesRef;
 
 type IndexName = String;
 type SegmentRowCount = NonZeroUsize;
@@ -119,13 +119,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use common_base::BitVec;
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
 
     use super::*;
+    use crate::Bytes;
     use crate::bitmap::Bitmap;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::{MockInvertedIndexWriter, ValueStream};
-    use crate::Bytes;
 
     #[tokio::test]
     async fn test_sort_index_creator_basic() {

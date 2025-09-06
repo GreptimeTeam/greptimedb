@@ -36,15 +36,15 @@ use table::table_name::TableName;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::Result;
-use crate::key::table_name::TableNameValue;
 use crate::key::TableMetadataManagerRef;
+use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_database::start::ReconcileDatabaseStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
-    wait_for_inflight_subprocedures, Context, ReconcileDatabaseMetrics, SubprocedureMeta,
+    Context, ReconcileDatabaseMetrics, SubprocedureMeta, wait_for_inflight_subprocedures,
 };
 pub(crate) const DEFAULT_PARALLELISM: usize = 64;
 

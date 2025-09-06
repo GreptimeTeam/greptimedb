@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_catalog::format_full_flow_name;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::error::{self, Result};

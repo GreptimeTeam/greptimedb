@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mito_codec::row_converter::{build_primary_key_codec, DensePrimaryKeyCodec};
+use mito_codec::row_converter::{DensePrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -102,7 +102,7 @@ fn build_read_format(
     projection: &Option<&[ColumnId]>,
     flat_format: bool,
 ) -> ReadFormat {
-    let read_format = if let Some(column_ids) = &projection {
+    if let Some(column_ids) = &projection {
         ReadFormat::new(region_metadata, column_ids.iter().copied(), flat_format)
     } else {
         // No projection, lists all column ids to read.
@@ -114,7 +114,5 @@ fn build_read_format(
                 .map(|col| col.column_id),
             flat_format,
         )
-    };
-
-    read_format
+    }
 }

@@ -18,16 +18,16 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::FileOptions;
 use crate::error::{
     CheckObjectSnafu, DecodeJsonSnafu, DeleteRegionManifestSnafu, EncodeJsonSnafu,
     InvalidMetadataSnafu, LoadRegionManifestSnafu, ManifestExistsSnafu, MissingRequiredFieldSnafu,
     ParseFileFormatSnafu, Result, StoreRegionManifestSnafu,
 };
-use crate::FileOptions;
 
 #[inline]
 fn region_manifest_path(region_dir: &str) -> String {

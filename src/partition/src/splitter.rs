@@ -19,8 +19,8 @@ use api::v1::{ColumnSchema, Row, Rows};
 use datatypes::value::Value;
 use store_api::storage::RegionNumber;
 
-use crate::error::Result;
 use crate::PartitionRuleRef;
+use crate::error::Result;
 
 pub struct RowSplitter {
     partition_rule: PartitionRuleRef,
@@ -134,14 +134,14 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use api::v1::ColumnDataType;
     use api::v1::helper::{field_column_schema, tag_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::ColumnDataType;
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::partition::RegionMask;
     use crate::PartitionRule;
+    use crate::partition::RegionMask;
 
     fn mock_rows() -> Rows {
         let schema = vec![

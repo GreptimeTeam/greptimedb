@@ -32,11 +32,11 @@ use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
-    Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType,
+    Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
     IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
     StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type, VectorType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -483,7 +483,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }
-                .fail()
+                .fail();
             }
         };
 

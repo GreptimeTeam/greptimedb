@@ -52,8 +52,8 @@ mod tests {
     use rand::SeedableRng;
 
     use super::SelectExprTranslator;
-    use crate::generator::select_expr::SelectExprGeneratorBuilder;
     use crate::generator::Generator;
+    use crate::generator::select_expr::SelectExprGeneratorBuilder;
     use crate::test_utils;
     use crate::translator::DslTranslator;
 

@@ -17,16 +17,16 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::tracing::info;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{Result, SchemaNotFoundSnafu};
 use crate::instruction::CacheIdent;
-use crate::key::schema_name::{SchemaName, SchemaNameKey, SchemaNameValue};
 use crate::key::DeserializedValueWithBytes;
+use crate::key::schema_name::{SchemaName, SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::rpc::ddl::UnsetDatabaseOption::{self};
 use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, SetDatabaseOption};

@@ -22,7 +22,7 @@ use index::inverted_index::error::Result;
 use index::inverted_index::format::reader::InvertedIndexReader;
 use prost::Message;
 
-use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
+use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 
@@ -130,10 +130,10 @@ mod test {
     use std::num::NonZeroUsize;
 
     use futures::stream;
+    use index::Bytes;
     use index::bitmap::{Bitmap, BitmapType};
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
-    use index::Bytes;
     use prometheus::register_int_counter_vec;
     use rand::{Rng, RngCore};
 
@@ -175,7 +175,11 @@ mod test {
             if read != data.get(expected_range).unwrap() {
                 panic!(
                     "fuzz_read_index failed, offset: {}, size: {}, page_size: {}\nread len: {}, expected len: {}\nrange: {:?}, page num: {}",
-                    offset, size, page_size, read.len(), size as usize,
+                    offset,
+                    size,
+                    page_size,
+                    read.len(),
+                    size as usize,
                     PageKey::calculate_range(offset, size, page_size as u64),
                     page_num
                 );

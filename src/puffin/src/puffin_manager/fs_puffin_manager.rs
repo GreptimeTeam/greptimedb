@@ -21,10 +21,10 @@ pub use reader::FsPuffinReader;
 pub use writer::FsPuffinWriter;
 
 use crate::error::Result;
+use crate::puffin_manager::PuffinManager;
 use crate::puffin_manager::cache::PuffinMetadataCacheRef;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::stager::Stager;
-use crate::puffin_manager::PuffinManager;
 
 /// `FsPuffinManager` is a `PuffinManager` that provides readers and writers for puffin data in filesystem.
 #[derive(Clone)]

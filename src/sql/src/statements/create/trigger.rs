@@ -8,8 +8,8 @@ use sqlparser::ast::{Query, Visit, VisitMut, Visitor, VisitorMut};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
-use crate::statements::create::{COMMA_SEP, INDENT, LINE_SEP};
 use crate::statements::OptionMap;
+use crate::statements::create::{COMMA_SEP, INDENT, LINE_SEP};
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateTrigger {

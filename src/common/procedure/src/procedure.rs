@@ -21,7 +21,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_event_recorder::{Event, Eventable};
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::watch::Receiver;
 use uuid::Uuid;

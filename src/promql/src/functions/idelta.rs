@@ -35,11 +35,7 @@ pub struct IDelta<const IS_RATE: bool> {}
 
 impl<const IS_RATE: bool> IDelta<IS_RATE> {
     pub const fn name() -> &'static str {
-        if IS_RATE {
-            "prom_irate"
-        } else {
-            "prom_idelta"
-        }
+        if IS_RATE { "prom_irate" } else { "prom_idelta" }
     }
 
     pub fn scalar_udf() -> ScalarUDF {

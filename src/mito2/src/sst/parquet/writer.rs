@@ -17,8 +17,8 @@
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -40,8 +40,8 @@ use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
@@ -52,11 +52,11 @@ use crate::error::{
 use crate::read::{Batch, FlatSource, Source};
 use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::index::{Indexer, IndexerBuilder};
-use crate::sst::parquet::flat_format::{time_index_column_index, FlatWriteFormat};
+use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
-use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
-use crate::sst::{FlatSchemaOptions, DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
@@ -351,11 +351,13 @@ where
         builder: WriterPropertiesBuilder,
         region_metadata: &RegionMetadataRef,
     ) -> WriterPropertiesBuilder {
-        let ts_col = ColumnPath::new(vec![region_metadata
-            .time_index_column()
-            .column_schema
-            .name
-            .clone()]);
+        let ts_col = ColumnPath::new(vec![
+            region_metadata
+                .time_index_column()
+                .column_schema
+                .name
+                .clone(),
+        ]);
         let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
 
         builder
@@ -561,7 +563,7 @@ fn timestamp_range_from_array(
                     timestamp_array.data_type()
                 ),
             }
-            .fail()
+            .fail();
         }
     };
 

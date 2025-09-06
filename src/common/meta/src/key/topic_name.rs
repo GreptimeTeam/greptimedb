@@ -15,19 +15,19 @@
 use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::ensure_values;
 use crate::error::{self, DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result, UnexpectedSnafu};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    DeserializedValueWithBytes, MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN,
-    KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
+    DeserializedValueWithBytes, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX,
+    LEGACY_TOPIC_KEY_PREFIX, MetadataKey, MetadataValue,
 };
-use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchPutRequest, RangeRequest};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicNameKey<'a> {
@@ -241,8 +241,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     #[tokio::test]

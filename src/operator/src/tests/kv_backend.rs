@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
 use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
-use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 
 pub async fn prepare_mocked_backend() -> KvBackendRef {
     let backend = Arc::new(MemoryKvBackend::default());

@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::ExternalSnafu;
 use datatypes::arrow::datatypes::Field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};

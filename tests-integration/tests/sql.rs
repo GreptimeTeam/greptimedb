@@ -26,8 +26,8 @@ use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
-    setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_user_provider, StorageType,
+    StorageType, setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
+    setup_pg_server_with_user_provider,
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -1376,10 +1376,12 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
         .expect("declare cursor");
 
     // duplicated cursor
-    assert!(client
-        .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
-        .await
-        .is_err());
+    assert!(
+        client
+            .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
+            .await
+            .is_err()
+    );
 
     let rows = client.query("FETCH 5 FROM c1", &[]).await.unwrap();
     assert_eq!(5, rows.len());

@@ -22,8 +22,8 @@ use datatypes::vectors::BinaryVector;
 use rand::Rng;
 use table::test_util::MemTable;
 
-use crate::tests::new_query_engine_with_table;
 use crate::QueryEngineRef;
+use crate::tests::new_query_engine_with_table;
 
 pub fn create_query_engine_for_vector10x3() -> QueryEngineRef {
     let mut column_schemas = vec![];

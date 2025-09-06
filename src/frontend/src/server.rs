@@ -34,7 +34,7 @@ use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandlers};
-use servers::tls::{maybe_watch_tls_config, ReloadableTlsServerConfig};
+use servers::tls::{ReloadableTlsServerConfig, maybe_watch_tls_config};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};

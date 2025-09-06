@@ -38,30 +38,27 @@ impl AliasTracker {
             .source
             .as_any()
             .downcast_ref::<DefaultTableSource>()
-        {
-            if let Some(provider) = source
+            && let Some(provider) = source
                 .table_provider
                 .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
-            {
-                if provider.table().table_type() == TableType::Base {
-                    let info = provider.table().table_info();
-                    let schema = info.meta.schema.clone();
-                    let col_schema = schema.column_schemas();
-                    let mapping = col_schema
-                        .iter()
-                        .map(|col| {
-                            (
-                                col.name.clone(),
-                                HashSet::from_iter(std::iter::once(Column::new_unqualified(
-                                    col.name.clone(),
-                                ))),
-                            )
-                        })
-                        .collect();
-                    return Some(Self { mapping });
-                }
-            }
+            && provider.table().table_type() == TableType::Base
+        {
+            let info = provider.table().table_info();
+            let schema = info.meta.schema.clone();
+            let col_schema = schema.column_schemas();
+            let mapping = col_schema
+                .iter()
+                .map(|col| {
+                    (
+                        col.name.clone(),
+                        HashSet::from_iter(std::iter::once(Column::new_unqualified(
+                            col.name.clone(),
+                        ))),
+                    )
+                })
+                .collect();
+            return Some(Self { mapping });
         }
 
         None
@@ -154,7 +151,7 @@ mod tests {
     use common_telemetry::init_default_ut_logging;
     use datafusion::error::Result as DfResult;
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, col};
 
     use super::*;
     use crate::dist_plan::analyzer::test::TestTable;

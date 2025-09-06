@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use client::api::v1::alter_table_expr::Kind;
-use client::api::v1::region::{region_request, AlterRequests, RegionRequest, RegionRequestHeader};
+use client::api::v1::region::{AlterRequests, RegionRequest, RegionRequestHeader, region_request};
 use client::api::v1::{AddColumn, AddColumns, AlterTableExpr};
 use common_meta::ddl::alter_logical_tables::make_alter_region_request;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{find_leader_regions, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};

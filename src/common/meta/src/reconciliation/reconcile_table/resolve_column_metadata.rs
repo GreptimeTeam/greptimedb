@@ -27,9 +27,9 @@ use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
 use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
 use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
 use crate::reconciliation::utils::{
-    build_column_metadata_from_table_info, check_column_metadatas_consistent,
-    resolve_column_metadatas_with_latest, resolve_column_metadatas_with_metasrv,
-    ResolveColumnMetadataResult,
+    ResolveColumnMetadataResult, build_column_metadata_from_table_info,
+    check_column_metadatas_consistent, resolve_column_metadatas_with_latest,
+    resolve_column_metadatas_with_metasrv,
 };
 
 /// Strategy for resolving column metadata inconsistencies.

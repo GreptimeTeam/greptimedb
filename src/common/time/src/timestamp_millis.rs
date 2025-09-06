@@ -14,8 +14,8 @@
 
 use std::cmp::Ordering;
 
-use crate::util::div_ceil;
 use crate::Timestamp;
+use crate::util::div_ceil;
 
 /// Unix timestamp in millisecond resolution.
 ///

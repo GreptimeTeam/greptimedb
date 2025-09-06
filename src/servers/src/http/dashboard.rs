@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use axum::body::Body;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::Response;
 use common_telemetry::debug;
 use rust_embed::RustEmbed;

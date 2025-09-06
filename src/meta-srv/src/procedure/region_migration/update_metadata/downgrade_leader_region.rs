@@ -17,8 +17,8 @@ use common_meta::rpc::router::LeaderState;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::Context;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 
 impl UpdateMetadata {
     /// Downgrades the leader region.
@@ -86,7 +86,7 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 

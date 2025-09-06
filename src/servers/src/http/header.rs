@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_plugins::GREPTIME_EXEC_PREFIX;
-use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricValue;
 use headers::{Header, HeaderName, HeaderValue};
 use hyper::HeaderMap;
 use serde_json::Value;
@@ -120,10 +120,10 @@ impl Header for GreptimeDbName {
     }
 
     fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
-        if let Some(name) = &self.0 {
-            if let Ok(value) = HeaderValue::from_str(name) {
-                values.extend(std::iter::once(value));
-            }
+        if let Some(name) = &self.0
+            && let Ok(value) = HeaderValue::from_str(name)
+        {
+            values.extend(std::iter::once(value));
         }
     }
 }

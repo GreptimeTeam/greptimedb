@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use common_telemetry::{error, info};
 use store_api::storage::RegionId;
-use store_api::{ManifestVersion, MIN_VERSION};
+use store_api::{MIN_VERSION, ManifestVersion};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};

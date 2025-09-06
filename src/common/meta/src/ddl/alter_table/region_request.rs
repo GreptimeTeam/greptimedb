@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::{
-    alter_request, AddColumn, AddColumns, DropColumn, DropColumns, RegionColumnDef,
+    AddColumn, AddColumns, DropColumn, DropColumns, RegionColumnDef, alter_request,
 };
 use snafu::OptionExt;
 use table::metadata::RawTableInfo;
@@ -122,27 +122,27 @@ mod tests {
 
     use api::v1::add_column_location::LocationType;
     use api::v1::alter_table_expr::Kind;
-    use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
+    use api::v1::region::region_request::Body;
     use api::v1::{
-        region, AddColumn, AddColumnLocation, AddColumns, AlterTableExpr, ColumnDataType,
-        ColumnDef as PbColumnDef, ModifyColumnType, ModifyColumnTypes, SemanticType,
+        AddColumn, AddColumnLocation, AddColumns, AlterTableExpr, ColumnDataType,
+        ColumnDef as PbColumnDef, ModifyColumnType, ModifyColumnTypes, SemanticType, region,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use store_api::storage::{RegionId, TableId};
 
-    use crate::ddl::alter_table::executor::make_alter_region_request;
+    use crate::ddl::DdlContext;
     use crate::ddl::alter_table::AlterTableProcedure;
+    use crate::ddl::alter_table::executor::make_alter_region_request;
     use crate::ddl::test_util::columns::TestColumnDefBuilder;
     use crate::ddl::test_util::create_table::{
-        build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+        TestCreateTableExprBuilder, build_raw_table_info_from_expr,
     };
-    use crate::ddl::DdlContext;
     use crate::key::table_route::TableRouteValue;
     use crate::peer::Peer;
     use crate::rpc::ddl::AlterTableTask;
     use crate::rpc::router::{Region, RegionRoute};
-    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     /// Prepares a region with schema `[ts: Timestamp, host: Tag, cpu: Field]`.
     async fn prepare_ddl_context() -> (DdlContext, TableId, RegionId, String) {

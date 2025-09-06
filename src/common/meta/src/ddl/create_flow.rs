@@ -17,9 +17,9 @@ mod metadata;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use api::v1::ExpireAfter;
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
-use api::v1::ExpireAfter;
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -31,13 +31,13 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;

@@ -17,9 +17,9 @@ use futures::{AsyncWrite, AsyncWriteExt, Stream, StreamExt};
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexStats};
 use snafu::ResultExt;
 
+use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::{FstCompileSnafu, FstInsertSnafu, Result, WriteSnafu};
-use crate::Bytes;
 
 /// `SingleIndexWriter` writes values to the blob storage for an individual inverted index
 pub struct SingleIndexWriter<W, S> {
@@ -164,8 +164,8 @@ mod tests {
     use futures::stream;
 
     use super::*;
-    use crate::inverted_index::error::Error;
     use crate::Bytes;
+    use crate::inverted_index::error::Error;
 
     #[tokio::test]
     async fn test_single_index_writer_write_empty() {

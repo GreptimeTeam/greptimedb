@@ -30,8 +30,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use datafusion_expr::Operator;
-use datafusion_physical_expr::expressions::{col, lit, BinaryExpr};
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::expressions::{BinaryExpr, col, lit};
 use datatypes::arrow::datatypes::Schema;
 use datatypes::value::{OrderedF64, OrderedFloat, Value};
 
@@ -363,33 +363,33 @@ impl<'a> Collider<'a> {
 
         match (lhs, rhs) {
             (Operand::Column(col), Operand::Value(val)) => {
-                if let Some(column_values) = normalized_values.get(col) {
-                    if let Some(&normalized_val) = column_values.get(val) {
-                        return Ok(NucleonExpr {
-                            column: col.clone(),
-                            op: gluon_op,
-                            value: normalized_val,
-                        });
-                    }
+                if let Some(column_values) = normalized_values.get(col)
+                    && let Some(&normalized_val) = column_values.get(val)
+                {
+                    return Ok(NucleonExpr {
+                        column: col.clone(),
+                        op: gluon_op,
+                        value: normalized_val,
+                    });
                 }
             }
             (Operand::Value(val), Operand::Column(col)) => {
-                if let Some(column_values) = normalized_values.get(col) {
-                    if let Some(&normalized_val) = column_values.get(val) {
-                        // Flip the operation for value op column
-                        let flipped_op = match gluon_op {
-                            GluonOp::Lt => GluonOp::Gt,
-                            GluonOp::LtEq => GluonOp::GtEq,
-                            GluonOp::Gt => GluonOp::Lt,
-                            GluonOp::GtEq => GluonOp::LtEq,
-                            op => op, // Eq and NotEq remain the same
-                        };
-                        return Ok(NucleonExpr {
-                            column: col.clone(),
-                            op: flipped_op,
-                            value: normalized_val,
-                        });
-                    }
+                if let Some(column_values) = normalized_values.get(col)
+                    && let Some(&normalized_val) = column_values.get(val)
+                {
+                    // Flip the operation for value op column
+                    let flipped_op = match gluon_op {
+                        GluonOp::Lt => GluonOp::Gt,
+                        GluonOp::LtEq => GluonOp::GtEq,
+                        GluonOp::Gt => GluonOp::Lt,
+                        GluonOp::GtEq => GluonOp::LtEq,
+                        op => op, // Eq and NotEq remain the same
+                    };
+                    return Ok(NucleonExpr {
+                        column: col.clone(),
+                        op: flipped_op,
+                        value: normalized_val,
+                    });
                 }
             }
             _ => {}
@@ -488,9 +488,11 @@ mod test {
         assert_eq!(collider.atomic_exprs[0].source_expr_index, 0);
 
         // Test simple AND
-        let exprs = vec![col("id")
-            .eq(Value::UInt32(1))
-            .and(col("status").eq(Value::String("active".into())))];
+        let exprs = vec![
+            col("id")
+                .eq(Value::UInt32(1))
+                .and(col("status").eq(Value::String("active".into()))),
+        ];
 
         let collider = Collider::new(&exprs).unwrap();
         assert_eq!(collider.atomic_exprs.len(), 1);

@@ -20,8 +20,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-use crate::procedure::ProcedureId;
 use crate::PoisonKey;
+use crate::procedure::ProcedureId;
 
 /// Procedure error.
 #[derive(Snafu)]

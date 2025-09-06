@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
-use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use snafu::{ensure, ResultExt};
+use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
@@ -173,8 +173,8 @@ pub fn extract_topic_from_wal_options(
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_wal::config::kafka::common::KafkaTopicConfig;
     use common_wal::maybe_skip_kafka_integration_test;
     use common_wal::test_util::get_kafka_endpoints;
 

@@ -24,12 +24,12 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, Value};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 
+use crate::fulltext_index::Config;
 use crate::fulltext_index::create::{ROWID_FIELD_NAME, TEXT_FIELD_NAME};
 use crate::fulltext_index::error::{
     Result, TantivyDocNotFoundSnafu, TantivyParserSnafu, TantivySnafu,
 };
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId};
-use crate::fulltext_index::Config;
 
 /// `TantivyFulltextIndexSearcher` is a searcher using Tantivy.
 pub struct TantivyFulltextIndexSearcher {

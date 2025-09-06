@@ -28,8 +28,8 @@ use substrait::variation_const::{
     UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
 use substrait_proto::proto;
-use substrait_proto::proto::expression::literal::{LiteralType, PrecisionTimestamp};
 use substrait_proto::proto::expression::Literal;
+use substrait_proto::proto::expression::literal::{LiteralType, PrecisionTimestamp};
 use substrait_proto::proto::r#type::Kind;
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};

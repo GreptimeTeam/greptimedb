@@ -47,8 +47,8 @@ macro_rules! with_match_primitive_type_id {
 
         use $crate::type_id::LogicalTypeId;
         use $crate::types::{
-            Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type,
-            UInt32Type, UInt64Type, UInt8Type,
+            Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type,
+            UInt16Type, UInt32Type, UInt64Type,
         };
         match $key_type {
             LogicalTypeId::Int8 => __with_ty__! { Int8Type },

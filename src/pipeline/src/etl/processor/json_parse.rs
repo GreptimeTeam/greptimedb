@@ -15,15 +15,15 @@
 use snafu::{OptionExt as _, ResultExt};
 use vrl::value::{KeyString, Value as VrlValue};
 
+use crate::Processor;
 use crate::error::{
     Error, FieldMustBeTypeSnafu, JsonParseSnafu, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu,
     ProcessorUnsupportedValueSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, yaml_bool, yaml_new_field, yaml_new_fields,
 };
-use crate::Processor;
 
 pub(crate) const PROCESSOR_JSON_PARSE: &str = "json_parse";
 

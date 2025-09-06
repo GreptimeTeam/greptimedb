@@ -30,7 +30,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::ScanPlanConfig;

@@ -13,20 +13,20 @@
 // limitations under the License.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use asynchronous_codec::{FramedRead, FramedWrite};
 use fastbloom::BloomFilter;
 use futures::stream::StreamExt;
-use futures::{stream, AsyncWriteExt, Stream};
+use futures::{AsyncWriteExt, Stream, stream};
 use snafu::ResultExt;
 
-use crate::bloom_filter::creator::intermediate_codec::IntermediateBloomFilterCodecV1;
+use crate::Bytes;
 use crate::bloom_filter::creator::SEED;
+use crate::bloom_filter::creator::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::external_provider::ExternalTempFileProvider;
-use crate::Bytes;
 
 /// The minimum memory usage threshold for flushing in-memory Bloom filters to disk.
 const MIN_MEMORY_USAGE_THRESHOLD: usize = 1024 * 1024; // 1MB
@@ -334,9 +334,11 @@ mod tests {
         let dup_seg = stream.next().await.unwrap().unwrap();
         assert_eq!(dup_seg.element_count, 1);
         assert!(stream.next().await.is_none());
-        assert!(indices[(batch - dup_batch)..batch]
-            .iter()
-            .all(|&x| x == batch - dup_batch));
+        assert!(
+            indices[(batch - dup_batch)..batch]
+                .iter()
+                .all(|&x| x == batch - dup_batch)
+        );
     }
 
     #[tokio::test]

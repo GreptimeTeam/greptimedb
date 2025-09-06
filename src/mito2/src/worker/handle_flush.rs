@@ -14,8 +14,8 @@
 
 //! Handling flush related requests.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
@@ -87,16 +87,13 @@ impl<S> RegionWorkerLoop<S> {
 
         // Flush memtable with max mutable memtable.
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
-        if let Some(region) = max_mem_region {
-            if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task =
-                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
-                self.flush_scheduler.schedule_flush(
-                    region.region_id,
-                    &region.version_control,
-                    task,
-                )?;
-            }
+        if let Some(region) = max_mem_region
+            && !self.flush_scheduler.is_flush_requested(region.region_id)
+        {
+            let task =
+                self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)?;
         }
 
         Ok(())

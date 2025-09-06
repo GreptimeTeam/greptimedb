@@ -29,10 +29,10 @@ use datafusion_common::tree_node::{
 use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
 use datatypes::schema::SchemaRef;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement, DEFAULT_LOOKBACK_STRING};
 use query::QueryEngineRef;
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -290,18 +290,17 @@ impl ColumnMatcherRewriter {
             .collect::<BTreeSet<_>>();
         // first match by position
         for (idx, expr) in exprs.iter_mut().enumerate() {
-            if !all_names.contains(&expr.qualified_name().1) {
-                if let Some(col_name) = self
+            if !all_names.contains(&expr.qualified_name().1)
+                && let Some(col_name) = self
                     .schema
                     .column_schemas()
                     .get(idx)
                     .map(|c| c.name.clone())
-                {
-                    // if the data type mismatched, later check_execute will error out
-                    // hence no need to check it here, beside, optimize pass might be able to cast it
-                    // so checking here is not necessary
-                    *expr = expr.clone().alias(col_name);
-                }
+            {
+                // if the data type mismatched, later check_execute will error out
+                // hence no need to check it here, beside, optimize pass might be able to cast it
+                // so checking here is not necessary
+                *expr = expr.clone().alias(col_name);
             }
         }
 
@@ -331,8 +330,7 @@ impl ColumnMatcherRewriter {
                 // helpful error message
                 return Err(DataFusionError::Plan(format!(
                     "Expect the last column in table to be timestamp column, found column {} with type {:?}",
-                    last_col_schema.name,
-                    last_col_schema.data_type
+                    last_col_schema.name, last_col_schema.data_type
                 )));
             }
         } else if query_col_cnt + 2 == table_col_cnt {
@@ -344,8 +342,7 @@ impl ColumnMatcherRewriter {
             } else {
                 return Err(DataFusionError::Plan(format!(
                     "Expect the second last column in the table to be timestamp column, found column {} with type {:?}",
-                    second_last_col_schema.name,
-                    second_last_col_schema.data_type
+                    second_last_col_schema.name, second_last_col_schema.data_type
                 )));
             }
 
@@ -361,9 +358,12 @@ impl ColumnMatcherRewriter {
             }
         } else {
             return Err(DataFusionError::Plan(format!(
-                    "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
-                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas()
-                )));
+                "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
+                query_col_cnt,
+                exprs,
+                table_col_cnt,
+                self.schema.column_schemas()
+            )));
         }
         Ok(exprs)
     }
@@ -520,36 +520,31 @@ mod test {
         let testcases = vec![
             (
                 "SELECT number FROM numbers_with_ts GROUP BY number",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number"
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number",
             ),
-
             (
                 "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE ((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4)"
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE ((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4)",
             ),
-
             (
                 "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)"
+                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)",
             ),
-
             // subquery
             (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);", 
-                "SELECT numbers_with_ts.number, time_window FROM (SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number)"
+                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
+                "SELECT numbers_with_ts.number, time_window FROM (SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number)",
             ),
-
             // complex subquery without alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name"
+                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name",
             ),
-
             // complex subquery alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte WHERE number > 1 GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(cte.number), cte.number, date_bin('5 minutes', cte.ts) AS time_window, cte.bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) AS cte WHERE (cte.number > 1) GROUP BY cte.number, date_bin('5 minutes', cte.ts), cte.bucket_name"
-            )
+                "SELECT sum(cte.number), cte.number, date_bin('5 minutes', cte.ts) AS time_window, cte.bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) AS cte WHERE (cte.number > 1) GROUP BY cte.number, date_bin('5 minutes', cte.ts), cte.bucket_name",
+            ),
         ];
         use datafusion_expr::{col, lit};
         let query_engine = create_test_query_engine();
@@ -588,7 +583,9 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -616,7 +613,9 @@ mod test {
             // add update_at and ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -635,7 +634,9 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -654,7 +655,9 @@ mod test {
             // add update_at after time index column
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -674,7 +677,9 @@ mod test {
             // error datatype mismatch
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Err("Expect the last column in table to be timestamp column, found column atat with type Int8"),
+                Err(
+                    "Expect the last column in table to be timestamp column, found column atat with type Int8",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -694,14 +699,12 @@ mod test {
             // error datatype mismatch on second last column
             (
                 "SELECT number FROM numbers_with_ts",
-                Err("Expect the second last column in the table to be timestamp column, found column ts with type Int8"),
+                Err(
+                    "Expect the second last column in the table to be timestamp column, found column ts with type Int8",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::int8_datatype(),
-                        false,
-                    ),
+                    ColumnSchema::new("ts", ConcreteDataType::int8_datatype(), false),
                     ColumnSchema::new(
                         // name is irrelevant for update_at column
                         "atat",
@@ -744,32 +747,32 @@ mod test {
     async fn test_find_group_by_exprs() {
         let testcases = vec![
             (
-                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;", 
-                vec!["ts"]
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;",
+                vec!["ts"],
             ),
             (
                 "SELECT number FROM numbers_with_ts GROUP BY number",
-                vec!["number"]
+                vec!["number"],
             ),
             (
                 "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                vec!["time_window"]
+                vec!["time_window"],
             ),
-             // subquery
+            // subquery
             (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);", 
-                vec!["time_window", "number"]
+                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
+                vec!["time_window", "number"],
             ),
             // complex subquery without alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"]
+                vec!["number", "time_window", "bucket_name"],
             ),
             // complex subquery alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"]
-            )
+                vec!["number", "time_window", "bucket_name"],
+            ),
         ];
 
         let query_engine = create_test_query_engine();

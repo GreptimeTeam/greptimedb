@@ -30,8 +30,8 @@ use store_api::storage::RegionId;
 use crate::error::{Result, UnexpectedSnafu};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
-    IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
-    READ_ROWS_RETURN, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
+    IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
+    READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_RETURN, READ_STAGE_ELAPSED,
 };
 use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
@@ -450,12 +450,20 @@ impl Drop for PartitionMetricsInner {
         if self.explain_verbose {
             common_telemetry::info!(
                 "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
-                self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
+                self.scanner_type,
+                self.region_id,
+                self.partition,
+                metrics,
+                self.convert_cost,
             );
         } else {
             common_telemetry::debug!(
                 "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
-                self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
+                self.scanner_type,
+                self.region_id,
+                self.partition,
+                metrics,
+                self.convert_cost,
             );
         }
     }

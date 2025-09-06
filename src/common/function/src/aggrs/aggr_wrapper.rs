@@ -28,8 +28,8 @@ use arrow::array::StructArray;
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
-use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
+use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
@@ -207,8 +207,9 @@ impl StateMergeHelper {
         let upper_plan = LogicalPlan::Aggregate(upper_check).recompute_schema()?;
         if *upper_plan.schema() != *aggr_plan.schema() {
             return Err(datafusion_common::DataFusionError::Internal(format!(
-                 "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: \n[transformed]:{}\n[original]:{}",
-                upper_plan.schema(), aggr_plan.schema()
+                "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: \n[transformed]:{}\n[original]:{}",
+                upper_plan.schema(),
+                aggr_plan.schema()
             )));
         }
 

@@ -14,13 +14,13 @@
 
 use async_trait::async_trait;
 use common_base::range_read::RangeReader;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::blob_metadata::BlobMetadata;
 use crate::error::{ReadSnafu, Result, UnexpectedPuffinFileSizeSnafu};
+use crate::file_format::MIN_FILE_SIZE;
 use crate::file_format::reader::footer::DEFAULT_PREFETCH_SIZE;
 use crate::file_format::reader::{AsyncReader, PuffinFileFooterReader};
-use crate::file_format::MIN_FILE_SIZE;
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 

@@ -27,10 +27,10 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::table_name::TableName;
 
+use crate::DatanodeId;
 use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
-use crate::DatanodeId;
 
 /// Returns the distribution of regions to datanodes.
 ///
@@ -129,10 +129,10 @@ pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Ve
     region_routes
         .iter()
         .filter_map(|x| {
-            if let Some(peer) = &x.leader_peer {
-                if peer == datanode {
-                    return Some(x.region.id.region_number());
-                }
+            if let Some(peer) = &x.leader_peer
+                && peer == datanode
+            {
+                return Some(x.region.id.region_number());
             }
             None
         })

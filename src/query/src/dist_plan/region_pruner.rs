@@ -17,6 +17,7 @@
 use std::cmp::Ordering;
 use std::ops::Bound;
 
+use GluonOp::*;
 use ahash::{HashMap, HashSet};
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
@@ -25,7 +26,6 @@ use partition::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
 use partition::expr::{Operand, PartitionExpr};
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
-use GluonOp::*;
 
 use crate::error::Result;
 
@@ -407,7 +407,7 @@ impl ValueRange {
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
-    use partition::expr::{col, Operand, PartitionExpr, RestrictedOp};
+    use partition::expr::{Operand, PartitionExpr, RestrictedOp, col};
     use store_api::storage::RegionId;
 
     use super::*;

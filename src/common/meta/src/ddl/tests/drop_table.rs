@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::region::{region_request, RegionRequest};
+use api::v1::region::{RegionRequest, region_request};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -27,6 +27,7 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
 
+use crate::ddl::TableMetadata;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::drop_table::{DropTableProcedure, DropTableState};
 use crate::ddl::test_util::create_table::test_create_table_task;
@@ -35,13 +36,12 @@ use crate::ddl::test_util::{
     create_logical_table, create_physical_table, create_physical_table_metadata,
     test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::TableMetadata;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{Region, RegionRoute};
-use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {
@@ -276,18 +276,22 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
         assert_eq!(guards.len(), 1);
         let (datanode_id, region_id) = (0, RegionId::new(physical_table_id, 0));
         assert_eq!(guards[0].info(), (datanode_id, region_id));
-        assert!(ddl_context
-            .memory_region_keeper
-            .contains(datanode_id, region_id));
+        assert!(
+            ddl_context
+                .memory_region_keeper
+                .contains(datanode_id, region_id)
+        );
 
         execute_procedure_until_done(&mut procedure).await;
 
         // Ensure that when run to the end, the dropping regions should be cleared:
         let guards = &procedure.dropping_regions;
         assert!(guards.is_empty());
-        assert!(!ddl_context
-            .memory_region_keeper
-            .contains(datanode_id, region_id));
+        assert!(
+            !ddl_context
+                .memory_region_keeper
+                .contains(datanode_id, region_id)
+        );
     };
 
     inner_test(new_drop_table_task("s", logical_table_id, false)).await;

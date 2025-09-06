@@ -24,8 +24,8 @@ pub mod test_util;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
-use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
+use api::greptime_proto::v1::add_column_location::LocationType;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};

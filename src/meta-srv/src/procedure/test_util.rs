@@ -19,10 +19,10 @@ use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::test_utils::new_test_table_info;
 use common_meta::key::topic_name::TopicNameKey;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_registry::{
     LeaderRegion, LeaderRegionManifestInfo, LeaderRegionRegistryRef,

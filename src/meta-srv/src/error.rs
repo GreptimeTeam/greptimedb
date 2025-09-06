@@ -1127,10 +1127,10 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
 
         // h2::Error do not expose std::io::Error with `source()`
         // https://github.com/hyperium/h2/pull/462
-        if let Some(h2_err) = err.downcast_ref::<h2::Error>() {
-            if let Some(io_err) = h2_err.get_io() {
-                return Some(io_err);
-            }
+        if let Some(h2_err) = err.downcast_ref::<h2::Error>()
+            && let Some(io_err) = h2_err.get_io()
+        {
+            return Some(io_err);
         }
 
         err = err.source()?;

@@ -273,10 +273,10 @@ impl Indexer {
     }
 
     pub(crate) async fn do_prune_intm_sst_dir(&mut self) {
-        if let Some(manager) = self.intermediate_manager.take() {
-            if let Err(e) = manager.prune_sst_dir(&self.region_id, &self.file_id).await {
-                warn!(e; "Failed to prune intermediate SST directory, region_id: {}, file_id: {}", self.region_id, self.file_id);
-            }
+        if let Some(manager) = self.intermediate_manager.take()
+            && let Err(e) = manager.prune_sst_dir(&self.region_id, &self.file_id).await
+        {
+            warn!(e; "Failed to prune intermediate SST directory, region_id: {}, file_id: {}", self.region_id, self.file_id);
         }
     }
 }

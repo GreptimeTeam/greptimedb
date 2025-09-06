@@ -18,8 +18,8 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value::{
     ArrayValue, BoolValue, BytesValue, DoubleValue, IntValue, KvlistValue, StringValue,
 };
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
-use serde::ser::{SerializeMap, SerializeSeq};
 use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
 
 use crate::otlp::utils::key_value_to_jsonb;
 

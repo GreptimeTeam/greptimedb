@@ -83,7 +83,7 @@ impl TryFrom<Precision> for TimeUnit {
             _ => {
                 return Err(Error::NotSupported {
                     feat: format!("convert {precision} into TimeUnit"),
-                })
+                });
             }
         })
     }

@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
+use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region_request};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::ddl::utils::{add_peer_context_if_needed, region_storage_path};
-use crate::ddl::{build_template_from_raw_table_info, CreateRequestBuilder};
+use crate::ddl::{CreateRequestBuilder, build_template_from_raw_table_info};
 use crate::error::Result;
 use crate::reconciliation::reconcile_logical_tables::update_table_infos::UpdateTableInfos;
 use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};

@@ -21,12 +21,12 @@ use common_base::range_read::RangeReader;
 use fastbloom::BloomFilter;
 use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
+use crate::bloom_filter::SEED;
 use crate::bloom_filter::error::{
     DecodeProtoSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
 };
-use crate::bloom_filter::SEED;
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
@@ -245,8 +245,8 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use futures::io::Cursor;
 

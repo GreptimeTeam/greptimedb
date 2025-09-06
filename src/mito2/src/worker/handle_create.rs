@@ -23,7 +23,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::region::opener::{check_recovered_region, RegionOpener};
+use crate::region::opener::{RegionOpener, check_recovered_region};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {

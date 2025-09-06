@@ -15,12 +15,12 @@
 use std::collections::HashMap;
 
 use api::v1::SemanticType;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use object_store::services::Fs;
 use object_store::ObjectStore;
+use object_store::services::Fs;
 use store_api::metadata::ColumnMetadata;
 
 pub fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {

@@ -25,8 +25,8 @@ use servers::error::{self, Result};
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::opentsdb::codec::DataPoint;
-use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
@@ -193,7 +193,10 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
+    assert_eq!(
+        result.text().await,
+        "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}"
+    );
 
     // multiple data point summary debug put
     let result = client
@@ -218,7 +221,10 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
+    assert_eq!(
+        result.text().await,
+        "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}"
+    );
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {

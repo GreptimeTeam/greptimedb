@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use arrow_schema::DataType as ArrowDataType;
-use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use common_decimal::Decimal128;
+use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::{DataType, ScalarVectorBuilder};

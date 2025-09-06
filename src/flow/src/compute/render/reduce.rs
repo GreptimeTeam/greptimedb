@@ -24,7 +24,7 @@ use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{BooleanVector, NullVector};
 use dfir_rs::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
@@ -514,8 +514,7 @@ fn reduce_batch_subgraph(
 
     trace!(
         "Reduce take {} batches, {} rows",
-        input_batch_count,
-        input_row_count
+        input_batch_count, input_row_count
     );
 
     // write lock the arrange for the rest of the function body
@@ -1035,7 +1034,11 @@ impl AccumOutput {
         ensure!(
             !self.accum.is_empty() && self.accum.len() == self.output.len(),
             InternalSnafu {
-                reason: format!("Accum and output should have the non-zero and same length, found accum.len() = {}, output.len() = {}", self.accum.len(), self.output.len())
+                reason: format!(
+                    "Accum and output should have the non-zero and same length, found accum.len() = {}, output.len() = {}",
+                    self.accum.len(),
+                    self.output.len()
+                )
             }
         );
         // make output vec from output map

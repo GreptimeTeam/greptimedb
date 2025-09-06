@@ -23,7 +23,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 
 async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str) {
@@ -71,7 +71,7 @@ async fn test_read_parquet_stats() {
 
     check_prune_row_groups(
         vec![
-            datafusion_expr::col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(4000), None)))
+            datafusion_expr::col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(4000), None))),
         ],
         "\
 +-------+---------+---------------------+

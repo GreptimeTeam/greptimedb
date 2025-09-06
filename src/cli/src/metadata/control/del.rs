@@ -18,9 +18,9 @@ mod table;
 use clap::Subcommand;
 use common_error::ext::BoxedError;
 
+use crate::Tool;
 use crate::metadata::control::del::key::DelKeyCommand;
 use crate::metadata::control::del::table::DelTableCommand;
-use crate::Tool;
 
 /// The prefix of the tombstone keys.
 pub(crate) const CLI_TOMBSTONE_PREFIX: &str = "__cli_tombstone/";

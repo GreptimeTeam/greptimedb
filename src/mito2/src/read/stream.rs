@@ -27,10 +27,10 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::cache::CacheStrategy;
 use crate::error::{Result, UnexpectedSnafu};
+use crate::read::Batch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
-use crate::read::Batch;
 
 /// All kinds of [`Batch`]es to produce in scanner.
 pub enum ScanBatch {

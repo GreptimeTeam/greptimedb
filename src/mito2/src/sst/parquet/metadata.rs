@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use object_store::ObjectStore;
-use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use parquet::file::FOOTER_SIZE;
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};

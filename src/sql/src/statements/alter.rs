@@ -201,7 +201,11 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})", options.analyzer, options.case_sensitive, options.backend)
+                    write!(
+                        f,
+                        "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})",
+                        options.analyzer, options.case_sensitive, options.backend
+                    )
                 }
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
@@ -210,7 +214,11 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET SKIPPING INDEX WITH(granularity={0}, index_type={1})", options.granularity, options.index_type)
+                    write!(
+                        f,
+                        "MODIFY COLUMN {column_name} SET SKIPPING INDEX WITH(granularity={0}, index_type={1})",
+                        options.granularity, options.index_type
+                    )
                 }
             },
             AlterTableOperation::UnsetIndex { options } => match options {

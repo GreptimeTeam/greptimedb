@@ -24,10 +24,10 @@ use snafu::OptionExt;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::error::{Error, InvalidQuerySnafu};
+use crate::expr::VectorDiff;
 use crate::expr::error::EvalError;
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::VectorDiff;
 use crate::repr::Diff;
 
 /// Aggregate functions that can be applied to a group of rows.

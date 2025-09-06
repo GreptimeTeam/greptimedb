@@ -20,8 +20,8 @@ use bytes::Bytes;
 use datatypes::arrow::array::{BooleanArray, Scalar, UInt64Array};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
@@ -267,7 +267,7 @@ mod tests {
 
     use api::v1::SemanticType;
     use datafusion_expr::{col, lit};
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;

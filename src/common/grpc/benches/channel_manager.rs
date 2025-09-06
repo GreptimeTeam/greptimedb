@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_grpc::channel_manager::ChannelManager;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 #[tokio::main]
 async fn do_bench_channel_manager() {

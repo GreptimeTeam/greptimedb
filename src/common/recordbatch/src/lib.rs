@@ -39,7 +39,7 @@ use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {

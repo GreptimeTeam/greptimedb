@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_base::Plugins;
-use flow::error::Result;
 use flow::FlownodeOptions;
+use flow::error::Result;
 
 use crate::options::PluginOptions;
 

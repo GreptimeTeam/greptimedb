@@ -16,7 +16,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, Ident, ItemFn, Signature, Type, TypeReference, Visibility,
+    Attribute, Ident, ItemFn, Signature, Type, TypeReference, Visibility, parse_macro_input,
 };
 
 use crate::utils::extract_input_types;

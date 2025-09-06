@@ -17,8 +17,8 @@ use std::any::Any;
 use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
-use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
+use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::error::Result;
 
 #[derive(Debug, Serialize, Deserialize)]

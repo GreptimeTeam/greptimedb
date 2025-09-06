@@ -67,7 +67,7 @@ mod tests {
 
     macro_rules! take_time_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-            use $crate::vectors::{$VectorType, VectorRef};
+            use $crate::vectors::{VectorRef, $VectorType};
 
             let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
             let indices = UInt32Vector::from_slice(&[3, 0, 1, 4]);

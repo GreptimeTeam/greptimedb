@@ -32,16 +32,16 @@ use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::build_wal_options_allocator;
-use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
@@ -54,7 +54,7 @@ use servers::grpc::GrpcOptions;
 use servers::server::ServerHandlers;
 use snafu::ResultExt;
 
-use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
+use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
 pub struct GreptimeDbStandalone {
     pub frontend: Arc<Frontend>,

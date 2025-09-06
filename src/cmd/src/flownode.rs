@@ -25,20 +25,20 @@ use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_telemetry::info;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
 use flow::{
-    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
-    FrontendClient, FrontendInvoker,
+    FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
+    get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -46,7 +46,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
+use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-flownode";
 

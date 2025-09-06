@@ -19,8 +19,8 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
-use tokio::sync::watch::{self, Receiver};
 use tokio::sync::RwLock;
+use tokio::sync::watch::{self, Receiver};
 
 use crate::error::{self, Error, Result};
 
@@ -201,7 +201,7 @@ mod tests {
     use store_api::storage::RegionId;
     use tokio::sync::oneshot;
 
-    use crate::heartbeat::task_tracker::{wait, TaskTracker};
+    use crate::heartbeat::task_tracker::{TaskTracker, wait};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestResult {

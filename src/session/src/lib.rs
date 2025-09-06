@@ -28,8 +28,8 @@ use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
 pub use common_session::ReadPreference;
-use common_time::timezone::get_timezone;
 use common_time::Timezone;
+use common_time::timezone::get_timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 

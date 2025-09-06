@@ -15,8 +15,8 @@
 use std::ops::DerefMut;
 
 use common_meta::ddl::DetectingRegion;
-use dashmap::mapref::multiple::RefMulti;
 use dashmap::DashMap;
+use dashmap::mapref::multiple::RefMulti;
 
 use crate::failure_detector::{PhiAccrualFailureDetector, PhiAccrualFailureDetectorOptions};
 

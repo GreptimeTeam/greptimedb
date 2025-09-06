@@ -14,7 +14,7 @@
 
 use std::str::FromStr;
 
-use api::v1::region::{compact_request, StrictWindow};
+use api::v1::region::{StrictWindow, compact_request};
 use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
@@ -27,7 +27,7 @@ use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::requests::{CompactTableRequest, FlushTableRequest};
 
 use crate::handlers::TableMutationHandlerRef;
@@ -133,13 +133,19 @@ fn parse_compact_params(
             table_name,
             compact_request::Options::Regular(Default::default()),
         ),
-        [ValueRef::String(table_name), ValueRef::String(compact_ty_str)] => {
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(compact_ty_str),
+        ] => {
             let compact_type = parse_compact_type(compact_ty_str, None)?;
             (table_name, compact_type)
         }
 
-        [ValueRef::String(table_name), ValueRef::String(compact_ty_str), ValueRef::String(options_str)] =>
-        {
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(compact_ty_str),
+            ValueRef::String(options_str),
+        ] => {
             let compact_type = parse_compact_type(compact_ty_str, Some(options_str))?;
             (table_name, compact_type)
         }
@@ -148,7 +154,7 @@ fn parse_compact_params(
                 function: "compact_table",
                 datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
             }
-            .fail()
+            .fail();
         }
     };
 
@@ -384,22 +390,26 @@ mod tests {
             ),
         ]);
 
-        assert!(parse_compact_params(
-            &["table", "strict_window", "abc"]
-                .into_iter()
-                .map(ValueRef::String)
-                .collect::<Vec<_>>(),
-            &QueryContext::arc(),
-        )
-        .is_err());
+        assert!(
+            parse_compact_params(
+                &["table", "strict_window", "abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
 
-        assert!(parse_compact_params(
-            &["a.b.table", "strict_window", "abc"]
-                .into_iter()
-                .map(ValueRef::String)
-                .collect::<Vec<_>>(),
-            &QueryContext::arc(),
-        )
-        .is_err());
+        assert!(
+            parse_compact_params(
+                &["a.b.table", "strict_window", "abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
     }
 }

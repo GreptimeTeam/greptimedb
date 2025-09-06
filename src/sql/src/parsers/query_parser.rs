@@ -53,9 +53,11 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .output_msg()
-            .contains("Expected: an expression"));
+        assert!(
+            result
+                .unwrap_err()
+                .output_msg()
+                .contains("Expected: an expression")
+        );
     }
 }

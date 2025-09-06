@@ -34,8 +34,8 @@ use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
-use table::table_name::TableName;
 use table::TableRef;
+use table::table_name::TableName;
 
 mod http;
 mod interceptor;

@@ -132,8 +132,8 @@ mod tests {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::UInt32Vector;
-    use futures::task::{Context, Poll};
     use futures::Stream;
+    use futures::task::{Context, Poll};
 
     use super::*;
     use crate::adapter::RecordBatchMetrics;

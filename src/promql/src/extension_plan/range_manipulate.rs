@@ -37,13 +37,13 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
@@ -465,7 +465,7 @@ impl DisplayAs for RangeManipulateExec {
                 write!(
                     f,
                     "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
-                   self.start, self.end, self.interval, self.range, self.time_index_column
+                    self.start, self.end, self.interval, self.range, self.time_index_column
                 )
             }
         }
@@ -804,7 +804,7 @@ mod test {
                 base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
-);
+        );
         do_normalize_test(0, 310_000, 30_000, 90_000, expected.clone()).await;
 
         // dump large range
@@ -814,7 +814,7 @@ mod test {
     #[tokio::test]
     async fn small_empty_range() {
         let expected = String::from(
-        "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
             1970-01-01T00:00:00.001,\n  \
             1970-01-01T00:00:03.001,\n  \
             1970-01-01T00:00:06.001,\n  \
@@ -829,7 +829,8 @@ mod test {
         RangeArray { \
             base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
-        }");
+        }",
+        );
         do_normalize_test(1, 10_001, 3_000, 1_000, expected).await;
     }
 }

@@ -15,11 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use dashmap::DashMap;
-use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
+use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};

@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
-use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::Event;
+use common_event_recorder::error::{Result, SerializeEventSnafu};
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};

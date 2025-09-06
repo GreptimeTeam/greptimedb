@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use common_telemetry::info;
 use file::{Metadata, MetadataContent};
-use futures::{future, TryStreamExt};
+use futures::{TryStreamExt, future};
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use strum::Display;
@@ -32,9 +32,9 @@ use crate::error::{
 };
 use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchPutRequest, RangeRequest};
 use crate::snapshot::file::{Document, KeyValue as FileKeyValue};
 
 /// The format of the backup file.
@@ -331,12 +331,12 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::services::Fs;
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     #[test]

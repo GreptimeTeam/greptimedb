@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::error::Error;
-use common_time::timezone::get_timezone;
 use common_time::Timezone;
+use common_time::timezone::get_timezone;
 
 pub struct EvalContext {
     pub timezone: Timezone,

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;

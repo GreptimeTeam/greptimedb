@@ -17,7 +17,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
 use crate::expr::{SafeMfpPlan, ScalarExpr};

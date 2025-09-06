@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::precision::Precision;
 use common_telemetry::tracing;
@@ -93,7 +93,7 @@ pub async fn influxdb_write(
     lines: String,
     handler: InfluxdbLineProtocolHandlerRef,
     ctx: QueryContextRef,
-) -> Result<impl IntoResponse> {
+) -> Result<impl IntoResponse + use<>> {
     let _timer = crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED
         .with_label_values(&[db])
         .start_timer();

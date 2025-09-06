@@ -25,7 +25,7 @@ use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::otlp::trace::attributes::Attributes;
-use crate::otlp::trace::span::{parse, TraceSpan};
+use crate::otlp::trace::span::{TraceSpan, parse};
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
     SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN,

@@ -18,11 +18,11 @@ use std::time::Duration;
 use common_time::Timezone;
 use lazy_static::lazy_static;
 use regex::Regex;
+use session::ReadPreference;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
-use session::ReadPreference;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
 use sqlparser::ast::ValueWithSpan;
@@ -61,7 +61,7 @@ pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()>
                             expr,
                         ),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())
@@ -95,7 +95,7 @@ pub fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
                     return NotSupportedSnafu {
                         feat: format!("Invalid timezone expr {} in set variable statement", tz),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())
@@ -316,7 +316,7 @@ pub fn set_query_timeout(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
                     return NotSupportedSnafu {
                         feat: format!("Invalid timeout expr {} in set variable statement", timeout),
                     }
-                    .fail()
+                    .fail();
                 }
             }
             Ok(())

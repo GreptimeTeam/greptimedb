@@ -20,9 +20,9 @@ use common_meta::instruction::CacheIdent;
 use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::OptionExt;
+use table::TableRef;
 use table::dist_table::DistTable;
 use table::table_name::TableName;
-use table::TableRef;
 
 pub type TableCacheRef = Arc<TableCache>;
 

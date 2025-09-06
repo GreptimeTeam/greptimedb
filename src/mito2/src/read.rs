@@ -52,13 +52,13 @@ use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampSecondVector,
-    UInt32Vector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector,
+    UInt8Vector, UInt8VectorBuilder, UInt32Vector, UInt64Vector, UInt64VectorBuilder, Vector,
     VectorRef,
 };
-use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -693,21 +693,21 @@ impl BatchChecker {
     pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
         batch.check_monotonic()?;
 
-        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
-            if start > first {
-                return Err(format!(
-                    "batch's first timestamp is before the start timestamp: {:?} > {:?}",
-                    start, first
-                ));
-            }
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp())
+            && start > first
+        {
+            return Err(format!(
+                "batch's first timestamp is before the start timestamp: {:?} > {:?}",
+                start, first
+            ));
         }
-        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
-            if end <= last {
-                return Err(format!(
-                    "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
-                    end, last
-                ));
-            }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp())
+            && end <= last
+        {
+            return Err(format!(
+                "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
+                end, last
+            ));
         }
 
         // Checks the batch is behind the last batch.

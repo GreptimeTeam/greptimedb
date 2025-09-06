@@ -31,17 +31,17 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::cache_invalidator::Context as CacheContext;
+use crate::ddl::DdlContext;
 use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::validator::{
-    retain_unskipped, AlterLogicalTableValidator, ValidatorResult,
+    AlterLogicalTableValidator, ValidatorResult, retain_unskipped,
 };
 use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
-use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::instruction::CacheIdent;
+use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
@@ -173,7 +173,9 @@ impl AlterLogicalTablesProcedure {
         {
             self.data.physical_columns = column_metadatas;
         } else {
-            warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
+            warn!(
+                "altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged"
+            );
         }
         self.submit_sync_region_requests(results, region_routes)
             .await;

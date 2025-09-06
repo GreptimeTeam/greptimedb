@@ -17,10 +17,10 @@ pub mod sort_create;
 
 use async_trait::async_trait;
 
+use crate::BytesRef;
 use crate::bitmap::BitmapType;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::BytesRef;
 
 /// `InvertedIndexCreator` provides functionality to construct an inverted index
 #[async_trait]

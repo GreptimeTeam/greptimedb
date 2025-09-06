@@ -32,7 +32,7 @@ use humantime::format_duration;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;

@@ -466,7 +466,7 @@ mod tests {
     use api::v1::OpType;
 
     use super::*;
-    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
+    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
 
     #[tokio::test]
     async fn test_merge_reader_empty() {

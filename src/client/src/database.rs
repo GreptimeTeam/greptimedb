@@ -27,8 +27,8 @@ use api::v1::{
 };
 use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -42,7 +42,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -50,7 +50,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
-use crate::{error, from_grpc_response, Client, Result};
+use crate::{Client, Result, error, from_grpc_response};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
@@ -379,11 +379,10 @@ impl Database {
                 tonic_code,
                 e
             );
-            let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+            Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
                 addr: client.addr().to_string(),
                 tonic_code,
-            });
-            error
+            })
         })?;
 
         let flight_data_stream = response.into_inner();

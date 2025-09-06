@@ -64,11 +64,11 @@ pub use interval::{
 pub use list::{ListIter, ListVector, ListVectorBuilder};
 pub use null::{NullVector, NullVectorBuilder};
 pub use primitive::{
-    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector,
-    Int16VectorBuilder, Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder,
-    Int8Vector, Int8VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
-    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
-    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int8Vector,
+    Int8VectorBuilder, Int16Vector, Int16VectorBuilder, Int32Vector, Int32VectorBuilder,
+    Int64Vector, Int64VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
+    UInt8Vector, UInt8VectorBuilder, UInt16Vector, UInt16VectorBuilder, UInt32Vector,
+    UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder,
 };
 pub use string::{StringVector, StringVectorBuilder};
 pub use time::{

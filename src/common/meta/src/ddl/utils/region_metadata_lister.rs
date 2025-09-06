@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, TableId};
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::error::{DecodeJsonSnafu, Result};
 use crate::node_manager::NodeManagerRef;
-use crate::rpc::router::{find_leaders, region_distribution, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// Collects the region metadata from the datanodes.
 pub struct RegionMetadataLister {
@@ -118,8 +118,8 @@ mod tests {
 
     use api::region::RegionResponse;
     use api::v1::meta::Peer;
-    use api::v1::region::region_request::Body;
     use api::v1::region::RegionRequest;
+    use api::v1::region::region_request::Body;
     use store_api::metadata::RegionMetadata;
     use store_api::storage::RegionId;
     use tokio::sync::mpsc;

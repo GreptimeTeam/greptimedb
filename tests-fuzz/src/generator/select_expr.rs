@@ -15,8 +15,8 @@
 use std::marker::PhantomData;
 
 use derive_builder::Builder;
-use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 
 use crate::context::TableContextRef;
 use crate::error::{Error, Result};

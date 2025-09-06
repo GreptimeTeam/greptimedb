@@ -34,7 +34,7 @@ use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSe
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
 };
-use datafusion_common::{internal_err, DataFusionError};
+use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::PhysicalSortExpr;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
@@ -377,10 +377,10 @@ impl PartSortStream {
 
         for (idx, val) in sort_column_iter {
             // ignore vacant time index data
-            if let Some(val) = val {
-                if val >= cur_range.end.value() || val < cur_range.start.value() {
-                    return Ok(Some(idx));
-                }
+            if let Some(val) = val
+                && (val >= cur_range.end.value() || val < cur_range.start.value())
+            {
+                return Ok(Some(idx));
             }
         }
 
@@ -680,7 +680,7 @@ mod test {
     use store_api::region_engine::PartitionRange;
 
     use super::*;
-    use crate::test_util::{new_ts_array, MockInputExec};
+    use crate::test_util::{MockInputExec, new_ts_array};
 
     #[tokio::test]
     async fn fuzzy_test() {
@@ -1097,11 +1097,13 @@ mod test {
             }
             panic!(
                 "case_{} failed, opt: {:?},\n real output has {} batches, {} rows, expected has {} batches with {} rows\nfull msg: {}",
-                case_id, opt,
+                case_id,
+                opt,
                 real_output.len(),
-                real_output.iter().map(|x|x.num_rows()).sum::<usize>(),
+                real_output.iter().map(|x| x.num_rows()).sum::<usize>(),
                 expected_output.len(),
-                expected_output.iter().map(|x|x.num_rows()).sum::<usize>(), full_msg
+                expected_output.iter().map(|x| x.num_rows()).sum::<usize>(),
+                full_msg
             );
         }
     }

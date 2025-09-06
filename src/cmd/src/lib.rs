@@ -46,7 +46,7 @@ lazy_static::lazy_static! {
 /// wait for the close signal, for unix platform it's SIGINT or SIGTERM
 #[cfg(unix)]
 async fn start_wait_for_close_signal() -> std::io::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
@@ -93,13 +93,13 @@ pub trait App: Send {
 
         self.start().await?;
 
-        if self.wait_signal() {
-            if let Err(e) = start_wait_for_close_signal().await {
-                error!(e; "Failed to listen for close signal");
-                // It's unusual to fail to listen for close signal, maybe there's something unexpected in
-                // the underlying system. So we stop the app instead of running nonetheless to let people
-                // investigate the issue.
-            }
+        if self.wait_signal()
+            && let Err(e) = start_wait_for_close_signal().await
+        {
+            error!(e; "Failed to listen for close signal");
+            // It's unusual to fail to listen for close signal, maybe there's something unexpected in
+            // the underlying system. So we stop the app instead of running nonetheless to let people
+            // investigate the issue.
         }
 
         self.stop().await?;

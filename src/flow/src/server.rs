@@ -24,8 +24,8 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
-use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_meta::procedure_executor::ProcedureExecutorRef;
@@ -33,7 +33,7 @@ use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
 use futures::TryStreamExt;
-use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
+use greptime_proto::v1::flow::{FlowRequest, FlowResponse, InsertRequests, flow_server};
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
@@ -48,16 +48,16 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
-use crate::adapter::{create_worker, FlowStreamingEngineRef};
+use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, IllegalAuthConfigSnafu,
-    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    CacheRequiredSnafu, ExternalSnafu, IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu,
+    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};

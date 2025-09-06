@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use arrow::array::{ArrayRef, BooleanArray};
 use common_error::ext::BoxedError;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datafusion_expr::Operator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -30,7 +30,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, TimestampMillisecondVector, VectorRef};
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::{EnumIter, IntoEnumIterator};
 use substrait::df_logical_plan::consumer::name_to_op;
 
@@ -40,7 +40,7 @@ use crate::expr::error::{
     TryFromValueSnafu, TypeMismatchSnafu,
 };
 use crate::expr::signature::{GenericFn, Signature};
-use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr, TypedExpr, TUMBLE_END, TUMBLE_START};
+use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr, TUMBLE_END, TUMBLE_START, TypedExpr};
 use crate::repr::{self, value_to_internal_ts};
 
 /// UnmaterializableFunc is a function that can't be eval independently,

@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use txn::{Compare, CompareOp, TxnOp};
 
 use super::{KvBackend, *};
 use crate::error::Error;
-use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::util;
 
 pub fn mock_kvs(prefix: Vec<u8>) -> Vec<KeyValue> {
@@ -50,13 +50,15 @@ pub async fn prepare_kv(kv_backend: &impl KvBackend) {
 
 pub async fn prepare_kv_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
     let kvs = mock_kvs(prefix);
-    assert!(kv_backend
-        .batch_put(BatchPutRequest {
-            kvs,
-            ..Default::default()
-        })
-        .await
-        .is_ok());
+    assert!(
+        kv_backend
+            .batch_put(BatchPutRequest {
+                kvs,
+                ..Default::default()
+            })
+            .await
+            .is_ok()
+    );
 }
 
 pub async fn unprepare_kv(kv_backend: &impl KvBackend, prefix: &[u8]) {

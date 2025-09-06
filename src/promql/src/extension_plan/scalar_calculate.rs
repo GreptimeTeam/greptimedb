@@ -32,10 +32,10 @@ use datafusion::physical_plan::{
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
 use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
-use datatypes::arrow::compute::{cast_with_options, concat_batches, CastOptions};
+use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
@@ -686,16 +686,18 @@ mod test {
             Field::new("val", DataType::Float64, true),
         ]));
         run_test(
-            vec![RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(TimestampMillisecondArray::new_null(0)),
-                    Arc::new(StringArray::new_null(0)),
-                    Arc::new(StringArray::new_null(0)),
-                    Arc::new(Float64Array::new_null(0)),
-                ],
-            )
-            .unwrap()],
+            vec![
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondArray::new_null(0)),
+                        Arc::new(StringArray::new_null(0)),
+                        Arc::new(StringArray::new_null(0)),
+                        Arc::new(Float64Array::new_null(0)),
+                    ],
+                )
+                .unwrap(),
+            ],
             "+---------------------+-----+\
             \n| ts                  | val |\
             \n+---------------------+-----+\

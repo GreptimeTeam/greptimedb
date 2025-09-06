@@ -17,16 +17,16 @@ use std::sync::Arc;
 use chrono::Utc;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::context::SessionState;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datafusion_sql::TableReference;
+use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
@@ -34,7 +34,7 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
 };
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
 
 use crate::error::{
@@ -88,16 +88,16 @@ pub fn parser_expr_to_scalar_value_literal(
             &mut self,
             node: &Self::Node,
         ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
-            if let Expr::ScalarFunction(func) = node {
-                if func.name().to_lowercase() == "now" {
-                    if !func.args.is_empty() {
-                        return Err(datafusion_common::DataFusionError::Plan(
-                            "now() function should not have arguments".to_string(),
-                        ));
-                    }
-                    self.found = true;
-                    return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
+            if let Expr::ScalarFunction(func) = node
+                && func.name().to_lowercase() == "now"
+            {
+                if !func.args.is_empty() {
+                    return Err(datafusion_common::DataFusionError::Plan(
+                        "now() function should not have arguments".to_string(),
+                    ));
                 }
+                self.found = true;
+                return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
             }
             Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
         }

@@ -34,7 +34,7 @@ use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_catalog::start::ReconcileCatalogStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
-    wait_for_inflight_subprocedures, Context, ReconcileCatalogMetrics, SubprocedureMeta,
+    Context, ReconcileCatalogMetrics, SubprocedureMeta, wait_for_inflight_subprocedures,
 };
 
 pub(crate) mod end;

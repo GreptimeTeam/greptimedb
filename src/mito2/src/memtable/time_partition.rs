@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use common_telemetry::debug;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
-use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
@@ -30,8 +30,8 @@ use datatypes::arrow::array::{
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
 use datatypes::arrow::datatypes::{DataType, Int64Type, SchemaRef};
 use mito_codec::key_values::KeyValue;
-use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
-use smallvec::{smallvec, SmallVec};
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
+use smallvec::{SmallVec, smallvec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 
@@ -40,7 +40,7 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
-use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// Initial time window if not specified.
 const INITIAL_TIME_WINDOW: Duration = Duration::from_days(1);
@@ -353,13 +353,13 @@ impl TimePartitions {
                     .builder
                     .build(inner.alloc_memtable_id(), &self.metadata);
                 debug!(
-                        "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
-                        range,
-                        self.metadata.region_id,
-                        self.part_duration,
-                        memtable.id(),
-                        inner.parts.len() + 1
-                    );
+                    "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
+                    range,
+                    self.metadata.region_id,
+                    self.part_duration,
+                    memtable.id(),
+                    inner.parts.len() + 1
+                );
                 let pos = inner.parts.len();
                 inner.parts.push(TimePartition {
                     memtable,

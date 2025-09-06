@@ -18,7 +18,7 @@ use std::time::Instant;
 use arrow::array::StringArray;
 use arrow_schema::{DataType, Field, Schema};
 use common_recordbatch::RecordBatch;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::StringVector;
 use servers::http::HttpRecordsOutput;

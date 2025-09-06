@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use api::v1::meta::Partition;
 use datafusion_common::{ScalarValue, ToDFSchema};
-use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::Expr;
-use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::{
-    duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value, Value,
+    Value, duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -97,7 +97,7 @@ impl Operand {
                         return error::UnsupportedPartitionExprValueSnafu {
                             value: other.clone(),
                         }
-                        .fail()
+                        .fail();
                     }
                 };
                 Ok(datafusion_expr::lit(scalar_value))

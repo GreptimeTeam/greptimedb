@@ -21,9 +21,9 @@ use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, F
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
+use crate::Client;
 use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
-use crate::Client;
 
 pub struct NodeClients {
     channel_manager: ChannelManager,

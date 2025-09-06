@@ -14,12 +14,12 @@
 
 use std::collections::HashMap;
 
-use client::api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
 use client::api::v1::CreateTableExpr;
+use client::api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region_request};
 use common_meta::ddl::create_logical_tables::create_region_request_builder;
 use common_meta::ddl::utils::region_storage_path;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{find_leader_regions, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};

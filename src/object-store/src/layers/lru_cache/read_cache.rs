@@ -20,7 +20,7 @@ use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use moka::policy::EvictionPolicy;
 use opendal::raw::oio::{Read, Reader, Write};
-use opendal::raw::{oio, Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
+use opendal::raw::{Access, OpDelete, OpRead, OpStat, OpWrite, RpRead, oio};
 use opendal::{Error as OpendalError, ErrorKind, OperatorBuilder, Result};
 
 use crate::metrics::{

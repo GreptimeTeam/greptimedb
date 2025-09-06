@@ -24,7 +24,7 @@ use datafusion_expr::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::Helper;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 

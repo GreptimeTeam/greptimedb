@@ -18,22 +18,22 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
-    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
-    meta::CreateTriggerTask as PbCreateTriggerTask, CreateTriggerExpr as PbCreateTriggerExpr,
+    CreateTriggerExpr as PbCreateTriggerExpr, meta::CreateTriggerTask as PbCreateTriggerTask,
 };
 use catalog::CatalogManagerRef;
 use chrono::Utc;
-use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
+use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
@@ -62,7 +62,7 @@ use query::sql::create_table_stmt;
 use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
@@ -76,11 +76,11 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
+use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
 use table::table_name::TableName;
-use table::TableRef;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
@@ -93,8 +93,8 @@ use crate::error::{
     ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
-use crate::statement::show::create_partitions_stmt;
 use crate::statement::StatementExecutor;
+use crate::statement::show::create_partitions_stmt;
 
 lazy_static! {
     pub static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
@@ -379,9 +379,16 @@ impl StatementExecutor {
             .await?;
 
         let table_ids = resp.table_ids;
-        ensure!(table_ids.len() == raw_tables_info.len(), CreateLogicalTablesSnafu {
-            reason: format!("The number of tables is inconsistent with the expected number to be created, expected: {}, actual: {}", raw_tables_info.len(), table_ids.len())
-        });
+        ensure!(
+            table_ids.len() == raw_tables_info.len(),
+            CreateLogicalTablesSnafu {
+                reason: format!(
+                    "The number of tables is inconsistent with the expected number to be created, expected: {}, actual: {}",
+                    raw_tables_info.len(),
+                    table_ids.len()
+                )
+            }
+        );
         info!("Successfully created logical tables: {:?}", table_ids);
 
         for (i, table_info) in raw_tables_info.iter_mut().enumerate() {

@@ -19,9 +19,9 @@ use datafusion::common::cast::as_primitive_array;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::prelude::create_udaf;
+use datafusion_common::ScalarValue;
 use datafusion_common::cast::{as_list_array, as_struct_array};
 use datafusion_common::utils::SingleRowListArrayBuilder;
-use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{Float64Array, Int64Array, ListArray, StructArray};
 use datatypes::arrow::datatypes::{
     DataType, Field, Float64Type, Int64Type, TimeUnit, TimestampNanosecondType,

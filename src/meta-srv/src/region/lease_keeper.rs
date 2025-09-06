@@ -15,11 +15,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use common_meta::key::table_route::TableRouteValue;
+use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::DatanodeId;
 use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
@@ -60,16 +60,16 @@ fn renew_region_lease_via_region_route(
     region_id: RegionId,
 ) -> Option<(RegionId, RegionRole)> {
     // If it's a leader region on this datanode.
-    if let Some(leader) = &region_route.leader_peer {
-        if leader.id == datanode_id {
-            let region_role = if region_route.is_leader_downgrading() {
-                RegionRole::DowngradingLeader
-            } else {
-                RegionRole::Leader
-            };
+    if let Some(leader) = &region_route.leader_peer
+        && leader.id == datanode_id
+    {
+        let region_role = if region_route.is_leader_downgrading() {
+            RegionRole::DowngradingLeader
+        } else {
+            RegionRole::Leader
+        };
 
-            return Some((region_id, region_role));
-        }
+        return Some((region_id, region_role));
     }
 
     // If it's a follower region on this datanode.
@@ -256,9 +256,9 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
     use common_meta::key::test_utils::new_test_table_info;
-    use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
@@ -267,7 +267,7 @@ mod tests {
     use store_api::storage::RegionId;
     use table::metadata::RawTableInfo;
 
-    use super::{renew_region_lease_via_region_route, RegionLeaseKeeper};
+    use super::{RegionLeaseKeeper, renew_region_lease_via_region_route};
     use crate::region::lease_keeper::{RegionLeaseInfo, RenewRegionLeasesResponse};
 
     fn new_test_keeper() -> RegionLeaseKeeper {

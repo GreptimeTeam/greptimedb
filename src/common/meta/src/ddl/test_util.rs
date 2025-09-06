@@ -38,7 +38,7 @@ use table::metadata::{RawTableInfo, TableId};
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
-    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+    TestCreateTableExprBuilder, build_raw_table_info_from_expr,
 };
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::key::table_route::TableRouteValue;

@@ -15,14 +15,14 @@
 //! For single-thread flow worker
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_telemetry::info;
 use dfir_rs::scheduled::graph::Dfir;
 use enum_as_inner::EnumAsInner;
 use snafu::ensure;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use crate::adapter::FlowId;
 use crate::compute::{Context, DataflowState, ErrCollector};

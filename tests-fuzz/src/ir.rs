@@ -34,8 +34,8 @@ use datatypes::value::Value;
 use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
-use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use self::insert_expr::{RowValue, RowValues};
@@ -153,7 +153,7 @@ pub fn generate_random_value<R: Rng>(
         ConcreteDataType::Float32(_) => Value::from(rng.random::<f32>()),
         ConcreteDataType::Float64(_) => Value::from(rng.random::<f64>()),
         ConcreteDataType::String(_) => match random_str {
-            Some(random) => Value::from(random.gen(rng).value),
+            Some(random) => Value::from(random.generate(rng).value),
             None => Value::from(rng.random::<char>().to_string()),
         },
         ConcreteDataType::Date(_) => generate_random_date(rng),
@@ -483,7 +483,7 @@ pub fn generate_columns<R: Rng + 'static>(
     names
         .into_iter()
         .map(|name| {
-            let column_type = types.gen(rng);
+            let column_type = types.generate(rng);
             let options = options(rng, &column_type);
             Column {
                 name,

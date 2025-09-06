@@ -22,7 +22,7 @@ use common_query::error::{
 use datafusion_expr::{Signature, Volatility};
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::parser::ParserContext;
 
@@ -91,7 +91,7 @@ fn parse_flush_flow(
                     obj_name
                 ),
             }
-            .fail()
+            .fail();
         }
     };
     Ok((catalog_name, flow_name))

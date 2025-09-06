@@ -21,7 +21,7 @@ use arrow_flight::FlightData;
 use common_error::ext::ErrorExt;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing::{info_span, Instrument};
+use common_telemetry::tracing::{Instrument, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, warn};
 use futures::channel::mpsc;
@@ -33,8 +33,8 @@ use snafu::ResultExt;
 use tokio::task::JoinHandle;
 
 use crate::error;
-use crate::grpc::flight::TonicResult;
 use crate::grpc::FlightCompression;
+use crate::grpc::flight::TonicResult;
 
 /// Metrics collector for Flight stream with RAII logging pattern
 struct StreamMetrics {
@@ -168,19 +168,18 @@ impl FlightRecordBatchStream {
                     }
                     metrics.send_record_batch_duration += start.elapsed();
 
-                    if should_send_partial_metrics {
-                        if let Some(metrics_str) = recordbatches
+                    if should_send_partial_metrics
+                        && let Some(metrics_str) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
-                        {
-                            metrics.metrics_count += 1;
-                            let start = Instant::now();
-                            if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
-                                warn!(e; "stop sending Flight data");
-                                return;
-                            }
-                            metrics.send_metrics_duration += start.elapsed();
+                    {
+                        metrics.metrics_count += 1;
+                        let start = Instant::now();
+                        if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
+                            warn!(e; "stop sending Flight data");
+                            return;
                         }
+                        metrics.send_metrics_duration += start.elapsed();
                     }
                 }
                 Err(e) => {

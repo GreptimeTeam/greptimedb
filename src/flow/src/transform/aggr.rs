@@ -25,7 +25,7 @@ use crate::expr::{
 };
 use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
-use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
+use crate::transform::{FlownodeContext, FunctionExtensions, substrait_proto};
 
 impl TypedExpr {
     /// Allow `deprecated` due to the usage of deprecated grouping_expressions on datafusion to substrait side
@@ -121,7 +121,7 @@ impl AggregateExpr {
                     .await?
                 }
                 None => {
-                    return not_impl_err!("Aggregate without aggregate function is not supported")
+                    return not_impl_err!("Aggregate without aggregate function is not supported");
                 }
             };
 
@@ -395,8 +395,8 @@ mod test {
     use crate::expr::{BinaryFunc, DfScalarFunction, GlobalId, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
-    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
+    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]
     async fn test_df_func_basic() {
@@ -414,68 +414,69 @@ mod test {
             expr: ScalarExpr::Column(0),
             distinct: false,
         };
-        let expected = TypedPlan {
-            schema: RelationType::new(vec![
-                ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
-                ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window start
-                ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window end
-            ])
-            .with_key(vec![2])
-            .with_time_index(Some(1))
-            .into_named(vec![
-                Some("sum(abs(numbers_with_ts.number))".to_string()),
-                Some("window_start".to_string()),
-                Some("window_end".to_string()),
-            ]),
-            plan: Plan::Mfp {
-                input: Box::new(
-                    Plan::Reduce {
-                        input: Box::new(
-                            Plan::Get {
-                                id: crate::expr::Id::Global(GlobalId::User(1)),
-                            }
-                            .with_types(
-                                RelationType::new(vec![
-                                    ColumnType::new(ConcreteDataType::uint32_datatype(), false),
-                                    ColumnType::new(
-                                        ConcreteDataType::timestamp_millisecond_datatype(),
-                                        false,
-                                    ),
-                                ])
-                                .into_named(vec![
-                                    Some("number".to_string()),
-                                    Some("ts".to_string()),
-                                ]),
-                            )
-                            .mfp(MapFilterProject::new(2).into_safe())
-                            .unwrap(),
-                        ),
-                        key_val_plan: KeyValPlan {
-                            key_plan: MapFilterProject::new(2)
-                                .map(vec![
-                                    ScalarExpr::Column(1).call_unary(
-                                        UnaryFunc::TumbleWindowFloor {
-                                            window_size: Duration::from_nanos(1_000_000_000),
-                                            start_time: Some(Timestamp::new_millisecond(
-                                                1625097600000,
-                                            )),
-                                        },
-                                    ),
-                                    ScalarExpr::Column(1).call_unary(
-                                        UnaryFunc::TumbleWindowCeiling {
-                                            window_size: Duration::from_nanos(1_000_000_000),
-                                            start_time: Some(Timestamp::new_millisecond(
-                                                1625097600000,
-                                            )),
-                                        },
-                                    ),
-                                ])
-                                .unwrap()
-                                .project(vec![2, 3])
-                                .unwrap()
-                                .into_safe(),
-                            val_plan: MapFilterProject::new(2)
-                                .map(vec![ScalarExpr::CallDf {
+        let expected =
+            TypedPlan {
+                schema: RelationType::new(vec![
+                    ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
+                    ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window start
+                    ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window end
+                ])
+                .with_key(vec![2])
+                .with_time_index(Some(1))
+                .into_named(vec![
+                    Some("sum(abs(numbers_with_ts.number))".to_string()),
+                    Some("window_start".to_string()),
+                    Some("window_end".to_string()),
+                ]),
+                plan: Plan::Mfp {
+                    input: Box::new(
+                        Plan::Reduce {
+                            input: Box::new(
+                                Plan::Get {
+                                    id: crate::expr::Id::Global(GlobalId::User(1)),
+                                }
+                                .with_types(
+                                    RelationType::new(vec![
+                                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                                        ColumnType::new(
+                                            ConcreteDataType::timestamp_millisecond_datatype(),
+                                            false,
+                                        ),
+                                    ])
+                                    .into_named(vec![
+                                        Some("number".to_string()),
+                                        Some("ts".to_string()),
+                                    ]),
+                                )
+                                .mfp(MapFilterProject::new(2).into_safe())
+                                .unwrap(),
+                            ),
+                            key_val_plan: KeyValPlan {
+                                key_plan: MapFilterProject::new(2)
+                                    .map(vec![
+                                        ScalarExpr::Column(1).call_unary(
+                                            UnaryFunc::TumbleWindowFloor {
+                                                window_size: Duration::from_nanos(1_000_000_000),
+                                                start_time: Some(Timestamp::new_millisecond(
+                                                    1625097600000,
+                                                )),
+                                            },
+                                        ),
+                                        ScalarExpr::Column(1).call_unary(
+                                            UnaryFunc::TumbleWindowCeiling {
+                                                window_size: Duration::from_nanos(1_000_000_000),
+                                                start_time: Some(Timestamp::new_millisecond(
+                                                    1625097600000,
+                                                )),
+                                            },
+                                        ),
+                                    ])
+                                    .unwrap()
+                                    .project(vec![2, 3])
+                                    .unwrap()
+                                    .into_safe(),
+                                val_plan: MapFilterProject::new(2)
+                                    .map(vec![ScalarExpr::CallDf {
                                     df_scalar_fn: DfScalarFunction::try_from_raw_fn(
                                         RawDfScalarFn {
                                             f: BytesMut::from(
@@ -503,39 +504,39 @@ mod test {
                                     exprs: vec![ScalarExpr::Column(0)],
                                 }
                                 .cast(CDT::uint64_datatype())])
-                                .unwrap()
-                                .project(vec![2])
-                                .unwrap()
-                                .into_safe(),
-                        },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
-                        }),
-                    }
-                    .with_types(
-                        RelationType::new(vec![
-                            ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window start
-                            ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window end
-                            ColumnType::new(CDT::uint64_datatype(), true), //sum(number)
-                        ])
-                        .with_key(vec![1])
-                        .with_time_index(Some(0))
-                        .into_unnamed(),
+                                    .unwrap()
+                                    .project(vec![2])
+                                    .unwrap()
+                                    .into_safe(),
+                            },
+                            reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                                full_aggrs: vec![aggr_expr.clone()],
+                                simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
+                                distinct_aggrs: vec![],
+                            }),
+                        }
+                        .with_types(
+                            RelationType::new(vec![
+                                ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window start
+                                ColumnType::new(CDT::timestamp_millisecond_datatype(), true), // window end
+                                ColumnType::new(CDT::uint64_datatype(), true), //sum(number)
+                            ])
+                            .with_key(vec![1])
+                            .with_time_index(Some(0))
+                            .into_unnamed(),
+                        ),
                     ),
-                ),
-                mfp: MapFilterProject::new(3)
-                    .map(vec![
-                        ScalarExpr::Column(2),
-                        ScalarExpr::Column(0),
-                        ScalarExpr::Column(1),
-                    ])
-                    .unwrap()
-                    .project(vec![3, 4, 5])
-                    .unwrap(),
-            },
-        };
+                    mfp: MapFilterProject::new(3)
+                        .map(vec![
+                            ScalarExpr::Column(2),
+                            ScalarExpr::Column(0),
+                            ScalarExpr::Column(1),
+                        ])
+                        .unwrap()
+                        .project(vec![3, 4, 5])
+                        .unwrap(),
+                },
+            };
         assert_eq!(flow_plan, expected);
     }
 
@@ -1327,8 +1328,10 @@ mod test {
                         .unwrap()
                         .into_safe(),
                     val_plan: MapFilterProject::new(1)
-                        .map(vec![ScalarExpr::Column(0)
-                            .call_unary(UnaryFunc::Cast(CDT::uint64_datatype()))])
+                        .map(vec![
+                            ScalarExpr::Column(0)
+                                .call_unary(UnaryFunc::Cast(CDT::uint64_datatype())),
+                        ])
                         .unwrap()
                         .project(vec![1])
                         .unwrap()
@@ -1450,8 +1453,10 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                             val_plan: MapFilterProject::new(1)
-                                .map(vec![ScalarExpr::Column(0)
-                                    .call_unary(UnaryFunc::Cast(CDT::uint64_datatype()))])
+                                .map(vec![
+                                    ScalarExpr::Column(0)
+                                        .call_unary(UnaryFunc::Cast(CDT::uint64_datatype())),
+                                ])
                                 .unwrap()
                                 .project(vec![1])
                                 .unwrap()
@@ -1533,9 +1538,11 @@ mod test {
                         .unwrap()
                         .into_safe(),
                     val_plan: MapFilterProject::new(1)
-                        .map(vec![ScalarExpr::Column(0)
-                            .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)
-                            .call_unary(UnaryFunc::Cast(CDT::uint64_datatype()))])
+                        .map(vec![
+                            ScalarExpr::Column(0)
+                                .call_binary(ScalarExpr::Column(0), BinaryFunc::AddUInt32)
+                                .call_unary(UnaryFunc::Cast(CDT::uint64_datatype())),
+                        ])
                         .unwrap()
                         .project(vec![1])
                         .unwrap()

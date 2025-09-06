@@ -296,7 +296,7 @@ mod test {
 
     use super::*;
     use crate::test_util::{
-        alter_logical_region_add_tag_columns, create_logical_region_request, TestEnv,
+        TestEnv, alter_logical_region_add_tag_columns, create_logical_region_request,
     };
 
     #[tokio::test]

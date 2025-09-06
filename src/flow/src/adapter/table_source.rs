@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
-use crate::adapter::util::table_info_value_to_relation_desc;
 use crate::adapter::TableName;
+use crate::adapter::util::table_info_value_to_relation_desc;
 use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };

@@ -21,15 +21,15 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::ObjectNamePartExt;
+use sql::statements::OptionMap;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
     ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
-use sql::statements::OptionMap;
+use table::TableRef;
 use table::metadata::{TableInfo, TableType};
 use table::table_name::TableName;
-use table::TableRef;
 
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,

@@ -40,8 +40,8 @@ impl FunctionState {
             AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
             RemoveRegionFollowerRequest,
         };
-        use common_query::error::Result;
         use common_query::Output;
+        use common_query::error::Result;
         use session::context::QueryContextRef;
         use store_api::storage::RegionId;
         use table::requests::{

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::response::IntoResponse;
 use axum::Json;
-use http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use http::HeaderValue;
+use http::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};

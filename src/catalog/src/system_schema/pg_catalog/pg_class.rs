@@ -32,15 +32,15 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 use table::metadata::TableType;
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::Predicates;
-use crate::system_schema::pg_catalog::pg_namespace::oid_map::PGNamespaceOidMapRef;
-use crate::system_schema::pg_catalog::{query_ctx, OID_COLUMN_NAME, PG_CLASS};
-use crate::system_schema::utils::tables::{string_column, u32_column};
 use crate::system_schema::SystemTable;
-use crate::CatalogManager;
+use crate::system_schema::pg_catalog::pg_namespace::oid_map::PGNamespaceOidMapRef;
+use crate::system_schema::pg_catalog::{OID_COLUMN_NAME, PG_CLASS, query_ctx};
+use crate::system_schema::utils::tables::{string_column, u32_column};
 
 // === column name ===
 pub const RELNAME: &str = "relname";

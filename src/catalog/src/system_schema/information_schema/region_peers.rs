@@ -23,9 +23,9 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::common::HashMap;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -35,13 +35,13 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::TableType;
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::information_schema::{InformationTable, Predicates, REGION_PEERS};
-use crate::CatalogManager;
 
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::warn;
 use datatypes::arrow::array::{Array, StringArray};
@@ -27,7 +27,7 @@ use index::fulltext_index::create::{
 use index::fulltext_index::{Analyzer, Config};
 use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
@@ -38,13 +38,13 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
+use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_FULLTEXT_INDEX;
 
 /// `FulltextIndexer` is responsible for creating fulltext indexes for SST files.
 pub struct FulltextIndexer {
@@ -427,12 +427,12 @@ mod tests {
     use common_base::BitVec;
     use datatypes::data_type::DataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
-    use datatypes::vectors::{UInt64Vector, UInt8Vector};
-    use futures::future::BoxFuture;
+    use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use futures::FutureExt;
+    use futures::future::BoxFuture;
     use index::fulltext_index::search::RowId;
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_request::PathType;
@@ -442,10 +442,10 @@ mod tests {
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
     use crate::sst::file::{FileId, RegionFileId};
+    use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
-    use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     fn mock_object_store() -> ObjectStore {

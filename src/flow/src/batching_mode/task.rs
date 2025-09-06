@@ -25,16 +25,16 @@ use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::DFSchemaRef;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use operator::expr_helper::column_schemas_to_defs;
-use query::query_engine::DefaultSerializer;
 use query::QueryEngineRef;
+use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -44,14 +44,14 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
+use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::{FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    gen_plan_with_matching_schema, get_table_info_df_schema, sql_to_df_plan, AddFilterRewriter,
-    ColumnMatcherRewriter, FindGroupByFinalName,
+    AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, gen_plan_with_matching_schema,
+    get_table_info_df_schema, sql_to_df_plan,
 };
-use crate::batching_mode::BatchingModeOptions;
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
     ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
@@ -666,7 +666,10 @@ impl BatchingTask {
 
         debug!(
             "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
-            self.config.flow_id, expire_lower_bound, expire_upper_bound, self.state.read().unwrap().dirty_time_windows
+            self.config.flow_id,
+            expire_lower_bound,
+            expire_upper_bound,
+            self.state.read().unwrap().dirty_time_windows
         );
         let window_size = expire_upper_bound
             .sub(&expire_lower_bound)

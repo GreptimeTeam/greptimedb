@@ -90,7 +90,7 @@ impl QuantileAccumulator {
             _ => {
                 return Err(DataFusionError::Internal(
                     "Invalid quantile value".to_string(),
-                ))
+                ));
             }
         };
 

@@ -32,7 +32,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
 use crate::error::{EncodeSnafu, Result};
-use crate::memtable::partition_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
+use crate::memtable::partition_tree::data::{DATA_INIT_CAP, DataBatch, DataParts};
 use crate::memtable::partition_tree::dedup::DedupReader;
 use crate::memtable::partition_tree::shard::{
     BoxedDataBatchSource, Shard, ShardMerger, ShardNode, ShardSource,

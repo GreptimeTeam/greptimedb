@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -24,7 +24,7 @@ use index::bloom_filter::creator::BloomFilterCreator;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -35,13 +35,13 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
+use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -432,11 +432,11 @@ pub(crate) mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
     use datatypes::value::ValueRef;
-    use datatypes::vectors::{UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;

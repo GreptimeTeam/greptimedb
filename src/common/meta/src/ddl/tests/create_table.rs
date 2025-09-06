@@ -18,13 +18,13 @@ use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::meta::{Partition, Peer};
-use api::v1::region::{region_request, RegionRequest};
+use api::v1::region::{RegionRequest, region_request};
 use api::v1::{ColumnDataType, SemanticType};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::{
-    execute_procedure_until, execute_procedure_until_done, MockContextProvider,
+    MockContextProvider, execute_procedure_until, execute_procedure_until_done,
 };
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use crate::ddl::create_table::{CreateTableProcedure, CreateTableState};
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
-    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+    TestCreateTableExprBuilder, build_raw_table_info_from_expr,
 };
 use crate::ddl::test_util::datanode_handler::{
     DatanodeWatcher, NaiveDatanodeHandler, RetryErrorDatanodeHandler,
@@ -47,7 +47,7 @@ use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::rpc::ddl::CreateTableTask;
-use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
 fn create_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
     let _ = _peer;
@@ -325,16 +325,20 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     assert_eq!(guards.len(), 1);
     let (datanode_id, region_id) = (0, RegionId::new(procedure.table_id(), 0));
     assert_eq!(guards[0].info(), (datanode_id, region_id));
-    assert!(ddl_context
-        .memory_region_keeper
-        .contains(datanode_id, region_id));
+    assert!(
+        ddl_context
+            .memory_region_keeper
+            .contains(datanode_id, region_id)
+    );
 
     execute_procedure_until_done(&mut procedure).await;
 
     // Ensure that when run to the end, the opening regions should be cleared:
     let guards = &procedure.creator.opening_regions;
     assert!(guards.is_empty());
-    assert!(!ddl_context
-        .memory_region_keeper
-        .contains(datanode_id, region_id));
+    assert!(
+        !ddl_context
+            .memory_region_keeper
+            .contains(datanode_id, region_id)
+    );
 }

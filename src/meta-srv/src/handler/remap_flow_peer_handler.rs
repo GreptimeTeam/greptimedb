@@ -20,9 +20,9 @@ use common_meta::rpc::store::PutRequest;
 use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 
+use crate::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::Result;
 
 #[derive(Debug, Default)]
 pub struct RemapFlowPeerHandler {

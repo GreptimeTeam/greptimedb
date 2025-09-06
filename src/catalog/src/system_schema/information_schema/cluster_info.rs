@@ -23,9 +23,9 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::timestamp::Timestamp;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::timestamp::TimestampMillisecond;
@@ -36,10 +36,10 @@ use datatypes::vectors::{
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::system_schema::information_schema::{InformationTable, Predicates, CLUSTER_INFO};
-use crate::system_schema::utils;
 use crate::CatalogManager;
+use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
+use crate::system_schema::information_schema::{CLUSTER_INFO, InformationTable, Predicates};
+use crate::system_schema::utils;
 
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";

@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use common_telemetry::{debug, error, info};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::error::Result;
 use crate::kafka::client_manager::ClientManagerRef;

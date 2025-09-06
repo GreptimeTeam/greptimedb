@@ -15,10 +15,10 @@
 pub mod index;
 pub mod transformer;
 
-use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use api::v1::value::ValueData;
 use chrono::Utc;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,

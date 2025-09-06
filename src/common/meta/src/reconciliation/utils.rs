@@ -18,11 +18,11 @@ use std::ops::AddAssign;
 use std::time::Instant;
 
 use api::v1::SemanticType;
-use common_procedure::{watcher, Context as ProcedureContext, ProcedureId};
+use common_procedure::{Context as ProcedureContext, ProcedureId, watcher};
 use common_telemetry::{error, warn};
 use datatypes::schema::ColumnSchema;
 use futures::future::{join_all, try_join_all};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
@@ -41,8 +41,8 @@ use crate::key::TableMetadataManagerRef;
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
-use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
+use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PartialRegionMetadata<'a> {
@@ -541,7 +541,10 @@ impl Display for SubprocedureMeta {
                 write!(
                     f,
                     "ReconcileLogicalTable(procedure_id: {}, physical_table_id: {}, physical_table_name: {}, logical_tables: {:?})",
-                    meta.procedure_id, meta.physical_table_id, meta.physical_table_name, meta.logical_tables
+                    meta.procedure_id,
+                    meta.physical_table_id,
+                    meta.physical_table_name,
+                    meta.logical_tables
                 )
             }
             SubprocedureMeta::Database(meta) => {
@@ -687,7 +690,14 @@ pub struct ReconcileDatabaseMetrics {
 
 impl Display for ReconcileDatabaseMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "succeeded_tables: {}, failed_tables: {}, succeeded_procedures: {}, failed_procedures: {}", self.succeeded_tables, self.failed_tables, self.succeeded_procedures, self.failed_procedures)
+        write!(
+            f,
+            "succeeded_tables: {}, failed_tables: {}, succeeded_procedures: {}, failed_procedures: {}",
+            self.succeeded_tables,
+            self.failed_tables,
+            self.succeeded_procedures,
+            self.failed_procedures
+        )
     }
 }
 

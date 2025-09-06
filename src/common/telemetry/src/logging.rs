@@ -22,7 +22,7 @@ use std::time::Duration;
 use common_base::serde::empty_string_as_default;
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::trace::TracerProvider;
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::Sampler;
@@ -35,9 +35,9 @@ use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{filter, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, filter};
 
-use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
+use crate::tracing_sampler::{TracingSampleOptions, create_sampler};
 
 /// The default endpoint when use gRPC exporter protocol.
 pub const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";

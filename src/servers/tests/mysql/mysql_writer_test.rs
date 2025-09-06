@@ -18,7 +18,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use servers::mysql::writer::create_mysql_column_def;
 
-use crate::mysql::{all_datatype_testing_data, TestingData};
+use crate::mysql::{TestingData, all_datatype_testing_data};
 
 #[test]
 fn test_create_mysql_column_def() {

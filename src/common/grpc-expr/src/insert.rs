@@ -17,7 +17,7 @@ use api::v1::column::Values;
 use common_base::BitVec;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{CreateVectorSnafu, Result, UnexpectedValuesLengthSnafu};
 

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
-pub use sparse::{SparsePrimaryKeyCodec, SparseValues, COLUMN_ID_ENCODE_SIZE};
+pub use sparse::{COLUMN_ID_ENCODE_SIZE, SparsePrimaryKeyCodec, SparseValues};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;

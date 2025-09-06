@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::helper::{
-    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
-    ColumnDataTypeWrapper,
+    ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
+    to_proto_value,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -29,8 +29,9 @@ use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::ManifestVersion;
+use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -39,7 +40,6 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
-use store_api::ManifestVersion;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
@@ -47,11 +47,11 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionEdit, TruncateKind};
-use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
+use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
-use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::wal::EntryId;
+use crate::wal::entry_distributor::WalEntryReceiver;
 
 /// Request to write a region.
 #[derive(Debug)]
@@ -1080,7 +1080,10 @@ mod tests {
 
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
-        check_invalid_request(&err, "column ts expect type Timestamp(Millisecond(TimestampMillisecondType)), given: INT64(4)");
+        check_invalid_request(
+            &err,
+            "column ts expect type Timestamp(Millisecond(TimestampMillisecondType)), given: INT64(4)",
+        );
     }
 
     #[test]
@@ -1213,11 +1216,13 @@ mod tests {
         let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows, None).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         assert!(err.is_fill_default());
-        assert!(request
-            .fill_missing_columns(&metadata)
-            .unwrap_err()
-            .to_string()
-            .contains("unexpected impure default value with region_id"));
+        assert!(
+            request
+                .fill_missing_columns(&metadata)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected impure default value with region_id")
+        );
     }
 
     #[test]

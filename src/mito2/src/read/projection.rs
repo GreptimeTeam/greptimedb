@@ -20,21 +20,21 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::ExternalSnafu;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use mito_codec::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::Batch;
+use crate::read::flat_projection::FlatProjectionMapper;
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -293,11 +293,12 @@ impl PrimaryKeyProjectionMapper {
         }
 
         debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
-        debug_assert!(self
-            .batch_fields
-            .iter()
-            .zip(batch.fields())
-            .all(|((id, _), batch_col)| *id == batch_col.column_id));
+        debug_assert!(
+            self.batch_fields
+                .iter()
+                .zip(batch.fields())
+                .all(|((id, _), batch_col)| *id == batch_col.column_id)
+        );
 
         // Skips decoding pk if we don't need to output it.
         let pk_values = if self.has_tags {
@@ -406,7 +407,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::OpType;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::Field;
     use datatypes::arrow::util::pretty;
     use datatypes::value::ValueRef;
@@ -509,15 +510,21 @@ mod tests {
 +---------------------+----+----+----+----+";
         assert_eq!(expect, print_record_batch(record_batch));
 
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(1))
-            .is_some());
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(2))
-            .is_some());
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
-            .is_none());
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(1))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(2))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
+                .is_none()
+        );
         let record_batch = mapper
             .as_primary_key()
             .unwrap()

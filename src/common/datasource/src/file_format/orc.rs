@@ -15,8 +15,8 @@
 use arrow_schema::Schema;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use object_store::ObjectStore;
 use orc_rust::arrow_reader::ArrowReaderBuilder;
 use orc_rust::async_arrow_reader::ArrowStreamReader;

@@ -18,7 +18,7 @@ mod validate;
 use std::collections::{HashMap, HashSet};
 
 use extract_new_columns::extract_new_columns;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
@@ -229,10 +229,10 @@ mod test {
     use store_api::region_request::{
         AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption,
     };
-    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
-    use crate::test_util::{alter_logical_region_request, create_logical_region_request, TestEnv};
+    use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
 
     #[tokio::test]
     async fn test_alter_region() {

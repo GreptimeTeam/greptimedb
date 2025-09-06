@@ -25,8 +25,8 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
+use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -35,7 +35,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::sqlparser::ast::NullTreatment;
-use datafusion_expr::{lit, Aggregate, Expr, LogicalPlan, SortExpr, TableScan};
+use datafusion_expr::{Aggregate, Expr, LogicalPlan, SortExpr, TableScan, lit};
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datatypes::arrow_array::StringArray;
@@ -264,36 +264,38 @@ async fn test_sum_udaf() {
         Aggregate::try_new(
             Arc::new(expected_lower_plan),
             vec![],
-            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
-                Arc::new(
-                    MergeWrapper::new(
-                        sum.clone(),
-                        Arc::new(
-                            AggregateExprBuilder::new(
-                                Arc::new(sum.clone()),
-                                vec![Arc::new(
-                                    datafusion::physical_expr::expressions::Column::new(
-                                        "number", 0,
-                                    ),
-                                )],
-                            )
-                            .schema(Arc::new(dummy_table_scan().schema().as_arrow().clone()))
-                            .alias("sum(number)")
-                            .build()
-                            .unwrap(),
-                        ),
-                        vec![DataType::Int64],
-                    )
-                    .unwrap()
-                    .into(),
-                ),
-                vec![Expr::Column(Column::new_unqualified("__sum_state(number)"))],
-                false,
-                None,
-                vec![],
-                None,
-            ))
-            .alias("sum(number)")],
+            vec![
+                Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(
+                        MergeWrapper::new(
+                            sum.clone(),
+                            Arc::new(
+                                AggregateExprBuilder::new(
+                                    Arc::new(sum.clone()),
+                                    vec![Arc::new(
+                                        datafusion::physical_expr::expressions::Column::new(
+                                            "number", 0,
+                                        ),
+                                    )],
+                                )
+                                .schema(Arc::new(dummy_table_scan().schema().as_arrow().clone()))
+                                .alias("sum(number)")
+                                .build()
+                                .unwrap(),
+                            ),
+                            vec![DataType::Int64],
+                        )
+                        .unwrap()
+                        .into(),
+                    ),
+                    vec![Expr::Column(Column::new_unqualified("__sum_state(number)"))],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                ))
+                .alias("sum(number)"),
+            ],
         )
         .unwrap(),
     );
@@ -444,15 +446,17 @@ async fn test_avg_udaf() {
         Aggregate::try_new(
             Arc::new(coerced_aggr_state_plan.clone()),
             vec![],
-            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
-                Arc::new(expected_merge_fn.into()),
-                vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
-                false,
-                None,
-                vec![],
-                None,
-            ))
-            .alias("avg(number)")],
+            vec![
+                Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(expected_merge_fn.into()),
+                    vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                ))
+                .alias("avg(number)"),
+            ],
         )
         .unwrap(),
     );

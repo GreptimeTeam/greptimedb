@@ -15,8 +15,8 @@
 use std::collections::HashSet;
 
 use datafusion::datasource::DefaultTableSource;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::TableReference;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::{Expr, LogicalPlan};
 use session::context::QueryContextRef;
 pub use table::metadata::TableType;
@@ -40,21 +40,19 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
     ) -> datafusion::error::Result<Transformed<Self::Node>> {
         match node {
             LogicalPlan::TableScan(mut scan) => {
-                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
-                    if let Some(provider) = source
+                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                    && let Some(provider) = source
                         .table_provider
                         .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
-                    {
-                        if provider.table().table_type() == TableType::Base {
-                            let info = provider.table().table_info();
-                            self.table_names.insert(TableName::new(
-                                info.catalog_name.clone(),
-                                info.schema_name.clone(),
-                                info.name.clone(),
-                            ));
-                        }
-                    }
+                    && provider.table().table_type() == TableType::Base
+                {
+                    let info = provider.table().table_info();
+                    self.table_names.insert(TableName::new(
+                        info.catalog_name.clone(),
+                        info.schema_name.clone(),
+                        info.name.clone(),
+                    ));
                 }
                 match &scan.table_name {
                     TableReference::Full {
@@ -144,7 +142,7 @@ pub(crate) mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use datafusion::logical_expr::builder::LogicalTableSource;
-    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
     use session::context::QueryContextBuilder;
 
     use super::*;

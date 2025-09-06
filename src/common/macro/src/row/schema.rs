@@ -19,8 +19,8 @@ use syn::spanned::Spanned;
 use syn::{DeriveInput, Result};
 
 use crate::row::utils::{
-    convert_semantic_type_to_proto_semantic_type, extract_struct_fields, get_column_data_type,
-    parse_fields_from_fields_named, ColumnDataTypeWithExtension, ParsedField,
+    ColumnDataTypeWithExtension, ParsedField, convert_semantic_type_to_proto_semantic_type,
+    extract_struct_fields, get_column_data_type, parse_fields_from_fields_named,
 };
 use crate::row::{META_KEY_COL, META_KEY_DATATYPE};
 

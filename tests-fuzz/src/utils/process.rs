@@ -22,7 +22,7 @@ use common_telemetry::{info, warn};
 use nix::sys::signal::Signal;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::fs::OpenOptions;
 use tokio::process::Child;
 

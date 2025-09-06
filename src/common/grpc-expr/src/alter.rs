@@ -19,13 +19,13 @@ use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr,
-    DropColumns, FulltextBackend as PbFulltextBackend, ModifyColumnTypes, RenameTable,
-    SemanticType, SkippingIndexType as PbSkippingIndexType,
+    AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr, DropColumns,
+    FulltextBackend as PbFulltextBackend, ModifyColumnTypes, RenameTable, SemanticType,
+    SkippingIndexType as PbSkippingIndexType, column_def,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{

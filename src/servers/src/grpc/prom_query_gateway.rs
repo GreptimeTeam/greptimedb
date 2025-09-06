@@ -32,10 +32,10 @@ use snafu::OptionExt;
 use tonic::{Request, Response};
 
 use crate::error::InvalidQuerySnafu;
+use crate::grpc::TonicResult;
 use crate::grpc::context_auth::auth;
 use crate::grpc::greptime_handler::create_query_context;
-use crate::grpc::TonicResult;
-use crate::http::prometheus::{retrieve_metric_name_and_result_type, PrometheusJsonResponse};
+use crate::http::prometheus::{PrometheusJsonResponse, retrieve_metric_name_and_result_type};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 pub struct PrometheusGatewayService {
@@ -125,7 +125,7 @@ impl PrometheusGatewayService {
             match retrieve_metric_name_and_result_type(&query.query) {
                 Ok((metric_name, result_type)) => (metric_name, result_type),
                 Err(err) => {
-                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg())
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
                 }
             };
         // range query only returns matrix

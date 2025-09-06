@@ -20,7 +20,7 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::test_util::{put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv, put_rows, rows_schema};
 
 /// Build rows for multiple tags and fields.
 fn build_rows_multi_tags_fields(

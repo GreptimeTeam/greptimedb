@@ -15,7 +15,7 @@
 #[cfg(feature = "enterprise")]
 pub mod trigger;
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
@@ -876,7 +876,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW COLUMNS from test";
         let result =
@@ -936,7 +939,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW INDEX from test";
         let result =
@@ -992,7 +998,10 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let error = result.unwrap_err();
-        assert_eq!("Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF", error.to_string());
+        assert_eq!(
+            "Unexpected token while parsing SQL statement, expected: '{FROM | IN} table', found: EOF",
+            error.to_string()
+        );
 
         let sql = "SHOW REGION from test";
         let result =

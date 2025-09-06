@@ -31,14 +31,14 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_telemetry::{error, info, warn};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
+use tonic::Status;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
-use crate::client::{util, Id, LeaderProviderRef};
+use crate::client::{Id, LeaderProviderRef, util};
 use crate::error::{
     ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu,
     ReadOnlyKvBackendSnafu, Result, RetryTimesExceededSnafu,

@@ -198,10 +198,12 @@ mod tests {
         let args: Vec<VectorRef> = vec![Arc::new(Float64Vector::from_vec(vec![0.95]))];
         let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("uddsketch_calc expects 2 arguments"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("uddsketch_calc expects 2 arguments")
+        );
 
         // Test with invalid binary data
         let args: Vec<VectorRef> = vec![

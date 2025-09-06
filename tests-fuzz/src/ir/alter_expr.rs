@@ -172,8 +172,7 @@ mod tests {
 
     #[test]
     fn test_parse_kv_pairs() {
-        let option_string =
-            "compaction.twcs.max_output_file_size = '1M', compaction.type = 'twcs', ttl = 'forever'";
+        let option_string = "compaction.twcs.max_output_file_size = '1M', compaction.type = 'twcs', ttl = 'forever'";
         let options = AlterTableOption::parse_kv_pairs(option_string).unwrap();
         assert_eq!(options.len(), 2);
         assert_eq!(

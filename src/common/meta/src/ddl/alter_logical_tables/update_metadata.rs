@@ -16,13 +16,13 @@ use common_grpc_expr::alter_expr_to_request;
 use snafu::ResultExt;
 use table::metadata::{RawTableInfo, TableInfo};
 
-use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
+use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::utils::table_info::batch_update_table_info_values;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
-use crate::key::table_info::TableInfoValue;
 use crate::key::DeserializedValueWithBytes;
+use crate::key::table_info::TableInfoValue;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::region_distribution;
 

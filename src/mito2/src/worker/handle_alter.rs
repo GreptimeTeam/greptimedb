@@ -33,10 +33,10 @@ use store_api::storage::RegionId;
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
 use crate::region::options::TwcsOptions;
 use crate::region::version::VersionRef;
-use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 

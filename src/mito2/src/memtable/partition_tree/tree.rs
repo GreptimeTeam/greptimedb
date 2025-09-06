@@ -27,7 +27,7 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::sparse::{FieldWithId, SparseEncoder};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -37,15 +37,15 @@ use crate::error::{
     EncodeSnafu, EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result,
 };
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
-use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
+use crate::read::dedup::LastNonNullIter;
 use crate::region::options::MergeMode;
 
 /// The partition tree.

@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::Runtime;
 use crate::error::{IllegalStateSnafu, Result, WaitGcTaskStopSnafu};
 use crate::runtime::RuntimeTrait;
-use crate::Runtime;
 
 /// Task to execute repeatedly.
 #[async_trait::async_trait]
@@ -170,8 +170,8 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicI32;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicI32;
 
     use super::*;
     use crate::error::Error;

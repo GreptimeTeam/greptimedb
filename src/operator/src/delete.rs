@@ -26,9 +26,9 @@ use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
-use table::requests::DeleteRequest as TableDeleteRequest;
+use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
+use table::requests::DeleteRequest as TableDeleteRequest;
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu,

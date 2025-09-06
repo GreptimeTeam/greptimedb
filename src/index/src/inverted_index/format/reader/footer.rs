@@ -15,7 +15,7 @@
 use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::inverted_index::error::{
     BlobSizeTooSmallSnafu, CommonIoSnafu, DecodeProtoSnafu, InvalidFooterPayloadSizeSnafu, Result,

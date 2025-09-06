@@ -40,12 +40,12 @@ use crate::error::{
     Result, TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
+use crate::etl::PipelineDocVersion;
 use crate::etl::ctx_req::ContextOpt;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
-use crate::etl::PipelineDocVersion;
-use crate::{truthy, unwrap_or_continue_if_err, PipelineContext};
+use crate::{PipelineContext, truthy, unwrap_or_continue_if_err};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -178,23 +178,17 @@ impl GreptimeTransformer {
 
             column_names_set.extend(target_fields_set);
 
-            if let Some(idx) = transform.index {
-                if idx == Index::Time {
-                    match transform.fields.len() {
-                        //Safety unwrap is fine here because we have checked the length of real_fields
-                        1 => {
-                            timestamp_columns.push(transform.fields.first().unwrap().input_field())
+            if let Some(idx) = transform.index
+                && idx == Index::Time
+            {
+                match transform.fields.len() {
+                    //Safety unwrap is fine here because we have checked the length of real_fields
+                    1 => timestamp_columns.push(transform.fields.first().unwrap().input_field()),
+                    _ => {
+                        return TransformMultipleTimestampIndexSnafu {
+                            columns: transform.fields.iter().map(|x| x.input_field()).join(", "),
                         }
-                        _ => {
-                            return TransformMultipleTimestampIndexSnafu {
-                                columns: transform
-                                    .fields
-                                    .iter()
-                                    .map(|x| x.input_field())
-                                    .join(", "),
-                            }
-                            .fail();
-                        }
+                        .fail();
                     }
                 }
             }
@@ -722,7 +716,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use super::*;
-    use crate::{identity_pipeline, PipelineDefinition};
+    use crate::{PipelineDefinition, identity_pipeline};
 
     #[test]
     fn test_identify_pipeline() {

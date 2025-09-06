@@ -30,8 +30,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, Processor, yaml_bool, yaml_new_field,
+    yaml_new_fields, yaml_string,
 };
 
 pub(crate) const PROCESSOR_CSV: &str = "csv";

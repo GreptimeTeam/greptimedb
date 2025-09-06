@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{Column, DeleteRequest as GrpcDeleteRequest};
 use datatypes::prelude::ConcreteDataType;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::requests::DeleteRequest;
 
 use crate::error::{ColumnDataTypeSnafu, IllegalDeleteRequestSnafu, Result};
@@ -70,8 +70,8 @@ pub fn to_table_delete_request(
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::column::Values;
     use api::v1::ColumnDataType;
+    use api::v1::column::Values;
     use datatypes::prelude::{ScalarVector, VectorRef};
     use datatypes::vectors::{Int32Vector, StringVector};
 

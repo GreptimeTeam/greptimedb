@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::fulltext_index::error::Result;
 use crate::Bytes;
+use crate::fulltext_index::error::Result;
 
 lazy_static::lazy_static! {
     static ref JIEBA: jieba_rs::Jieba = jieba_rs::Jieba::new();

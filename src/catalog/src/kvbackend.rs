@@ -21,4 +21,4 @@ mod table_cache;
 
 pub use builder::KvBackendCatalogManagerBuilder;
 pub use manager::KvBackendCatalogManager;
-pub use table_cache::{new_table_cache, TableCache, TableCacheRef};
+pub use table_cache::{TableCache, TableCacheRef, new_table_cache};

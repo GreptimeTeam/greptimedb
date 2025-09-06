@@ -17,8 +17,8 @@ use std::sync::Arc;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DfResult;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_expr::Distribution;
 
 use crate::dist_plan::MergeScanExec;

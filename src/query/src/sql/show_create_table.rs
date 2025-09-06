@@ -18,11 +18,11 @@ use std::collections::HashMap;
 
 use common_meta::SchemaOptions;
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
 };
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
@@ -260,7 +260,7 @@ mod tests {
     use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
-        TableOptions, FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
+        FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
     };
 
     use super::*;

@@ -98,9 +98,5 @@ pub(crate) fn ensure(
     predicate: bool,
     error: DataFusionError,
 ) -> std::result::Result<(), DataFusionError> {
-    if predicate {
-        Ok(())
-    } else {
-        Err(error)
-    }
+    if predicate { Ok(()) } else { Err(error) }
 }

@@ -31,8 +31,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, Processor, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, Processor, yaml_bool, yaml_new_field,
+    yaml_new_fields,
 };
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
@@ -363,14 +363,16 @@ mod tests {
                     (
                         "prefix_nor",
                         VrlValue::Bytes(Bytes::from("\"../300kbps/segment35.m4v\"")),
-
                     ),
                 ],
             ),
             (
                 "nrr%3D%2212323-48763%22%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![
-                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
+                    (
+                        "prefix_nrr",
+                        VrlValue::Bytes(Bytes::from("\"12323-48763\"")),
+                    ),
                     (
                         "prefix_sid",
                         VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
@@ -380,7 +382,10 @@ mod tests {
             (
                 "nor%3D%22..%252F300kbps%252Ftrack.m4v%22%2Cnrr%3D%2212323-48763%22%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![
-                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
+                    (
+                        "prefix_nrr",
+                        VrlValue::Bytes(Bytes::from("\"12323-48763\"")),
+                    ),
                     (
                         "prefix_sid",
                         VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
@@ -416,7 +421,10 @@ mod tests {
                     ),
                     ("prefix_sf", VrlValue::Bytes(Bytes::from("d"))),
                     ("prefix_br", VrlValue::Integer(3200)),
-                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
+                    (
+                        "prefix_nrr",
+                        VrlValue::Bytes(Bytes::from("\"12323-48763\"")),
+                    ),
                     ("prefix_pr", VrlValue::Float(NotNan::new(1.08).unwrap())),
                     ("prefix_su", VrlValue::Boolean(true)),
                     ("prefix_dl", VrlValue::Integer(18500)),

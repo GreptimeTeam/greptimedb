@@ -15,9 +15,9 @@
 use std::ops::Range;
 
 use crate::error::Result;
+use crate::memtable::partition_tree::PkId;
 use crate::memtable::partition_tree::data::DataBatch;
 use crate::memtable::partition_tree::shard::DataBatchSource;
-use crate::memtable::partition_tree::PkId;
 
 /// A reader that dedup sorted batches from a merger.
 pub struct DedupReader<T> {

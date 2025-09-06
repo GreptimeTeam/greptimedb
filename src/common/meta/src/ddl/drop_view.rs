@@ -19,14 +19,14 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;

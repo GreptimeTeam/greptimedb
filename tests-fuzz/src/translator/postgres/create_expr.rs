@@ -18,8 +18,8 @@ use sql::statements::concrete_data_type_to_sql_data_type;
 use crate::error::{Error, Result};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{Column, CreateTableExpr};
-use crate::translator::postgres::sql_data_type_to_postgres_data_type;
 use crate::translator::DslTranslator;
+use crate::translator::postgres::sql_data_type_to_postgres_data_type;
 
 pub struct CreateTableExprTranslator;
 

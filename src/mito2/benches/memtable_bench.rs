@@ -16,11 +16,12 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion_common::Column;
-use datafusion_expr::{lit, Expr};
+use datafusion_expr::{Expr, lit};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
 use mito2::memtable::bulk::part_reader::BulkPartRecordBatchIter;
@@ -29,12 +30,11 @@ use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::read::flat_merge::FlatMergeIterator;
 use mito2::region::options::MergeMode;
-use mito2::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
-use mito_codec::row_converter::DensePrimaryKeyCodec;
+use rand::Rng;
 use rand::rngs::ThreadRng;
 use rand::seq::IndexedRandom;
-use rand::Rng;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };

@@ -14,4 +14,4 @@
 
 pub mod manager;
 
-pub use manager::{new_memory_catalog_manager, MemoryCatalogManager};
+pub use manager::{MemoryCatalogManager, new_memory_catalog_manager};

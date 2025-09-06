@@ -23,8 +23,8 @@ use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::table_name::TableName;
 use table::TableRef;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 

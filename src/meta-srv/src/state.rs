@@ -113,7 +113,7 @@ pub fn become_follower() -> impl FnOnce(&State) -> State {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use crate::state::{become_follower, become_leader, FollowerState, LeaderState, State};
+    use crate::state::{FollowerState, LeaderState, State, become_follower, become_leader};
 
     #[tokio::test]
     async fn test_next_state() {

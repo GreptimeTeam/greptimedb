@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_meta::RegionIdent;
+use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_telemetry::{tracing, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
@@ -38,7 +38,9 @@ impl HandlerContext {
                     error: None,
                 })),
                 Err(error::Error::RegionNotFound { .. }) => {
-                    warn!("Received a close region instruction from meta, but target region:{region_id} is not found.");
+                    warn!(
+                        "Received a close region instruction from meta, but target region:{region_id} is not found."
+                    );
                     Some(InstructionReply::CloseRegion(SimpleReply {
                         result: true,
                         error: None,

@@ -14,8 +14,8 @@
 
 use std::time::Instant;
 
-use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::TableRouteValue;
 use table::table_name::TableName;
 
 use crate::bench::{

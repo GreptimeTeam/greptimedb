@@ -171,10 +171,10 @@ mod tests {
 
     use super::*;
     use crate::bitmap::Bitmap;
+    use crate::inverted_index::FstMap;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::reader::MockInvertedIndexReader;
     use crate::inverted_index::search::fst_apply::MockFstApplier;
-    use crate::inverted_index::FstMap;
 
     fn s(s: &'static str) -> String {
         s.to_owned()
@@ -223,11 +223,9 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_ranges| {
-            Ok(vec![FstMap::from_iter([(
-                b"tag-0_value-0",
-                fst_value(2, 1),
-            )])
-            .unwrap()])
+            Ok(vec![
+                FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap(),
+            ])
         });
 
         mock_reader.expect_bitmap_deque().returning(|arg| {
@@ -256,11 +254,9 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_range| {
-            Ok(vec![FstMap::from_iter([(
-                b"tag-0_value-1",
-                fst_value(2, 1),
-            )])
-            .unwrap()])
+            Ok(vec![
+                FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap(),
+            ])
         });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)

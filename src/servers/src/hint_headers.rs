@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use http::HeaderMap;
-use session::hints::{HINTS_KEY, HINTS_KEY_PREFIX, HINT_KEYS};
+use session::hints::{HINT_KEYS, HINTS_KEY, HINTS_KEY_PREFIX};
 use tonic::metadata::MetadataMap;
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {

@@ -16,7 +16,7 @@ use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use futures::future::{join_all, BoxFuture};
+use futures::future::{BoxFuture, join_all};
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 
@@ -194,8 +194,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI32, Ordering};
 
     use moka::future::{Cache, CacheBuilder};
 

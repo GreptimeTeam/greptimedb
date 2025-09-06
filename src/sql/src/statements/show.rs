@@ -426,23 +426,19 @@ mod tests {
     #[test]
     pub fn test_show_create_missing_table_name() {
         let sql = "SHOW CREATE TABLE";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]
     pub fn test_show_create_unknown_for() {
         let sql = "SHOW CREATE TABLE t FOR UNKNOWN";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -466,12 +462,10 @@ mod tests {
     #[test]
     pub fn test_show_create_missing_flow() {
         let sql = "SHOW CREATE FLOW";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 
     #[test]

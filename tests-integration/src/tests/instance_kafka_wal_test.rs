@@ -13,16 +13,16 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use client::DEFAULT_CATALOG_NAME;
 use common_query::{Output, OutputData};
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use frontend::instance::Instance;
 use itertools::Itertools;
-use rand::rngs::ThreadRng;
 use rand::Rng;
+use rand::rngs::ThreadRng;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;

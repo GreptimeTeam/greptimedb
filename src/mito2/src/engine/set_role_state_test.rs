@@ -23,7 +23,7 @@ use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
 /// Helper function to assert a successful response with expected entry id
 fn assert_success_response(response: &SetRegionRoleStateResponse, expected_entry_id: u64) {

@@ -24,8 +24,8 @@ use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, warn};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
-use tokio::time::{sleep, Instant};
+use snafu::{OptionExt, ResultExt, ensure};
+use tokio::time::{Instant, sleep};
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
@@ -241,9 +241,9 @@ impl UpgradeCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                        "Mailbox received timeout for upgrade candidate region {region_id} on datanode {:?}", 
-                        candidate,
-                    );
+                    "Mailbox received timeout for upgrade candidate region {region_id} on datanode {:?}",
+                    candidate,
+                );
                 error::RetryLaterSnafu { reason }.fail()
             }
             Err(err) => Err(err),
@@ -315,7 +315,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
-    use crate::procedure::region_migration::test_util::{new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_upgrade_region_reply, send_mock_reply,

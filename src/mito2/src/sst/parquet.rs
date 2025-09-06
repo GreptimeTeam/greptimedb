@@ -19,9 +19,9 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
+use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::{FileId, FileTimeRange};
 use crate::sst::index::IndexOutput;
-use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
 pub mod flat_format;
@@ -93,11 +93,11 @@ mod tests {
     use api::v1::OpType;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{col, lit, BinaryExpr, Expr, Literal, Operator};
+    use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt64Array, UInt8Array,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use parquet::arrow::AsyncArrowWriter;
@@ -124,14 +124,14 @@ mod tests {
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{
-        location, to_flat_sst_arrow_schema, FlatSchemaOptions, DEFAULT_WRITE_CONCURRENCY,
+        DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
     };
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
         new_batch_with_binary, new_batch_with_custom_sequence, new_primary_key, new_source,
         sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
     };
-    use crate::test_util::{check_reader_result, TestEnv};
+    use crate::test_util::{TestEnv, check_reader_result};
 
     const FILE_DIR: &str = "/";
 

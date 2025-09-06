@@ -29,7 +29,7 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
 

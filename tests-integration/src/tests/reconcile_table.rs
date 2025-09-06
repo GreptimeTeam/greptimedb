@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_meta::reconciliation::manager::ReconciliationManagerRef;
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_meta::reconciliation::ResolveStrategy;
+use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_recordbatch::util::collect_batches;
 use common_test_util::recordbatch::check_output_stream;
@@ -22,8 +22,8 @@ use table::table_reference::TableReference;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::tests::test_util::{
-    dump_kvbackend, execute_sql, restore_kvbackend, try_execute_sql, wait_procedure, MockInstance,
-    MockInstanceBuilder, RebuildableMockInstance, TestContext,
+    MockInstance, MockInstanceBuilder, RebuildableMockInstance, TestContext, dump_kvbackend,
+    execute_sql, restore_kvbackend, try_execute_sql, wait_procedure,
 };
 
 const CREATE_MONITOR_TABLE_SQL: &str = r#"

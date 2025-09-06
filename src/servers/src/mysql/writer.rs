@@ -238,7 +238,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                                 "cannot write value {:?} in mysql protocol: unimplemented",
                                 &value
                             ),
-                        })
+                        });
                     }
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,

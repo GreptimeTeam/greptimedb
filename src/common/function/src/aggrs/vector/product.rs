@@ -101,7 +101,7 @@ impl VectorProduct {
                 return Err(datafusion_common::DataFusionError::NotImplemented(format!(
                     "unsupported data type {} for `VEC_PRODUCT`",
                     values[0].data_type()
-                )))
+                )));
             }
         };
         if vectors.len() != values[0].len() {
@@ -208,11 +208,13 @@ mod tests {
 
         // test update with constant vector
         let mut vec_product = VectorProduct::default();
-        let v: Vec<ArrayRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
-            4,
-        ))
-        .to_arrow_array()];
+        let v: Vec<ArrayRef> = vec![
+            Arc::new(ConstantVector::new(
+                Arc::new(StringVector::from_vec(vec!["[1.0,2.0,3.0]".to_string()])),
+                4,
+            ))
+            .to_arrow_array(),
+        ];
 
         vec_product.update_batch(&v).unwrap();
 

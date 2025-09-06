@@ -19,7 +19,7 @@ use common_time::interval::IntervalFormat;
 use common_time::timestamp::TimeUnit;
 use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use pgwire::types::ToSqlText;
-use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
+use postgres_types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
 
 use crate::error;
 
@@ -217,8 +217,8 @@ impl ToSqlText for PgInterval {
 
 #[cfg(test)]
 mod tests {
-    use common_time::timestamp::TimeUnit;
     use common_time::Duration;
+    use common_time::timestamp::TimeUnit;
 
     use super::*;
 

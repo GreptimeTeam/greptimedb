@@ -90,7 +90,7 @@ mod tests {
 
     use store_api::region_engine::{RegionEngine, RegionManifestInfo};
 
-    use crate::config::{EngineConfig, DEFAULT_FLUSH_METADATA_REGION_INTERVAL};
+    use crate::config::{DEFAULT_FLUSH_METADATA_REGION_INTERVAL, EngineConfig};
     use crate::test_util::TestEnv;
 
     #[tokio::test]
