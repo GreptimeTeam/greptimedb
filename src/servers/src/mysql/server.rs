@@ -141,7 +141,7 @@ impl MysqlServer {
         io_runtime: Runtime,
         stream: AbortableStream,
         process_manager: Option<ProcessManagerRef>,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + use<> {
         let spawn_ref = self.spawn_ref.clone();
         let spawn_config = self.spawn_config.clone();
 

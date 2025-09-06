@@ -165,7 +165,7 @@ where
 
         match this.state {
             State::Pollable => {}
-            State::Throttled(ref mut sleep) => match sleep.poll_unpin(cx) {
+            State::Throttled(sleep) => match sleep.poll_unpin(cx) {
                 Poll::Ready(_) => {
                     *this.state = State::Pollable;
                 }

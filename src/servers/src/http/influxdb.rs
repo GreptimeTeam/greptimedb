@@ -93,7 +93,7 @@ pub async fn influxdb_write(
     lines: String,
     handler: InfluxdbLineProtocolHandlerRef,
     ctx: QueryContextRef,
-) -> Result<impl IntoResponse> {
+) -> Result<impl IntoResponse + use<>> {
     let _timer = crate::metrics::METRIC_HTTP_INFLUXDB_WRITE_ELAPSED
         .with_label_values(&[db])
         .start_timer();

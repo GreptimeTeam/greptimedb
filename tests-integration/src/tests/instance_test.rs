@@ -181,7 +181,7 @@ async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let fe_instance = instance.frontend();
     let format = "csv";
@@ -676,7 +676,7 @@ async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInst
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "parquet";
@@ -749,7 +749,7 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "orc";
@@ -832,7 +832,7 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "orc";
@@ -888,7 +888,7 @@ async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn Moc
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "csv";
@@ -941,7 +941,7 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "json";
@@ -1001,7 +1001,7 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "json";
@@ -1070,7 +1070,7 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "json";
@@ -1143,7 +1143,7 @@ async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn Mock
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<dyn MockInstance>) {
-    std::env::set_var("TZ", "UTC");
+    unsafe { std::env::set_var("TZ", "UTC"); }
 
     let instance = instance.frontend();
     let format = "json";

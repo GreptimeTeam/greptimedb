@@ -74,7 +74,7 @@ impl PostgresServer {
         &self,
         io_runtime: Runtime,
         accepting_stream: AbortableStream,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + use<> {
         let handler_maker = self.make_handler.clone();
         let tls_server_config = self.tls_server_config.clone();
         let process_manager = self.process_manager.clone();

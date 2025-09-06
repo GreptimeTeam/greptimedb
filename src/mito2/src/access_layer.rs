@@ -311,7 +311,7 @@ impl AccessLayer {
     }
 
     /// Lists the SST entries from the storage layer in the table directory.
-    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
+    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> + use<> {
         let object_store = self.object_store.clone();
         let table_dir = self.table_dir.clone();
 

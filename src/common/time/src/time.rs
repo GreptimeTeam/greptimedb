@@ -376,7 +376,7 @@ mod tests {
             "10:00:00.001",
             Time::new(1, TimeUnit::Millisecond).to_timezone_aware_string(None)
         );
-        std::env::set_var("TZ", "Asia/Shanghai");
+        unsafe { std::env::set_var("TZ", "Asia/Shanghai"); }
         assert_eq!(
             "08:00:00.001",
             Time::new(1, TimeUnit::Millisecond)

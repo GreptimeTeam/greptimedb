@@ -102,7 +102,7 @@ impl EnvController for Env {
             panic!("Parallel test mode is not supported when server address is already set.");
         }
 
-        std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
+        unsafe { std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string()); }
         match mode {
             "standalone" => self.start_standalone(id).await,
             "distributed" => self.start_distributed(id).await,

@@ -155,7 +155,7 @@ impl TableInfoManager {
         table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult + use<>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -177,7 +177,7 @@ impl TableInfoManager {
         new_table_info_value: &TableInfoValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableInfoDecodeResult + use<>,
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();

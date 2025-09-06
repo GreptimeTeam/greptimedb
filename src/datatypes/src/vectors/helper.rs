@@ -57,7 +57,7 @@ impl Helper {
     pub unsafe fn static_cast<T: Any>(vector: &VectorRef) -> &T {
         let object = vector.as_ref();
         debug_assert!(object.as_any().is::<T>());
-        &*(object as *const dyn Vector as *const T)
+        unsafe { &*(object as *const dyn Vector as *const T) }
     }
 
     pub fn check_get_scalar<T: Scalar>(vector: &VectorRef) -> Result<&<T as Scalar>::VectorType> {

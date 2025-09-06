@@ -576,7 +576,7 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -600,7 +600,7 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
