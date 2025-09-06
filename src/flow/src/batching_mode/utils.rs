@@ -290,18 +290,17 @@ impl ColumnMatcherRewriter {
             .collect::<BTreeSet<_>>();
         // first match by position
         for (idx, expr) in exprs.iter_mut().enumerate() {
-            if !all_names.contains(&expr.qualified_name().1) {
-                if let Some(col_name) = self
+            if !all_names.contains(&expr.qualified_name().1)
+                && let Some(col_name) = self
                     .schema
                     .column_schemas()
                     .get(idx)
                     .map(|c| c.name.clone())
-                {
-                    // if the data type mismatched, later check_execute will error out
-                    // hence no need to check it here, beside, optimize pass might be able to cast it
-                    // so checking here is not necessary
-                    *expr = expr.clone().alias(col_name);
-                }
+            {
+                // if the data type mismatched, later check_execute will error out
+                // hence no need to check it here, beside, optimize pass might be able to cast it
+                // so checking here is not necessary
+                *expr = expr.clone().alias(col_name);
             }
         }
 

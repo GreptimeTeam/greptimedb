@@ -456,11 +456,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -513,11 +513,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -568,11 +568,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -635,11 +635,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+            return true;
         }
 
         // Slow path: apply the index from the file.

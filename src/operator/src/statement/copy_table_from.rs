@@ -467,10 +467,10 @@ impl StatementExecutor {
                     insert_cost += cost;
                 }
 
-                if let Some(max_insert_rows) = max_insert_rows {
-                    if rows_inserted >= max_insert_rows {
-                        return Ok(gen_insert_output(rows_inserted, insert_cost));
-                    }
+                if let Some(max_insert_rows) = max_insert_rows
+                    && rows_inserted >= max_insert_rows
+                {
+                    return Ok(gen_insert_output(rows_inserted, insert_cost));
                 }
             }
 
@@ -511,10 +511,10 @@ async fn batch_insert(
 /// Custom type compatibility check for GreptimeDB that handles Map -> Binary (JSON) conversion
 fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool {
     // Handle Map -> Binary conversion for JSON types
-    if let ArrowDataType::Map(_, _) = from {
-        if let ArrowDataType::Binary = to {
-            return true;
-        }
+    if let ArrowDataType::Map(_, _) = from
+        && let ArrowDataType::Binary = to
+    {
+        return true;
     }
 
     // For all other cases, use Arrow's built-in can_cast_types

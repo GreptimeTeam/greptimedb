@@ -82,11 +82,11 @@ impl BinaryVector {
                 continue;
             };
 
-            if let Ok(s) = String::from_utf8(binary.to_vec()) {
-                if let Ok(v) = parse_string_to_vector_type_value(&s, Some(dim)) {
-                    vector.push(Some(v));
-                    continue;
-                }
+            if let Ok(s) = String::from_utf8(binary.to_vec())
+                && let Ok(v) = parse_string_to_vector_type_value(&s, Some(dim))
+            {
+                vector.push(Some(v));
+                continue;
             }
 
             let expected_bytes_size = dim as usize * std::mem::size_of::<f32>();

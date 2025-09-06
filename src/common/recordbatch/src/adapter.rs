@@ -575,10 +575,10 @@ fn custom_cast(
     target_type: &ArrowDataType,
     extype: Option<ColumnExtType>,
 ) -> std::result::Result<Arc<dyn Array>, ArrowError> {
-    if let ArrowDataType::Map(_, _) = array.data_type() {
-        if let ArrowDataType::Binary = target_type {
-            return convert_map_to_json_binary(array, extype);
-        }
+    if let ArrowDataType::Map(_, _) = array.data_type()
+        && let ArrowDataType::Binary = target_type
+    {
+        return convert_map_to_json_binary(array, extype);
     }
 
     cast(array, target_type)

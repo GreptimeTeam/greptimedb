@@ -1171,10 +1171,10 @@ pub const HTTP_SERVER: &str = "HTTP_SERVER";
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the HTTP server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the HTTP server has already exited");
         }
         info!("Shutdown HTTP server");
 

@@ -1615,42 +1615,42 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
-    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-        if !bucket.is_empty() {
-            let instance = instance.frontend();
+    if let Ok(bucket) = env::var("GT_S3_BUCKET")
+        && !bucket.is_empty()
+    {
+        let instance = instance.frontend();
 
-            // setups
-            assert!(matches!(execute_sql(
+        // setups
+        assert!(matches!(execute_sql(
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
             .await.data, OutputData::AffectedRows(0)));
 
-            let output = execute_sql(
-                &instance,
-                r#"insert into demo(host, cpu, memory, ts) values
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
                             ('host1', 66.6, 1024, 1655276557000),
                             ('host2', 88.8,  333.3, 1655276558000)
                             "#,
-            )
-            .await
-            .data;
-            assert!(matches!(output, OutputData::AffectedRows(2)));
-            let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
-            let key = env::var("GT_S3_ACCESS_KEY").unwrap();
-            let region = env::var("GT_S3_REGION").unwrap();
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+        let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
+        let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+        let region = env::var("GT_S3_REGION").unwrap();
 
-            let root = uuid::Uuid::new_v4().to_string();
+        let root = uuid::Uuid::new_v4().to_string();
 
-            // exports
-            let copy_to_stmt = format!(
-                "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-                bucket, root, key_id, key, region
-            );
+        // exports
+        let copy_to_stmt = format!(
+            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+            bucket, root, key_id, key, region
+        );
 
-            let output = execute_sql(&instance, &copy_to_stmt).await.data;
-            assert!(matches!(output, OutputData::AffectedRows(2)));
-        }
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
     }
 }
 
@@ -1659,70 +1659,71 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     use common_telemetry::info;
 
     common_telemetry::init_default_ut_logging();
-    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-        if !bucket.is_empty() {
-            let instance = instance.frontend();
+    if let Ok(bucket) = env::var("GT_S3_BUCKET")
+        && !bucket.is_empty()
+    {
+        let instance = instance.frontend();
 
-            // setups
-            assert!(matches!(execute_sql(
+        // setups
+        assert!(matches!(execute_sql(
                 &instance,
                 "create table demo(host string, cpu double, memory double, ts timestamp time index);",
             )
             .await.data, OutputData::AffectedRows(0)));
 
-            let output = execute_sql(
-                &instance,
-                r#"insert into demo(host, cpu, memory, ts) values
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
                             ('host1', 66.6, 1024, 1655276557000),
                             ('host2', 88.8,  333.3, 1655276558000)
                             "#,
-            )
-            .await
-            .data;
-            assert!(matches!(output, OutputData::AffectedRows(2)));
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
 
-            // export
-            let root = uuid::Uuid::new_v4().to_string();
-            let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
-            let key = env::var("GT_S3_ACCESS_KEY").unwrap();
-            let region = env::var("GT_S3_REGION").unwrap();
+        // export
+        let root = uuid::Uuid::new_v4().to_string();
+        let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
+        let key = env::var("GT_S3_ACCESS_KEY").unwrap();
+        let region = env::var("GT_S3_REGION").unwrap();
 
-            let copy_to_stmt = format!(
-                "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-                bucket, root, key_id, key, region
-            );
+        let copy_to_stmt = format!(
+            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+            bucket, root, key_id, key, region
+        );
 
-            let output = execute_sql(&instance, &copy_to_stmt).await.data;
-            assert!(matches!(output, OutputData::AffectedRows(2)));
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
 
-            struct Test<'a> {
-                sql: &'a str,
-                table_name: &'a str,
-            }
-            let tests = [
-                Test {
-                    sql: &format!(
-                        "Copy with_filename FROM 's3://{}/{}/export/demo.parquet'",
-                        bucket, root
-                    ),
-                    table_name: "with_filename",
-                },
-                Test {
-                    sql: &format!("Copy with_path FROM 's3://{}/{}/export/'", bucket, root),
-                    table_name: "with_path",
-                },
-                Test {
-                    sql: &format!(
-                        "Copy with_pattern FROM 's3://{}/{}/export/' WITH (PATTERN = 'demo.*')",
-                        bucket, root
-                    ),
-                    table_name: "with_pattern",
-                },
-            ];
+        struct Test<'a> {
+            sql: &'a str,
+            table_name: &'a str,
+        }
+        let tests = [
+            Test {
+                sql: &format!(
+                    "Copy with_filename FROM 's3://{}/{}/export/demo.parquet'",
+                    bucket, root
+                ),
+                table_name: "with_filename",
+            },
+            Test {
+                sql: &format!("Copy with_path FROM 's3://{}/{}/export/'", bucket, root),
+                table_name: "with_path",
+            },
+            Test {
+                sql: &format!(
+                    "Copy with_pattern FROM 's3://{}/{}/export/' WITH (PATTERN = 'demo.*')",
+                    bucket, root
+                ),
+                table_name: "with_pattern",
+            },
+        ];
 
-            for test in tests {
-                // import
-                assert!(matches!(
+        for test in tests {
+            // import
+            assert!(matches!(
                     execute_sql(
                         &instance,
                         &format!(
@@ -1734,30 +1735,29 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                     .data,
                     OutputData::AffectedRows(0)
                 ));
-                let sql = format!(
-                    "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-                    test.sql, key_id, key, region,
-                );
-                info!("Running sql: {}", sql);
+            let sql = format!(
+                "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
+                test.sql, key_id, key, region,
+            );
+            info!("Running sql: {}", sql);
 
-                let output = execute_sql(&instance, &sql).await.data;
-                assert!(matches!(output, OutputData::AffectedRows(2)));
+            let output = execute_sql(&instance, &sql).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
 
-                let output = execute_sql(
-                    &instance,
-                    &format!("select * from {} order by ts", test.table_name),
-                )
-                .await
-                .data;
-                let expected = "\
+            let output = execute_sql(
+                &instance,
+                &format!("select * from {} order by ts", test.table_name),
+            )
+            .await
+            .data;
+            let expected = "\
 +-------+------+--------+---------------------+
 | host  | cpu  | memory | ts                  |
 +-------+------+--------+---------------------+
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
 +-------+------+--------+---------------------+";
-                check_output_stream(output, expected).await;
-            }
+            check_output_stream(output, expected).await;
         }
     }
 }

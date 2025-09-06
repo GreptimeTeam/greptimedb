@@ -377,10 +377,10 @@ impl PartSortStream {
 
         for (idx, val) in sort_column_iter {
             // ignore vacant time index data
-            if let Some(val) = val {
-                if val >= cur_range.end.value() || val < cur_range.start.value() {
-                    return Ok(Some(idx));
-                }
+            if let Some(val) = val
+                && (val >= cur_range.end.value() || val < cur_range.start.value())
+            {
+                return Ok(Some(idx));
             }
         }
 

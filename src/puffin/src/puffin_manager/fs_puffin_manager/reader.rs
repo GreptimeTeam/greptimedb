@@ -167,10 +167,10 @@ where
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
         let id = self.handle.to_string();
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            if let Some(metadata) = cache.get_metadata(&id) {
-                return Ok(metadata);
-            }
+        if let Some(cache) = self.puffin_file_metadata_cache.as_ref()
+            && let Some(metadata) = cache.get_metadata(&id)
+        {
+            return Ok(metadata);
         }
 
         let metadata = Arc::new(reader.metadata().await?);

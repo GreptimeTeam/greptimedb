@@ -272,10 +272,10 @@ impl<S> RegionWorkerLoop<S> {
 
         let _ = edit_result.sender.send(edit_result.result);
 
-        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
-            if let Some(request) = edit_queue.dequeue() {
-                self.handle_region_edit(request).await;
-            }
+        if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id)
+            && let Some(request) = edit_queue.dequeue()
+        {
+            self.handle_region_edit(request).await;
         }
 
         if need_compaction {

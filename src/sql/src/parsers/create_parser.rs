@@ -213,13 +213,14 @@ impl<'a> ParserContext<'a> {
                 }
             );
         }
-        if let Some(append_mode) = options.get("append_mode") {
-            if append_mode == "true" && options.contains_key("merge_mode") {
-                return InvalidDatabaseOptionSnafu {
-                    key: "merge_mode".to_string(),
-                }
-                .fail();
+        if let Some(append_mode) = options.get("append_mode")
+            && append_mode == "true"
+            && options.contains_key("merge_mode")
+        {
+            return InvalidDatabaseOptionSnafu {
+                key: "merge_mode".to_string(),
             }
+            .fail();
         }
 
         Ok(Statement::CreateDatabase(CreateDatabase {
@@ -554,8 +555,8 @@ impl<'a> ParserContext<'a> {
 
         let mut time_index_opt_idx = None;
         for (index, opt) in column.options().iter().enumerate() {
-            if let ColumnOption::DialectSpecific(tokens) = &opt.option {
-                if matches!(
+            if let ColumnOption::DialectSpecific(tokens) = &opt.option
+                && matches!(
                     &tokens[..],
                     [
                         Token::Word(Word {
@@ -567,21 +568,21 @@ impl<'a> ParserContext<'a> {
                             ..
                         })
                     ]
-                ) {
-                    ensure!(
-                        time_index_opt_idx.is_none(),
-                        InvalidColumnOptionSnafu {
-                            name: column.name().to_string(),
-                            msg: "duplicated time index",
-                        }
-                    );
-                    time_index_opt_idx = Some(index);
+                )
+            {
+                ensure!(
+                    time_index_opt_idx.is_none(),
+                    InvalidColumnOptionSnafu {
+                        name: column.name().to_string(),
+                        msg: "duplicated time index",
+                    }
+                );
+                time_index_opt_idx = Some(index);
 
-                    let constraint = TableConstraint::TimeIndex {
-                        column: Ident::new(column.name().value.clone()),
-                    };
-                    constraints.push(constraint);
-                }
+                let constraint = TableConstraint::TimeIndex {
+                    column: Ident::new(column.name().value.clone()),
+                };
+                constraints.push(constraint);
             }
         }
 

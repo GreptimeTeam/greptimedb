@@ -356,13 +356,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribeStatementResponse::new(
-                        param_types,
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribeStatementResponse::new(
+                    param_types,
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribeStatementResponse::new(param_types, vec![]))
@@ -387,12 +386,11 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
+                && let Response::Query(query_response) = resp.remove(0)
             {
-                if let Response::Query(query_response) = resp.remove(0) {
-                    return Ok(DescribePortalResponse::new(
-                        (*query_response.row_schema()).clone(),
-                    ));
-                }
+                return Ok(DescribePortalResponse::new(
+                    (*query_response.row_schema()).clone(),
+                ));
             }
 
             Ok(DescribePortalResponse::new(vec![]))

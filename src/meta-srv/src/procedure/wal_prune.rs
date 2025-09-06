@@ -219,7 +219,8 @@ mod tests {
             (n_region * n_table * 5) as usize,
         )
         .await;
-        let prunable_entry_id = new_wal_prune_metadata(
+
+        new_wal_prune_metadata(
             context.table_metadata_manager.clone(),
             context.leader_region_registry.clone(),
             n_region,
@@ -227,8 +228,7 @@ mod tests {
             &offsets,
             topic.to_string(),
         )
-        .await;
-        prunable_entry_id
+        .await
     }
 
     fn record(i: usize) -> Record {

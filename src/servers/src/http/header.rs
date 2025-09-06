@@ -120,10 +120,10 @@ impl Header for GreptimeDbName {
     }
 
     fn encode<E: Extend<HeaderValue>>(&self, values: &mut E) {
-        if let Some(name) = &self.0 {
-            if let Ok(value) = HeaderValue::from_str(name) {
-                values.extend(std::iter::once(value));
-            }
+        if let Some(name) = &self.0
+            && let Ok(value) = HeaderValue::from_str(name)
+        {
+            values.extend(std::iter::once(value));
         }
     }
 }

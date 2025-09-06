@@ -1271,12 +1271,11 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate() {
-                    if !predicate.exprs().is_empty() {
-                        let exprs: Vec<_> =
-                            predicate.exprs().iter().map(|e| e.to_string()).collect();
-                        write!(f, ", \"filters\": {:?}", exprs)?;
-                    }
+                if let Some(predicate) = &self.input.predicate.predicate()
+                    && !predicate.exprs().is_empty()
+                {
+                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
+                    write!(f, ", \"filters\": {:?}", exprs)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;

@@ -140,10 +140,10 @@ impl SparsePrimaryKeyCodec {
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
         // if the `columns` is not specified, all unknown columns is primary key(label field).
-        if let Some(columns) = &self.inner.columns {
-            if !columns.contains(&column_id) {
-                return None;
-            }
+        if let Some(columns) = &self.inner.columns
+            && !columns.contains(&column_id)
+        {
+            return None;
         }
 
         match column_id {

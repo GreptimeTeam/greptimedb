@@ -151,10 +151,10 @@ impl FulltextIndexApplier {
                 row_ids = Some(result);
             }
 
-            if let Some(ids) = row_ids.as_ref() {
-                if ids.is_empty() {
-                    break;
-                }
+            if let Some(ids) = row_ids.as_ref()
+                && ids.is_empty()
+            {
+                break;
             }
         }
 
@@ -204,10 +204,10 @@ impl FulltextIndexApplier {
                 row_ids = Some(result);
             }
 
-            if let Some(ids) = row_ids.as_ref() {
-                if ids.is_empty() {
-                    break;
-                }
+            if let Some(ids) = row_ids.as_ref()
+                && ids.is_empty()
+            {
+                break;
             }
         }
 

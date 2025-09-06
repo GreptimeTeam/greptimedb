@@ -195,10 +195,10 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         let deleted = keys.len() as i64;
 
         for key in keys {
-            if let Some(value) = kvs.remove(&key) {
-                if prev_kv {
-                    prev_kvs.push((key.clone(), value).into())
-                }
+            if let Some(value) = kvs.remove(&key)
+                && prev_kv
+            {
+                prev_kvs.push((key.clone(), value).into())
             }
         }
 

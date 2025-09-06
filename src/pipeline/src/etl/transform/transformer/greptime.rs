@@ -178,23 +178,17 @@ impl GreptimeTransformer {
 
             column_names_set.extend(target_fields_set);
 
-            if let Some(idx) = transform.index {
-                if idx == Index::Time {
-                    match transform.fields.len() {
-                        //Safety unwrap is fine here because we have checked the length of real_fields
-                        1 => {
-                            timestamp_columns.push(transform.fields.first().unwrap().input_field())
+            if let Some(idx) = transform.index
+                && idx == Index::Time
+            {
+                match transform.fields.len() {
+                    //Safety unwrap is fine here because we have checked the length of real_fields
+                    1 => timestamp_columns.push(transform.fields.first().unwrap().input_field()),
+                    _ => {
+                        return TransformMultipleTimestampIndexSnafu {
+                            columns: transform.fields.iter().map(|x| x.input_field()).join(", "),
                         }
-                        _ => {
-                            return TransformMultipleTimestampIndexSnafu {
-                                columns: transform
-                                    .fields
-                                    .iter()
-                                    .map(|x| x.input_field())
-                                    .join(", "),
-                            }
-                            .fail();
-                        }
+                        .fail();
                     }
                 }
             }

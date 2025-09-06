@@ -227,10 +227,10 @@ impl ExternalSorter {
             return Ok(());
         }
 
-        if let Some(current_threshold) = self.current_memory_usage_threshold {
-            if memory_usage < current_threshold {
-                return Ok(());
-            }
+        if let Some(current_threshold) = self.current_memory_usage_threshold
+            && memory_usage < current_threshold
+        {
+            return Ok(());
         }
 
         let file_id = &format!("{:012}", self.total_row_count);

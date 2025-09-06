@@ -239,16 +239,15 @@ impl GlobalIndexCollector {
         region_id: RegionId,
         entry_id: EntryId,
     ) -> Result<()> {
-        if let Some(sender) = self.providers.lock().await.get(provider).cloned() {
-            if sender
+        if let Some(sender) = self.providers.lock().await.get(provider).cloned()
+            && sender
                 .send(WorkerRequest::TruncateIndex(TruncateIndexRequest::new(
                     region_id, entry_id,
                 )))
                 .await
                 .is_err()
-            {
-                return error::OrderedBatchProducerStoppedSnafu {}.fail();
-            }
+        {
+            return error::OrderedBatchProducerStoppedSnafu {}.fail();
         }
 
         Ok(())

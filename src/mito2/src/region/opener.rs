@@ -469,15 +469,12 @@ impl RegionOpener {
             .await?;
             // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
             // Only set after the WAL replay is completed.
-            let topic_latest_entry_id = if provider.is_remote_wal()
-                && version_control.current().version.memtables.is_empty()
-            {
+
+            if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
                 wal.store().latest_entry_id(&provider).unwrap_or(0)
             } else {
                 0
-            };
-
-            topic_latest_entry_id
+            }
         } else {
             info!(
                 "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",

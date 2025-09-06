@@ -849,17 +849,17 @@ impl Inserter {
                 for col in &mut rows.schema {
                     match col.semantic_type {
                         x if x == SemanticType::Timestamp as i32 => {
-                            if let Some(ref ts_name) = ts_col_name {
-                                if col.column_name != *ts_name {
-                                    col.column_name = ts_name.clone();
-                                }
+                            if let Some(ref ts_name) = ts_col_name
+                                && col.column_name != *ts_name
+                            {
+                                col.column_name = ts_name.clone();
                             }
                         }
                         x if x == SemanticType::Field as i32 => {
-                            if let Some(ref field_name) = field_col_name {
-                                if col.column_name != *field_name {
-                                    col.column_name = field_name.clone();
-                                }
+                            if let Some(ref field_name) = field_col_name
+                                && col.column_name != *field_name
+                            {
+                                col.column_name = field_name.clone();
                             }
                         }
                         _ => {}

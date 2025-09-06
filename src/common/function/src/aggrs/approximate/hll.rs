@@ -105,10 +105,10 @@ impl HllState {
     }
 
     fn merge(&mut self, raw: &[u8]) {
-        if let Ok(serialized) = bincode::deserialize::<HllStateType>(raw) {
-            if let Ok(()) = self.hll.merge(&serialized) {
-                return;
-            }
+        if let Ok(serialized) = bincode::deserialize::<HllStateType>(raw)
+            && let Ok(()) = self.hll.merge(&serialized)
+        {
+            return;
         }
         trace!("Warning: Failed to merge HyperLogLog from {:?}", raw);
     }

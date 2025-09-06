@@ -693,21 +693,21 @@ impl BatchChecker {
     pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
         batch.check_monotonic()?;
 
-        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
-            if start > first {
-                return Err(format!(
-                    "batch's first timestamp is before the start timestamp: {:?} > {:?}",
-                    start, first
-                ));
-            }
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp())
+            && start > first
+        {
+            return Err(format!(
+                "batch's first timestamp is before the start timestamp: {:?} > {:?}",
+                start, first
+            ));
         }
-        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
-            if end <= last {
-                return Err(format!(
-                    "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
-                    end, last
-                ));
-            }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp())
+            && end <= last
+        {
+            return Err(format!(
+                "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
+                end, last
+            ));
         }
 
         // Checks the batch is behind the last batch.

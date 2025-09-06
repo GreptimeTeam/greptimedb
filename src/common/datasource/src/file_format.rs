@@ -158,10 +158,10 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
 
         let stream = futures::stream::poll_fn(move |cx| {
             loop {
-                if buffered.is_empty() {
-                    if let Some(result) = futures::ready!(upstream.poll_next_unpin(cx)) {
-                        buffered = result?;
-                    };
+                if buffered.is_empty()
+                    && let Some(result) = futures::ready!(upstream.poll_next_unpin(cx))
+                {
+                    buffered = result?;
                 }
 
                 let decoded = decoder.decode(buffered.as_ref())?;

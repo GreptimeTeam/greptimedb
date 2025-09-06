@@ -178,26 +178,26 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                                 return Ok(Transformed::no(expr));
                             }
 
-                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>() {
-                                if let ScalarValue::Utf8(Some(term)) = lit.value() {
-                                    let finder = MatchesTermFinder::new(term);
+                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>()
+                                && let ScalarValue::Utf8(Some(term)) = lit.value()
+                            {
+                                let finder = MatchesTermFinder::new(term);
 
-                                    // For debugging purpose. Not really precise but enough for most cases.
-                                    let probes = term
-                                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string())
-                                        .collect();
+                                // For debugging purpose. Not really precise but enough for most cases.
+                                let probes = term
+                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string())
+                                    .collect();
 
-                                    let expr = PreCompiledMatchesTermExpr {
-                                        text: args[0].clone(),
-                                        term: term.to_string(),
-                                        finder,
-                                        probes,
-                                    };
+                                let expr = PreCompiledMatchesTermExpr {
+                                    text: args[0].clone(),
+                                    term: term.to_string(),
+                                    finder,
+                                    probes,
+                                };
 
-                                    return Ok(Transformed::yes(Arc::new(expr)));
-                                }
+                                return Ok(Transformed::yes(Arc::new(expr)));
                             }
                         }
 

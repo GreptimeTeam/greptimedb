@@ -160,11 +160,11 @@ impl Election for EtcdElection {
             let _ = keep_alive_interval.tick().await;
             keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
 
-            if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
-                if res.ttl() <= 0 {
-                    warn!("Candidate lease expired, key: {}", self.candidate_key());
-                    break;
-                }
+            if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)?
+                && res.ttl() <= 0
+            {
+                warn!("Candidate lease expired, key: {}", self.candidate_key());
+                break;
             }
         }
 

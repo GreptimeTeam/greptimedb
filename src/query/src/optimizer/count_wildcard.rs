@@ -146,29 +146,26 @@ impl TreeNodeVisitor<'_> for TimeIndexFinder {
             self.table_alias = Some(subquery_alias.alias.clone());
         }
 
-        if let LogicalPlan::TableScan(table_scan) = &node {
-            if let Some(source) = table_scan
+        if let LogicalPlan::TableScan(table_scan) = &node
+            && let Some(source) = table_scan
                 .source
                 .as_any()
                 .downcast_ref::<DefaultTableSource>()
-            {
-                if let Some(adapter) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DfTableProviderAdapter>()
-                {
-                    let table_info = adapter.table().table_info();
-                    self.table_alias
-                        .get_or_insert(TableReference::bare(table_info.name.clone()));
-                    self.time_index_col = table_info
-                        .meta
-                        .schema
-                        .timestamp_column()
-                        .map(|c| c.name.clone());
+            && let Some(adapter) = source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+        {
+            let table_info = adapter.table().table_info();
+            self.table_alias
+                .get_or_insert(TableReference::bare(table_info.name.clone()));
+            self.time_index_col = table_info
+                .meta
+                .schema
+                .timestamp_column()
+                .map(|c| c.name.clone());
 
-                    return Ok(TreeNodeRecursion::Stop);
-                }
-            }
+            return Ok(TreeNodeRecursion::Stop);
         }
 
         Ok(TreeNodeRecursion::Continue)

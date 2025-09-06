@@ -755,10 +755,10 @@ fn set_addresses(
     };
 
     for region_route in &mut physical_table_route.region_routes {
-        if let Some(leader) = &mut region_route.leader_peer {
-            if let Some(node_addr) = node_addrs.get(&leader.id) {
-                leader.addr = node_addr.peer.addr.clone();
-            }
+        if let Some(leader) = &mut region_route.leader_peer
+            && let Some(node_addr) = node_addrs.get(&leader.id)
+        {
+            leader.addr = node_addr.peer.addr.clone();
         }
         for follower in &mut region_route.follower_peers {
             if let Some(node_addr) = node_addrs.get(&follower.id) {

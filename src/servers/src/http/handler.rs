@@ -400,10 +400,10 @@ pub async fn metrics(
     // But ProcessCollector only support on linux.
 
     #[cfg(not(windows))]
-    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref() {
-        if let Err(e) = c.update() {
-            common_telemetry::error!(e; "Failed to update jemalloc metrics");
-        }
+    if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref()
+        && let Err(e) = c.update()
+    {
+        common_telemetry::error!(e; "Failed to update jemalloc metrics");
     }
     state.render()
 }

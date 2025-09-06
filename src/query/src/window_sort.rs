@@ -916,22 +916,22 @@ fn find_successive_runs<T: Iterator<Item = (usize, Option<N>)>, N: Ord + Copy>(
     let mut last_val: Option<N> = None;
 
     for (idx, t) in iter {
-        if let Some(last_value) = &last_value {
-            if cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater {
-                // we found a boundary
-                let len = idx - last_offset;
-                let run = SucRun {
-                    offset: last_offset,
-                    len,
-                    first_val,
-                    last_val,
-                };
-                runs.push(run);
-                first_val = None;
-                last_val = None;
+        if let Some(last_value) = &last_value
+            && cmp_with_opts(last_value, &t, sort_opts) == std::cmp::Ordering::Greater
+        {
+            // we found a boundary
+            let len = idx - last_offset;
+            let run = SucRun {
+                offset: last_offset,
+                len,
+                first_val,
+                last_val,
+            };
+            runs.push(run);
+            first_val = None;
+            last_val = None;
 
-                last_offset = idx;
-            }
+            last_offset = idx;
         }
         last_value = Some(t);
         if let Some(t) = t {

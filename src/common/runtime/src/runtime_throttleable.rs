@@ -173,16 +173,16 @@ where
             },
         };
 
-        if let Some(ratelimiter) = &this.handle.ratelimiter {
-            if let Err(wait) = ratelimiter.try_wait() {
-                *this.state = State::Throttled(Box::pin(tokio::time::sleep(wait)));
-                match this.state.unwrap_backoff().poll_unpin(cx) {
-                    Poll::Ready(_) => {
-                        *this.state = State::Pollable;
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
+        if let Some(ratelimiter) = &this.handle.ratelimiter
+            && let Err(wait) = ratelimiter.try_wait()
+        {
+            *this.state = State::Throttled(Box::pin(tokio::time::sleep(wait)));
+            match this.state.unwrap_backoff().poll_unpin(cx) {
+                Poll::Ready(_) => {
+                    *this.state = State::Pollable;
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
                 }
             }
         }

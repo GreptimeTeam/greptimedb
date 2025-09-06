@@ -83,10 +83,10 @@ impl StorageType {
     pub fn build_storage_types_based_on_env() -> Vec<StorageType> {
         let mut storage_types = Vec::with_capacity(4);
         storage_types.push(StorageType::File);
-        if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-            if !bucket.is_empty() {
-                storage_types.push(StorageType::S3);
-            }
+        if let Ok(bucket) = env::var("GT_S3_BUCKET")
+            && !bucket.is_empty()
+        {
+            storage_types.push(StorageType::S3);
         }
         if env::var("GT_OSS_BUCKET").is_ok() {
             storage_types.push(StorageType::Oss);
@@ -309,10 +309,9 @@ impl Drop for TestGuard {
                 | TempDirGuard::Oss(guard)
                 | TempDirGuard::Azblob(guard)
                 | TempDirGuard::Gcs(guard) = guard.0
+                    && let Err(e) = guard.remove_all().await
                 {
-                    if let Err(e) = guard.remove_all().await {
-                        errors.push(e);
-                    }
+                    errors.push(e);
                 }
             }
             if errors.is_empty() {

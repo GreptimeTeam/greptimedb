@@ -80,10 +80,10 @@ impl WalEntryDistributor {
             let region_id = entry.region_id();
 
             if let Some(EntryReceiver { sender, start_id }) = receivers.get(&region_id) {
-                if entry_id >= *start_id {
-                    if let Err(err) = sender.send(entry).await {
-                        error!(err; "Failed to distribute raw entry, entry_id:{}, region_id: {}", entry_id, region_id);
-                    }
+                if entry_id >= *start_id
+                    && let Err(err) = sender.send(entry).await
+                {
+                    error!(err; "Failed to distribute raw entry, entry_id:{}, region_id: {}", entry_id, region_id);
                 }
             } else {
                 debug!("Subscriber not found, region_id: {}", region_id);

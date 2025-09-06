@@ -301,15 +301,13 @@ impl<S> RegionWorkerLoop<S> {
             // Only fill missing columns if primary key is dense encoded.
             if need_fill_missing_columns
                 && sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense
-            {
-                if let Err(e) = sender_req
+                && let Err(e) = sender_req
                     .request
                     .maybe_fill_missing_columns(&region_ctx.version().metadata)
-                {
-                    sender_req.sender.send(Err(e));
+            {
+                sender_req.sender.send(Err(e));
 
-                    continue;
-                }
+                continue;
             }
 
             // Collect requests by region.

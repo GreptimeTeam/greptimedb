@@ -179,10 +179,10 @@ impl DirtyTimeWindows {
     pub fn window_size(&self) -> Duration {
         let mut ret = Duration::from_secs(0);
         for (start, end) in &self.windows {
-            if let Some(end) = end {
-                if let Some(duration) = end.sub(start) {
-                    ret += duration.to_std().unwrap_or_default();
-                }
+            if let Some(end) = end
+                && let Some(duration) = end.sub(start)
+            {
+                ret += duration.to_std().unwrap_or_default();
             }
         }
         ret
@@ -487,10 +487,10 @@ impl DirtyTimeWindows {
         let mut prev_tw = None;
         for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
-            if let Some(expire_lower_bound) = expire_lower_bound {
-                if lower_bound < expire_lower_bound {
-                    continue;
-                }
+            if let Some(expire_lower_bound) = expire_lower_bound
+                && lower_bound < expire_lower_bound
+            {
+                continue;
             }
 
             let Some(prev_tw) = &mut prev_tw else {

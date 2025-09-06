@@ -243,10 +243,10 @@ impl DropTableExecutor {
                 let datanode = datanode.clone();
                 let requester = requester.clone();
                 drop_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        if err.status_code() != StatusCode::RegionNotFound {
-                            return Err(add_peer_context_if_needed(datanode)(err));
-                        }
+                    if let Err(err) = requester.handle(request).await
+                        && err.status_code() != StatusCode::RegionNotFound
+                    {
+                        return Err(add_peer_context_if_needed(datanode)(err));
                     }
                     Ok(())
                 });
@@ -284,10 +284,10 @@ impl DropTableExecutor {
                 let datanode = datanode.clone();
                 let requester = requester.clone();
                 close_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        if err.status_code() != StatusCode::RegionNotFound {
-                            return Err(add_peer_context_if_needed(datanode)(err));
-                        }
+                    if let Err(err) = requester.handle(request).await
+                        && err.status_code() != StatusCode::RegionNotFound
+                    {
+                        return Err(add_peer_context_if_needed(datanode)(err));
                     }
                     Ok(())
                 });

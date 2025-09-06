@@ -60,16 +60,16 @@ fn renew_region_lease_via_region_route(
     region_id: RegionId,
 ) -> Option<(RegionId, RegionRole)> {
     // If it's a leader region on this datanode.
-    if let Some(leader) = &region_route.leader_peer {
-        if leader.id == datanode_id {
-            let region_role = if region_route.is_leader_downgrading() {
-                RegionRole::DowngradingLeader
-            } else {
-                RegionRole::Leader
-            };
+    if let Some(leader) = &region_route.leader_peer
+        && leader.id == datanode_id
+    {
+        let region_role = if region_route.is_leader_downgrading() {
+            RegionRole::DowngradingLeader
+        } else {
+            RegionRole::Leader
+        };
 
-            return Some((region_id, region_role));
-        }
+        return Some((region_id, region_role));
     }
 
     // If it's a follower region on this datanode.

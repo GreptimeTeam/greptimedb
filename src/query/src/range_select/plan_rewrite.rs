@@ -273,53 +273,52 @@ impl TreeNodeRewriter for RangeExprRewriter<'_> {
     type Node = Expr;
 
     fn f_down(&mut self, node: Expr) -> DFResult<Transformed<Expr>> {
-        if let Expr::ScalarFunction(func) = &node {
-            if func.name() == "range_fn" {
-                // `range_fn(func, range, fill, byc, [byv], align, to)`
-                // `[byv]` are variadic arguments, byc indicate the length of arguments
-                let range_expr = self.get_range_expr(&func.args, 0)?;
-                let range = parse_duration_expr(&func.args, 1)?;
-                let byc = str::parse::<usize>(parse_str_expr(&func.args, 3)?)
-                    .map_err(|e| DataFusionError::Plan(e.to_string()))?;
-                let by = parse_expr_list(&func.args, 4, byc)?;
-                let align = parse_duration_expr(&func.args, byc + 4)?;
-                let align_to =
-                    parse_align_to(&func.args, byc + 5, Some(&self.query_ctx.timezone()))?;
-                let mut data_type = range_expr.get_type(self.input_plan.schema())?;
-                let mut need_cast = false;
-                let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
-                if matches!(fill, Some(Fill::Linear)) && data_type.is_integer() {
-                    data_type = DataType::Float64;
-                    need_cast = true;
-                }
-                inconsistent_check!(self.by, !self.by.is_empty());
-                inconsistent_check!(self.align, self.align != Duration::default());
-                inconsistent_check!(self.align_to, self.align_to != 0);
-                let range_fn = RangeFn {
-                    name: if let Some(fill) = &fill {
-                        format!(
-                            "{} RANGE {} FILL {}",
-                            range_expr.schema_name(),
-                            parse_expr_to_string(&func.args, 1)?,
-                            fill
-                        )
-                    } else {
-                        format!(
-                            "{} RANGE {}",
-                            range_expr.schema_name(),
-                            parse_expr_to_string(&func.args, 1)?,
-                        )
-                    },
-                    data_type,
-                    expr: range_expr,
-                    range,
-                    fill,
-                    need_cast,
-                };
-                let alias = Expr::Column(Column::from_name(range_fn.name.clone()));
-                self.range_fn.insert(range_fn);
-                return Ok(Transformed::yes(alias));
+        if let Expr::ScalarFunction(func) = &node
+            && func.name() == "range_fn"
+        {
+            // `range_fn(func, range, fill, byc, [byv], align, to)`
+            // `[byv]` are variadic arguments, byc indicate the length of arguments
+            let range_expr = self.get_range_expr(&func.args, 0)?;
+            let range = parse_duration_expr(&func.args, 1)?;
+            let byc = str::parse::<usize>(parse_str_expr(&func.args, 3)?)
+                .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+            let by = parse_expr_list(&func.args, 4, byc)?;
+            let align = parse_duration_expr(&func.args, byc + 4)?;
+            let align_to = parse_align_to(&func.args, byc + 5, Some(&self.query_ctx.timezone()))?;
+            let mut data_type = range_expr.get_type(self.input_plan.schema())?;
+            let mut need_cast = false;
+            let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
+            if matches!(fill, Some(Fill::Linear)) && data_type.is_integer() {
+                data_type = DataType::Float64;
+                need_cast = true;
             }
+            inconsistent_check!(self.by, !self.by.is_empty());
+            inconsistent_check!(self.align, self.align != Duration::default());
+            inconsistent_check!(self.align_to, self.align_to != 0);
+            let range_fn = RangeFn {
+                name: if let Some(fill) = &fill {
+                    format!(
+                        "{} RANGE {} FILL {}",
+                        range_expr.schema_name(),
+                        parse_expr_to_string(&func.args, 1)?,
+                        fill
+                    )
+                } else {
+                    format!(
+                        "{} RANGE {}",
+                        range_expr.schema_name(),
+                        parse_expr_to_string(&func.args, 1)?,
+                    )
+                },
+                data_type,
+                expr: range_expr,
+                range,
+                fill,
+                need_cast,
+            };
+            let alias = Expr::Column(Column::from_name(range_fn.name.clone()));
+            self.range_fn.insert(range_fn);
+            return Ok(Transformed::yes(alias));
         }
         Ok(Transformed::no(node))
     }

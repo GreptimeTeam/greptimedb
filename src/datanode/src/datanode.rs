@@ -655,12 +655,12 @@ async fn open_all_regions(
     }
 
     for region_id in open_regions {
-        if open_with_writable {
-            if let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader) {
-                error!(
-                    e; "failed to convert region {region_id} to leader"
-                );
-            }
+        if open_with_writable
+            && let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader)
+        {
+            error!(
+                e; "failed to convert region {region_id} to leader"
+            );
         }
     }
 

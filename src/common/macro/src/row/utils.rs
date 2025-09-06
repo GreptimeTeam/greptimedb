@@ -149,21 +149,16 @@ fn field_type(ty: &Type) -> FieldType<'_> {
             segments,
         },
     }) = ty
+        && leading_colon.is_none()
+        && segments.len() == 1
+        && let Some(PathSegment {
+            ident,
+            arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+        }) = segments.first()
+        && let (1, Some(GenericArgument::Type(t))) = (args.len(), args.first())
+        && ident == "Option"
     {
-        if leading_colon.is_none() && segments.len() == 1 {
-            if let Some(PathSegment {
-                ident,
-                arguments:
-                    PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
-            }) = segments.first()
-            {
-                if let (1, Some(GenericArgument::Type(t))) = (args.len(), args.first()) {
-                    if ident == "Option" {
-                        return FieldType::Optional(t);
-                    }
-                }
-            }
-        }
+        return FieldType::Optional(t);
     }
 
     FieldType::Required(ty)

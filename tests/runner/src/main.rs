@@ -137,10 +137,10 @@ async fn main() {
         Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
     );
 
-    if let Some(d) = &args.case_dir {
-        if !d.is_dir() {
-            panic!("{} is not a directory", d.display());
-        }
+    if let Some(d) = &args.case_dir
+        && !d.is_dir()
+    {
+        panic!("{} is not a directory", d.display());
     }
     if args.jobs == 0 {
         args.jobs = num_cpus::get() / 2;

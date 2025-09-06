@@ -129,10 +129,9 @@ impl ProcedureMeta {
         // Emit the event to the event recorder if the user metadata contains the eventable object.
         if let (Some(event_recorder), Some(user_metadata)) =
             (&self.event_recorder, &self.user_metadata)
+            && let Some(event) = user_metadata.to_event()
         {
-            if let Some(event) = user_metadata.to_event() {
-                event_recorder.record(Box::new(ProcedureEvent::new(self.id, event, state.clone())));
-            }
+            event_recorder.record(Box::new(ProcedureEvent::new(self.id, event, state.clone())));
         }
 
         // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.

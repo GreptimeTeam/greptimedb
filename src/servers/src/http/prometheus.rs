@@ -1113,10 +1113,11 @@ pub async fn label_values_query(
 }
 
 fn truncate_results(label_values: &mut Vec<String>, limit: Option<usize>) {
-    if let Some(limit) = limit {
-        if limit > 0 && label_values.len() >= limit {
-            label_values.truncate(limit);
-        }
+    if let Some(limit) = limit
+        && limit > 0
+        && label_values.len() >= limit
+    {
+        label_values.truncate(limit);
     }
 }
 

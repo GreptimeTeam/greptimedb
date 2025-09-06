@@ -453,10 +453,10 @@ impl RegionSupervisor {
                 .region_routes
                 .iter()
                 .for_each(|region_route| {
-                    if !regions.contains(&region_route.region.id) {
-                        if let Some(leader_peer) = &region_route.leader_peer {
-                            detecting_regions.push((leader_peer.id, region_route.region.id));
-                        }
+                    if !regions.contains(&region_route.region.id)
+                        && let Some(leader_peer) = &region_route.leader_peer
+                    {
+                        detecting_regions.push((leader_peer.id, region_route.region.id));
                     }
                 });
         }

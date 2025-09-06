@@ -61,10 +61,10 @@ impl PuffinFileAccessor for MockFileAccessor {
 
     async fn writer(&self, handle: &String) -> Result<Self::Writer> {
         let p = self.tempdir.path().join(handle);
-        if let Some(p) = p.parent() {
-            if !tokio::fs::try_exists(p).await.unwrap() {
-                tokio::fs::create_dir_all(p).await.unwrap();
-            }
+        if let Some(p) = p.parent()
+            && !tokio::fs::try_exists(p).await.unwrap()
+        {
+            tokio::fs::create_dir_all(p).await.unwrap();
         }
         let f = tokio::fs::File::create(p).await.unwrap();
         Ok(f.compat())

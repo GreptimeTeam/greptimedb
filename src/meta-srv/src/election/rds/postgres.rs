@@ -778,13 +778,11 @@ impl PgElection {
             .is_leader
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-        {
-            if let Err(e) = self
+            && let Err(e) = self
                 .leader_watcher
                 .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
-            {
-                error!(e; "Failed to send leader change message");
-            }
+        {
+            error!(e; "Failed to send leader change message");
         }
         Ok(())
     }

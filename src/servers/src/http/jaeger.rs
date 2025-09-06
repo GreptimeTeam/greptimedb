@@ -789,14 +789,14 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 PARENT_SPAN_ID_COLUMN => {
-                    if let JsonValue::String(parent_span_id) = cell {
-                        if !parent_span_id.is_empty() {
-                            span.references.push(Reference {
-                                trace_id: span.trace_id.clone(),
-                                span_id: parent_span_id,
-                                ref_type: REF_TYPE_CHILD_OF.to_string(),
-                            });
-                        }
+                    if let JsonValue::String(parent_span_id) = cell
+                        && !parent_span_id.is_empty()
+                    {
+                        span.references.push(Reference {
+                            trace_id: span.trace_id.clone(),
+                            span_id: parent_span_id,
+                            ref_type: REF_TYPE_CHILD_OF.to_string(),
+                        });
                     }
                 }
                 SPAN_EVENTS_COLUMN => {
@@ -840,47 +840,48 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 SCOPE_NAME_COLUMN => {
-                    if let JsonValue::String(scope_name) = cell {
-                        if !scope_name.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_SCOPE_NAME.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(scope_name),
-                            });
-                        }
+                    if let JsonValue::String(scope_name) = cell
+                        && !scope_name.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_NAME.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_name),
+                        });
                     }
                 }
                 SCOPE_VERSION_COLUMN => {
-                    if let JsonValue::String(scope_version) = cell {
-                        if !scope_version.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_SCOPE_VERSION.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(scope_version),
-                            });
-                        }
+                    if let JsonValue::String(scope_version) = cell
+                        && !scope_version.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_version),
+                        });
                     }
                 }
                 SPAN_KIND_COLUMN => {
-                    if let JsonValue::String(span_kind) = cell {
-                        if !span_kind.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_SPAN_KIND.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(normalize_span_kind(&span_kind)),
-                            });
-                        }
+                    if let JsonValue::String(span_kind) = cell
+                        && !span_kind.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_SPAN_KIND.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(normalize_span_kind(&span_kind)),
+                        });
                     }
                 }
                 SPAN_STATUS_CODE => {
-                    if let JsonValue::String(span_status) = cell {
-                        if span_status != SPAN_STATUS_UNSET && !span_status.is_empty() {
-                            span.tags.push(KeyValue {
-                                key: KEY_OTEL_STATUS_CODE.to_string(),
-                                value_type: ValueType::String,
-                                value: Value::String(normalize_status_code(&span_status)),
-                            });
-                        }
+                    if let JsonValue::String(span_status) = cell
+                        && span_status != SPAN_STATUS_UNSET
+                        && !span_status.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_STATUS_CODE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(normalize_status_code(&span_status)),
+                        });
                     }
                 }
 
@@ -900,16 +901,16 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                             ) {
                                 span.tags.push(keyvalue);
                             }
-                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
-                            if let Some(keyvalue) = to_keyvalue(
+                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX)
+                            && let Some(keyvalue) = to_keyvalue(
                                 column_name
                                     .strip_prefix(RESOURCE_ATTR_PREFIX)
                                     .unwrap_or_default()
                                     .to_string(),
                                 cell,
-                            ) {
-                                resource_tags.push(keyvalue);
-                            }
+                            )
+                        {
+                            resource_tags.push(keyvalue);
                         }
                     }
                 }
@@ -1093,10 +1094,10 @@ fn convert_string_to_number(input: &serde_json::Value) -> Option<serde_json::Val
         if let Ok(number) = data.parse::<i64>() {
             return Some(serde_json::Value::Number(serde_json::Number::from(number)));
         }
-        if let Ok(number) = data.parse::<f64>() {
-            if let Some(number) = serde_json::Number::from_f64(number) {
-                return Some(serde_json::Value::Number(number));
-            }
+        if let Ok(number) = data.parse::<f64>()
+            && let Some(number) = serde_json::Number::from_f64(number)
+        {
+            return Some(serde_json::Value::Number(number));
         }
     }
 

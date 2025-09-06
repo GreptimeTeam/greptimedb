@@ -626,22 +626,21 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let user_info = &self.session.user_info();
 
-        if let Some(schema_validator) = &self.user_provider {
-            if let Err(e) = schema_validator
+        if let Some(schema_validator) = &self.user_provider
+            && let Err(e) = schema_validator
                 .authorize(&catalog, &schema, user_info)
                 .await
-            {
-                METRIC_AUTH_FAILURE
-                    .with_label_values(&[e.status_code().as_ref()])
-                    .inc();
-                return w
-                    .error(
-                        ErrorKind::ER_DBACCESS_DENIED_ERROR,
-                        e.output_msg().as_bytes(),
-                    )
-                    .await
-                    .map_err(|e| e.into());
-            }
+        {
+            METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            return w
+                .error(
+                    ErrorKind::ER_DBACCESS_DENIED_ERROR,
+                    e.output_msg().as_bytes(),
+                )
+                .await
+                .map_err(|e| e.into());
         }
 
         if catalog_from_db.is_some() {

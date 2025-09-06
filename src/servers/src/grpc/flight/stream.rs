@@ -168,19 +168,18 @@ impl FlightRecordBatchStream {
                     }
                     metrics.send_record_batch_duration += start.elapsed();
 
-                    if should_send_partial_metrics {
-                        if let Some(metrics_str) = recordbatches
+                    if should_send_partial_metrics
+                        && let Some(metrics_str) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
-                        {
-                            metrics.metrics_count += 1;
-                            let start = Instant::now();
-                            if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
-                                warn!(e; "stop sending Flight data");
-                                return;
-                            }
-                            metrics.send_metrics_duration += start.elapsed();
+                    {
+                        metrics.metrics_count += 1;
+                        let start = Instant::now();
+                        if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
+                            warn!(e; "stop sending Flight data");
+                            return;
                         }
+                        metrics.send_metrics_duration += start.elapsed();
                     }
                 }
                 Err(e) => {

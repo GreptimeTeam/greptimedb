@@ -277,15 +277,15 @@ impl InformationSchemaKeyColumnUsageBuilder {
                         constraints.push(CONSTRAINT_NAME_INVERTED_INDEX);
                         greptime_index_type.push(INDEX_TYPE_INVERTED_INDEX);
                     }
-                    if let Ok(Some(options)) = column.fulltext_options() {
-                        if options.enable {
-                            constraints.push(CONSTRAINT_NAME_FULLTEXT_INDEX);
-                            let index_type = match options.backend {
-                                FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
-                                FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
-                            };
-                            greptime_index_type.push(index_type);
-                        }
+                    if let Ok(Some(options)) = column.fulltext_options()
+                        && options.enable
+                    {
+                        constraints.push(CONSTRAINT_NAME_FULLTEXT_INDEX);
+                        let index_type = match options.backend {
+                            FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
+                            FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
+                        };
+                        greptime_index_type.push(index_type);
                     }
                     if column.is_skipping_indexed() {
                         constraints.push(CONSTRAINT_NAME_SKIPPING_INDEX);

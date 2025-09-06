@@ -91,12 +91,12 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         }
                     }
                     Err(err) => {
-                        if let Some(io_err) = error::match_for_io_error(&err) {
-                            if io_err.kind() == ErrorKind::BrokenPipe {
-                                // client disconnected in unexpected way
-                                error!("Client disconnected: broken pipe");
-                                break;
-                            }
+                        if let Some(io_err) = error::match_for_io_error(&err)
+                            && io_err.kind() == ErrorKind::BrokenPipe
+                        {
+                            // client disconnected in unexpected way
+                            error!("Client disconnected: broken pipe");
+                            break;
                         }
 
                         if tx.send(Err(err)).await.is_err() {

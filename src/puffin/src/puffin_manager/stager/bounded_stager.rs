@@ -107,10 +107,10 @@ impl<H: 'static> BoundedStager<H> {
                 }
                 .boxed()
             });
-        if let Some(ttl) = cache_ttl {
-            if !ttl.is_zero() {
-                cache_builder = cache_builder.time_to_live(ttl);
-            }
+        if let Some(ttl) = cache_ttl
+            && !ttl.is_zero()
+        {
+            cache_builder = cache_builder.time_to_live(ttl);
         }
         let cache = cache_builder.build();
 

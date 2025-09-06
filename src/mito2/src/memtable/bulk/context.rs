@@ -102,7 +102,7 @@ fn build_read_format(
     projection: &Option<&[ColumnId]>,
     flat_format: bool,
 ) -> ReadFormat {
-    let read_format = if let Some(column_ids) = &projection {
+    if let Some(column_ids) = &projection {
         ReadFormat::new(region_metadata, column_ids.iter().copied(), flat_format)
     } else {
         // No projection, lists all column ids to read.
@@ -114,7 +114,5 @@ fn build_read_format(
                 .map(|col| col.column_id),
             flat_format,
         )
-    };
-
-    read_format
+    }
 }

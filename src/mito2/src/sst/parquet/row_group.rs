@@ -296,10 +296,10 @@ impl<'a> InMemoryRowGroup<'a> {
                 let _timer = READ_STAGE_ELAPSED
                     .with_label_values(&["cache_miss_read"])
                     .start_timer();
-                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
+
+                fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
                     .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-                data
+                    .map_err(|e| ParquetError::External(Box::new(e)))?
             }
         };
 

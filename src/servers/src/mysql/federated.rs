@@ -279,10 +279,10 @@ pub(crate) fn check(
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
     let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
-    if let Some(index) = the_6th_index {
-        if query[..index].eq_ignore_ascii_case("INSERT") {
-            return None;
-        }
+    if let Some(index) = the_6th_index
+        && query[..index].eq_ignore_ascii_case("INSERT")
+    {
+        return None;
     }
 
     // First to check the query is like "select @@variables".

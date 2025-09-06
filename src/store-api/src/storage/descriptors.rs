@@ -200,10 +200,10 @@ impl ColumnDescriptorBuilder {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if let Some(name) = &self.name {
-            if name.is_empty() {
-                return Err("name should not be empty".to_string());
-            }
+        if let Some(name) = &self.name
+            && name.is_empty()
+        {
+            return Err("name should not be empty".to_string());
         }
 
         if let (Some(Some(constraint)), Some(data_type)) =

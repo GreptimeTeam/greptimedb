@@ -129,10 +129,10 @@ struct TypeConverter {
 
 impl TypeConverter {
     fn column_type(&self, expr: &Expr) -> Option<DataType> {
-        if let Expr::Column(_) = expr {
-            if let Ok(v) = expr.get_type(&self.schema) {
-                return Some(v);
-            }
+        if let Expr::Column(_) = expr
+            && let Ok(v) = expr.get_type(&self.schema)
+        {
+            return Some(v);
         }
         None
     }

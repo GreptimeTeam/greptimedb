@@ -269,12 +269,12 @@ impl Runner {
     }
 
     async fn rollback(&mut self, ctx: &Context, err: Arc<Error>) {
-        if self.procedure.rollback_supported() {
-            if let Err(e) = self.procedure.rollback(ctx).await {
-                self.meta
-                    .set_state(ProcedureState::rolling_back(Arc::new(e)));
-                return;
-            }
+        if self.procedure.rollback_supported()
+            && let Err(e) = self.procedure.rollback(ctx).await
+        {
+            self.meta
+                .set_state(ProcedureState::rolling_back(Arc::new(e)));
+            return;
         }
         self.meta.set_state(ProcedureState::failed(err));
     }
@@ -314,20 +314,20 @@ impl Runner {
                         }
 
                         // Cleans poisons before persist.
-                        if status.need_clean_poisons() {
-                            if let Err(e) = self.clean_poisons().await {
-                                error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
-                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                                return;
-                            }
+                        if status.need_clean_poisons()
+                            && let Err(e) = self.clean_poisons().await
+                        {
+                            error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
+                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                            return;
                         }
 
-                        if status.need_persist() {
-                            if let Err(e) = self.persist_procedure().await {
-                                error!(e; "Failed to persist procedure: {}", self.meta.id);
-                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                                return;
-                            }
+                        if status.need_persist()
+                            && let Err(e) = self.persist_procedure().await
+                        {
+                            error!(e; "Failed to persist procedure: {}", self.meta.id);
+                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                            return;
                         }
 
                         match status {

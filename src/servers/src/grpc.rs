@@ -282,10 +282,10 @@ pub const GRPC_SERVER: &str = "GRPC_SERVER";
 impl Server for GrpcServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the grpc server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the grpc server has already exited");
         }
         info!("Shutdown grpc server");
 

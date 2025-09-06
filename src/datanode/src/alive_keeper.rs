@@ -144,13 +144,13 @@ impl RegionAliveKeeper {
     async fn close_staled_region(&self, region_id: RegionId) {
         info!("Closing staled region: {region_id}");
         let request = RegionRequest::Close(RegionCloseRequest {});
-        if let Err(e) = self.region_server.handle_request(region_id, request).await {
-            if e.status_code() != StatusCode::RegionNotFound {
-                let _ = self
-                    .region_server
-                    .set_region_role(region_id, RegionRole::Follower);
-                error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
-            }
+        if let Err(e) = self.region_server.handle_request(region_id, request).await
+            && e.status_code() != StatusCode::RegionNotFound
+        {
+            let _ = self
+                .region_server
+                .set_region_role(region_id, RegionRole::Follower);
+            error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
         }
     }
 

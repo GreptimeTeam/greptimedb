@@ -129,10 +129,10 @@ pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Ve
     region_routes
         .iter()
         .filter_map(|x| {
-            if let Some(peer) = &x.leader_peer {
-                if peer == datanode {
-                    return Some(x.region.id.region_number());
-                }
+            if let Some(peer) = &x.leader_peer
+                && peer == datanode
+            {
+                return Some(x.region.id.region_number());
             }
             None
         })

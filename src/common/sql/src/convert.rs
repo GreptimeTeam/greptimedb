@@ -243,10 +243,8 @@ pub(crate) fn parse_string_to_value(
     timezone: Option<&Timezone>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
-    if auto_string_to_numeric {
-        if let Some(value) = auto_cast_to_numeric(&s, data_type)? {
-            return Ok(value);
-        }
+    if auto_string_to_numeric && let Some(value) = auto_cast_to_numeric(&s, data_type)? {
+        return Ok(value);
     }
 
     ensure!(

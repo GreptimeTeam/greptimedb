@@ -81,15 +81,15 @@ fn infer_column_datatype(
     let column_type =
         ColumnDataType::try_from(datatype).context(UnknownColumnDataTypeSnafu { datatype })?;
 
-    if matches!(&column_type, ColumnDataType::Binary) {
-        if let Some(ext) = datatype_extension {
-            let type_ext = ext
-                .type_ext
-                .as_ref()
-                .context(error::MissingFieldSnafu { field: "type_ext" })?;
-            if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
-                return Ok(ColumnDataType::Json);
-            }
+    if matches!(&column_type, ColumnDataType::Binary)
+        && let Some(ext) = datatype_extension
+    {
+        let type_ext = ext
+            .type_ext
+            .as_ref()
+            .context(error::MissingFieldSnafu { field: "type_ext" })?;
+        if *type_ext == TypeExt::JsonType(JsonTypeExtension::JsonBinary.into()) {
+            return Ok(ColumnDataType::Json);
         }
     }
 

@@ -140,10 +140,10 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             })
             .await;
 
-            if let Some(reply) = reply {
-                if let Err(e) = mailbox.send((meta, reply)).await {
-                    error!(e; "Failed to send reply to mailbox");
-                }
+            if let Some(reply) = reply
+                && let Err(e) = mailbox.send((meta, reply)).await
+            {
+                error!(e; "Failed to send reply to mailbox");
             }
         });
 

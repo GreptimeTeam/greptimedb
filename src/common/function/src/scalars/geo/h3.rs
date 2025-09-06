@@ -967,11 +967,11 @@ impl Function for H3CellContains {
                     // get cell resolution, and find cell_this's parent at
                     //  this solution, test if cell_that equals the parent
                     let resolution = cell_that.resolution();
-                    if let Some(cell_this_parent) = cell_this.parent(resolution) {
-                        if cell_this_parent == *cell_that {
-                            result = Some(true);
-                            break;
-                        }
+                    if let Some(cell_this_parent) = cell_this.parent(resolution)
+                        && cell_this_parent == *cell_that
+                    {
+                        result = Some(true);
+                        break;
                     }
                 }
             }

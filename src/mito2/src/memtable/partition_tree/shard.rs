@@ -234,10 +234,10 @@ impl ShardReader {
 
         while self.parts_reader.is_valid() {
             let pk_index = self.parts_reader.current_data_batch().pk_index();
-            if let Some(yield_pk_index) = self.last_yield_pk_index {
-                if pk_index == yield_pk_index {
-                    break;
-                }
+            if let Some(yield_pk_index) = self.last_yield_pk_index
+                && pk_index == yield_pk_index
+            {
+                break;
             }
             self.keys_before_pruning += 1;
             // Safety: `key_filter` is some so the shard has primary keys.

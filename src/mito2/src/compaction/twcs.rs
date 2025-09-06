@@ -66,20 +66,20 @@ impl TwcsPicker {
             let mut files_to_merge: Vec<_> = files.files().cloned().collect();
 
             // Filter out large files in append mode - they won't benefit from compaction
-            if self.append_mode {
-                if let Some(max_size) = self.max_output_file_size {
-                    let (kept_files, ignored_files) = files_to_merge
-                        .into_iter()
-                        .partition(|fg| fg.size() <= max_size as usize && fg.is_all_level_0());
-                    files_to_merge = kept_files;
-                    info!(
-                        "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
-                        ignored_files.len(),
-                        region_id,
-                        window,
-                        max_size
-                    );
-                }
+            if self.append_mode
+                && let Some(max_size) = self.max_output_file_size
+            {
+                let (kept_files, ignored_files) = files_to_merge
+                    .into_iter()
+                    .partition(|fg| fg.size() <= max_size as usize && fg.is_all_level_0());
+                files_to_merge = kept_files;
+                info!(
+                    "Skipped {} large files in append mode for region {}, window {}, max_size: {}",
+                    ignored_files.len(),
+                    region_id,
+                    window,
+                    max_size
+                );
             }
 
             let sorted_runs = find_sorted_runs(&mut files_to_merge);

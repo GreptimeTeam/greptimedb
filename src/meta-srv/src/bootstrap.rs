@@ -180,10 +180,10 @@ impl MetasrvInstance {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        if let Some(mut rx) = self.serve_state.lock().await.take() {
-            if let Ok(Err(err)) = rx.try_recv() {
-                common_telemetry::error!(err; "Metasrv start failed")
-            }
+        if let Some(mut rx) = self.serve_state.lock().await.take()
+            && let Ok(Err(err)) = rx.try_recv()
+        {
+            common_telemetry::error!(err; "Metasrv start failed")
         }
         if let Some(signal) = &self.signal_sender {
             signal

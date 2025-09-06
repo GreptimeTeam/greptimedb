@@ -115,10 +115,10 @@ impl DropFlowProcedure {
             };
 
             drop_flow_tasks.push(async move {
-                if let Err(err) = requester.handle(request).await {
-                    if err.status_code() != StatusCode::FlowNotFound {
-                        return Err(add_peer_context_if_needed(peer.clone())(err));
-                    }
+                if let Err(err) = requester.handle(request).await
+                    && err.status_code() != StatusCode::FlowNotFound
+                {
+                    return Err(add_peer_context_if_needed(peer.clone())(err));
                 }
                 Ok(())
             });

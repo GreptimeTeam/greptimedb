@@ -751,13 +751,13 @@ impl Tokenizer {
                     let phase = self.consume_next_phase(true, pattern)?;
                     tokens.push(Token::Phase(phase));
                     // consume a writespace (or EOF) after quotes
-                    if let Some(ending_separator) = self.consume_next(pattern) {
-                        if ending_separator != ' ' {
-                            return InvalidFuncArgsSnafu {
-                                err_msg: "Expect a space after quotes ('\"')",
-                            }
-                            .fail();
+                    if let Some(ending_separator) = self.consume_next(pattern)
+                        && ending_separator != ' '
+                    {
+                        return InvalidFuncArgsSnafu {
+                            err_msg: "Expect a space after quotes ('\"')",
                         }
+                        .fail();
                     }
                 }
                 _ => {
@@ -776,8 +776,7 @@ impl Tokenizer {
 
     fn consume_next(&mut self, pattern: &str) -> Option<char> {
         self.cursor += 1;
-        let c = pattern.chars().nth(self.cursor);
-        c
+        pattern.chars().nth(self.cursor)
     }
 
     fn step_next(&mut self) {

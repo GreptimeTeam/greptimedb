@@ -240,14 +240,14 @@ impl TimeFilter {
         }
 
         // Validate that end is after start
-        if let (Some(start), Some(end)) = (&start_dt, &end_dt) {
-            if end <= start {
-                return Err(EndBeforeStartSnafu {
-                    start: start.to_rfc3339(),
-                    end: end.to_rfc3339(),
-                }
-                .build());
+        if let (Some(start), Some(end)) = (&start_dt, &end_dt)
+            && end <= start
+        {
+            return Err(EndBeforeStartSnafu {
+                start: start.to_rfc3339(),
+                end: end.to_rfc3339(),
             }
+            .build());
         }
 
         // Update the fields with canonicalized timestamps

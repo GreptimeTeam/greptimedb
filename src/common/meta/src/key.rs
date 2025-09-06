@@ -1321,10 +1321,10 @@ impl TableMetadataManager {
 
         let mut updated = 0;
         for route in &mut new_region_routes {
-            if let Some(state) = next_region_route_status(route) {
-                if route.set_leader_state(state) {
-                    updated += 1;
-                }
+            if let Some(state) = next_region_route_status(route)
+                && route.set_leader_state(state)
+            {
+                updated += 1;
             }
         }
 
