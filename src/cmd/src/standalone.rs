@@ -75,7 +75,6 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -152,7 +151,6 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
-    pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
@@ -181,7 +179,6 @@ impl Default for StandaloneOptions {
             procedure: ProcedureConfig::default(),
             flow: FlowConfig::default(),
             logging: LoggingOptions::default(),
-            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -230,8 +227,6 @@ impl StandaloneOptions {
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
-            // Handle the export metrics task run by standalone to frontend for execution
-            export_metrics: cloned_opts.export_metrics,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             slow_query: cloned_opts.slow_query,
             ..Default::default()
@@ -694,9 +689,6 @@ impl StartCommand {
         .context(StartFlownodeSnafu)?;
         flow_streaming_engine.set_frontend_invoker(invoker).await;
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -705,7 +697,6 @@ impl StartCommand {
             instance: fe_instance,
             servers,
             heartbeat_task: None,
-            export_metrics_task,
         };
 
         #[cfg(feature = "enterprise")]
