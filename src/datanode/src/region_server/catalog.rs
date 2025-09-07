@@ -65,9 +65,12 @@ impl InternalTableKind {
 impl RegionServer {
     /// Expose SSTs listed in Manifest as an in-memory table for inspection.
     pub async fn inspect_sst_manifest_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let mito = self.inner.mito_engine.get().context(UnexpectedSnafu {
-            violated: "mito engine not available",
-        })?;
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
 
         let entries = mito.all_ssts_from_manifest().collect::<Vec<_>>();
         let schema = ManifestSstEntry::schema().arrow_schema().clone();
@@ -81,10 +84,12 @@ impl RegionServer {
 
     /// Expose SSTs found in storage as an in-memory table for inspection.
     pub async fn inspect_sst_storage_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let mito = self.inner.mito_engine.get().context(UnexpectedSnafu {
-            violated: "mito engine not available",
-        })?;
-
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
         let entries = mito
             .all_ssts_from_storage()
             .try_collect::<Vec<_>>()

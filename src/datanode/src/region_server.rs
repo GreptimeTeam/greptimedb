@@ -17,7 +17,7 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::region::RegionResponse;
@@ -684,7 +684,7 @@ struct RegionServerInner {
     // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
     // server with a concrete engine; acceptable for now to fetch Mito-specific
     // info (e.g., list SSTs). Consider a diagnostics trait later.
-    mito_engine: OnceLock<MitoEngine>,
+    mito_engine: RwLock<Option<MitoEngine>>,
 }
 
 struct RegionServerParallelism {
@@ -751,7 +751,7 @@ impl RegionServerInner {
             table_provider_factory,
             parallelism,
             topic_stats_reporter: RwLock::new(None),
-            mito_engine: OnceLock::new(),
+            mito_engine: RwLock::new(None),
         }
     }
 
@@ -760,7 +760,7 @@ impl RegionServerInner {
         if engine_name == MITO_ENGINE_NAME
             && let Some(mito_engine) = engine.as_any().downcast_ref::<MitoEngine>()
         {
-            let _ = self.mito_engine.set(mito_engine.clone());
+            *self.mito_engine.write().unwrap() = Some(mito_engine.clone());
         }
 
         info!("Region Engine {engine_name} is registered");
@@ -1281,6 +1281,7 @@ impl RegionServerInner {
         self.region_map.clear();
         info!("closed {num_regions} regions");
 
+        drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
         for (engine_name, engine) in engines {
             engine
