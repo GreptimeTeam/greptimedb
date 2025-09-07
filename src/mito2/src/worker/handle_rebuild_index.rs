@@ -5,13 +5,14 @@ use common_telemetry::{debug, warn};
 use puffin::puffin_manager;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
+use tokio::sync::oneshot;
 
 use crate::access_layer::{self, OperationType};
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState};
 use crate::request::{self, IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
-use crate::sst::index::{IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
+use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
 use crate::sst::location::{self, sst_file_path};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
@@ -22,6 +23,7 @@ impl<S> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         file: FileHandle,
         build_type: IndexBuildType,
+        result_sender: Option<oneshot::Sender<IndexBuildOutcome>>,
     ) -> IndexBuildTask {
         let version = region.version();
         let access_layer = region.access_layer.clone();
@@ -55,6 +57,7 @@ impl<S> RegionWorkerLoop<S> {
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
+            result_sender,
         }
     }
 
@@ -92,6 +95,7 @@ impl<S> RegionWorkerLoop<S> {
                     &region,
                     file_handle,
                     request.build_type.clone(),
+                    None,
                 ));
         }
     }

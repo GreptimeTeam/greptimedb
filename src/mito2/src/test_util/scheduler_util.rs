@@ -37,6 +37,7 @@ use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::IndexBuildScheduler;
 use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
@@ -106,6 +107,13 @@ impl SchedulerEnv {
         let scheduler = self.get_scheduler();
 
         FlushScheduler::new(scheduler)
+    }
+
+    /// Creates a new index build scheduler.
+    pub(crate) fn mock_index_build_scheduler(&self) -> IndexBuildScheduler {
+        let scheduler = self.get_scheduler();
+
+        IndexBuildScheduler::new(scheduler)
     }
 
     /// Creates a new manifest context.
