@@ -79,12 +79,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("No datanode available"))]
-    NoDatanodeAvailable {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Flow info not found: {flow_name} in catalog {catalog_name}"))]
     FlowInfoNotFound {
         flow_name: String,
@@ -310,6 +304,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to project schema"))]
+    ProjectSchema {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -341,7 +342,6 @@ impl ErrorExt for Error {
             | Error::Json { .. }
             | Error::GetInformationExtension { .. }
             | Error::PartitionManagerNotFound { .. }
-            | Error::NoDatanodeAvailable { .. }
             | Error::ProcedureIdNotFound { .. } => StatusCode::Unexpected,
 
             Error::ViewPlanColumnsChanged { .. } => StatusCode::InvalidArguments,
@@ -384,6 +384,7 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::HandleQuery { source, .. } => source.status_code(),
+            Error::ProjectSchema { source, .. } => source.status_code(),
         }
     }
 
