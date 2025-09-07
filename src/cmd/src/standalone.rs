@@ -19,11 +19,12 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::information_schema::InformationExtension;
+use catalog::information_schema::{DatanodeInspectRequest, InformationExtension};
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
+use client::SendableRecordBatchStream;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -48,6 +49,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_options::memory::MemoryOptions;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
+use common_query::request::QueryRequest;
 use common_telemetry::info;
 use common_telemetry::logging::{
     LoggingOptions, SlowQueryOptions, TracingOptions, DEFAULT_LOGGING_DIR,
@@ -80,6 +82,7 @@ use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -851,6 +854,25 @@ impl InformationExtension for StandaloneInformationExtension {
                 .gen_state_report()
                 .await,
         ))
+    }
+
+    async fn inspect_datanode(
+        &self,
+        request: DatanodeInspectRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+        let req = QueryRequest {
+            plan: request
+                .build_plan()
+                .context(catalog::error::DatafusionSnafu)?,
+            region_id: RegionId::default(),
+            header: None,
+        };
+
+        self.region_server
+            .handle_read(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(catalog::error::InternalSnafu)
     }
 }
 

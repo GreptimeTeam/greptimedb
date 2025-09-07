@@ -389,8 +389,10 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            datanode_clients.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),

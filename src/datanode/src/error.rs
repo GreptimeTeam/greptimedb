@@ -315,6 +315,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to list SST entries from storage"))]
+    ListStorageSsts {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito2::error::Error,
+    },
+
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -453,6 +460,7 @@ impl ErrorExt for Error {
             FindLogicalRegions { source, .. } => source.status_code(),
             BuildMitoEngine { source, .. } => source.status_code(),
             BuildMetricEngine { source, .. } => source.status_code(),
+            ListStorageSsts { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }

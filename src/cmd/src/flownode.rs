@@ -341,8 +341,18 @@ impl StartCommand {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        // flownode's frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        let client = Arc::new(NodeClients::new(channel_config));
+
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            client.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
@@ -397,14 +407,6 @@ impl StartCommand {
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);
         let flownode = flownode;
-
-        // flownode's frontend to datanode need not timeout.
-        // Some queries are expected to take long time.
-        let channel_config = ChannelConfig {
-            timeout: None,
-            ..Default::default()
-        };
-        let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
             flownode.flow_engine().streaming_engine(),
