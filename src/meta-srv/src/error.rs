@@ -290,13 +290,6 @@ pub enum Error {
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to init export metrics task"))]
-    InitExportMetricsTask {
-        #[snafu(implicit)]
-        location: Location,
-        source: servers::error::Error,
-    },
-
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
@@ -1032,7 +1025,6 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
-            | Error::InitExportMetricsTask { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }

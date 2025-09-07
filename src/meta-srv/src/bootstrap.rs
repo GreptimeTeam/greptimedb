@@ -43,7 +43,6 @@ use deadpool_postgres::{Config, Runtime};
 use either::Either;
 use etcd_client::{Client, ConnectOptions};
 use servers::configurator::ConfiguratorRef;
-use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -93,8 +92,6 @@ pub struct MetasrvInstance {
 
     plugins: Plugins,
 
-    export_metrics_task: Option<ExportMetricsTask>,
-
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     serve_state: Arc<Mutex<Option<oneshot::Receiver<Result<()>>>>>,
 
@@ -118,15 +115,12 @@ impl MetasrvInstance {
 
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
             http_server: Either::Left(Some(builder)),
             opts,
             signal_sender: None,
             plugins,
-            export_metrics_task,
             serve_state: Default::default(),
             bind_addr: None,
         })
@@ -153,10 +147,6 @@ impl MetasrvInstance {
         };
 
         self.metasrv.try_start().await?;
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(error::InitExportMetricsTaskSnafu)?
-        }
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
