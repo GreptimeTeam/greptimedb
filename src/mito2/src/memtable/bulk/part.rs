@@ -593,6 +593,21 @@ pub struct BulkPartMeta {
     pub region_metadata: RegionMetadataRef,
 }
 
+/// Metrics for encoding a part.
+#[derive(Default, Debug)]
+pub struct BulkPartEncodeMetrics {
+    /// Cost of iterating over the data.
+    pub iter_cost: Duration,
+    /// Cost of writing the data.
+    pub write_cost: Duration,
+    /// Size of data before encoding.
+    pub raw_size: usize,
+    /// Size of data after encoding.
+    pub encoded_size: usize,
+    /// Number of rows in part.
+    pub num_rows: usize,
+}
+
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
     row_group_size: usize,
@@ -634,6 +649,7 @@ impl BulkPartEncoder {
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
+        metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
         let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
@@ -641,46 +657,36 @@ impl BulkPartEncoder {
         let mut total_rows = 0;
 
         // Process each batch from the iterator
-        let mut iter_cost = Duration::default();
-        let mut write_cost = Duration::default();
         let mut iter_start = Instant::now();
-        let mut raw_size = 0;
         for batch_result in iter {
-            iter_cost += iter_start.elapsed();
+            metrics.iter_cost += iter_start.elapsed();
             let batch = batch_result?;
             if batch.num_rows() == 0 {
                 continue;
             }
 
-            raw_size += batch.get_array_memory_size();
-            let writer_start = Instant::now();
+            metrics.raw_size += batch.get_array_memory_size();
+            let write_start = Instant::now();
             writer.write(&batch).context(EncodeMemtableSnafu)?;
-            write_cost += writer_start.elapsed();
+            metrics.write_cost += write_start.elapsed();
             total_rows += batch.num_rows();
             iter_start = Instant::now();
         }
-        iter_cost += iter_start.elapsed();
+        metrics.iter_cost += iter_start.elapsed();
         iter_start = Instant::now();
 
         if total_rows == 0 {
             return Ok(None);
         }
 
-        let writer_start = Instant::now();
+        let write_start = Instant::now();
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
-        write_cost += writer_start.elapsed();
+        metrics.write_cost += write_start.elapsed();
+        metrics.encoded_size += buf.len();
+        metrics.num_rows += total_rows;
 
         let buf = Bytes::from(buf);
         let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
-
-        common_telemetry::info!(
-            "Encode record batch iter, total rows: {}, raw size: {}, encoded size: {}, iter_cost: {:?}, write_cost: {:?}",
-            total_rows,
-            raw_size,
-            buf.len(),
-            iter_cost,
-            write_cost
-        );
 
         Ok(Some(EncodedBulkPart {
             data: buf,
