@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
-use datafusion::catalog::TableFunctionImpl;
+use datafusion::catalog::TableFunction;
 use datafusion_expr::AggregateUDF;
 
 use crate::admin::AdminFunction;
@@ -25,7 +25,7 @@ use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
-use crate::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
+use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -43,7 +43,7 @@ use crate::system::SystemFunction;
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
-    table_functions: RwLock<HashMap<String, TableFunctionFactory>>,
+    table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
 }
 
 impl FunctionRegistry {
@@ -78,6 +78,15 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
+    /// Register a table function
+    pub fn register_table_function(&self, func: TableFunction) {
+        let _ = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(func.name().to_string(), Arc::new(func));
+    }
+
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
@@ -97,7 +106,7 @@ impl FunctionRegistry {
             .collect()
     }
 
-    pub fn table_functions(&self) -> Vec<TableFunctionFactory> {
+    pub fn table_functions(&self) -> Vec<Arc<TableFunction>> {
         self.table_functions
             .read()
             .unwrap()

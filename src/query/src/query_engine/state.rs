@@ -19,12 +19,13 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
+use common_function::function_factory::ScalarFunctionFactory;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_function::state::FunctionState;
 use common_telemetry::warn;
+use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
@@ -72,7 +73,7 @@ pub struct QueryEngineState {
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
-    table_functions: Arc<RwLock<HashMap<String, TableFunctionFactory>>>,
+    table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -268,7 +269,7 @@ impl QueryEngineState {
     }
 
     /// Retrieve table function by name
-    pub fn table_function(&self, function_name: &str) -> Option<TableFunctionFactory> {
+    pub fn table_function(&self, function_name: &str) -> Option<Arc<TableFunction>> {
         self.table_functions
             .read()
             .unwrap()
@@ -277,7 +278,7 @@ impl QueryEngineState {
     }
 
     /// Retrieve table function names.
-    pub fn table_function_named(&self) -> Vec<String> {
+    pub fn table_function_names(&self) -> Vec<String> {
         self.table_functions
             .read()
             .unwrap()
@@ -322,13 +323,13 @@ impl QueryEngineState {
         );
     }
 
-    pub fn register_table_function(&self, func: TableFunctionFactory) {
-        let name = func.name.clone();
+    pub fn register_table_function(&self, func: Arc<TableFunction>) {
+        let name = func.name();
         let x = self
             .table_functions
             .write()
             .unwrap()
-            .insert(name.clone(), func);
+            .insert(name.to_string(), func.clone());
 
         if x.is_some() {
             warn!("Already registered table function '{name}");

@@ -22,12 +22,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
+use common_function::function_factory::ScalarFunctionFactory;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
+use datafusion::catalog::TableFunction;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
@@ -86,7 +87,7 @@ pub trait QueryEngine: Send + Sync {
     fn register_scalar_function(&self, func: ScalarFunctionFactory);
 
     /// Register table function
-    fn register_table_function(&self, func: TableFunctionFactory);
+    fn register_table_function(&self, func: Arc<TableFunction>);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;

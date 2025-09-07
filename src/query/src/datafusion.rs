@@ -25,12 +25,12 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
-use common_function::function_factory::{ScalarFunctionFactory, TableFunctionFactory};
+use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
-use datafusion::catalog::TableFunctionImpl;
+use datafusion::catalog::TableFunction;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
@@ -509,7 +509,7 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_scalar_function(func);
     }
 
-    fn register_table_function(&self, func: TableFunctionFactory) {
+    fn register_table_function(&self, func: Arc<TableFunction>) {
         self.state.register_table_function(func);
     }
 
