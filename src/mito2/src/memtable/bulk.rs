@@ -338,6 +338,7 @@ impl Memtable for BulkMemtable {
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
 
+        // TODO(yingwen): Filter ranges by sequence.
         let context = Arc::new(BulkIterContext::new(
             self.metadata.clone(),
             &projection,
@@ -1315,5 +1316,121 @@ mod tests {
 
         assert!(!original_memtable.is_empty());
         assert_eq!(1, original_memtable.stats().num_rows);
+    }
+
+    #[test]
+    fn test_bulk_memtable_ranges_multiple_parts() {
+        let metadata = metadata_for_test();
+        let memtable =
+            BulkMemtable::new(777, metadata.clone(), None, None, false, MergeMode::LastRow);
+
+        let parts_data = vec![
+            (
+                "part1",
+                1u32,
+                vec![1000i64, 1100i64],
+                vec![Some(10.0), Some(11.0)],
+                100u64,
+            ),
+            (
+                "part2",
+                2u32,
+                vec![2000i64, 2100i64],
+                vec![Some(20.0), Some(21.0)],
+                200u64,
+            ),
+            ("part3", 3u32, vec![3000i64], vec![Some(30.0)], 300u64),
+        ];
+
+        for (k0, k1, timestamps, values, seq) in parts_data {
+            let part = create_bulk_part_with_converter(k0, k1, timestamps, values, seq).unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let ranges = memtable.ranges(None, predicate_group, None).unwrap();
+
+        assert_eq!(3, ranges.ranges.len());
+        assert_eq!(5, ranges.stats.num_rows);
+        assert_eq!(3, ranges.stats.num_ranges);
+
+        for (range_id, range) in ranges.ranges.iter() {
+            assert!(*range_id < 3);
+            assert!(range.num_rows() > 0);
+            assert!(range.is_record_batch());
+        }
+    }
+
+    #[test]
+    fn test_bulk_memtable_ranges_with_sequence_filter() {
+        let metadata = metadata_for_test();
+        let memtable =
+            BulkMemtable::new(888, metadata.clone(), None, None, false, MergeMode::LastRow);
+
+        let part = create_bulk_part_with_converter(
+            "seq_test",
+            1,
+            vec![1000, 2000, 3000],
+            vec![Some(10.0), Some(20.0), Some(30.0)],
+            500,
+        )
+        .unwrap();
+
+        memtable.write_bulk(part).unwrap();
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let sequence_filter = Some(400u64); // Filters out rows with sequence > 400
+        let ranges = memtable
+            .ranges(None, predicate_group, sequence_filter)
+            .unwrap();
+
+        assert_eq!(1, ranges.ranges.len());
+        let range = ranges.ranges.get(&0).unwrap();
+
+        let mut record_batch_iter = range.build_record_batch_iter(None).unwrap();
+        assert!(record_batch_iter.next().is_none());
+    }
+
+    #[test]
+    fn test_bulk_memtable_ranges_with_encoded_parts() {
+        let metadata = metadata_for_test();
+        let memtable =
+            BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
+
+        // Adds enough bulk parts to trigger encoding
+        for i in 0..10 {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i,
+                vec![1000 + i as i64 * 100],
+                vec![Some(i as f64 * 10.0)],
+                100 + i as u64,
+            )
+            .unwrap();
+            memtable.write_bulk(part).unwrap();
+        }
+
+        memtable.compact(false).unwrap();
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let ranges = memtable.ranges(None, predicate_group, None).unwrap();
+
+        // Should have ranges for both bulk parts and encoded parts
+        assert_eq!(3, ranges.ranges.len());
+        assert_eq!(10, ranges.stats.num_rows);
+
+        for (_range_id, range) in ranges.ranges.iter() {
+            assert!(range.num_rows() > 0);
+            assert!(range.is_record_batch());
+
+            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let mut total_rows = 0;
+            for batch_result in record_batch_iter {
+                let batch = batch_result.unwrap();
+                total_rows += batch.num_rows();
+                assert!(batch.num_rows() > 0);
+            }
+            assert_eq!(total_rows, range.num_rows());
+        }
     }
 }
