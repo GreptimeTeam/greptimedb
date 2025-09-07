@@ -309,14 +309,16 @@ impl TreeNodeRewriter for NameAwareDataSourceInjector {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use datafusion::catalog::MemTable as DfMemTable;
+    use datafusion_common::tree_node::TreeNode;
+    use datafusion_expr::{table_scan, LogicalPlanBuilder};
     use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
-    use datafusion::catalog::MemTable as DfMemTable;
-    use datafusion_expr::{table_scan, LogicalPlanBuilder};
-    use datafusion_common::tree_node::TreeNode; // bring rewrite() into scope
+
+    use super::*; // bring rewrite() into scope
 
     fn test_schema() -> Schema {
         Schema::new(vec![Field::new("a", DataType::Int32, true)])
@@ -343,7 +345,10 @@ mod tests {
             .unwrap();
         let b1 = NameAwareDataSourceInjectorBuilder::from_plan(&plan1).unwrap();
         assert!(!b1.need_region_provider);
-        assert_eq!(b1.reserved_table_needed, vec![InternalTableKind::InspectSstManifest]);
+        assert_eq!(
+            b1.reserved_table_needed,
+            vec![InternalTableKind::InspectSstManifest]
+        );
 
         // plan2: normal table scan only
         let plan2 = table_scan(Some("normal_table"), &schema, None)
@@ -370,7 +375,10 @@ mod tests {
             .unwrap();
         let b3 = NameAwareDataSourceInjectorBuilder::from_plan(&plan3).unwrap();
         assert!(b3.need_region_provider);
-        assert_eq!(b3.reserved_table_needed, vec![InternalTableKind::InspectSstManifest]);
+        assert_eq!(
+            b3.reserved_table_needed,
+            vec![InternalTableKind::InspectSstManifest]
+        );
     }
 
     #[test]
