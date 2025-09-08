@@ -37,10 +37,7 @@ use lazy_static::lazy_static;
 use mime_guess::mime;
 use operator::expr_helper::{create_table_expr_by_column_schemas, expr_to_create};
 use pipeline::util::to_pipeline_version;
-use pipeline::{
-    ContextReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineContext,
-    PipelineDefinition, TransformerMode,
-};
+use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -72,6 +69,9 @@ use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_PIPELINE_SKIP_ERROR_KEY: &str = "skip_error";
+
+const CREATE_TABLE_SQL_SUFFIX_EXISTS: &str =
+    "the pipeline has dispatcher or table_suffix, the table name may not be fixed";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -219,9 +219,9 @@ pub async fn query_pipeline_create_table(
         }
     );
     ensure!(
-        !pipeline_name.eq_ignore_ascii_case(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME),
+        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
         InvalidParameterSnafu {
-            reason: "identity pipeline doesn't have fixed table schema",
+            reason: "built-in pipelines don't have fixed table schema",
         }
     );
     let table_name = query_params.table.context(InvalidParameterSnafu {
@@ -237,17 +237,9 @@ pub async fn query_pipeline_create_table(
         .get_pipeline(&pipeline_name, version, query_ctx.clone())
         .await?;
 
-    let transformer = match pipeline.transformer() {
-        TransformerMode::GreptimeTransformer(greptime_transformer) => greptime_transformer,
-        TransformerMode::AutoTransform(_, _) => {
-            return InvalidParameterSnafu {
-                reason: "auto transform doesn't have fixed table schema",
-            }
-            .fail();
-        }
-    };
-
-    let schemas_def = transformer.schemas();
+    let schemas_def = pipeline.schemas().context(InvalidParameterSnafu {
+        reason: "auto transform doesn't have fixed table schema",
+    })?;
 
     let schema = query_ctx.current_schema();
     let table_name_ref = TableReference {
@@ -270,9 +262,15 @@ pub async fn query_pipeline_create_table(
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
 
+    let message = if pipeline.is_variant_table_name() {
+        Some(CREATE_TABLE_SQL_SUFFIX_EXISTS.to_string())
+    } else {
+        None
+    };
+
     let sql = SqlOutput {
         sql: format!("{:#}", expr),
-        message: None,
+        message,
     };
 
     Ok(GreptimedbManageResponse::from_sql(
