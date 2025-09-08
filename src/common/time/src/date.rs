@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 
+use crate::Timezone;
 use crate::error::{InvalidDateStrSnafu, ParseDateStrSnafu, Result};
 use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::timezone::get_timezone;
 use crate::util::datetime_to_utc;
-use crate::Timezone;
 
 const UNIX_EPOCH_FROM_CE: i32 = 719_163;
 

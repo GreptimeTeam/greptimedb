@@ -90,11 +90,9 @@ impl MemoryRegionKeeper {
         region_ids: &mut HashSet<RegionId>,
     ) -> HashSet<RegionId> {
         let inner = self.inner.read().unwrap();
-        let operating_regions = region_ids
+        region_ids
             .extract_if(|region_id| inner.contains(&(datanode_id, *region_id)))
-            .collect::<HashSet<_>>();
-
-        operating_regions
+            .collect::<HashSet<_>>()
     }
 
     /// Returns number of element in tracking set.

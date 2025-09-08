@@ -19,9 +19,9 @@ use bytes::{Buf, BufMut};
 use greptime_proto::v1::index::BitmapType;
 use snafu::ResultExt;
 
+use crate::Bytes;
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::{CommonIoSnafu, Error, Result};
-use crate::Bytes;
 
 const U64_LENGTH: usize = std::mem::size_of::<u64>();
 

@@ -586,11 +586,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::OpType;
-    use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 
     use super::*;
     use crate::read::BatchBuilder;
-    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
+    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
 
     #[tokio::test]
     async fn test_dedup_reader_no_duplications() {

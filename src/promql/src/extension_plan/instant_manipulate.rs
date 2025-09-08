@@ -35,13 +35,13 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
@@ -321,7 +321,11 @@ impl DisplayAs for InstantManipulateExec {
                 write!(
                     f,
                     "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
-                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
+                    self.start,
+                    self.end,
+                    self.lookback_delta,
+                    self.interval,
+                    self.time_index_column
                 )
             }
         }
@@ -513,7 +517,7 @@ mod test {
 
     use super::*;
     use crate::extension_plan::test_util::{
-        prepare_test_data, prepare_test_data_with_nan, TIME_INDEX_COLUMN,
+        TIME_INDEX_COLUMN, prepare_test_data, prepare_test_data_with_nan,
     };
 
     async fn do_normalize_test(

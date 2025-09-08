@@ -14,17 +14,17 @@
 
 use std::collections::HashMap;
 
+use axum::Form;
 use axum::extract::{Json, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use axum::Form;
 use bytes::Bytes;
 use headers::HeaderValue;
 use mime_guess::mime;
 use servers::http::GreptimeQueryOutput::Records;
 use servers::http::{
-    handler as http_handler, ApiState, GreptimeOptionsConfigState, GreptimeQueryOutput,
-    HttpResponse,
+    ApiState, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpResponse,
+    handler as http_handler,
 };
 use servers::metrics_handler::MetricsHandler;
 use session::context::QueryContext;

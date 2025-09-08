@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
 use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
@@ -21,12 +21,12 @@ use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use partition::manager::PartitionRuleManager;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
-use table::metadata::TableInfoRef;
 use table::TableRef;
+use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,

@@ -98,10 +98,7 @@ pub(crate) fn update_table_info_column_ids(
     if table_column_names != column_names {
         warn!(
             "Column metadata doesn't match the table schema for table {}, table_id: {}, column in table: {:?}, column in metadata: {:?}",
-            raw_table_info.name,
-            raw_table_info.ident.table_id,
-            table_column_names,
-            column_names,
+            raw_table_info.name, raw_table_info.ident.table_id, table_column_names, column_names,
         );
         return;
     }

@@ -29,7 +29,7 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
-use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
+use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 12; // 1 hours (5m * 12)

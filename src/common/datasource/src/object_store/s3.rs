@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
+use object_store::ObjectStore;
 use object_store::services::S3;
 use object_store::util::DefaultLoggingInterceptor;
-use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};

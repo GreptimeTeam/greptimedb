@@ -22,8 +22,8 @@ use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
     RemoveRegionFollowerRequest,
 };
-use common_query::error::Result;
 use common_query::Output;
+use common_query::error::Result;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
@@ -39,7 +39,7 @@ pub trait TableMutationHandler: Send + Sync {
 
     /// Trigger a flush task for table.
     async fn flush(&self, request: FlushTableRequest, ctx: QueryContextRef)
-        -> Result<AffectedRows>;
+    -> Result<AffectedRows>;
 
     /// Trigger a compaction task for table.
     async fn compact(
@@ -50,7 +50,7 @@ pub trait TableMutationHandler: Send + Sync {
 
     /// Trigger a flush task for a table region.
     async fn flush_region(&self, region_id: RegionId, ctx: QueryContextRef)
-        -> Result<AffectedRows>;
+    -> Result<AffectedRows>;
 
     /// Trigger a compaction task for a table region.
     async fn compact_region(

@@ -34,7 +34,7 @@
 use std::fmt::Debug;
 use std::{any, fmt};
 
-use serde::{de, ser, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de, ser};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Wrapper type for strings that contains secrets. See also [SecretBox].

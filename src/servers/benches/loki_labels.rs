@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use servers::error::Result;
 use servers::http::loki::parse_loki_labels;
 

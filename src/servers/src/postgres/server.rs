@@ -19,8 +19,8 @@ use std::sync::Arc;
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use catalog::process_manager::ProcessManagerRef;
-use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
@@ -74,7 +74,7 @@ impl PostgresServer {
         &self,
         io_runtime: Runtime,
         accepting_stream: AbortableStream,
-    ) -> impl Future<Output = ()> {
+    ) -> impl Future<Output = ()> + use<> {
         let handler_maker = self.make_handler.clone();
         let tls_server_config = self.tls_server_config.clone();
         let process_manager = self.process_manager.clone();

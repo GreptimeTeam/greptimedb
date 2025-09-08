@@ -18,23 +18,23 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use derive_builder::Builder;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
-use rand::seq::SliceRandom;
 use rand::Rng;
-use snafu::{ensure, ResultExt};
+use rand::seq::SliceRandom;
+use snafu::{ResultExt, ensure};
 
 use super::Generator;
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
-use crate::fake::{random_capitalize_map, MappedGenerator, WordGenerator};
+use crate::fake::{MappedGenerator, WordGenerator, random_capitalize_map};
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Random};
 use crate::ir::create_expr::{
     ColumnOption, CreateDatabaseExprBuilder, CreateTableExprBuilder, PartitionDef,
 };
 use crate::ir::{
-    column_options_generator, generate_columns, generate_partition_bounds,
-    partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
     Column, ColumnTypeGenerator, CreateDatabaseExpr, CreateTableExpr, Ident,
     PartibleColumnTypeGenerator, StringColumnTypeGenerator, TsColumnTypeGenerator,
+    column_options_generator, generate_columns, generate_partition_bounds,
+    partible_column_options_generator, primary_key_options_generator, ts_column_options_generator,
 };
 
 #[derive(Builder)]
@@ -163,7 +163,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         builder.engine(self.engine.to_string());
         builder.if_not_exists(self.if_not_exists);
         if self.name.is_empty() {
-            builder.table_name(self.name_generator.gen(rng));
+            builder.table_name(self.name_generator.generate(rng));
         } else {
             builder.table_name(self.name.clone());
         }
@@ -243,7 +243,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
         }
 
         Ok(CreateTableExpr {
-            table_name: self.name_generator.gen(rng),
+            table_name: self.name_generator.generate(rng),
             columns: vec![
                 Column {
                     name: Ident::new("ts"),
@@ -355,7 +355,7 @@ impl<R: Rng + 'static> Generator<CreateDatabaseExpr, R> for CreateDatabaseExprGe
         let mut builder = CreateDatabaseExprBuilder::default();
         builder.if_not_exists(self.if_not_exists);
         if self.database_name.is_empty() {
-            builder.database_name(self.name_generator.gen(rng));
+            builder.database_name(self.name_generator.generate(rng));
         } else {
             builder.database_name(self.database_name.to_string());
         }
@@ -477,16 +477,13 @@ mod tests {
         assert_eq!(logical_table_expr.engine, "metric");
         assert_eq!(logical_table_expr.columns.len(), 7);
         assert_eq!(logical_ts_name, physical_ts_name);
-        assert!(logical_table_expr
-            .columns
-            .iter()
-            .all(
-                |column| column.column_type != ConcreteDataType::string_datatype()
-                    || column
-                        .options
-                        .iter()
-                        .any(|option| option == &ColumnOption::PrimaryKey)
-            ));
+        assert!(logical_table_expr.columns.iter().all(|column| {
+            column.column_type != ConcreteDataType::string_datatype()
+                || column
+                    .options
+                    .iter()
+                    .any(|option| option == &ColumnOption::PrimaryKey)
+        }));
     }
 
     #[test]

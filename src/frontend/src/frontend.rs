@@ -33,8 +33,8 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::prom_store::ExportMetricHandler;
 use crate::instance::Instance;
+use crate::instance::prom_store::ExportMetricHandler;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
     PromStoreOptions,

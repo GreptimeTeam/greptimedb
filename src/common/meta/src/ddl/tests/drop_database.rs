@@ -17,16 +17,16 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId};
 use common_procedure_test::{
-    execute_procedure_until, execute_procedure_until_done, MockContextProvider,
+    MockContextProvider, execute_procedure_until, execute_procedure_until_done,
 };
 use futures::TryStreamExt;
 
-use crate::ddl::drop_database::executor::DropDatabaseExecutor;
 use crate::ddl::drop_database::DropDatabaseProcedure;
+use crate::ddl::drop_database::executor::DropDatabaseExecutor;
 use crate::ddl::test_util::datanode_handler::{NaiveDatanodeHandler, RetryErrorDatanodeHandler};
 use crate::ddl::test_util::{create_logical_table, create_physical_table};
 use crate::key::schema_name::SchemaNameKey;
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 #[tokio::test]
 async fn test_drop_database_with_logical_tables() {

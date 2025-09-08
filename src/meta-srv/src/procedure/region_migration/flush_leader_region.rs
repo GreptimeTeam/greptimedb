@@ -174,8 +174,7 @@ impl PreFlushRegion {
             Err(Error::PusherNotFound { .. }) => {
                 warn!(
                     "Failed to flush leader region({}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
-                    region_id,
-                    leader
+                    region_id, leader
                 );
                 Ok(())
             }
@@ -191,7 +190,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_flush_region_reply_for_region, send_mock_reply,

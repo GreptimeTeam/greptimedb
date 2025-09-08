@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::ops::Deref;
 use std::slice;
 
@@ -22,17 +22,17 @@ use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::warn;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
-use prost::encoding::message::merge;
-use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
+use prost::encoding::message::merge;
+use prost::encoding::{WireType, decode_key, decode_varint};
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 use vrl::prelude::NotNan;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::InternalSnafu;
-use crate::http::event::PipelineIngestRequest;
 use crate::http::PromValidationMode;
+use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::{PromCtx, TablesBuilder};
 use crate::prom_store::{

@@ -33,20 +33,20 @@ use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use itertools::Itertools;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use query::dataframe::DataFrame;
 use query::QueryEngineRef;
+use query::dataframe::DataFrame;
 use session::context::{QueryContextBuilder, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use table::TableRef;
 use table::metadata::TableInfo;
 use table::table::adapter::DfTableProviderAdapter;
-use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu, Error,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
-use crate::etl::{parse, Content, Pipeline};
+use crate::etl::{Content, Pipeline, parse};
 use crate::manager::pipeline_cache::PipelineCache;
 use crate::manager::{PipelineInfo, PipelineVersion};
 use crate::metrics::METRIC_PIPELINE_TABLE_FIND_COUNT;
@@ -487,7 +487,7 @@ impl PipelineTable {
             ])
             .context(BuildDfLogicalPlanSnafu)?
             .sort(vec![
-                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true)
+                col(PIPELINE_TABLE_CREATED_AT_COLUMN_NAME).sort(false, true),
             ])
             .context(BuildDfLogicalPlanSnafu)?;
 

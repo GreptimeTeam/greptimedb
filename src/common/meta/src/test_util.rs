@@ -20,18 +20,18 @@ use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::MetasrvKafkaConfig;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 use crate::cache_invalidator::DummyCacheInvalidator;
 use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use crate::error::Result;
-use crate::key::flow::FlowMetadataManager;
 use crate::key::TableMetadataManager;
-use crate::kv_backend::memory::MemoryKvBackend;
+use crate::key::flow::FlowMetadataManager;
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::memory::MemoryKvBackend;
 use crate::node_manager::{
     Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
@@ -40,7 +40,7 @@ use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
-use crate::wal_options_allocator::{build_kafka_topic_creator, WalOptionsAllocator};
+use crate::wal_options_allocator::{WalOptionsAllocator, build_kafka_topic_creator};
 use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]

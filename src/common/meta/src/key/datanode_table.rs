@@ -21,19 +21,19 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
+use crate::DatanodeId;
 use crate::error::{DatanodeTableInfoNotFoundSnafu, InvalidMetadataSnafu, Result};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{
-    MetadataKey, MetadataValue, RegionDistribution, RegionRoleSet, DATANODE_TABLE_KEY_PATTERN,
-    DATANODE_TABLE_KEY_PREFIX,
+    DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX, MetadataKey, MetadataValue,
+    RegionDistribution, RegionRoleSet,
 };
-use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
 use crate::rpc::router::region_distribution;
 use crate::rpc::store::{BatchGetRequest, RangeRequest};
-use crate::rpc::KeyValue;
-use crate::DatanodeId;
 
 #[serde_with::serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

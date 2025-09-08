@@ -14,20 +14,20 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
+use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
-use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use tokio::io::duplex;
@@ -39,13 +39,13 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
+use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_INVERTED_INDEX;
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -427,17 +427,17 @@ mod tests {
     use std::collections::BTreeSet;
 
     use api::v1::SemanticType;
-    use datafusion_expr::{binary_expr, col, lit, Expr as DfExpr, Operator};
+    use datafusion_expr::{Expr as DfExpr, Operator, binary_expr, col, lit};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
-    use datatypes::vectors::{UInt64Vector, UInt8Vector};
+    use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use futures::future::BoxFuture;
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
-    use object_store::services::Memory;
     use object_store::ObjectStore;
-    use puffin::puffin_manager::cache::PuffinMetadataCache;
+    use object_store::services::Memory;
     use puffin::puffin_manager::PuffinManager;
+    use puffin::puffin_manager::cache::PuffinMetadataCache;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;

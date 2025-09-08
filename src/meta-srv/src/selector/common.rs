@@ -20,8 +20,8 @@ use snafu::ensure;
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::SelectTarget;
-use crate::selector::weighted_choose::{WeightedChoose, WeightedItem};
 use crate::selector::SelectorOptions;
+use crate::selector::weighted_choose::{WeightedChoose, WeightedItem};
 
 /// Filter out the excluded peers from the `weight_array`.
 pub fn filter_out_excluded_peers(
@@ -90,9 +90,9 @@ mod tests {
 
     use common_meta::peer::Peer;
 
+    use crate::selector::SelectorOptions;
     use crate::selector::common::{choose_items, filter_out_excluded_peers};
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
-    use crate::selector::SelectorOptions;
 
     #[test]
     fn test_choose_peers() {

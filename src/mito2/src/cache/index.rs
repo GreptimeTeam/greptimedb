@@ -100,7 +100,9 @@ where
         weight_of_metadata: fn(&K, &Arc<M>) -> u32,
         weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
     ) -> Self {
-        common_telemetry::debug!("Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}");
+        common_telemetry::debug!(
+            "Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}"
+        );
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name(&format!("index_metadata_{}", index_type))
             .weigher(weight_of_metadata)

@@ -75,14 +75,15 @@ use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{info, tracing};
-use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -94,8 +95,7 @@ use store_api::region_engine::{
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
-use store_api::ManifestVersion;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{Semaphore, oneshot};
 
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
@@ -116,7 +116,7 @@ use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
-    build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+    DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RawEntryReader};
 use crate::worker::WorkerGroup;

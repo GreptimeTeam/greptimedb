@@ -26,8 +26,8 @@ mod tests {
     use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
     use servers::prom_store;
     use servers::prom_store::to_grpc_row_insert_requests;
-    use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::PromStoreProtocolHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -98,15 +98,17 @@ mod tests {
         }
         let ctx = Arc::new(ctx);
 
-        assert!(SqlQueryHandler::do_query(
-            instance.as_ref(),
-            "CREATE DATABASE IF NOT EXISTS prometheus",
-            ctx.clone(),
-        )
-        .await
-        .first()
-        .unwrap()
-        .is_ok());
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                "CREATE DATABASE IF NOT EXISTS prometheus",
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
 
         let (row_inserts, _) = to_grpc_row_insert_requests(&write_request).unwrap();
         instance

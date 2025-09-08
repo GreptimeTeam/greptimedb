@@ -40,10 +40,10 @@ use store_api::storage::RegionId;
 use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
-    build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, kafka_log_store_factory, multiple_log_store_factories,
-    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
-    rows_schema, CreateRequestBuilder, LogStoreFactory, TestEnv,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_delete_rows_for_key, build_rows,
+    build_rows_for_key, delete_rows, delete_rows_schema, flush_region, kafka_log_store_factory,
+    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
+    raft_engine_log_store_factory, reopen_region, rows_schema,
 };
 
 #[tokio::test]
@@ -93,7 +93,7 @@ async fn test_write_to_region() {
     };
     put_rows(&engine, region_id, rows).await;
     let region = engine.get_region(region_id).unwrap();
-    assert!(region.write_bytes.load(Ordering::Relaxed) > 0);
+    assert!(region.written_bytes.load(Ordering::Relaxed) > 0);
 }
 
 #[apply(multiple_log_store_factories)]
@@ -167,7 +167,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
 
     // The replay won't update the write bytes rate meter.
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.write_bytes.load(Ordering::Relaxed), 0);
+    assert_eq!(region.written_bytes.load(Ordering::Relaxed), 0);
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();

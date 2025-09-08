@@ -14,8 +14,8 @@
 
 //! Flush tests for mito engine.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -31,10 +31,10 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
-    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
-    raft_engine_log_store_factory, reopen_region, rows_schema, single_kafka_log_store_factory,
-    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
+    build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
+    rows_schema, single_kafka_log_store_factory,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;

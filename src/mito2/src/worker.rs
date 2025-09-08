@@ -29,8 +29,8 @@ mod handle_write;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
@@ -41,15 +41,15 @@ use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
-use rand::{rng, Rng};
-use snafu::{ensure, ResultExt};
+use rand::{Rng, rng};
+use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};

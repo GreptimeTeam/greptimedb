@@ -15,8 +15,8 @@
 use std::path::Path;
 
 use common_base::readable_size::ReadableSize;
-use common_wal::config::kafka::common::KafkaConnectionConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use common_wal::config::kafka::common::KafkaConnectionConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 
 use crate::kafka::log_store::KafkaLogStore;

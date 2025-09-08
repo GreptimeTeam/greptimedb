@@ -22,10 +22,10 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
 };
 use common_grpc::precision::Precision;
+use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp::TimeUnit::Nanosecond;
-use common_time::Timestamp;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
     IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
