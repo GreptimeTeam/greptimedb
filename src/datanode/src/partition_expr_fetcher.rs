@@ -54,8 +54,8 @@ impl PartitionExprFetcher for MetaPartitionExprFetcher {
 #[cfg(test)]
 mod tests {
     use common_meta::key::table_route::{TableRouteStorage, TableRouteValue};
-    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::TxnService;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::rpc::router::{Region, RegionRoute};
 
     use super::*;
