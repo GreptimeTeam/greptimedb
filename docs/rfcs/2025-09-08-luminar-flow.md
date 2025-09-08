@@ -250,12 +250,12 @@ graph LR
 ### Phase 1: Core Infrastructure
 
 1. **State Management**: Implement in-memory state map in flownode
-2. **Query Interface**: Develop `__aggr_state` query interface in frontend
+2. **Query Interface**: Develop `__aggr_state` query interface in frontend(Already done in previous query pushdown optimizer work)
 3. **Basic Coordination**: Implement query dispatch and result collection
 
 ### Phase 2: Optimization Features
 
-1. **Sequence Tracking**: Implement sequence-based incremental processing
+1. **Sequence Tracking**: Implement sequence-based incremental processing(Can use similar interface which leader range read use)
 2. **Refill Logic**: Develop state recovery mechanisms
 3. **Mirror Write Optimization**: Simplify mirror write protocol
 
