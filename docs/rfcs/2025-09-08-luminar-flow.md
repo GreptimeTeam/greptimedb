@@ -252,12 +252,14 @@ graph LR
 1. **State Management**: Implement in-memory state map in flownode
 2. **Query Interface**: Develop `__aggr_state` query interface in frontend(Already done in previous query pushdown optimizer work)
 3. **Basic Coordination**: Implement query dispatch and result collection
+4. **Sequence Tracking**: Implement sequence-based incremental processing(Can use similar interface which leader range read use)
+
+After phase 1, the system should support basic flow operations with incremental updates.
 
 ### Phase 2: Optimization Features
 
-1. **Sequence Tracking**: Implement sequence-based incremental processing(Can use similar interface which leader range read use)
-2. **Refill Logic**: Develop state recovery mechanisms
-3. **Mirror Write Optimization**: Simplify mirror write protocol
+1. **Refill Logic**: Develop state recovery mechanisms
+2. **Mirror Write Optimization**: Simplify mirror write protocol
 
 ### Phase 3: Advanced Features
 
