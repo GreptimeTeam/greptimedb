@@ -104,7 +104,7 @@ The computation process follows these steps:
    - Identifies changed time windows for result computation
 
 4. **Result Materialization**: Flownode computes final results using `__aggr_merge` operations:
-   - Processes only updated time windows for efficiency
+   - Processes only updated time windows(and time series) for efficiency
    - Writes results back to datanode through frontend or embedded frontend
 
 ### Detailed Workflow
