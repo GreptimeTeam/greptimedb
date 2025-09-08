@@ -19,8 +19,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
-use snafu::prelude::*;
 use snafu::Location;
+use snafu::prelude::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

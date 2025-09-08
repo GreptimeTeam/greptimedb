@@ -25,8 +25,8 @@ use datafusion::datasource::TableProvider;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
+use crate::error::TableNotExistSnafu;
 
 /// Delegate the resolving requests to the `[CatalogManager]` unconditionally.
 #[derive(Clone)]

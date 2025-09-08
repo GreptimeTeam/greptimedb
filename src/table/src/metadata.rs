@@ -27,7 +27,7 @@ use datatypes::schema::{
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
@@ -1340,8 +1340,10 @@ fn set_column_fulltext_options(
                 && current_options.case_sensitive == options.case_sensitive,
             error::InvalidColumnOptionSnafu {
                 column_name,
-                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
-                current_options.analyzer, current_options.case_sensitive),
+                msg: format!(
+                    "Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                    current_options.analyzer, current_options.case_sensitive
+                ),
             }
         );
     }

@@ -51,7 +51,7 @@ pub trait Generator<T, R: Rng> {
 
 pub trait Random<T, R: Rng> {
     /// Generates a random element.
-    fn gen(&self, rng: &mut R) -> T {
+    fn generate(&self, rng: &mut R) -> T {
         self.choose(rng, 1).remove(0)
     }
 

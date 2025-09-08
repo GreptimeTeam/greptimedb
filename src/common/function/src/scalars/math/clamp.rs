@@ -18,15 +18,15 @@ use std::sync::Arc;
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion::arrow::array::{ArrayIter, PrimitiveArray};
 use datafusion::logical_expr::Volatility;
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::Signature;
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::value::TryAsPrimitive;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 

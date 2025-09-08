@@ -18,7 +18,7 @@ use common_meta::datanode::DatanodeStatKey;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error;
 use crate::error::Result;

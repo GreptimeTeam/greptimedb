@@ -21,9 +21,9 @@ use common_meta::key::schema_name::SchemaNameKey;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -31,13 +31,13 @@ use datatypes::vectors::StringVectorBuilder;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::system_schema::information_schema::{InformationTable, Predicates, SCHEMATA};
 use crate::system_schema::utils;
-use crate::CatalogManager;
 
 pub const CATALOG_NAME: &str = "catalog_name";
 pub const SCHEMA_NAME: &str = "schema_name";

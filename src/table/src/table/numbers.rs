@@ -24,8 +24,8 @@ use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
-use futures::task::{Context, Poll};
 use futures::Stream;
+use futures::task::{Context, Poll};
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 

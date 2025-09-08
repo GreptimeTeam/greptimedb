@@ -27,17 +27,17 @@ use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
 use common_test_util::ports;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+use object_store::ObjectStore;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
 };
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
-use object_store::ObjectStore;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
@@ -83,10 +83,10 @@ impl StorageType {
     pub fn build_storage_types_based_on_env() -> Vec<StorageType> {
         let mut storage_types = Vec::with_capacity(4);
         storage_types.push(StorageType::File);
-        if let Ok(bucket) = env::var("GT_S3_BUCKET") {
-            if !bucket.is_empty() {
-                storage_types.push(StorageType::S3);
-            }
+        if let Ok(bucket) = env::var("GT_S3_BUCKET")
+            && !bucket.is_empty()
+        {
+            storage_types.push(StorageType::S3);
         }
         if env::var("GT_OSS_BUCKET").is_ok() {
             storage_types.push(StorageType::Oss);
@@ -309,10 +309,9 @@ impl Drop for TestGuard {
                 | TempDirGuard::Oss(guard)
                 | TempDirGuard::Azblob(guard)
                 | TempDirGuard::Gcs(guard) = guard.0
+                    && let Err(e) = guard.remove_all().await
                 {
-                    if let Err(e) = guard.remove_all().await {
-                        errors.push(e);
-                    }
+                    errors.push(e);
                 }
             }
             if errors.is_empty() {
@@ -483,7 +482,9 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    std::env::set_var("TZ", "UTC");
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
 
     let instance = setup_standalone_instance(name, store_type).await;
 

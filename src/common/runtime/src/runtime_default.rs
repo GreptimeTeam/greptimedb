@@ -18,8 +18,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 pub use tokio::task::JoinHandle;
 
-use crate::runtime::{Dropper, RuntimeTrait};
 use crate::Builder;
+use crate::runtime::{Dropper, RuntimeTrait};
 
 /// A runtime to run future tasks
 #[derive(Clone, Debug)]

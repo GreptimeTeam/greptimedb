@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::warn;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -149,7 +149,9 @@ impl Scheduler for LocalScheduler {
 impl Drop for LocalScheduler {
     fn drop(&mut self) {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
-            warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+            warn!(
+                "scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP"
+            );
 
             // We didn't call `stop()` so we cancel all background workers here.
             self.sender.write().unwrap().take();
@@ -160,8 +162,8 @@ impl Drop for LocalScheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicI32;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicI32;
 
     use tokio::sync::Barrier;
     use tokio::time::Duration;

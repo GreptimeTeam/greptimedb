@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::region_request::Body;
 use api::v1::region::RegionRequest;
+use api::v1::region::region_request::Body;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
 use common_query::request::QueryRequest;

@@ -26,7 +26,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
@@ -34,7 +34,7 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
-use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
+use crate::ddl::create_table_template::{CreateRequestBuilder, build_template};
 use crate::ddl::utils::raw_table_info::update_table_info_column_ids;
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
@@ -49,7 +49,7 @@ use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
-    find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
+    RegionRoute, find_leader_regions, find_leaders, operating_leader_regions,
 };
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -265,7 +265,9 @@ impl CreateTableProcedure {
         {
             self.creator.data.column_metadatas = column_metadatas;
         } else {
-            warn!("creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
+            warn!(
+                "creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged"
+            );
         }
 
         self.creator.data.state = CreateTableState::CreateMetadata;

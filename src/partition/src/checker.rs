@@ -19,7 +19,7 @@ use datatypes::arrow::array::{BooleanArray, Float64Array, Float64Builder, Record
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::value::OrderedF64;
 
-use crate::collider::{Collider, CHECK_STEP, NORMALIZE_STEP};
+use crate::collider::{CHECK_STEP, Collider, NORMALIZE_STEP};
 use crate::error::{
     CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
 };

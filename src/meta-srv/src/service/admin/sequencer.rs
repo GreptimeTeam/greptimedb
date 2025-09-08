@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::Json;
 use axum::extract::{self, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::sequence::SequenceRef;
 use serde::{Deserialize, Serialize};
 use servers::http::result::error_result::ErrorResponse;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{
     PeekSequenceSnafu, Result, RuntimeSwitchManagerSnafu, SetNextSequenceSnafu, UnexpectedSnafu,

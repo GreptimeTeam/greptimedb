@@ -16,15 +16,15 @@ use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
 use vrl::prelude::Value as VrlValue;
 
+use crate::Processor;
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
     ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, FIELDS_NAME, FIELD_NAME,
+    FIELD_NAME, FIELDS_NAME, yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings,
 };
-use crate::Processor;
 
 pub(crate) const PROCESSOR_FILTER: &str = "filter";
 
@@ -185,9 +185,9 @@ mod test {
     use vrl::prelude::{Bytes, Value as VrlValue};
     use vrl::value::{KeyString, ObjectMap};
 
+    use crate::Processor;
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::filter::{FilterProcessor, MatchMode, MatchOp};
-    use crate::Processor;
 
     #[test]
     fn test_eq() {

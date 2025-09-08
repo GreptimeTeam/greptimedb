@@ -20,7 +20,7 @@ use common_options::memory::MemoryOptions;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
-use common_workload::{sanitize_workload_types, DatanodeWorkloadType};
+use common_workload::{DatanodeWorkloadType, sanitize_workload_types};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;

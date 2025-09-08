@@ -26,12 +26,12 @@ use crate::kv_backend::txn::{
 };
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
-use crate::rpc::KeyValue;
 
 const RDS_STORE_OP_BATCH_GET: &str = "batch_get";
 const RDS_STORE_OP_BATCH_PUT: &str = "batch_put";

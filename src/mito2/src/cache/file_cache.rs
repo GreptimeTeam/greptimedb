@@ -578,10 +578,12 @@ mod tests {
             None,
         ));
         // No entry before recovery.
-        assert!(cache
-            .reader(IndexKey::new(region_id, file_ids[0], file_type))
-            .await
-            .is_none());
+        assert!(
+            cache
+                .reader(IndexKey::new(region_id, file_ids[0], file_type))
+                .await
+                .is_none()
+        );
         cache.recover(true).await;
 
         // Check size.
@@ -662,9 +664,9 @@ mod tests {
         assert!(
             parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parque").is_none()
         );
-        assert!(parse_index_key(
-            "5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin"
-        )
-        .is_none());
+        assert!(
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet.puffin")
+                .is_none()
+        );
     }
 }

@@ -32,7 +32,7 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, yaml_bool, yaml_new_field, yaml_new_fields,
 };
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";

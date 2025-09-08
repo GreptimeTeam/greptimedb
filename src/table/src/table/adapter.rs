@@ -22,10 +22,10 @@ use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
-use datafusion_physical_expr::expressions::Column;
+use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::expressions::Column;
 use store_api::storage::ScanRequest;
 
 use crate::table::{TableRef, TableType};

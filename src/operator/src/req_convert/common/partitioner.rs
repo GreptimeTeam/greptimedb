@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{DeleteRequest, InsertRequest};
 use api::v1::Rows;
+use api::v1::region::{DeleteRequest, InsertRequest};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::RegionId;

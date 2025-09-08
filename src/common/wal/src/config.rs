@@ -114,8 +114,8 @@ mod tests {
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
-    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
     use crate::TopicSelectorType;
+    use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 
     #[test]
     fn test_toml_raft_engine() {

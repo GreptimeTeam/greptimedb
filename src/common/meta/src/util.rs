@@ -31,12 +31,12 @@ pub fn get_prefix_end_key(key: &[u8]) -> Vec<u8> {
 }
 
 pub fn check_response_header(header: Option<&ResponseHeader>) -> Result<()> {
-    if let Some(header) = header {
-        if let Some(error) = &header.error {
-            let code = error.code;
-            let err_msg = &error.err_msg;
-            return IllegalServerStateSnafu { code, err_msg }.fail();
-        }
+    if let Some(header) = header
+        && let Some(error) = &header.error
+    {
+        let code = error.code;
+        let err_msg = &error.err_msg;
+        return IllegalServerStateSnafu { code, err_msg }.fail();
     }
 
     Ok(())

@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use api::v1::meta::{HeartbeatRequest, Role};
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, Value};
-use client::inserter::{Context as InserterContext, Inserter};
 use client::DEFAULT_CATALOG_NAME;
+use client::inserter::{Context as InserterContext, Inserter};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_macro::{Schema, ToRow};
-use common_meta::datanode::RegionStat;
 use common_meta::DatanodeId;
+use common_meta::datanode::RegionStat;
 use common_telemetry::warn;
 use dashmap::DashMap;
 use store_api::region_engine::RegionRole;
@@ -535,11 +535,13 @@ mod tests {
         assert_eq!(request.rows.unwrap().rows, vec![expected_row]);
 
         // Check last persisted time
-        assert!(handler
-            .last_persisted_time
-            .get(&datanode_id)
-            .unwrap()
-            .gt(&before_insert_time));
+        assert!(
+            handler
+                .last_persisted_time
+                .get(&datanode_id)
+                .unwrap()
+                .gt(&before_insert_time)
+        );
 
         // Check last persisted region stats
         assert_eq!(

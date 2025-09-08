@@ -27,7 +27,7 @@ use datatypes::value::Value;
 use futures::StreamExt;
 use query::parser::QueryLanguageParser;
 use session::context::QueryContextBuilder;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableId;
 
 use crate::adapter::table_source::ManagedTableSource;

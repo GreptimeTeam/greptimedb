@@ -14,14 +14,14 @@
 
 use std::sync::{Arc, RwLock};
 
-use catalog::memory::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
+use catalog::memory::new_memory_catalog_manager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
 use datafusion_expr::expr::Expr;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};

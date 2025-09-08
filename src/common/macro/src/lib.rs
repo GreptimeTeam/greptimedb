@@ -25,7 +25,7 @@ use print_caller::process_print_caller;
 use proc_macro::TokenStream;
 use quote::quote;
 use range_fn::process_range_fn;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use crate::admin_fn::process_admin_fn;
 use crate::row::into_row::derive_into_row_impl;
@@ -175,7 +175,7 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
         }
     });
 
-    let gen = quote! {
+    let generated = quote! {
         impl From<&TableMeta> for TableMetaBuilder {
             fn from(meta: &TableMeta) -> Self {
                 let mut builder = Self {
@@ -188,7 +188,7 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
         }
     };
 
-    gen.into()
+    generated.into()
 }
 
 /// Derive macro to convert a struct to a row.

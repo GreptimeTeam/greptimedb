@@ -24,13 +24,13 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::serve::ListenerExt;
-use axum::{middleware, routing, Router};
-use common_base::readable_size::ReadableSize;
+use axum::{Router, middleware, routing};
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{debug, error, info};
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::value::transform_value_ref_to_json_value;
@@ -40,9 +40,9 @@ use http::{HeaderValue, Method};
 use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ensure, ResultExt};
-use tokio::sync::oneshot::{self, Sender};
+use snafu::{ResultExt, ensure};
 use tokio::sync::Mutex;
+use tokio::sync::oneshot::{self, Sender};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -1171,10 +1171,10 @@ pub const HTTP_SERVER: &str = "HTTP_SERVER";
 impl Server for HttpServer {
     async fn shutdown(&self) -> Result<()> {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the HTTP server has already exited");
-            }
+        if let Some(tx) = shutdown_tx.take()
+            && tx.send(()).is_err()
+        {
+            info!("Receiver dropped, the HTTP server has already exited");
         }
         info!("Shutdown HTTP server");
 
@@ -1433,9 +1433,10 @@ mod test {
             .await;
 
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(!res
-            .headers()
-            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(
+            !res.headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
     }
 
     #[tokio::test]
@@ -1454,9 +1455,10 @@ mod test {
         let res = client.get("/health").send().await;
 
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(!res
-            .headers()
-            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(
+            !res.headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
     }
 
     #[test]

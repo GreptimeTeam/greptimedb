@@ -24,12 +24,12 @@ use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
 use common_runtime::RepeatedTask;
 use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};

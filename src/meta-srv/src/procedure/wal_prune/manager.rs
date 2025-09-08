@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_set::Entry;
 use std::collections::HashSet;
+use std::collections::hash_set::Entry;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{ProcedureId, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::define_ticker;
 use crate::error::{self, Result};

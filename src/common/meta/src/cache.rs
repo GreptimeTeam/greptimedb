@@ -18,14 +18,14 @@ mod registry;
 mod table;
 
 pub use container::{CacheContainer, Initializer, Invalidator, TokenFilter};
-pub use flow::{new_table_flownode_set_cache, TableFlownodeSetCache, TableFlownodeSetCacheRef};
+pub use flow::{TableFlownodeSetCache, TableFlownodeSetCacheRef, new_table_flownode_set_cache};
 pub use registry::{
     CacheRegistry, CacheRegistryBuilder, CacheRegistryRef, LayeredCacheRegistry,
     LayeredCacheRegistryBuilder, LayeredCacheRegistryRef,
 };
 pub use table::{
-    new_schema_cache, new_table_info_cache, new_table_name_cache, new_table_route_cache,
-    new_table_schema_cache, new_view_info_cache, SchemaCache, SchemaCacheRef, TableInfoCache,
-    TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRoute, TableRouteCache,
-    TableRouteCacheRef, TableSchemaCache, TableSchemaCacheRef, ViewInfoCache, ViewInfoCacheRef,
+    SchemaCache, SchemaCacheRef, TableInfoCache, TableInfoCacheRef, TableNameCache,
+    TableNameCacheRef, TableRoute, TableRouteCache, TableRouteCacheRef, TableSchemaCache,
+    TableSchemaCacheRef, ViewInfoCache, ViewInfoCacheRef, new_schema_cache, new_table_info_cache,
+    new_table_name_cache, new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };

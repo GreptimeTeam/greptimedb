@@ -155,14 +155,14 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
-            .fail()
+            .fail();
         }
 
         _ => {
             return UnsupportedTypeInPipelineSnafu {
                 ty: transform.type_.as_str_name(),
             }
-            .fail()
+            .fail();
         }
     };
 
@@ -196,7 +196,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
-            .fail()
+            .fail();
         }
 
         _ => return Ok(None),
@@ -232,7 +232,7 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
-            .fail()
+            .fail();
         }
 
         _ => return Ok(None),
@@ -276,7 +276,7 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
-            .fail()
+            .fail();
         }
 
         _ => return Ok(None),

@@ -21,7 +21,7 @@ use store_api::storage::TableId;
 
 use crate::cache::{SchemaCacheRef, TableSchemaCacheRef};
 use crate::error::TableInfoNotFoundSnafu;
-use crate::{error, SchemaOptions};
+use crate::{SchemaOptions, error};
 
 pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 

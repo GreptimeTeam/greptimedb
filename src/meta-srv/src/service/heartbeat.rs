@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use std::io::ErrorKind;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use api::v1::meta::{
-    heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
-    Peer, RequestHeader, ResponseHeader, Role,
+    AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, Peer, RequestHeader,
+    ResponseHeader, Role, heartbeat_server,
 };
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
@@ -91,12 +91,12 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         }
                     }
                     Err(err) => {
-                        if let Some(io_err) = error::match_for_io_error(&err) {
-                            if io_err.kind() == ErrorKind::BrokenPipe {
-                                // client disconnected in unexpected way
-                                error!("Client disconnected: broken pipe");
-                                break;
-                            }
+                        if let Some(io_err) = error::match_for_io_error(&err)
+                            && io_err.kind() == ErrorKind::BrokenPipe
+                        {
+                            // client disconnected in unexpected way
+                            error!("Client disconnected: broken pipe");
+                            break;
                         }
 
                         if tx.send(Err(err)).await.is_err() {
@@ -199,8 +199,8 @@ mod tests {
     use tonic::IntoRequest;
 
     use super::get_node_id;
-    use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::MetasrvOptions;
+    use crate::metasrv::builder::MetasrvBuilder;
 
     #[tokio::test]
     async fn test_ask_leader() {

@@ -23,9 +23,9 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{CacheIdent, Instruction};
+use common_meta::key::MetadataKey;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::MetadataKey;
 use partition::manager::TableRouteCacheInvalidator;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
@@ -98,11 +98,13 @@ async fn test_invalidate_table_cache_handler() {
     )
     .await;
 
-    assert!(!backend
-        .inner
-        .lock()
-        .unwrap()
-        .contains_key(&table_info_key.to_bytes()));
+    assert!(
+        !backend
+            .inner
+            .lock()
+            .unwrap()
+            .contains_key(&table_info_key.to_bytes())
+    );
 
     // removes a invalid key
     handle_instruction(
@@ -141,11 +143,13 @@ async fn test_invalidate_schema_key_handler() {
     )
     .await;
 
-    assert!(!backend
-        .inner
-        .lock()
-        .unwrap()
-        .contains_key(&schema_key.to_bytes()));
+    assert!(
+        !backend
+            .inner
+            .lock()
+            .unwrap()
+            .contains_key(&schema_key.to_bytes())
+    );
 
     // removes a invalid key
     handle_instruction(

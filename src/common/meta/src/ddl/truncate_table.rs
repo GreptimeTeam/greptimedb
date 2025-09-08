@@ -14,8 +14,8 @@
 
 use api::helper::to_pb_time_ranges;
 use api::v1::region::{
-    region_request, truncate_request, RegionRequest, RegionRequestHeader,
-    TruncateRequest as PbTruncateRegionRequest,
+    RegionRequest, RegionRequestHeader, TruncateRequest as PbTruncateRegionRequest, region_request,
+    truncate_request,
 };
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -26,23 +26,23 @@ use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
+use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leader_regions, find_leaders};
 
 pub struct TruncateTableProcedure {
     context: DdlContext,

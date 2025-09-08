@@ -21,7 +21,7 @@ use client::{Client, Database};
 use common_error::ext::BoxedError;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::{debug, warn};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
 
 use crate::error::{LookupFrontendsSnafu, NoAvailableFrontendSnafu};

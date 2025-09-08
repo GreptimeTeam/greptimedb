@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use puffin::puffin_manager::file_accessor::MockFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use puffin::puffin_manager::stager::BoundedStager;

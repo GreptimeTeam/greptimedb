@@ -27,7 +27,7 @@ use common_event_recorder::EventRecorderRef;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
@@ -129,10 +129,9 @@ impl ProcedureMeta {
         // Emit the event to the event recorder if the user metadata contains the eventable object.
         if let (Some(event_recorder), Some(user_metadata)) =
             (&self.event_recorder, &self.user_metadata)
+            && let Some(event) = user_metadata.to_event()
         {
-            if let Some(event) = user_metadata.to_event() {
-                event_recorder.record(Box::new(ProcedureEvent::new(self.id, event, state.clone())));
-            }
+            event_recorder.record(Box::new(ProcedureEvent::new(self.id, event, state.clone())));
         }
 
         // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.
@@ -895,8 +894,8 @@ impl TaskFunction<Error> for RemoveOutdatedMetaFunction {
 #[cfg(test)]
 pub(crate) mod test_util {
     use common_test_util::temp_dir::TempDir;
-    use object_store::services::Fs as Builder;
     use object_store::ObjectStore;
+    use object_store::services::Fs as Builder;
 
     use super::*;
 
@@ -1142,27 +1141,33 @@ mod tests {
         manager.manager_ctx.start();
 
         let procedure_id = ProcedureId::random();
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(manager.procedure_watcher(procedure_id).is_none());
 
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         // Wait for the procedure done.
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
@@ -1308,18 +1313,22 @@ mod tests {
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1342,23 +1351,27 @@ mod tests {
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
 
         manager.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
         manager.stop().await.unwrap();
@@ -1367,43 +1380,51 @@ mod tests {
         let procedure_id = ProcedureId::random();
 
         manager.manager_ctx.set_running();
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // After restart
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
 
         manager.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1452,18 +1473,22 @@ mod tests {
         // Submit a new procedure should succeed.
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
-        assert!(manager
-            .submit(ProcedureWithId {
-                id: procedure_id,
-                procedure: Box::new(procedure),
-            })
-            .await
-            .is_ok());
-        assert!(manager
-            .procedure_state(procedure_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            manager
+                .submit(ProcedureWithId {
+                    id: procedure_id,
+                    procedure: Box::new(procedure),
+                })
+                .await
+                .is_ok()
+        );
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         // Wait for the procedure done.
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();

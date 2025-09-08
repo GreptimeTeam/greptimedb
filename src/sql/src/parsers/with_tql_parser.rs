@@ -197,14 +197,13 @@ impl ParserContext<'_> {
     /// Determine if CTE contains TQL or SQL and parse accordingly
     fn parse_cte_content(&mut self) -> Result<CteContent> {
         // Check if the next token is TQL
-        if let Token::Word(w) = &self.parser.peek_token().token {
-            if w.keyword == Keyword::NoKeyword
-                && w.quote_style.is_none()
-                && w.value.to_uppercase() == tql_parser::TQL
-            {
-                let tql = self.parse_tql_content_in_cte()?;
-                return Ok(CteContent::Tql(tql));
-            }
+        if let Token::Word(w) = &self.parser.peek_token().token
+            && w.keyword == Keyword::NoKeyword
+            && w.quote_style.is_none()
+            && w.value.to_uppercase() == tql_parser::TQL
+        {
+            let tql = self.parse_tql_content_in_cte()?;
+            return Ok(CteContent::Tql(tql));
         }
 
         // Parse as SQL query

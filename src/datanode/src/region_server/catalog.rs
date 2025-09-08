@@ -21,8 +21,8 @@ use datafusion::catalog::{
 use datafusion::datasource::provider_as_source;
 use datafusion::error as df_error;
 use datafusion::error::Result as DfResult;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::DataFusionError;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
 use session::context::QueryContextRef;
@@ -318,7 +318,7 @@ mod tests {
 
     use datafusion::catalog::MemTable as DfMemTable;
     use datafusion_common::tree_node::TreeNode;
-    use datafusion_expr::{table_scan, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, table_scan};
     use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;

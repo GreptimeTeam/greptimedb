@@ -26,8 +26,8 @@ use store_api::storage::RegionId;
 use tokio::time::Instant;
 
 use crate::error::{self, Result};
-use crate::region::opener::{replay_memtable, RegionOpener};
 use crate::region::MitoRegion;
+use crate::region::opener::{RegionOpener, replay_memtable};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -52,7 +52,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Utilizes the short circuit evaluation.
         let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
             if !is_empty_memtable {
-                warn!("Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                warn!(
+                    "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
                     region.region_id,
                     region.manifest_ctx.manifest_version().await,
                     region.version_control.current().last_entry_id
@@ -70,7 +71,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .map(|c| c.entry_id)
                 .unwrap_or_default()
                 .max(flushed_entry_id);
-            info!("Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}", region.provider);
+            info!(
+                "Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}",
+                region.provider
+            );
             let timer = Instant::now();
             let wal_entry_reader =
                 self.wal
@@ -98,7 +102,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     last_entry_id >= expected_last_entry_id,
                     error::UnexpectedSnafu {
                         reason: format!(
-                            "failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}", 
+                            "failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
                             region_id, expected_last_entry_id, last_entry_id,
                         ),
                     }
@@ -145,7 +149,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region_id = region.region_id;
         let manifest_version = region.manifest_ctx.manifest_version().await;
         let flushed_entry_id = region.version_control.current().last_entry_id;
-        info!("Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
+        info!(
+            "Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}"
+        );
         let reopened_region = Arc::new(
             RegionOpener::new(
                 region_id,

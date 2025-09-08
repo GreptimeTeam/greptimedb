@@ -36,7 +36,7 @@ use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;

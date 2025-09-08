@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Error, InvalidMetadataSnafu, Result};
-use crate::key::{MetadataKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
+use crate::key::{CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX, MetadataKey};
 use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::RangeRequest;
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
+use crate::rpc::store::RangeRequest;
 
 /// The catalog name key, indices all catalog names
 ///
