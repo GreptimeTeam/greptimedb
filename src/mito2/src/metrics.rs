@@ -456,6 +456,21 @@ lazy_static! {
             exponential_buckets(0.001, 10.0, 8).unwrap(),
         )
         .unwrap();
+    /// Counter for the number of files that's tmp ref by at least one datanode.
+    pub static ref GC_TMP_REF_FILE_CNT_PER_TABLE: IntGaugeVec =
+        register_int_gauge_vec!(
+            "greptime_mito_gc_tmp_ref_file_count_per_table",
+            "mito gc tmp ref file count per table",
+            &["table_id"],
+        ).unwrap();
+
+    /// Counter for the number of files deleted by the GC worker.
+    pub static ref GC_FILE_CNT_PER_TABLE: IntGaugeVec =
+        register_int_gauge_vec!(
+            "greptime_mito_gc_file_count_per_table",
+            "mito gc deleted file count per table",
+            &["table_id"],
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.
