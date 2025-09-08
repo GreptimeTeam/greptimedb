@@ -27,32 +27,39 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use axum_extra::TypedHeader;
-use common_error::ext::ErrorExt;
+use common_catalog::consts::default_engine;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use mime_guess::mime;
+use operator::expr_helper::{create_table_expr_by_column_schemas, expr_to_create};
 use pipeline::util::to_pipeline_version;
-use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
+use pipeline::{
+    ContextReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineContext,
+    PipelineDefinition, TransformerMode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use simd_json::Buffers;
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::{EnumIter, IntoEnumIterator};
+use table::table_reference::TableReference;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, status_code_to_http_status,
+    Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    status_code_to_http_status,
 };
 use crate::http::HttpResponse;
 use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
 use crate::http::header::{
     CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
-use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
+use crate::http::result::greptime_manage_resp::{GreptimedbManageResponse, SqlOutput};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
@@ -192,6 +199,79 @@ pub async fn query_pipeline(
             .unwrap_or(pipeline_version.0.to_timezone_aware_string(None)),
         start.elapsed().as_millis() as u64,
         Some(pipeline),
+    ))
+}
+
+#[axum_macros::debug_handler]
+pub async fn query_pipeline_create_table(
+    State(state): State<LogState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required in path",
+        }
+    );
+    ensure!(
+        pipeline_name.eq_ignore_ascii_case(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME),
+        InvalidParameterSnafu {
+            reason: "identity pipeline doesn't have fixed table schema",
+        }
+    );
+    let table_name = query_params.table.context(InvalidParameterSnafu {
+        reason: "table name is required",
+    })?;
+
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Log);
+    let query_ctx = Arc::new(query_ctx);
+
+    let pipeline = handler
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+        .await?;
+
+    let transformer = match pipeline.transformer() {
+        TransformerMode::GreptimeTransformer(greptime_transformer) => greptime_transformer,
+        TransformerMode::AutoTransform(_, _) => {
+            return InvalidParameterSnafu {
+                reason: "auto transform doesn't have fixed table schema",
+            }
+            .fail();
+        }
+    };
+
+    let schemas_def = transformer.schemas();
+
+    let schema = query_ctx.current_schema();
+    let table_name_ref = TableReference {
+        catalog: query_ctx.current_catalog(),
+        schema: &schema,
+        table: &table_name,
+    };
+
+    let create_table_expr =
+        create_table_expr_by_column_schemas(&table_name_ref, schemas_def, default_engine(), None)
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
+
+    let expr = expr_to_create(&create_table_expr, None)
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+
+    let sql = SqlOutput {
+        sql: expr.to_string(),
+        message: None,
+    };
+
+    Ok(GreptimedbManageResponse::from_sql(
+        sql,
+        start.elapsed().as_millis() as u64,
     ))
 }
 
