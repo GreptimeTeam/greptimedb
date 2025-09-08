@@ -22,6 +22,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
+use common_config::utils::ResourceSpec;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -506,6 +507,7 @@ pub struct Metasrv {
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
+    resource_spec: ResourceSpec,
 
     plugins: Plugins,
 }
@@ -687,6 +689,10 @@ impl Metasrv {
         self.start_time_ms
     }
 
+    pub fn resource_spec(&self) -> &ResourceSpec {
+        &self.resource_spec
+    }
+
     pub fn node_info(&self) -> MetasrvNodeInfo {
         let build_info = common_version::build_info();
         MetasrvNodeInfo {
@@ -694,10 +700,8 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            cpus: common_config::utils::get_cpus() as u32,
-            memory_bytes: common_config::utils::get_sys_total_memory()
-                .unwrap_or_default()
-                .as_bytes(),
+            cpus: self.resource_spec().cpus as u32,
+            memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
         }
     }
 

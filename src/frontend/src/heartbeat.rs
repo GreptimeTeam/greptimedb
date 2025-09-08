@@ -18,6 +18,7 @@ mod tests;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
+use common_config::utils::ResourceSpec;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -46,6 +47,7 @@ pub struct HeartbeatTask {
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
+    resource_spec: ResourceSpec,
 }
 
 impl HeartbeatTask {
@@ -69,6 +71,7 @@ impl HeartbeatTask {
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
+            resource_spec: Default::default(),
         }
     }
 
@@ -146,17 +149,15 @@ impl HeartbeatTask {
         })
     }
 
-    fn build_node_info(start_time_ms: u64) -> Option<NodeInfo> {
+    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
 
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus: common_config::utils::get_cpus() as u32,
-            memory_bytes: common_config::utils::get_sys_total_memory()
-                .unwrap_or_default()
-                .as_bytes(),
+            cpus,
+            memory_bytes,
         })
     }
 
@@ -172,6 +173,8 @@ impl HeartbeatTask {
             id: 0,
             addr: self.peer_addr.clone(),
         });
+        let cpus = self.resource_spec.cpus as u32;
+        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -179,7 +182,7 @@ impl HeartbeatTask {
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
-                info: Self::build_node_info(start_time_ms),
+                info: Self::build_node_info(start_time_ms, cpus, memory_bytes),
                 ..Default::default()
             };
 
