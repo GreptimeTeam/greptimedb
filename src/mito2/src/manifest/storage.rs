@@ -701,38 +701,13 @@ impl ManifestObjectStore {
 
     /// Clear all staging manifest files.
     pub async fn clear_staging_manifests(&mut self) -> Result<()> {
-        let staging_entries = self
-            .get_paths(
-                |entry| {
-                    let file_name = entry.name();
-                    if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                        Some(entry)
-                    } else {
-                        None
-                    }
-                },
-                true,
-            )
-            .await?;
-
-        if staging_entries.is_empty() {
-            debug!("No staging manifest files to clear");
-            return Ok(());
-        }
-
-        let delete_tasks = staging_entries.iter().map(|entry| async {
-            debug!("Deleting staging manifest file: {}", entry.path());
-            self.object_store
-                .delete(entry.path())
-                .await
-                .context(OpenDalSnafu)
-        });
-
-        try_join_all(delete_tasks).await?;
+        self.object_store
+            .remove_all(&self.staging_path)
+            .await
+            .context(OpenDalSnafu)?;
 
         debug!(
-            "Cleared {} staging manifest files from {}",
-            staging_entries.len(),
+            "Cleared all staging manifest files from {}",
             self.staging_path
         );
 
