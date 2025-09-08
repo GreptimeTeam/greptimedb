@@ -317,7 +317,7 @@ mod tests {
     use common_telemetry::init_default_ut_logging;
     use datafusion::datasource::DefaultTableSource;
     use datafusion::functions_aggregate::min_max::{max, min};
-    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, col};
     use pretty_assertions::assert_eq;
     use table::table::adapter::DfTableProviderAdapter;
 
