@@ -30,9 +30,10 @@ use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use jsonb::Number;
 use once_cell::sync::OnceCell;
+use serde_json as serde_json_crate;
 use session::context::Channel;
 use snafu::OptionExt;
-use vrl::prelude::VrlValueConvert;
+use vrl::prelude::{Bytes, VrlValueConvert};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
@@ -107,16 +108,6 @@ impl GreptimePipelineParams {
         } else {
             HashMap::new()
         }
-    }
-
-    /// Whether to flatten the JSON object.
-    pub fn flatten_json_object(&self) -> bool {
-        *self.flatten_json_object.get_or_init(|| {
-            self.options
-                .get("flatten_json_object")
-                .map(|v| v == "true")
-                .unwrap_or(false)
-        })
     }
 
     /// Whether to skip error when processing the pipeline.
@@ -618,19 +609,15 @@ pub fn identity_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<HashMap<ContextOpt, Rows>> {
     let skip_error = pipeline_ctx.pipeline_param.skip_error();
-    let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
-        let mut results = Vec::with_capacity(array.len());
-        for item in array.into_iter() {
-            let result = unwrap_or_continue_if_err!(
-                flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING),
-                skip_error
-            );
-            results.push(result);
-        }
-        results
-    } else {
-        array
-    };
+    // Always flatten JSON objects and stringify arrays
+    let mut input = Vec::with_capacity(array.len());
+    for item in array.into_iter() {
+        let result = unwrap_or_continue_if_err!(
+            flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING),
+            skip_error
+        );
+        input.push(result);
+    }
 
     identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, opt_map)| {
         if let Some(table) = table {
@@ -673,6 +660,30 @@ pub fn flatten_object(object: VrlValue, max_nested_levels: usize) -> Result<VrlV
     Ok(VrlValue::Object(flattened))
 }
 
+fn vrl_value_to_serde_json(value: &VrlValue) -> serde_json_crate::Value {
+    match value {
+        VrlValue::Null => serde_json_crate::Value::Null,
+        VrlValue::Boolean(b) => serde_json_crate::Value::Bool(*b),
+        VrlValue::Integer(i) => serde_json_crate::Value::Number((*i).into()),
+        VrlValue::Float(not_nan) => serde_json_crate::Number::from_f64(not_nan.into_inner())
+            .map(serde_json_crate::Value::Number)
+            .unwrap_or(serde_json_crate::Value::Null),
+        VrlValue::Bytes(bytes) => {
+            serde_json_crate::Value::String(String::from_utf8_lossy(bytes).into_owned())
+        }
+        VrlValue::Regex(re) => serde_json_crate::Value::String(re.as_str().to_string()),
+        VrlValue::Timestamp(ts) => serde_json_crate::Value::String(ts.to_rfc3339()),
+        VrlValue::Array(arr) => {
+            serde_json_crate::Value::Array(arr.iter().map(vrl_value_to_serde_json).collect())
+        }
+        VrlValue::Object(map) => serde_json_crate::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), vrl_value_to_serde_json(v)))
+                .collect(),
+        ),
+    }
+}
+
 fn do_flatten_object(
     dest: &mut BTreeMap<KeyString, VrlValue>,
     base: Option<&str>,
@@ -701,7 +712,13 @@ fn do_flatten_object(
                     max_nested_levels,
                 )?;
             }
-            // For other types, we will directly insert them into as JSON type.
+            // Arrays are stringified to ensure no JSON column types in the result.
+            VrlValue::Array(_) => {
+                let json_string = serde_json_crate::to_string(&vrl_value_to_serde_json(&value))
+                    .unwrap_or_else(|_| String::from("[]"));
+                dest.insert(new_key, VrlValue::Bytes(Bytes::from(json_string)));
+            }
+            // Other leaf types are inserted as-is.
             _ => {
                 dest.insert(new_key, value);
             }
@@ -920,9 +937,9 @@ mod tests {
                 10,
                 Some(serde_json::json!(
                     {
-                        "a.b.c": [1,2,3],
-                        "d": ["foo","bar"],
-                        "e.f": [7,8,9],
+                        "a.b.c": "[1,2,3]",
+                        "d": "[\"foo\",\"bar\"]",
+                        "e.f": "[7,8,9]",
                         "e.g.h": 123,
                         "e.g.i": "hello",
                         "e.g.j.k": true
@@ -958,16 +975,5 @@ mod tests {
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);
         }
-    }
-
-    #[test]
-    fn test_greptime_pipeline_params() {
-        let params = Some("flatten_json_object=true");
-        let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert!(pipeline_params.flatten_json_object());
-
-        let params = None;
-        let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert!(!pipeline_params.flatten_json_object());
     }
 }
