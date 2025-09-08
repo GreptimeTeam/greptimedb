@@ -66,8 +66,6 @@ pub struct GreptimePipelineParams {
     /// This should not be used directly, instead, use the parsed shortcut option values.
     options: HashMap<String, String>,
 
-    /// Parsed shortcut option values
-    pub flatten_json_object: OnceCell<bool>,
     /// Whether to skip error when processing the pipeline.
     pub skip_error: OnceCell<bool>,
     /// Max nested levels when flattening JSON object. Defaults to
@@ -78,14 +76,13 @@ pub struct GreptimePipelineParams {
 impl GreptimePipelineParams {
     /// Create a `GreptimePipelineParams` from params string which is from the http header with key `x-greptime-pipeline-params`
     /// The params is in the format of `key1=value1&key2=value2`,for example:
-    /// x-greptime-pipeline-params: flatten_json_object=true&max_nested_levels=5
+    /// x-greptime-pipeline-params: max_nested_levels=5
     pub fn from_params(params: Option<&str>) -> Self {
         let options = Self::parse_header_str_to_map(params);
 
         Self {
             options,
             skip_error: OnceCell::new(),
-            flatten_json_object: OnceCell::new(),
             max_nested_levels: OnceCell::new(),
         }
     }
@@ -94,7 +91,6 @@ impl GreptimePipelineParams {
         Self {
             options,
             skip_error: OnceCell::new(),
-            flatten_json_object: OnceCell::new(),
             max_nested_levels: OnceCell::new(),
         }
     }
