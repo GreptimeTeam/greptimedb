@@ -241,27 +241,13 @@ pub fn create_to_expr(
     Ok(expr)
 }
 
-/// Convert [`CreateTableExpr`] gRPC request back to `CreateTable` statement.
-///
-/// This function performs the reverse conversion of [`create_to_expr`], taking a gRPC
-/// `CreateTableExpr` and converting it back to a SQL AST `CreateTable` statement.
+/// Convert gRPC's [`CreateTableExpr`] back to `CreateTable` statement.
+/// You can use `create_table_expr_by_column_schemas` to create a `CreateTableExpr` from column schemas.
 ///
 /// # Parameters
 ///
 /// * `expr` - The `CreateTableExpr` to convert
-/// * `quote_style` - Optional quote style for identifiers (defaults to `"`)
-///
-/// # Returns
-///
-/// Returns a `CreateTable` SQL AST node that represents the same table structure
-/// as the input `CreateTableExpr`.
-///
-/// # Note
-///
-/// The conversion may not be 100% identical to the original SQL due to:
-/// - Quote style differences
-/// - Table option normalization (e.g., "3days" -> "3d")
-/// - Primary key representation (always as constraints, not inline)
+/// * `quote_style` - Optional quote style for identifiers (defaults to MySQL style ` backtick)
 pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Result<CreateTable> {
     let quote_style = quote_style.unwrap_or('`');
 
