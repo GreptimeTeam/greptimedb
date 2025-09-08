@@ -24,8 +24,8 @@ use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray, StringBuilder,
@@ -68,7 +68,7 @@ use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
-use crate::sst::parquet::{SstInfo, PARQUET_METADATA_KEY};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
 use crate::sst::to_sst_arrow_schema;
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;

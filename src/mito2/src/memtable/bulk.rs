@@ -50,7 +50,7 @@ use crate::region::options::MergeMode;
 use crate::sst::file::FileId;
 use crate::sst::parquet::format::FIXED_POS_COLUMN_NUM;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
-use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// All parts in a bulk memtable.
 #[derive(Default)]
@@ -225,10 +225,10 @@ impl<'a> MergingFlagsGuard<'a> {
 
 impl<'a> Drop for MergingFlagsGuard<'a> {
     fn drop(&mut self) {
-        if !self.success {
-            if let Ok(mut parts) = self.bulk_parts.write() {
-                parts.reset_merging_flags(self.file_ids, self.merge_encoded);
-            }
+        if !self.success
+            && let Ok(mut parts) = self.bulk_parts.write()
+        {
+            parts.reset_merging_flags(self.file_ids, self.merge_encoded);
         }
     }
 }
