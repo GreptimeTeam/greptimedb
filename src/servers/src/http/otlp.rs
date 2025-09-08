@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::Extension;
 use bytes::Bytes;
 use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_telemetry::tracing;
@@ -40,7 +40,7 @@ use crate::http::extractor::{
     LogTableName, OtlpMetricOptions, PipelineInfo, SelectInfoWrapper, TraceTableName,
 };
 // use crate::http::header::constants::GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME;
-use crate::http::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
+use crate::http::header::{CONTENT_TYPE_PROTOBUF, write_cost_header_map};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 

@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::Json;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_query::{Output, OutputData};
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, util};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;

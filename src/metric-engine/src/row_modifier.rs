@@ -25,7 +25,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
-use store_api::storage::consts::{ReservedColumnId, PRIMARY_KEY_COLUMN_NAME};
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{ColumnId, TableId};
 
 use crate::error::{EncodePrimaryKeySnafu, Result};

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
-use store_api::storage::{RegionId, TableId};
 use store_api::ManifestVersion;
+use store_api::storage::{RegionId, TableId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;

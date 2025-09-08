@@ -37,7 +37,7 @@ use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
+use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::ResultExt;
@@ -324,14 +324,14 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
 mod tests {
     use api::v1::ColumnDataType;
     use datatypes::schema::{
-        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, FulltextAnalyzer,
     };
     use sqlparser::ast::{ColumnOptionDef, Expr};
 
     use super::*;
     use crate::ast::TimezoneInfo;
-    use crate::statements::create::ColumnExtensions;
     use crate::statements::ColumnOption;
+    use crate::statements::create::ColumnExtensions;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(

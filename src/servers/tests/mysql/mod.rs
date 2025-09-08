@@ -17,9 +17,9 @@ use std::sync::Arc;
 use datatypes::prelude::*;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{
-    BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
-    Int64Vector, Int8Vector, NullVector, StringVector, UInt16Vector, UInt32Vector, UInt64Vector,
-    UInt8Vector,
+    BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector,
+    Int32Vector, Int64Vector, NullVector, StringVector, UInt8Vector, UInt16Vector, UInt32Vector,
+    UInt64Vector,
 };
 use mysql_async::prelude::FromRow;
 use mysql_async::{FromRowError, Value as MysqlValue};
@@ -48,9 +48,11 @@ impl TestingData {
         // and all columns length are equal
         assert!(columns.windows(2).all(|x| x[0].len() == x[1].len()));
         // and all output rows width are equal
-        assert!(mysql_text_output_rows
-            .windows(2)
-            .all(|x| x[0].len() == x[1].len()));
+        assert!(
+            mysql_text_output_rows
+                .windows(2)
+                .all(|x| x[0].len() == x[1].len())
+        );
         // and the rows' columns size equals to input columns size.
         assert_eq!(columns.first().unwrap().len(), mysql_text_output_rows.len());
 

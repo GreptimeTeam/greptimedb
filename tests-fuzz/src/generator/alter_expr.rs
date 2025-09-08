@@ -29,8 +29,8 @@ use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generat
 use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation, AlterTableOption, Ttl};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
-    droppable_columns, generate_columns, generate_random_value, modifiable_columns, Column,
-    ColumnTypeGenerator, Ident,
+    Column, ColumnTypeGenerator, Ident, droppable_columns, generate_columns, generate_random_value,
+    modifiable_columns,
 };
 
 fn add_column_options_generator<R: Rng>(
@@ -175,9 +175,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprModifyDataTypeGenerator<R
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let modifiable = modifiable_columns(&self.table_ctx.columns);
         let changed = modifiable[rng.random_range(0..modifiable.len())].clone();
-        let mut to_type = self.column_type_generator.gen(rng);
+        let mut to_type = self.column_type_generator.generate(rng);
         while !changed.column_type.can_arrow_type_cast_to(&to_type) {
-            to_type = self.column_type_generator.gen(rng);
+            to_type = self.column_type_generator.generate(rng);
         }
 
         Ok(AlterTableExpr {
@@ -292,8 +292,8 @@ mod tests {
 
     use super::*;
     use crate::context::TableContext;
-    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
     use crate::generator::Generator;
+    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
 
     #[test]
     fn test_alter_table_expr_generator_deterministic() {

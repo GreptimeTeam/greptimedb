@@ -14,7 +14,7 @@
 
 use asynchronous_codec::{BytesMut, Decoder, Encoder};
 use bytes::{Buf, BufMut};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::bloom_filter::creator::finalize_segment::FinalizedBloomFilterSegment;
 use crate::bloom_filter::error::{Error, InvalidIntermediateMagicSnafu, IoSnafu, Result};

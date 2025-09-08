@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use async_trait::async_trait;
 use common_greptimedb_telemetry::{
-    default_get_uuid, Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask,
-    Mode as VersionReporterMode, TELEMETRY_INTERVAL,
+    Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask, Mode as VersionReporterMode,
+    TELEMETRY_INTERVAL, default_get_uuid,
 };
 
 struct StandaloneGreptimeDBTelemetryCollector {

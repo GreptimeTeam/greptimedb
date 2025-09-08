@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
 use api::v1::CreateTableExpr;
+use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region_request};
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
 use store_api::storage::{RegionId, TableId};
@@ -23,12 +23,12 @@ use table::metadata::RawTableInfo;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table_template::{
-    build_template, build_template_from_raw_table_info, CreateRequestBuilder,
+    CreateRequestBuilder, build_template, build_template_from_raw_table_info,
 };
 use crate::ddl::utils::region_storage_path;
 use crate::error::Result;
 use crate::peer::Peer;
-use crate::rpc::router::{find_leader_regions, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leader_regions};
 
 impl CreateLogicalTablesProcedure {
     pub(crate) fn make_request(

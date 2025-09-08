@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::meta::Peer;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{region_request, MetricManifestInfo, RegionRequest, SyncRequest};
+use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_request};
 use api::v1::{ColumnDataType, SemanticType};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::{Procedure, ProcedureId, Status};
@@ -26,8 +26,8 @@ use common_procedure_test::MockContextProvider;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 use tokio::sync::mpsc;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
@@ -45,7 +45,7 @@ use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 fn make_alter_logical_table_add_column_task(
     schema: Option<&str>,

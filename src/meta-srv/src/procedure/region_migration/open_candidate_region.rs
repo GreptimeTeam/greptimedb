@@ -16,10 +16,10 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::RegionIdent;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -195,16 +195,16 @@ mod tests {
     use std::collections::HashMap;
 
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::DatanodeId;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_meta::DatanodeId;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_open_region_reply, send_mock_reply,

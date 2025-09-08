@@ -28,12 +28,12 @@ use common_telemetry::warn;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
@@ -41,12 +41,14 @@ use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
-use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
+use table::table::adapter::DfTableProviderAdapter;
 
+use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
 };
+use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -57,13 +59,11 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::optimizer::ExtensionAnalyzerRule;
 use crate::options::QueryOptions as QueryOptionsNew;
-use crate::query_engine::options::QueryOptions;
 use crate::query_engine::DefaultSerializer;
+use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::QueryEngineContext;
 
 /// Query engine global state
 #[derive(Clone)]

@@ -20,7 +20,7 @@ use common_time::DatabaseTimeToLive;
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::ensure_values;
 use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
@@ -28,11 +28,11 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     DeserializedValueWithBytes, MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::RangeRequest;
+use crate::kv_backend::txn::Txn;
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
+use crate::rpc::store::RangeRequest;
 
 const OPT_KEY_TTL: &str = "ttl";
 

@@ -66,7 +66,18 @@ impl FunctionRegistry {
 
     /// Register a scalar function in the registry.
     pub fn register_scalar(&self, func: impl Function + 'static) {
-        self.register(Arc::new(func) as FunctionRef);
+        let func = Arc::new(func) as FunctionRef;
+
+        for alias in func.aliases() {
+            let func: ScalarFunctionFactory = func.clone().into();
+            let alias = ScalarFunctionFactory {
+                name: alias.to_string(),
+                ..func
+            };
+            self.register(alias);
+        }
+
+        self.register(func)
     }
 
     /// Register an aggregate function in the registry.

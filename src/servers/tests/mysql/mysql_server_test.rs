@@ -19,8 +19,8 @@ use std::time::Duration;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
-use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
+use common_runtime::runtime::BuilderBuild;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
@@ -32,11 +32,11 @@ use servers::install_ring_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
-use table::test_util::MemTable;
 use table::TableRef;
+use table::test_util::MemTable;
 
 use crate::create_testing_sql_query_handler;
-use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
+use crate::mysql::{MysqlTextRow, TestingData, all_datatype_testing_data};
 
 #[derive(Default)]
 struct MysqlOpts<'a> {
@@ -87,10 +87,12 @@ async fn test_start_mysql_server() -> Result<()> {
     mysql_server.start(listening).await.unwrap();
 
     let result = mysql_server.start(listening).await;
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("MySQL server has been started."));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("MySQL server has been started.")
+    );
     Ok(())
 }
 
@@ -173,10 +175,12 @@ async fn test_shutdown_mysql_server() -> Result<()> {
 
     let mut mysql_server = create_mysql_server(table, Default::default())?;
     let result = mysql_server.shutdown().await;
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("MySQL server is not started."));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("MySQL server is not started.")
+    );
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     mysql_server.start(listening).await.unwrap();

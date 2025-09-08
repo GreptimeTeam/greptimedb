@@ -19,12 +19,12 @@ use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
+use datafusion_common::Column;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::Column;
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
-use datafusion_expr::{col as col_fn, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerContext, OptimizerRule};
@@ -33,7 +33,7 @@ use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
-    partial_commutative_transformer, Categorizer, Commutativity,
+    Categorizer, Commutativity, partial_commutative_transformer,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
@@ -472,46 +472,42 @@ impl PlanRewriter {
             return;
         }
 
-        if let LogicalPlan::TableScan(table_scan) = plan {
-            if let Some(source) = table_scan
+        if let LogicalPlan::TableScan(table_scan) = plan
+            && let Some(source) = table_scan
                 .source
                 .as_any()
                 .downcast_ref::<DefaultTableSource>()
-            {
-                if let Some(provider) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DfTableProviderAdapter>()
-                {
-                    let table = provider.table();
-                    if table.table_type() == TableType::Base {
-                        let info = table.table_info();
-                        let partition_key_indices = info.meta.partition_key_indices.clone();
-                        let schema = info.meta.schema.clone();
-                        let mut partition_cols = partition_key_indices
-                            .into_iter()
-                            .map(|index| schema.column_name_by_index(index).to_string())
-                            .collect::<Vec<String>>();
+            && let Some(provider) = source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DfTableProviderAdapter>()
+        {
+            let table = provider.table();
+            if table.table_type() == TableType::Base {
+                let info = table.table_info();
+                let partition_key_indices = info.meta.partition_key_indices.clone();
+                let schema = info.meta.schema.clone();
+                let mut partition_cols = partition_key_indices
+                    .into_iter()
+                    .map(|index| schema.column_name_by_index(index).to_string())
+                    .collect::<Vec<String>>();
 
-                        let partition_rules = table.partition_rules();
-                        let exist_phy_part_cols_not_in_logical_table = partition_rules
-                            .map(|r| !r.extra_phy_cols_not_in_logical_table.is_empty())
-                            .unwrap_or(false);
+                let partition_rules = table.partition_rules();
+                let exist_phy_part_cols_not_in_logical_table = partition_rules
+                    .map(|r| !r.extra_phy_cols_not_in_logical_table.is_empty())
+                    .unwrap_or(false);
 
-                        if exist_phy_part_cols_not_in_logical_table && partition_cols.is_empty() {
-                            // there are other physical partition columns that are not in logical table and part cols are empty
-                            // so we need to add a placeholder for it to prevent certain optimization
-                            // this is used to make sure the final partition columns(that optimizer see) are not empty
-                            // notice if originally partition_cols is not empty, then there is no need to add this place holder,
-                            // as subset of phy part cols can still be used for certain optimization, and it works as if
-                            // those columns are always null
-                            // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
-                            partition_cols
-                                .push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
-                        }
-                        self.partition_cols = Some(partition_cols);
-                    }
+                if exist_phy_part_cols_not_in_logical_table && partition_cols.is_empty() {
+                    // there are other physical partition columns that are not in logical table and part cols are empty
+                    // so we need to add a placeholder for it to prevent certain optimization
+                    // this is used to make sure the final partition columns(that optimizer see) are not empty
+                    // notice if originally partition_cols is not empty, then there is no need to add this place holder,
+                    // as subset of phy part cols can still be used for certain optimization, and it works as if
+                    // those columns are always null
+                    // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
+                    partition_cols.push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
                 }
+                self.partition_cols = Some(partition_cols);
             }
         }
     }
@@ -533,7 +529,9 @@ impl PlanRewriter {
             std::mem::take(&mut self.column_requirements),
             self.level,
         );
-        debug!("PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}");
+        debug!(
+            "PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}"
+        );
         on_node = on_node.rewrite(&mut rewriter)?.data;
         debug!(
             "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"

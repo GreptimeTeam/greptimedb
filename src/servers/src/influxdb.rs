@@ -16,7 +16,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::precision::Precision;
 use hyper::Request;
-use influxdb_line_protocol::{parse_lines, FieldValue};
+use influxdb_line_protocol::{FieldValue, parse_lines};
 use snafu::ResultExt;
 
 use crate::error::{Error, InfluxdbLineProtocolSnafu};

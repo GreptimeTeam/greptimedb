@@ -17,7 +17,7 @@
 use proc_macro2::{Literal, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{parenthesized, Attribute, Ident, ItemEnum, Variant};
+use syn::{Attribute, Ident, ItemEnum, Variant, parenthesized};
 
 pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let input_cloned: TokenStream2 = input.clone();

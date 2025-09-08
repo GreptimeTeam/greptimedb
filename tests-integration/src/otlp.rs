@@ -16,7 +16,7 @@
 mod test {
     use std::sync::Arc;
 
-    use client::{OutputData, DEFAULT_CATALOG_NAME};
+    use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -26,12 +26,12 @@ mod test {
     };
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
-        metric, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
-        ScopeMetrics,
+        Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
+        ScopeMetrics, metric,
     };
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
-    use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpenTelemetryProtocolHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -59,15 +59,17 @@ mod test {
         let db = "otlp";
         let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
-        assert!(SqlQueryHandler::do_query(
-            instance.as_ref(),
-            &format!("CREATE DATABASE IF NOT EXISTS {db}"),
-            ctx.clone(),
-        )
-        .await
-        .first()
-        .unwrap()
-        .is_ok());
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
 
         let resp = instance.metrics(req, ctx.clone()).await;
         assert!(resp.is_ok());

@@ -182,10 +182,14 @@ pub async fn pull_binary(version: &str) {
 /// Pull the binary if it does not exist and `pull_version_on_need` is true.
 pub async fn maybe_pull_binary(version: &str, pull_version_on_need: bool) {
     let exist = Path::new(version).join(PROGRAM).is_file();
-    match (exist, pull_version_on_need){
+    match (exist, pull_version_on_need) {
         (true, _) => println!("Binary {version} exists"),
-        (false, false) => panic!("Binary {version} does not exist, please run with --pull-version-on-need or manually download it"),
-        (false, true) => { pull_binary(version).await; },
+        (false, false) => panic!(
+            "Binary {version} does not exist, please run with --pull-version-on-need or manually download it"
+        ),
+        (false, true) => {
+            pull_binary(version).await;
+        }
     }
 }
 

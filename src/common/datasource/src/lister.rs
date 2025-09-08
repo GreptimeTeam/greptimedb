@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::{future, TryStreamExt};
+use futures::{TryStreamExt, future};
 use object_store::{Entry, ObjectStore};
 use regex::Regex;
 use snafu::ResultExt;

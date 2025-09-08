@@ -21,13 +21,13 @@ use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
 use async_stream::try_stream;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::prelude::{col, lit};
-use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
+use futures_util::stream::BoxStream;
 use mito2::engine::MitoEngine;
 use moka::future::Cache;
 use moka::policy::EvictionPolicy;
@@ -349,12 +349,11 @@ fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
 
     (0..batch.num_rows())
         .flat_map(move |row_index| {
-            let key = key_col
+            key_col
                 .get_ref(row_index)
                 .as_string()
                 .unwrap()
-                .map(|s| s.to_string());
-            key
+                .map(|s| s.to_string())
         })
         .collect()
 }

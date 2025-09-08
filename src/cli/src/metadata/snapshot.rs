@@ -19,13 +19,13 @@ use clap::{Parser, Subcommand};
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
-use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
+use object_store::services::{Fs, S3};
 use snafu::{OptionExt, ResultExt};
 
+use crate::Tool;
 use crate::error::{InvalidFilePathSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
 use crate::metadata::common::StoreConfig;
-use crate::Tool;
 
 /// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
 #[derive(Subcommand)]
@@ -258,11 +258,13 @@ impl Tool for MetaRestoreTool {
             Ok(())
         } else if !self.force {
             common_telemetry::warn!(
-                 "The target source is not clean, if you want to restore the metadata snapshot forcefully, please use --force option."
-             );
+                "The target source is not clean, if you want to restore the metadata snapshot forcefully, please use --force option."
+            );
             Ok(())
         } else {
-            common_telemetry::info!("The target source is not clean, We will restore the metadata snapshot with --force.");
+            common_telemetry::info!(
+                "The target source is not clean, We will restore the metadata snapshot with --force."
+            );
             self.inner
                 .restore(&self.source_file)
                 .await

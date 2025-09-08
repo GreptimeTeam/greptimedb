@@ -16,8 +16,8 @@
 mod tests {
     use std::borrow::Cow;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
 
     use api::v1::region::QueryRequest;
     use client::OutputData;
@@ -278,13 +278,15 @@ mod tests {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        assert!(instance
-            .frontend()
-            .catalog_manager()
-            .table("greptime", "public", "demo", None)
-            .await
-            .unwrap()
-            .is_none())
+        assert!(
+            instance
+                .frontend()
+                .catalog_manager()
+                .table("greptime", "public", "demo", None)
+                .await
+                .unwrap()
+                .is_none()
+        )
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -395,7 +397,7 @@ mod tests {
                         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
                             return Err(Error::NotSupported {
                                 feat: "Database operations".to_owned(),
-                            })
+                            });
                         }
                         _ => {}
                     }

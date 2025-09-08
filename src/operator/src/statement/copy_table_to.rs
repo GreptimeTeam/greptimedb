@@ -17,17 +17,17 @@ use std::sync::Arc;
 
 use client::OutputData;
 use common_base::readable_size::ReadableSize;
+use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
-use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::{
-    map_json_type_to_string, map_json_type_to_string_schema, RecordBatchStream,
-    SendableRecordBatchMapper, SendableRecordBatchStream,
+    RecordBatchStream, SendableRecordBatchMapper, SendableRecordBatchStream,
+    map_json_type_to_string, map_json_type_to_string_schema,
 };
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;

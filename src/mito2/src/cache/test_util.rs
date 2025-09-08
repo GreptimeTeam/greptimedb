@@ -19,10 +19,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use datatypes::arrow::array::{ArrayRef, Int64Array};
 use datatypes::arrow::record_batch::RecordBatch;
-use object_store::services::Fs;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use object_store::services::Fs;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 
 /// Returns a parquet meta data.

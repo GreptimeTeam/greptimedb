@@ -31,7 +31,7 @@ use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::prom_store;
-use servers::prom_store::{snappy_compress, Metrics};
+use servers::prom_store::{Metrics, snappy_compress};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;

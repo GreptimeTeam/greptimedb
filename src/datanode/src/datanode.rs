@@ -28,12 +28,12 @@ use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::{error, info, warn};
+use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
-use common_wal::config::DatanodeWalConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::kafka::{default_index_file, GlobalIndexCollector};
+use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
@@ -42,11 +42,11 @@ use mito2::engine::{MitoEngine, MitoEngineBuilder};
 use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
-use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use query::QueryEngineFactory;
+use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{RegionEngineRef, RegionRole};
 use tokio::fs;
@@ -59,14 +59,14 @@ use crate::error::{
     ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
-    new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
-    RegionServerEventReceiver,
+    NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
+    new_region_server_event_channel,
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
-use crate::utils::{build_region_open_requests, RegionOpenRequests};
+use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
 /// Datanode service.
 pub struct Datanode {
@@ -655,12 +655,12 @@ async fn open_all_regions(
     }
 
     for region_id in open_regions {
-        if open_with_writable {
-            if let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader) {
-                error!(
-                    e; "failed to convert region {region_id} to leader"
-                );
-            }
+        if open_with_writable
+            && let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader)
+        {
+            error!(
+                e; "failed to convert region {region_id} to leader"
+            );
         }
     }
 
@@ -719,17 +719,17 @@ mod tests {
     use cache::build_datanode_cache_registry;
     use common_base::Plugins;
     use common_meta::cache::LayeredCacheRegistryBuilder;
-    use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::key::RegionRoleSet;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
     use crate::config::DatanodeOptions;
     use crate::datanode::DatanodeBuilder;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
         let mgr = DatanodeTableManager::new(kv.clone());

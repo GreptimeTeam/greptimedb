@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionConfig;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;

@@ -21,7 +21,7 @@ use api::v1::meta::heartbeat_request::NodeWorkloads;
 pub use datanode::*;
 pub use flownode::*;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error;
 

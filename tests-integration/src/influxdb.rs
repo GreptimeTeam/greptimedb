@@ -21,11 +21,11 @@ mod test {
     use rstest::rstest;
     use rstest_reuse::apply;
     use servers::influxdb::InfluxdbRequest;
-    use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::InfluxdbLineProtocolHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
-    use crate::tests::test_util::{both_instances_cases, distributed, standalone, MockInstance};
+    use crate::tests::test_util::{MockInstance, both_instances_cases, distributed, standalone};
 
     #[apply(both_instances_cases)]
     async fn test_put_influxdb_lines_without_time_column(instance: Arc<dyn MockInstance>) {

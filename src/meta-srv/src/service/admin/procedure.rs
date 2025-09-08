@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,8 @@ use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::error::RuntimeSwitchManagerSnafu;
-use crate::service::admin::util::{to_json_response, to_not_found_response, ErrorHandler};
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::{ErrorHandler, to_json_response, to_not_found_response};
 
 #[derive(Clone)]
 pub struct ProcedureManagerHandler {

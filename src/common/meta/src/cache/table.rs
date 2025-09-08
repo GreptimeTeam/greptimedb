@@ -19,9 +19,9 @@ mod table_route;
 mod table_schema;
 mod view_info;
 
-pub use schema::{new_schema_cache, SchemaCache, SchemaCacheRef};
-pub use table_info::{new_table_info_cache, TableInfoCache, TableInfoCacheRef};
-pub use table_name::{new_table_name_cache, TableNameCache, TableNameCacheRef};
-pub use table_route::{new_table_route_cache, TableRoute, TableRouteCache, TableRouteCacheRef};
-pub use table_schema::{new_table_schema_cache, TableSchemaCache, TableSchemaCacheRef};
-pub use view_info::{new_view_info_cache, ViewInfoCache, ViewInfoCacheRef};
+pub use schema::{SchemaCache, SchemaCacheRef, new_schema_cache};
+pub use table_info::{TableInfoCache, TableInfoCacheRef, new_table_info_cache};
+pub use table_name::{TableNameCache, TableNameCacheRef, new_table_name_cache};
+pub use table_route::{TableRoute, TableRouteCache, TableRouteCacheRef, new_table_route_cache};
+pub use table_schema::{TableSchemaCache, TableSchemaCacheRef, new_table_schema_cache};
+pub use view_info::{ViewInfoCache, ViewInfoCacheRef, new_view_info_cache};

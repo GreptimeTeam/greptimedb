@@ -14,18 +14,18 @@
 
 use std::str::FromStr;
 
-use common_time::timezone::Timezone;
 use common_time::Timestamp;
+use common_time::timezone::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::types::{parse_string_to_json_type_value, parse_string_to_vector_type_value};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 pub use sqlparser::ast::{
-    visit_expressions_mut, visit_statements_mut, BinaryOperator, ColumnDef, ColumnOption,
-    ColumnOptionDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo, UnaryOperator, Value as SqlValue,
-    Visit, VisitMut, Visitor, VisitorMut,
+    BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName, SqlOption, TableConstraint,
+    TimezoneInfo, UnaryOperator, Value as SqlValue, Visit, VisitMut, Visitor, VisitorMut,
+    visit_expressions_mut, visit_statements_mut,
 };
 
 use crate::error::{
@@ -173,7 +173,7 @@ pub fn sql_value_to_value(
                 value: sql_val.clone(),
                 datatype: data_type.clone(),
             }
-            .fail()
+            .fail();
         }
     };
 
@@ -221,7 +221,7 @@ pub fn sql_value_to_value(
             },
 
             Value::String(_) | Value::Binary(_) | Value::List(_) => {
-                return InvalidUnaryOpSnafu { unary_op, value }.fail()
+                return InvalidUnaryOpSnafu { unary_op, value }.fail();
             }
         }
     }
@@ -243,10 +243,8 @@ pub(crate) fn parse_string_to_value(
     timezone: Option<&Timezone>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
-    if auto_string_to_numeric {
-        if let Some(value) = auto_cast_to_numeric(&s, data_type)? {
-            return Ok(value);
-        }
+    if auto_string_to_numeric && let Some(value) = auto_cast_to_numeric(&s, data_type)? {
+        return Ok(value);
     }
 
     ensure!(
@@ -814,14 +812,16 @@ mod test {
             }
         }
 
-        assert!(parse_string_to_value(
-            "json_col",
-            r#"Nicola Kovac is the best rifler in the world"#.to_string(),
-            &ConcreteDataType::json_datatype(),
-            None,
-            false,
+        assert!(
+            parse_string_to_value(
+                "json_col",
+                r#"Nicola Kovac is the best rifler in the world"#.to_string(),
+                &ConcreteDataType::json_datatype(),
+                None,
+                false,
+            )
+            .is_err()
         )
-        .is_err())
     }
 
     #[test]
@@ -966,14 +966,16 @@ mod test {
             }
         }
 
-        assert!(parse_string_to_value(
-            "timestamp_col",
-            "2022-02-22T00:01:01+08".to_string(),
-            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-            None,
-            false,
-        )
-        .is_err());
+        assert!(
+            parse_string_to_value(
+                "timestamp_col",
+                "2022-02-22T00:01:01+08".to_string(),
+                &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+                None,
+                false,
+            )
+            .is_err()
+        );
 
         // with timezone
         match parse_string_to_value(
@@ -998,42 +1000,50 @@ mod test {
 
     #[test]
     fn test_parse_placeholder_value() {
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::string_datatype(),
-            &SqlValue::Placeholder("default".into()),
-            None,
-            None,
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::string_datatype(),
-            &SqlValue::Placeholder("default".into()),
-            None,
-            Some(UnaryOperator::Minus),
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::uint16_datatype(),
-            &SqlValue::Number("3".into(), false),
-            None,
-            Some(UnaryOperator::Minus),
-            false
-        )
-        .is_err());
-        assert!(sql_value_to_value(
-            "test",
-            &ConcreteDataType::uint16_datatype(),
-            &SqlValue::Number("3".into(), false),
-            None,
-            None,
-            false
-        )
-        .is_ok());
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::string_datatype(),
+                &SqlValue::Placeholder("default".into()),
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::string_datatype(),
+                &SqlValue::Placeholder("default".into()),
+                None,
+                Some(UnaryOperator::Minus),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::uint16_datatype(),
+                &SqlValue::Number("3".into(), false),
+                None,
+                Some(UnaryOperator::Minus),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            sql_value_to_value(
+                "test",
+                &ConcreteDataType::uint16_datatype(),
+                &SqlValue::Number("3".into(), false),
+                None,
+                None,
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -170,9 +170,12 @@ pub trait Collector {
 }
 
 fn print_anonymous_usage_data_disclaimer() {
-    info!("Attention: GreptimeDB now collects anonymous usage data to help improve its roadmap and prioritize features.");
     info!(
-        "To learn more about this anonymous program and how to deactivate it if you don't want to participate, please visit the following URL: ");
+        "Attention: GreptimeDB now collects anonymous usage data to help improve its roadmap and prioritize features."
+    );
+    info!(
+        "To learn more about this anonymous program and how to deactivate it if you don't want to participate, please visit the following URL: "
+    );
     info!("https://docs.greptime.com/reference/telemetry");
 }
 
@@ -308,19 +311,19 @@ impl GreptimeDBTelemetry {
 mod tests {
     use std::convert::Infallible;
     use std::env;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::time::Duration;
 
     use common_test_util::ports;
     use common_version::build_info;
-    use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
+    use hyper::service::{make_service_fn, service_fn};
     use reqwest::{Client, Response};
     use tokio::spawn;
 
     use crate::{
-        default_get_uuid, format_uptime, Collector, GreptimeDBTelemetry, Mode, StatisticData,
+        Collector, GreptimeDBTelemetry, Mode, StatisticData, default_get_uuid, format_uptime,
     };
 
     static COUNT: AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

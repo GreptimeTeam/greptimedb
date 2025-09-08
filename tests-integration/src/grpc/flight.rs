@@ -40,7 +40,7 @@ mod test {
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{setup_grpc_server, StorageType};
+    use crate::test_util::{StorageType, setup_grpc_server};
     use crate::tests::test_util::MockInstance;
 
     #[tokio::test(flavor = "multi_thread")]

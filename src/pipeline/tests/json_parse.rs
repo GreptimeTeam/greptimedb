@@ -16,8 +16,8 @@ mod common;
 
 use std::borrow::Cow;
 
-use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use api::v1::value::ValueData;
 
 const INPUT_VALUE_OBJ: &str = r#"
 [
