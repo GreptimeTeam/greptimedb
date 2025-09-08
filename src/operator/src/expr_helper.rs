@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
-use api::v1::column_def::options_from_column_schema;
+use api::v1::column_def::{options_from_column_schema, try_as_column_schema};
 use api::v1::{
     AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
     ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
@@ -36,7 +36,8 @@ use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
-    COMMENT_KEY, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SkippingIndexType,
+    COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema,
+    SkippingIndexType,
 };
 use file_engine::FileOptions;
 use query::sql::{
@@ -46,15 +47,21 @@ use query::sql::{
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
-use sql::ast::{ColumnOption, ObjectName, ObjectNamePartExt};
+use sql::ast::{
+    ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName, ObjectNamePartExt,
+};
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::ParserContext;
 use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
 };
 use sql::statements::create::{
-    Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
+    Column as SqlColumn, ColumnExtensions, CreateExternalTable, CreateFlow, CreateTable,
+    CreateView, TableConstraint,
 };
 use sql::statements::{
-    column_to_schema, sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type,
+    OptionMap, column_to_schema, concrete_data_type_to_sql_data_type,
+    sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type, value_to_sql_value,
 };
 use sql::util::extract_tables_from_query;
 use table::requests::{FILE_TABLE_META_KEY, TableOptions};
@@ -65,9 +72,9 @@ pub use trigger::to_create_trigger_task_expr;
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, FindNewColumnsOnInsertionSnafu,
-    IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu,
-    NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
-    UnrecognizedTableOptionSnafu,
+    IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidColumnDefSnafu,
+    InvalidFlowNameSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, ParseSqlValueSnafu,
+    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 
 pub fn create_table_expr_by_column_schemas(
@@ -228,6 +235,136 @@ pub fn create_to_expr(
 
     validate_create_expr(&expr)?;
     Ok(expr)
+}
+
+/// Convert [`CreateTableExpr`] gRPC request back to `CreateTable` statement.
+///
+/// This function performs the reverse conversion of [`create_to_expr`], taking a gRPC
+/// `CreateTableExpr` and converting it back to a SQL AST `CreateTable` statement.
+///
+/// # Parameters
+///
+/// * `expr` - The `CreateTableExpr` to convert
+/// * `quote_style` - Optional quote style for identifiers (defaults to `"`)
+///
+/// # Returns
+///
+/// Returns a `CreateTable` SQL AST node that represents the same table structure
+/// as the input `CreateTableExpr`.
+///
+/// # Note
+///
+/// The conversion may not be 100% identical to the original SQL due to:
+/// - Quote style differences
+/// - Table option normalization (e.g., "3days" -> "3d")
+/// - Primary key representation (always as constraints, not inline)
+pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Result<CreateTable> {
+    let quote_style = quote_style.unwrap_or('"');
+
+    // Convert table name
+    let table_name = ObjectName(vec![sql::ast::ObjectNamePart::Identifier(
+        sql::ast::Ident::with_quote(quote_style, &expr.table_name),
+    )]);
+
+    // Convert columns
+    let mut columns = Vec::with_capacity(expr.column_defs.len());
+    for column_def in &expr.column_defs {
+        let column_schema = try_as_column_schema(column_def).context(InvalidColumnDefSnafu {
+            column: &column_def.name,
+        })?;
+
+        let mut options = Vec::new();
+
+        // Add NULL/NOT NULL constraint
+        if column_def.is_nullable {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Null,
+            });
+        } else {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            });
+        }
+
+        // Add DEFAULT constraint if present
+        if let Some(default_constraint) = column_schema.default_constraint() {
+            let expr = match default_constraint {
+                ColumnDefaultConstraint::Value(v) => {
+                    Expr::Value(value_to_sql_value(v).context(ParseSqlValueSnafu)?.into())
+                }
+                ColumnDefaultConstraint::Function(func_expr) => {
+                    ParserContext::parse_function(func_expr, &GreptimeDbDialect {})
+                        .context(ParseSqlSnafu)?
+                }
+            };
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(expr),
+            });
+        }
+
+        // Add COMMENT if present
+        if !column_def.comment.is_empty() {
+            options.push(ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Comment(column_def.comment.clone()),
+            });
+        }
+
+        // Note: We don't add inline PRIMARY KEY options here,
+        // we'll handle all primary keys as constraints instead for consistency
+        let sql_column = SqlColumn {
+            column_def: ColumnDef {
+                name: Ident::with_quote(quote_style, &column_def.name),
+                data_type: concrete_data_type_to_sql_data_type(&column_schema.data_type)
+                    .context(ParseSqlSnafu)?,
+                options,
+            },
+            extensions: ColumnExtensions::default(),
+        };
+
+        columns.push(sql_column);
+    }
+
+    // Convert constraints
+    let mut constraints = Vec::new();
+
+    // Add TIME INDEX constraint
+    constraints.push(TableConstraint::TimeIndex {
+        column: Ident::with_quote(quote_style, &expr.time_index),
+    });
+
+    // Add PRIMARY KEY constraint (always add as constraint for consistency)
+    if !expr.primary_keys.is_empty() {
+        let primary_key_columns: Vec<Ident> = expr
+            .primary_keys
+            .iter()
+            .map(|pk| Ident::with_quote(quote_style, pk))
+            .collect();
+
+        constraints.push(TableConstraint::PrimaryKey {
+            columns: primary_key_columns,
+        });
+    }
+
+    // Convert table options
+    let mut options = OptionMap::default();
+    for (key, value) in &expr.table_options {
+        options.insert(key.clone(), value.clone());
+    }
+
+    Ok(CreateTable {
+        if_not_exists: expr.create_if_not_exists,
+        table_id: expr.table_id.as_ref().map(|tid| tid.id).unwrap_or(0),
+        name: table_name,
+        columns,
+        engine: expr.engine.clone(),
+        constraints,
+        options,
+        partitions: None,
+    })
 }
 
 /// Validate the [`CreateTableExpr`] request.
@@ -1300,5 +1437,66 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!(sql, expr.definition);
         assert_eq!(columns, expr.columns);
         assert_eq!(plan_columns, expr.plan_columns);
+    }
+
+    #[test]
+    fn test_expr_to_create() {
+        let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(ttl='3days');";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateTable(original_create) = stmt else {
+            unreachable!()
+        };
+
+        // Convert CreateTable -> CreateTableExpr -> CreateTable
+        let expr = create_to_expr(&original_create, &QueryContext::arc()).unwrap();
+        let recreated_create = expr_to_create(&expr, Some('"')).unwrap();
+
+        // Verify basic properties
+        assert_eq!(
+            original_create.if_not_exists,
+            recreated_create.if_not_exists
+        );
+
+        // Compare table names (ignoring quote style)
+        assert_eq!(original_create.name.0.len(), recreated_create.name.0.len());
+        for (orig, recreated) in original_create
+            .name
+            .0
+            .iter()
+            .zip(recreated_create.name.0.iter())
+        {
+            let (
+                sql::ast::ObjectNamePart::Identifier(orig_ident),
+                sql::ast::ObjectNamePart::Identifier(recreated_ident),
+            ) = (orig, recreated);
+            assert_eq!(orig_ident.value, recreated_ident.value);
+        }
+
+        assert_eq!(original_create.engine, recreated_create.engine);
+        assert_eq!(
+            original_create.columns.len(),
+            recreated_create.columns.len()
+        );
+        assert_eq!(
+            original_create.constraints.len(),
+            recreated_create.constraints.len()
+        );
+
+        // Verify column names (ignoring quote style)
+        for (orig, recreated) in original_create
+            .columns
+            .iter()
+            .zip(recreated_create.columns.iter())
+        {
+            assert_eq!(orig.column_def.name.value, recreated.column_def.name.value);
+        }
+
+        // Verify table options (ttl should be converted to normalized format)
+        assert!(recreated_create.options.get("ttl").is_some());
     }
 }
