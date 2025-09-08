@@ -16,7 +16,8 @@ use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::InvalidFuncArgsSnafu;
-use common_query::prelude::{Signature, TypeSignature, Volatility};
+use datafusion_expr::type_coercion::aggregates::{BINARYS, STRINGS};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
@@ -46,8 +47,8 @@ impl Function for ElemSumFunction {
     fn signature(&self) -> Signature {
         Signature::one_of(
             vec![
-                TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
-                TypeSignature::Exact(vec![ConcreteDataType::binary_datatype()]),
+                TypeSignature::Uniform(1, STRINGS.to_vec()),
+                TypeSignature::Uniform(1, BINARYS.to_vec()),
             ],
             Volatility::Immutable,
         )

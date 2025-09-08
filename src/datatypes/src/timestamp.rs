@@ -17,8 +17,8 @@ use arrow_array::{
     TimestampNanosecondArray, TimestampSecondArray,
 };
 use arrow_schema::DataType;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 

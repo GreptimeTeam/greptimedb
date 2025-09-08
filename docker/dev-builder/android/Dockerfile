@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y \
     git \
     unzip \
     build-essential \
-    pkg-config
+    pkg-config \
+    openssh-client
 
 # Install protoc
 ARG PROTOBUF_VERSION=29.3

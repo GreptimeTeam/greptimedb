@@ -16,8 +16,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::{Signature, Volatility};
 use common_time::{Date, Timestamp};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, VectorRef};
 use snafu::ensure;
@@ -68,14 +69,14 @@ impl Function for ToUnixtimeFunction {
         Signature::uniform(
             1,
             vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::int64_datatype(),
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::timestamp_second_datatype(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                ConcreteDataType::timestamp_microsecond_datatype(),
-                ConcreteDataType::timestamp_nanosecond_datatype(),
+                DataType::Utf8,
+                DataType::Int32,
+                DataType::Int64,
+                DataType::Date32,
+                DataType::Timestamp(TimeUnit::Second, None),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
             ],
             Volatility::Immutable,
         )
@@ -129,7 +130,7 @@ impl fmt::Display for ToUnixtimeFunction {
 
 #[cfg(test)]
 mod tests {
-    use common_query::prelude::TypeSignature;
+    use datafusion_expr::TypeSignature;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
@@ -152,14 +153,14 @@ mod tests {
                              type_signature: TypeSignature::Uniform(1, valid_types),
                              volatility: Volatility::Immutable
                          } if  valid_types == vec![
-                             ConcreteDataType::string_datatype(),
-                             ConcreteDataType::int32_datatype(),
-                             ConcreteDataType::int64_datatype(),
-                             ConcreteDataType::date_datatype(),
-                             ConcreteDataType::timestamp_second_datatype(),
-                             ConcreteDataType::timestamp_millisecond_datatype(),
-                             ConcreteDataType::timestamp_microsecond_datatype(),
-                             ConcreteDataType::timestamp_nanosecond_datatype(),
+                             DataType::Utf8,
+                             DataType::Int32,
+                             DataType::Int64,
+                             DataType::Date32,
+                             DataType::Timestamp(TimeUnit::Second, None),
+                             DataType::Timestamp(TimeUnit::Millisecond, None),
+                             DataType::Timestamp(TimeUnit::Microsecond, None),
+                             DataType::Timestamp(TimeUnit::Nanosecond, None),
                          ]
         ));
 

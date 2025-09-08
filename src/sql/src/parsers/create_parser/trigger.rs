@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -10,11 +10,11 @@ use crate::error;
 use crate::error::Result;
 use crate::parser::ParserContext;
 use crate::parsers::utils::convert_month_day_nano_to_duration;
+use crate::statements::OptionMap;
 use crate::statements::create::trigger::{
     AlertManagerWebhook, ChannelType, CreateTrigger, NotifyChannel, TriggerOn,
 };
 use crate::statements::statement::Statement;
-use crate::statements::OptionMap;
 use crate::util::parse_option_string;
 
 /// Some keywords about trigger.

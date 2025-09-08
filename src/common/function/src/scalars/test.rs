@@ -16,12 +16,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
 use crate::function::{Function, FunctionContext};
-use crate::scalars::expression::{scalar_binary_op, EvalContext};
+use crate::scalars::expression::{EvalContext, scalar_binary_op};
 
 #[derive(Clone, Default)]
 pub(crate) struct TestAndFunction;
@@ -37,10 +38,7 @@ impl Function for TestAndFunction {
 
     fn signature(&self) -> Signature {
         Signature::exact(
-            vec![
-                ConcreteDataType::boolean_datatype(),
-                ConcreteDataType::boolean_datatype(),
-            ],
+            vec![DataType::Boolean, DataType::Boolean],
             Volatility::Immutable,
         )
     }

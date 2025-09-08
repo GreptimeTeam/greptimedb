@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
-use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE;
 use common_base::range_read::FileReader;
 use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{info, warn};
@@ -107,10 +107,10 @@ impl<H: 'static> BoundedStager<H> {
                 }
                 .boxed()
             });
-        if let Some(ttl) = cache_ttl {
-            if !ttl.is_zero() {
-                cache_builder = cache_builder.time_to_live(ttl);
-            }
+        if let Some(ttl) = cache_ttl
+            && !ttl.is_zero()
+        {
+            cache_builder = cache_builder.time_to_live(ttl);
         }
         let cache = cache_builder.build();
 
@@ -369,6 +369,9 @@ impl<H> BoundedStager<H> {
     /// Note: It can't recover the mapping between puffin files and keys, so TTL
     ///       is configured to purge the dangling files and directories.
     async fn recover(&self) -> Result<()> {
+        let timer = std::time::Instant::now();
+        info!("Recovering the staging area, base_dir: {:?}", self.base_dir);
+
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
         let mut elems = HashMap::new();
@@ -430,6 +433,7 @@ impl<H> BoundedStager<H> {
         }
 
         let mut size = 0;
+        let num_elems = elems.len();
         for (key, value) in elems {
             size += value.size();
             self.cache.insert(key, value).await;
@@ -440,6 +444,12 @@ impl<H> BoundedStager<H> {
 
         self.cache.run_pending_tasks().await;
 
+        info!(
+            "Recovered the staging area, num_entries: {}, num_bytes: {}, cost: {:?}",
+            num_elems,
+            size,
+            timer.elapsed()
+        );
         Ok(())
     }
 

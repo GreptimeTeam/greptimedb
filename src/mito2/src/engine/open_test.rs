@@ -27,12 +27,12 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
-use crate::compaction::compactor::{open_compaction_region, OpenCompactionRegionRequest};
+use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::region::options::RegionOptions;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
@@ -238,17 +238,21 @@ async fn test_engine_region_open_with_custom_store() {
     // The region should not be opened with the default object store.
     let region = engine.get_region(region_id).unwrap();
     let object_store_manager = env.get_object_store_manager().unwrap();
-    assert!(!object_store_manager
-        .default_object_store()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
-    assert!(object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
+    assert!(
+        !object_store_manager
+            .default_object_store()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

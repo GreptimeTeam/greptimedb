@@ -23,7 +23,7 @@ use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
 use processor::{Processor, Processors};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use transform::Transforms;
 use vrl::core::Value as VrlValue;
 use yaml_rust::{Yaml, YamlLoader};
@@ -218,7 +218,7 @@ impl From<&Rule> for DispatchedTo {
 impl DispatchedTo {
     /// Generate destination table name from input
     pub fn dispatched_to_table_name(&self, original: &str) -> String {
-        format!("{}_{}", &original, self.table_suffix)
+        [original, &self.table_suffix].concat()
     }
 }
 

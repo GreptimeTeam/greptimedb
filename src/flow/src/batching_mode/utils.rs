@@ -24,15 +24,15 @@ use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
 use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{
-    Transformed, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
+    Transformed, TreeNode as _, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
 use datatypes::schema::SchemaRef;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement, DEFAULT_LOOKBACK_STRING};
 use query::QueryEngineRef;
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -122,16 +122,37 @@ pub async fn sql_to_df_plan(
     };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx)
+        .plan(&query_stmt, query_ctx.clone())
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
 
     let plan = if optimize {
-        apply_df_optimizer(plan).await?
+        apply_df_optimizer(plan, &query_ctx).await?
     } else {
         plan
     };
+    Ok(plan)
+}
+
+/// Generate a plan that matches the schema of the sink table
+/// from given sql by alias and adding auto columns
+pub(crate) async fn gen_plan_with_matching_schema(
+    sql: &str,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+    sink_table_schema: SchemaRef,
+) -> Result<LogicalPlan, Error> {
+    let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
+
+    let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema);
+    let plan = plan
+        .clone()
+        .rewrite(&mut add_auto_column)
+        .with_context(|_| DatafusionSnafu {
+            context: format!("Failed to rewrite plan:\n {}\n", plan),
+        })?
+        .data;
     Ok(plan)
 }
 
@@ -239,28 +260,116 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     }
 }
 
-/// Add to the final select columns like `update_at`
+/// Optionally add to the final select columns like `update_at` if the sink table has such column
 /// (which doesn't necessary need to have exact name just need to be a extra timestamp column)
 /// and `__ts_placeholder`(this column need to have exact this name and be a timestamp)
 /// with values like `now()` and `0`
 ///
 /// it also give existing columns alias to column in sink table if needed
 #[derive(Debug)]
-pub struct AddAutoColumnRewriter {
+pub struct ColumnMatcherRewriter {
     pub schema: SchemaRef,
     pub is_rewritten: bool,
 }
 
-impl AddAutoColumnRewriter {
+impl ColumnMatcherRewriter {
     pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
             is_rewritten: false,
         }
     }
+
+    /// modify the exprs in place so that it matches the schema and some auto columns are added
+    fn modify_project_exprs(&mut self, mut exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
+        let all_names = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<BTreeSet<_>>();
+        // first match by position
+        for (idx, expr) in exprs.iter_mut().enumerate() {
+            if !all_names.contains(&expr.qualified_name().1)
+                && let Some(col_name) = self
+                    .schema
+                    .column_schemas()
+                    .get(idx)
+                    .map(|c| c.name.clone())
+            {
+                // if the data type mismatched, later check_execute will error out
+                // hence no need to check it here, beside, optimize pass might be able to cast it
+                // so checking here is not necessary
+                *expr = expr.clone().alias(col_name);
+            }
+        }
+
+        // add columns if have different column count
+        let query_col_cnt = exprs.len();
+        let table_col_cnt = self.schema.column_schemas().len();
+        debug!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
+
+        let placeholder_ts_expr =
+            datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
+                .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
+
+        if query_col_cnt == table_col_cnt {
+            // still need to add alias, see below
+        } else if query_col_cnt + 1 == table_col_cnt {
+            let last_col_schema = self.schema.column_schemas().last().unwrap();
+
+            // if time index column is auto created add it
+            if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
+                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
+            {
+                exprs.push(placeholder_ts_expr);
+            } else if last_col_schema.data_type.is_timestamp() {
+                // is the update at column
+                exprs.push(datafusion::prelude::now().alias(&last_col_schema.name));
+            } else {
+                // helpful error message
+                return Err(DataFusionError::Plan(format!(
+                    "Expect the last column in table to be timestamp column, found column {} with type {:?}",
+                    last_col_schema.name, last_col_schema.data_type
+                )));
+            }
+        } else if query_col_cnt + 2 == table_col_cnt {
+            let mut col_iter = self.schema.column_schemas().iter().rev();
+            let last_col_schema = col_iter.next().unwrap();
+            let second_last_col_schema = col_iter.next().unwrap();
+            if second_last_col_schema.data_type.is_timestamp() {
+                exprs.push(datafusion::prelude::now().alias(&second_last_col_schema.name));
+            } else {
+                return Err(DataFusionError::Plan(format!(
+                    "Expect the second last column in the table to be timestamp column, found column {} with type {:?}",
+                    second_last_col_schema.name, second_last_col_schema.data_type
+                )));
+            }
+
+            if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
+                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
+            {
+                exprs.push(placeholder_ts_expr);
+            } else {
+                return Err(DataFusionError::Plan(format!(
+                    "Expect timestamp column {}, found {:?}",
+                    AUTO_CREATED_PLACEHOLDER_TS_COL, last_col_schema
+                )));
+            }
+        } else {
+            return Err(DataFusionError::Plan(format!(
+                "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
+                query_col_cnt,
+                exprs,
+                table_col_cnt,
+                self.schema.column_schemas()
+            )));
+        }
+        Ok(exprs)
+    }
 }
 
-impl TreeNodeRewriter for AddAutoColumnRewriter {
+impl TreeNodeRewriter for ColumnMatcherRewriter {
     type Node = LogicalPlan;
     fn f_down(&mut self, mut node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         if self.is_rewritten {
@@ -302,99 +411,30 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         }
 
         // only do rewrite if found the outermost projection
-        let mut exprs = if let LogicalPlan::Projection(project) = &node {
-            project.expr.clone()
+        // if the outermost node is projection, can rewrite the exprs
+        // if not, wrap it in a projection
+        if let LogicalPlan::Projection(project) = &node {
+            let exprs = project.expr.clone();
+            let exprs = self.modify_project_exprs(exprs)?;
+
+            self.is_rewritten = true;
+            let new_plan =
+                node.with_new_exprs(exprs, node.inputs().into_iter().cloned().collect())?;
+            Ok(Transformed::yes(new_plan))
         } else {
-            return Ok(Transformed::no(node));
-        };
-
-        let all_names = self
-            .schema
-            .column_schemas()
-            .iter()
-            .map(|c| c.name.clone())
-            .collect::<BTreeSet<_>>();
-        // first match by position
-        for (idx, expr) in exprs.iter_mut().enumerate() {
-            if !all_names.contains(&expr.qualified_name().1) {
-                if let Some(col_name) = self
-                    .schema
-                    .column_schemas()
-                    .get(idx)
-                    .map(|c| c.name.clone())
-                {
-                    // if the data type mismatched, later check_execute will error out
-                    // hence no need to check it here, beside, optimize pass might be able to cast it
-                    // so checking here is not necessary
-                    *expr = expr.clone().alias(col_name);
-                }
+            // wrap the logical plan in a projection
+            let mut exprs = vec![];
+            for field in node.schema().fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new_unqualified(
+                    field.name(),
+                )));
             }
+            let exprs = self.modify_project_exprs(exprs)?;
+            self.is_rewritten = true;
+            let new_plan =
+                LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
+            Ok(Transformed::yes(new_plan))
         }
-
-        // add columns if have different column count
-        let query_col_cnt = exprs.len();
-        let table_col_cnt = self.schema.column_schemas().len();
-        debug!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
-
-        let placeholder_ts_expr =
-            datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
-                .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
-
-        if query_col_cnt == table_col_cnt {
-            // still need to add alias, see below
-        } else if query_col_cnt + 1 == table_col_cnt {
-            let last_col_schema = self.schema.column_schemas().last().unwrap();
-
-            // if time index column is auto created add it
-            if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
-            {
-                exprs.push(placeholder_ts_expr);
-            } else if last_col_schema.data_type.is_timestamp() {
-                // is the update at column
-                exprs.push(datafusion::prelude::now().alias(&last_col_schema.name));
-            } else {
-                // helpful error message
-                return Err(DataFusionError::Plan(format!(
-                    "Expect the last column in table to be timestamp column, found column {} with type {:?}",
-                    last_col_schema.name,
-                    last_col_schema.data_type
-                )));
-            }
-        } else if query_col_cnt + 2 == table_col_cnt {
-            let mut col_iter = self.schema.column_schemas().iter().rev();
-            let last_col_schema = col_iter.next().unwrap();
-            let second_last_col_schema = col_iter.next().unwrap();
-            if second_last_col_schema.data_type.is_timestamp() {
-                exprs.push(datafusion::prelude::now().alias(&second_last_col_schema.name));
-            } else {
-                return Err(DataFusionError::Plan(format!(
-                    "Expect the second last column in the table to be timestamp column, found column {} with type {:?}",
-                    second_last_col_schema.name,
-                    second_last_col_schema.data_type
-                )));
-            }
-
-            if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
-            {
-                exprs.push(placeholder_ts_expr);
-            } else {
-                return Err(DataFusionError::Plan(format!(
-                    "Expect timestamp column {}, found {:?}",
-                    AUTO_CREATED_PLACEHOLDER_TS_COL, last_col_schema
-                )));
-            }
-        } else {
-            return Err(DataFusionError::Plan(format!(
-                    "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
-                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas()
-                )));
-        }
-
-        self.is_rewritten = true;
-        let new_plan = node.with_new_exprs(exprs, node.inputs().into_iter().cloned().collect())?;
-        Ok(Transformed::yes(new_plan))
     }
 
     /// We might add new columns, so we need to recompute the schema
@@ -480,36 +520,31 @@ mod test {
         let testcases = vec![
             (
                 "SELECT number FROM numbers_with_ts GROUP BY number",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number"
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number",
             ),
-
             (
                 "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10",
-                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE ((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4)"
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE ((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4)",
             ),
-
             (
                 "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)"
+                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)",
             ),
-
             // subquery
             (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);", 
-                "SELECT numbers_with_ts.number, time_window FROM (SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number)"
+                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
+                "SELECT numbers_with_ts.number, time_window FROM (SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number)",
             ),
-
             // complex subquery without alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name"
+                "SELECT sum(numbers_with_ts.number), numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window, bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) GROUP BY numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts), bucket_name",
             ),
-
             // complex subquery alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte WHERE number > 1 GROUP BY number, time_window, bucket_name;",
-                "SELECT sum(cte.number), cte.number, date_bin('5 minutes', cte.ts) AS time_window, cte.bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) AS cte WHERE (cte.number > 1) GROUP BY cte.number, date_bin('5 minutes', cte.ts), cte.bucket_name"
-            )
+                "SELECT sum(cte.number), cte.number, date_bin('5 minutes', cte.ts) AS time_window, cte.bucket_name FROM (SELECT numbers_with_ts.number, numbers_with_ts.ts, CASE WHEN (numbers_with_ts.number < 5) THEN 'bucket_0_5' WHEN (numbers_with_ts.number >= 5) THEN 'bucket_5_inf' END AS bucket_name FROM numbers_with_ts WHERE (number > 4)) AS cte WHERE (cte.number > 1) GROUP BY cte.number, date_bin('5 minutes', cte.ts), cte.bucket_name",
+            ),
         ];
         use datafusion_expr::{col, lit};
         let query_engine = create_test_query_engine();
@@ -548,7 +583,9 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -576,7 +613,9 @@ mod test {
             // add update_at and ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -595,7 +634,9 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -614,7 +655,9 @@ mod test {
             // add update_at after time index column
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts"),
+                Ok(
+                    "SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -634,7 +677,9 @@ mod test {
             // error datatype mismatch
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Err("Expect the last column in table to be timestamp column, found column atat with type Int8"),
+                Err(
+                    "Expect the last column in table to be timestamp column, found column atat with type Int8",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -654,14 +699,12 @@ mod test {
             // error datatype mismatch on second last column
             (
                 "SELECT number FROM numbers_with_ts",
-                Err("Expect the second last column in the table to be timestamp column, found column ts with type Int8"),
+                Err(
+                    "Expect the second last column in the table to be timestamp column, found column ts with type Int8",
+                ),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::int8_datatype(),
-                        false,
-                    ),
+                    ColumnSchema::new("ts", ConcreteDataType::int8_datatype(), false),
                     ColumnSchema::new(
                         // name is irrelevant for update_at column
                         "atat",
@@ -677,7 +720,7 @@ mod test {
         let ctx = QueryContext::arc();
         for (before, after, column_schemas) in testcases {
             let schema = Arc::new(Schema::new(column_schemas));
-            let mut add_auto_column_rewriter = AddAutoColumnRewriter::new(schema);
+            let mut add_auto_column_rewriter = ColumnMatcherRewriter::new(schema);
 
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
                 .await
@@ -704,32 +747,32 @@ mod test {
     async fn test_find_group_by_exprs() {
         let testcases = vec![
             (
-                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;", 
-                vec!["ts"]
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;",
+                vec!["ts"],
             ),
             (
                 "SELECT number FROM numbers_with_ts GROUP BY number",
-                vec!["number"]
+                vec!["number"],
             ),
             (
                 "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
-                vec!["time_window"]
+                vec!["time_window"],
             ),
-             // subquery
+            // subquery
             (
-                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);", 
-                vec!["time_window", "number"]
+                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);",
+                vec!["time_window", "number"],
             ),
             // complex subquery without alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"]
+                vec!["number", "time_window", "bucket_name"],
             ),
             // complex subquery alias
             (
                 "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte GROUP BY number, time_window, bucket_name;",
-                vec!["number", "time_window", "bucket_name"]
-            )
+                vec!["number", "time_window", "bucket_name"],
+            ),
         ];
 
         let query_engine = create_test_query_engine();

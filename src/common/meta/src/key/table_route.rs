@@ -17,7 +17,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
@@ -31,9 +31,9 @@ use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
     TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
 };
-use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::kv_backend::txn::Txn;
+use crate::rpc::router::{RegionRoute, region_distribution};
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores table routes
@@ -576,7 +576,7 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -600,7 +600,7 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult + use<>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.to_bytes();
@@ -755,10 +755,10 @@ fn set_addresses(
     };
 
     for region_route in &mut physical_table_route.region_routes {
-        if let Some(leader) = &mut region_route.leader_peer {
-            if let Some(node_addr) = node_addrs.get(&leader.id) {
-                leader.addr = node_addr.peer.addr.clone();
-            }
+        if let Some(leader) = &mut region_route.leader_peer
+            && let Some(node_addr) = node_addrs.get(&leader.id)
+        {
+            leader.addr = node_addr.peer.addr.clone();
         }
         for follower in &mut region_route.follower_peers {
             if let Some(node_addr) = node_addrs.get(&follower.id) {

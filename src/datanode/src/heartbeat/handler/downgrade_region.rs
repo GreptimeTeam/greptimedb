@@ -215,7 +215,7 @@ mod tests {
 
     use crate::error;
     use crate::heartbeat::handler::HandlerContext;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
     async fn test_region_not_exist() {
@@ -490,10 +490,12 @@ mod tests {
         assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
         if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(reply.exists);
-            assert!(reply
-                .error
-                .unwrap()
-                .contains("Failed to set region to readonly"));
+            assert!(
+                reply
+                    .error
+                    .unwrap()
+                    .contains("Failed to set region to readonly")
+            );
             assert!(reply.last_entry_id.is_none());
         }
     }

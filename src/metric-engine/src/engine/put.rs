@@ -14,7 +14,7 @@
 
 use api::v1::{Rows, WriteHint};
 use common_telemetry::{error, info};
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};

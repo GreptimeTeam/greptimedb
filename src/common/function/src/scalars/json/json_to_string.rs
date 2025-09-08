@@ -15,8 +15,8 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -41,10 +41,8 @@ impl Function for JsonToStringFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![ConcreteDataType::json_datatype()],
-            Volatility::Immutable,
-        )
+        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -80,7 +78,7 @@ impl Function for JsonToStringFunction {
                                 return InvalidFuncArgsSnafu {
                                     err_msg: format!("Illegal json binary: {:?}", json),
                                 }
-                                .fail()
+                                .fail();
                             }
                         },
                         _ => None,
@@ -112,7 +110,7 @@ impl Display for JsonToStringFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
+    use datafusion_expr::TypeSignature;
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::BinaryVector;
 
@@ -134,7 +132,7 @@ mod tests {
                          Signature {
                              type_signature: TypeSignature::Exact(valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::json_datatype()]
+                         } if  valid_types == vec![DataType::Binary]
         ));
 
         let json_strings = [

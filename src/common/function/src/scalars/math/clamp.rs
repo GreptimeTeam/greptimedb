@@ -16,16 +16,17 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::Signature;
 use datafusion::arrow::array::{ArrayIter, PrimitiveArray};
 use datafusion::logical_expr::Volatility;
+use datafusion_expr::Signature;
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::value::TryAsPrimitive;
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 
@@ -33,6 +34,33 @@ use crate::function::{Function, FunctionContext};
 pub struct ClampFunction;
 
 const CLAMP_NAME: &str = "clamp";
+
+/// Ensure the vector is constant and not empty (i.e., all values are identical)
+fn ensure_constant_vector(vector: &VectorRef) -> Result<()> {
+    ensure!(
+        !vector.is_empty(),
+        InvalidFuncArgsSnafu {
+            err_msg: "Expect at least one value",
+        }
+    );
+
+    if vector.is_const() {
+        return Ok(());
+    }
+
+    let first = vector.get_ref(0);
+    for i in 1..vector.len() {
+        let v = vector.get_ref(i);
+        if first != v {
+            return InvalidFuncArgsSnafu {
+                err_msg: "All values in min/max argument must be identical",
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
 
 impl Function for ClampFunction {
     fn name(&self) -> &str {
@@ -46,7 +74,7 @@ impl Function for ClampFunction {
 
     fn signature(&self) -> Signature {
         // input, min, max
-        Signature::uniform(3, ConcreteDataType::numerics(), Volatility::Immutable)
+        Signature::uniform(3, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -80,16 +108,9 @@ impl Function for ClampFunction {
                 ),
             }
         );
-        ensure!(
-            (columns[1].len() == 1 || columns[1].is_const())
-                && (columns[2].len() == 1 || columns[2].is_const()),
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The second and third args should be scalar, have: {:?}, {:?}",
-                    columns[1], columns[2]
-                ),
-            }
-        );
+
+        ensure_constant_vector(&columns[1])?;
+        ensure_constant_vector(&columns[2])?;
 
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
             let input_array = columns[0].to_arrow_array();
@@ -172,7 +193,7 @@ impl Function for ClampMinFunction {
 
     fn signature(&self) -> Signature {
         // input, min
-        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -204,15 +225,8 @@ impl Function for ClampMinFunction {
                 ),
             }
         );
-        ensure!(
-            columns[1].len() == 1 || columns[1].is_const(),
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The second arg (min) should be scalar, have: {:?}",
-                    columns[1]
-                ),
-            }
-        );
+
+        ensure_constant_vector(&columns[1])?;
 
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
             let input_array = columns[0].to_arrow_array();
@@ -260,7 +274,7 @@ impl Function for ClampMaxFunction {
 
     fn signature(&self) -> Signature {
         // input, max
-        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -292,15 +306,8 @@ impl Function for ClampMaxFunction {
                 ),
             }
         );
-        ensure!(
-            columns[1].len() == 1 || columns[1].is_const(),
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The second arg (max) should be scalar, have: {:?}",
-                    columns[1]
-                ),
-            }
-        );
+
+        ensure_constant_vector(&columns[1])?;
 
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
             let input_array = columns[0].to_arrow_array();
@@ -537,8 +544,8 @@ mod test {
         let func = ClampFunction;
         let args = [
             Arc::new(Float64Vector::from(input)) as _,
-            Arc::new(Float64Vector::from_vec(vec![min, min])) as _,
-            Arc::new(Float64Vector::from_vec(vec![max])) as _,
+            Arc::new(Float64Vector::from_vec(vec![min, max])) as _,
+            Arc::new(Float64Vector::from_vec(vec![max, min])) as _,
         ];
         let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());

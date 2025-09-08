@@ -38,12 +38,12 @@ use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProvi
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
 use crate::kafka::index::{
-    build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
+    GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE, build_region_wal_index_iterator,
 };
 use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
+    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, maybe_emit_entry, remaining_entries,
 };
 use crate::metrics;
 
@@ -302,6 +302,10 @@ impl LogStore for KafkaLogStore {
                 },
             ))
             .await?;
+        debug!(
+            "Appended batch to Kafka, region_grouped_max_offset: {:?}",
+            region_grouped_max_offset
+        );
 
         Ok(AppendBatchResponse {
             last_entry_ids: region_grouped_max_offset.into_iter().collect(),
@@ -344,9 +348,9 @@ impl LogStore for KafkaLogStore {
 
             if entry_id as i64 <= start_offset {
                 warn!(
-                "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
-                entry_id, start_offset, &provider.topic
-            );
+                    "The entry_id: {} is less than start_offset: {}, topic: {}. Overwriting entry_id with start_offset",
+                    entry_id, start_offset, &provider.topic
+                );
 
                 entry_id = start_offset as u64;
             }
@@ -362,6 +366,17 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu {
                 topic: &provider.topic,
             })?;
+        let latest_offset = (end_offset as u64).saturating_sub(1);
+        self.topic_stats
+            .entry(provider.clone())
+            .and_modify(|stat| {
+                stat.latest_offset = stat.latest_offset.max(latest_offset);
+            })
+            .or_insert_with(|| TopicStat {
+                latest_offset,
+                record_size: 0,
+                record_num: 0,
+            });
 
         let region_indexes = if let (Some(index), Some(collector)) =
             (index, self.client_manager.global_index_collector())
@@ -544,15 +559,16 @@ mod tests {
     use common_meta::datanode::TopicStatsReporter;
     use common_telemetry::info;
     use common_telemetry::tracing::warn;
-    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::config::kafka::DatanodeKafkaConfig;
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use dashmap::DashMap;
     use futures::TryStreamExt;
-    use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rand::prelude::SliceRandom;
+    use rskafka::client::partition::OffsetAt;
+    use store_api::logstore::LogStore;
     use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader, NaiveEntry};
     use store_api::logstore::provider::Provider;
-    use store_api::logstore::LogStore;
     use store_api::storage::RegionId;
 
     use super::build_entry;
@@ -713,8 +729,16 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.latest_entry_id(&provider).unwrap();
-        assert_eq!(high_wathermark, 99);
+        let latest_entry_id = logstore.latest_entry_id(&provider).unwrap();
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(latest_entry_id, 99);
+        // The latest offset is the offset of the last record plus one.
+        let latest = client.client().get_offset(OffsetAt::Latest).await.unwrap();
+        assert_eq!(latest, 100);
     }
 
     #[tokio::test]

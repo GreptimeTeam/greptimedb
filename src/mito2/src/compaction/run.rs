@@ -15,10 +15,10 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
-use common_base::readable_size::ReadableSize;
 use common_base::BitVec;
+use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 
 use crate::sst::file::{FileHandle, RegionFileId};
 
@@ -174,6 +174,10 @@ impl FileGroup {
 
     pub(crate) fn into_files(self) -> impl Iterator<Item = FileHandle> {
         self.files.into_iter()
+    }
+
+    pub(crate) fn is_all_level_0(&self) -> bool {
+        self.files.iter().all(|f| f.level() == 0)
     }
 }
 

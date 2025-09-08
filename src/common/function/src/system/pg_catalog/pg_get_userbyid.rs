@@ -16,14 +16,14 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 
 use crate::function::{Function, FunctionContext};
-use crate::scalars::expression::{scalar_unary_op, EvalContext};
+use crate::scalars::expression::{EvalContext, scalar_unary_op};
 
 #[derive(Clone, Debug, Default)]
 pub struct PGGetUserByIdFunction;
@@ -48,7 +48,7 @@ impl Function for PGGetUserByIdFunction {
     fn signature(&self) -> Signature {
         Signature::uniform(
             1,
-            vec![ConcreteDataType::uint32_datatype()],
+            vec![arrow::datatypes::DataType::UInt32],
             Volatility::Immutable,
         )
     }

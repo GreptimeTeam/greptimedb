@@ -106,27 +106,21 @@ mod tests {
     #[test]
     fn test_invalid_admin_statement() {
         let sql = "ADMIN";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
 
         let sql = "ADMIN test";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
 
         let sql = "ADMIN test test";
-        assert!(ParserContext::create_with_dialect(
-            sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default()
-        )
-        .is_err());
+        assert!(
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .is_err()
+        );
     }
 }

@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use object_store::services::Fs;
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use object_store::ObjectStore;
+use object_store::services::Fs;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use tokio::sync::mpsc::Sender;
@@ -116,6 +116,7 @@ impl SchedulerEnv {
         Arc::new(ManifestContext::new(
             RegionManifestManager::new(
                 metadata,
+                0,
                 RegionManifestOptions {
                     manifest_dir: "".to_string(),
                     object_store: self.access_layer.object_store().clone(),

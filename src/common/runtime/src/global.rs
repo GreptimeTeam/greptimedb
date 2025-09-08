@@ -48,7 +48,9 @@ impl Default for RuntimeOptions {
 }
 
 pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usize) -> Runtime {
-    info!("Creating runtime with runtime_name: {runtime_name}, thread_name: {thread_name}, work_threads: {worker_threads}.");
+    info!(
+        "Creating runtime with runtime_name: {runtime_name}, thread_name: {thread_name}, work_threads: {worker_threads}."
+    );
     Builder::default()
         .runtime_name(runtime_name)
         .thread_name(thread_name)

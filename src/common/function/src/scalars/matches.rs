@@ -24,11 +24,12 @@ use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
+use datafusion_expr::Signature;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::BooleanVector;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::ConcreteDataType;
 
 use crate::function::{Function, FunctionContext};
@@ -61,14 +62,8 @@ impl Function for MatchesFunction {
         Ok(ConcreteDataType::boolean_datatype())
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::exact(
-            vec![
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::string_datatype(),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> Signature {
+        Signature::string(2, Volatility::Immutable)
     }
 
     // TODO: read case-sensitive config
@@ -756,13 +751,13 @@ impl Tokenizer {
                     let phase = self.consume_next_phase(true, pattern)?;
                     tokens.push(Token::Phase(phase));
                     // consume a writespace (or EOF) after quotes
-                    if let Some(ending_separator) = self.consume_next(pattern) {
-                        if ending_separator != ' ' {
-                            return InvalidFuncArgsSnafu {
-                                err_msg: "Expect a space after quotes ('\"')",
-                            }
-                            .fail();
+                    if let Some(ending_separator) = self.consume_next(pattern)
+                        && ending_separator != ' '
+                    {
+                        return InvalidFuncArgsSnafu {
+                            err_msg: "Expect a space after quotes ('\"')",
                         }
+                        .fail();
                     }
                 }
                 _ => {
@@ -781,8 +776,7 @@ impl Tokenizer {
 
     fn consume_next(&mut self, pattern: &str) -> Option<char> {
         self.cursor += 1;
-        let c = pattern.chars().nth(self.cursor);
-        c
+        pattern.chars().nth(self.cursor)
     }
 
     fn step_next(&mut self) {

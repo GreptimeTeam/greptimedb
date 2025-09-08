@@ -26,7 +26,7 @@ use datafusion::common::cast::{as_binary_array, as_primitive_array};
 use datafusion::common::not_impl_err;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
-use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF};
+use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
 use datatypes::arrow::array::ArrayRef;
@@ -98,11 +98,11 @@ impl UddSketchState {
                 {
                     return Err(DataFusionError::Plan(format!(
                         "Merging UDDSketch with different parameters: arguments={:?} vs actual input={:?}",
+                        (self.uddsketch.max_allowed_buckets(), self.error_rate),
                         (
-                            self.uddsketch.max_allowed_buckets(),
-                            self.error_rate
-                        ),
-                        (uddsketch.uddsketch.max_allowed_buckets(), uddsketch.error_rate)
+                            uddsketch.uddsketch.max_allowed_buckets(),
+                            uddsketch.error_rate
+                        )
                     )));
                 }
                 self.uddsketch.merge_sketch(&uddsketch.uddsketch);
@@ -130,7 +130,7 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
                 "{} not supported for bucket size: {}",
                 UDDSKETCH_STATE_NAME,
                 &args.exprs[0]
-            )
+            );
         }
     };
 
@@ -145,7 +145,7 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
                 "{} not supported for error rate: {}",
                 UDDSKETCH_STATE_NAME,
                 &args.exprs[1]
-            )
+            );
         }
     };
 
@@ -168,7 +168,7 @@ impl DfAccumulator for UddSketchState {
                 return not_impl_err!(
                     "UDDSketch functions do not support data type: {}",
                     array.data_type()
-                )
+                );
             }
         }
 

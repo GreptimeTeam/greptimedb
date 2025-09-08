@@ -23,24 +23,24 @@ use common_telemetry::tracing;
 use datafusion::common::DFSchema;
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
-use datafusion_expr::{col, Expr as DfExpr, LogicalPlan, LogicalPlanBuilder};
+use datafusion_expr::{Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, col};
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use log_query::LogQuery;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
+use sql::CteContent;
 use sql::ast::Expr as SqlExpr;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
-use sql::CteContent;
 
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
     UnimplementedSnafu,
 };
 use crate::log_query::planner::LogQueryPlanner;
-use crate::parser::{PromQuery, QueryLanguageParser, QueryStatement, DEFAULT_LOOKBACK_STRING};
+use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
@@ -282,6 +282,16 @@ impl DfLogicalPlanner {
                             .build()
                             .context(PlanSqlSnafu)?;
                     }
+
+                    // Wrap in SubqueryAlias to ensure proper table qualification for CTE
+                    logical_plan = LogicalPlan::SubqueryAlias(
+                        datafusion_expr::SubqueryAlias::try_new(
+                            Arc::new(logical_plan),
+                            cte.name.value.clone(),
+                        )
+                        .context(PlanSqlSnafu)?,
+                    );
+
                     planner_context.insert_cte(&cte.name.value, logical_plan);
                 }
                 CteContent::Sql(_) => {

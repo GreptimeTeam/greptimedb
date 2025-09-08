@@ -15,14 +15,14 @@
 use std::sync::Arc;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
-use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
+use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
 use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
-use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
@@ -36,15 +36,15 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
-use query::region_query::RegionQueryHandlerFactoryRef;
 use query::QueryEngineFactory;
+use query::region_query::RegionQueryHandlerFactoryRef;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
-use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
+use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::limiter::Limiter;
 
 /// The frontend [`Instance`] builder.
@@ -207,7 +207,7 @@ impl FrontendBuilder {
             .options
             .max_in_flight_write_bytes
             .map(|max_in_flight_write_bytes| {
-                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes()))
+                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes() as usize))
             });
 
         Ok(Instance {

@@ -25,8 +25,8 @@ use common_catalog::consts::{INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME};
 use futures::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
-use table::metadata::{TableId, TableInfoRef};
 use table::TableRef;
+use table::metadata::{TableId, TableInfoRef};
 
 use crate::error::Result;
 

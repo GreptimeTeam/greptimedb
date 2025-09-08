@@ -15,10 +15,10 @@
 use std::hint::black_box;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::prelude::ValueRef;
-use mito_codec::row_converter::sparse::{RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID};
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
+use mito_codec::row_converter::sparse::{RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID};
 
 fn encode_sparse(c: &mut Criterion) {
     let num_tags = 10;
@@ -72,7 +72,7 @@ fn encode_sparse(c: &mut Criterion) {
                 .unwrap();
             codec
                 .encode_raw_tag_value(
-                    tags.iter().map(|(c, b)| (*c, b)),
+                    tags.iter().map(|(c, b)| (*c, &b[..])),
                     &mut buffer_by_raw_encoding,
                 )
                 .unwrap();

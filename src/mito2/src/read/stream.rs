@@ -27,15 +27,16 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::cache::CacheStrategy;
 use crate::error::{Result, UnexpectedSnafu};
+use crate::read::Batch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
-use crate::read::Batch;
 
 /// All kinds of [`Batch`]es to produce in scanner.
 pub enum ScanBatch {
     Normal(Batch),
     Series(SeriesBatch),
+    RecordBatch(DfRecordBatch),
 }
 
 pub type ScanBatchStream = BoxStream<'static, Result<ScanBatch>>;
@@ -98,6 +99,12 @@ impl ConvertBatchStream {
                         .context(ArrowComputeSnafu)?;
 
                 RecordBatch::try_from_df_record_batch(output_schema, record_batch)
+            }
+            ScanBatch::RecordBatch(df_record_batch) => {
+                // Safety: Only flat format returns this batch.
+                let mapper = self.projection_mapper.as_flat().unwrap();
+
+                mapper.convert(&df_record_batch)
             }
         }
     }

@@ -28,7 +28,7 @@ use super::ScanRequest;
 use crate::config::MitoConfig;
 use crate::engine::listener::FlushTruncateListener;
 use crate::test_util::{
-    build_rows, put_rows, rows_schema, CreateRequestBuilder, MockWriteBufferManager, TestEnv,
+    CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, put_rows, rows_schema,
 };
 
 #[tokio::test]

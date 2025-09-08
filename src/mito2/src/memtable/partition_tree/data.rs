@@ -30,12 +30,12 @@ use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::vectors::{
     TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt16Vector, UInt16VectorBuilder, UInt64Vector, UInt64VectorBuilder,
-    UInt8Vector, UInt8VectorBuilder,
+    TimestampSecondVector, UInt8Vector, UInt8VectorBuilder, UInt16Vector, UInt16VectorBuilder,
+    UInt64Vector, UInt64VectorBuilder,
 };
 use mito_codec::key_values::KeyValue;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
@@ -45,8 +45,8 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
 use crate::error;
 use crate::error::Result;
-use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::partition_tree::PkIndex;
+use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::metrics::{
     PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, PARTITION_TREE_READ_STAGE_ELAPSED,
 };

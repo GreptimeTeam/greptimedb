@@ -18,13 +18,13 @@ use std::sync::Arc;
 
 use common_query::error;
 use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu};
-use common_query::prelude::{Signature, Volatility};
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::compute::is_null;
+use datafusion_expr::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::Helper;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 
@@ -79,7 +79,7 @@ impl Function for IsNullFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
+    use datafusion_expr::TypeSignature;
     use datatypes::scalars::ScalarVector;
     use datatypes::vectors::{BooleanVector, Float32Vector};
 

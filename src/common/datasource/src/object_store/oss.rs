@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use object_store::services::Oss;
 use object_store::ObjectStore;
+use object_store::services::Oss;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};

@@ -20,9 +20,9 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
+use crate::ProcedureId;
 use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
-use crate::ProcedureId;
 
 pub mod poison_store;
 pub mod state_store;
@@ -342,9 +342,9 @@ mod tests {
 
     use object_store::ObjectStore;
 
+    use crate::BoxedProcedure;
     use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
-    use crate::BoxedProcedure;
 
     impl ProcedureStore {
         pub(crate) fn from_object_store(store: ObjectStore) -> ProcedureStore {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     use async_trait::async_trait;
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::services::Fs as Builder;
 
     use super::*;

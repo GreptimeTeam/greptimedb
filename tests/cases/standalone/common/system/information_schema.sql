@@ -32,6 +32,11 @@ from information_schema.tables
 where table_schema = 'my_db'
 order by table_name;
 
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'my_db'
+  AND create_time > NOW() - INTERVAL 1 MINUTE;
+
 select table_name
 from information_schema.tables
 where table_schema in ('my_db', 'public')

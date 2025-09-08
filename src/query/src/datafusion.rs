@@ -30,9 +30,9 @@ use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{
     AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp,
@@ -41,10 +41,10 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
-use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
+use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
@@ -60,7 +60,7 @@ use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
-use crate::{metrics, QueryEngine};
+use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
 /// This hint can be set in the query context to control the parallelism of the query execution.
@@ -537,6 +537,9 @@ impl QueryEngine for DatafusionQueryEngine {
             }
         }
 
+        // configure execution options
+        state.config_mut().options_mut().execution.time_zone = query_ctx.timezone().to_string();
+
         // usually it's impossible to have both `set variable` set by sql client and
         // hint in header by grpc client, so only need to deal with them separately
         if query_ctx.configuration_parameter().allow_query_fallback() {
@@ -665,7 +668,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
     use session::context::{QueryContext, QueryContextBuilder};
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
     use super::*;
     use crate::options::QueryOptions;
@@ -820,6 +823,9 @@ mod tests {
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!(
+            "Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]",
+            format!("{}", logical_plan.display_indent())
+        );
     }
 }

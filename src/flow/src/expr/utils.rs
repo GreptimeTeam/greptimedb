@@ -18,12 +18,12 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use datatypes::value::Value;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 
+use crate::Result;
 use crate::error::UnexpectedSnafu;
 use crate::expr::ScalarExpr;
 use crate::plan::TypedPlan;
-use crate::Result;
 
 /// Find lower bound for time `current` in given `plan` for the time window expr.
 ///
@@ -102,11 +102,14 @@ pub fn find_time_window_lower_bound(
         }
     );
 
-    ensure!(all_ref_columns.len() == 1, UnexpectedSnafu {
-        reason: format!(
-            "Expect only one column to be referenced in expression {expr:?}, found {all_ref_columns:?}"
-        ),
-    });
+    ensure!(
+        all_ref_columns.len() == 1,
+        UnexpectedSnafu {
+            reason: format!(
+                "Expect only one column to be referenced in expression {expr:?}, found {all_ref_columns:?}"
+            ),
+        }
+    );
 
     let permute_map = BTreeMap::from([(ts_col_idx, 0usize)]);
 
@@ -170,9 +173,14 @@ pub fn find_time_window_lower_bound(
 
     // binary search for the lower bound
 
-    ensure!(lower_bound.map(|v|v.unit())==upper_bound.map(|v|v.unit()), UnexpectedSnafu{
-        reason: format!(" unit mismatch for time window expression {expr:?}, found {lower_bound:?} and {upper_bound:?}"),
-    });
+    ensure!(
+        lower_bound.map(|v| v.unit()) == upper_bound.map(|v| v.unit()),
+        UnexpectedSnafu {
+            reason: format!(
+                " unit mismatch for time window expression {expr:?}, found {lower_bound:?} and {upper_bound:?}"
+            ),
+        }
+    );
 
     let output_unit = lower_bound.expect("should have lower bound").unit();
 

@@ -551,7 +551,7 @@ impl Iterator for FlatMergeIterator {
 /// Iterator to merge multiple sorted iterators into a single sorted iterator.
 ///
 /// All iterators must be sorted by primary key, time index, sequence desc.
-pub struct MergeReader {
+pub struct FlatMergeReader {
     /// The merge algorithm to maintain heaps.
     algo: MergeAlgo<StreamNode>,
     /// Current buffered rows to output.
@@ -564,7 +564,7 @@ pub struct MergeReader {
     batch_size: usize,
 }
 
-impl MergeReader {
+impl FlatMergeReader {
     /// Creates a new iterator to merge sorted `iters`.
     pub async fn new(
         schema: SchemaRef,
@@ -825,7 +825,7 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
 

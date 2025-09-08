@@ -18,10 +18,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
+use dfir_rs::scheduled::SubgraphId;
 use dfir_rs::scheduled::graph::Dfir;
 use dfir_rs::scheduled::handoff::TeeingHandoff;
 use dfir_rs::scheduled::port::RecvPort;
-use dfir_rs::scheduled::SubgraphId;
 use itertools::Itertools;
 use tokio::sync::Mutex;
 

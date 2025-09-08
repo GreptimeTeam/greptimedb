@@ -18,7 +18,7 @@ use std::string::FromUtf8Error;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::{http, Json};
+use axum::{Json, http};
 use base64::DecodeError;
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -594,12 +594,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
-    InFlightWriteBytesExceeded {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
     InvalidElasticsearchInput {
         reason: String,
@@ -758,8 +752,6 @@ impl ErrorExt for Error {
             ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
-
-            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
 
             DurationOverflow { .. } => StatusCode::InvalidArguments,
 

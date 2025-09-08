@@ -20,13 +20,13 @@ use std::sync::Arc;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
-use crate::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
+use crate::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;

@@ -17,14 +17,20 @@
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_telemetry::debug;
 use common_time::Timestamp;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::array::{
+    ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use datatypes::arrow::compute::{max, min};
+use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datatypes::arrow::record_batch::RecordBatch;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -34,20 +40,23 @@ use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
-use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
-use crate::read::{Batch, Source};
+use crate::error::{
+    InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
+};
+use crate::read::{Batch, FlatSource, Source};
 use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::index::{Indexer, IndexerBuilder};
+use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
-use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
@@ -270,16 +279,85 @@ where
         Ok(results)
     }
 
+    /// Iterates FlatSource and writes all RecordBatch in flat format to Parquet file.
+    ///
+    /// Returns the [SstInfo] if the SST is written.
+    pub async fn write_all_flat(
+        &mut self,
+        source: FlatSource,
+        opts: &WriteOptions,
+    ) -> Result<SstInfoArray> {
+        let res = self.write_all_flat_without_cleaning(source, opts).await;
+        if res.is_err() {
+            // Clean tmp files explicitly on failure.
+            let file_id = self.current_file;
+            if let Some(cleaner) = &self.file_cleaner {
+                cleaner.clean_by_file_id(file_id).await;
+            }
+        }
+        res
+    }
+
+    async fn write_all_flat_without_cleaning(
+        &mut self,
+        mut source: FlatSource,
+        opts: &WriteOptions,
+    ) -> Result<SstInfoArray> {
+        let mut results = smallvec![];
+        let flat_format =
+            FlatWriteFormat::new(self.metadata.clone(), &FlatSchemaOptions::default())
+                .with_override_sequence(None);
+        let mut stats = SourceStats::default();
+
+        while let Some(record_batch) = self
+            .write_next_flat_batch(&mut source, &flat_format, opts)
+            .await
+            .transpose()
+        {
+            match record_batch {
+                Ok(batch) => {
+                    stats.update_flat(&batch)?;
+                    let start = Instant::now();
+                    // safety: self.current_indexer must be set when first batch has been written.
+                    self.current_indexer
+                        .as_mut()
+                        .unwrap()
+                        .update_flat(&batch)
+                        .await;
+                    self.metrics.update_index += start.elapsed();
+                    if let Some(max_file_size) = opts.max_file_size
+                        && self.bytes_written.load(Ordering::Relaxed) > max_file_size
+                    {
+                        self.finish_current_file(&mut results, &mut stats).await?;
+                    }
+                }
+                Err(e) => {
+                    if let Some(indexer) = &mut self.current_indexer {
+                        indexer.abort().await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        self.finish_current_file(&mut results, &mut stats).await?;
+
+        // object_store.write will make sure all bytes are written or an error is raised.
+        Ok(results)
+    }
+
     /// Customizes per-column config according to schema and maybe column cardinality.
     fn customize_column_config(
         builder: WriterPropertiesBuilder,
         region_metadata: &RegionMetadataRef,
     ) -> WriterPropertiesBuilder {
-        let ts_col = ColumnPath::new(vec![region_metadata
-            .time_index_column()
-            .column_schema
-            .name
-            .clone()]);
+        let ts_col = ColumnPath::new(vec![
+            region_metadata
+                .time_index_column()
+                .column_schema
+                .name
+                .clone(),
+        ]);
         let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
 
         builder
@@ -311,6 +389,30 @@ where
             .context(WriteParquetSnafu)?;
         self.metrics.write_batch += start.elapsed();
         Ok(Some(batch))
+    }
+
+    async fn write_next_flat_batch(
+        &mut self,
+        source: &mut FlatSource,
+        flat_format: &FlatWriteFormat,
+        opts: &WriteOptions,
+    ) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+        let Some(record_batch) = source.next_batch().await? else {
+            return Ok(None);
+        };
+        self.metrics.iter_source += start.elapsed();
+
+        let arrow_batch = flat_format.convert_batch(&record_batch)?;
+
+        let start = Instant::now();
+        self.maybe_init_writer(flat_format.arrow_schema(), opts)
+            .await?
+            .write(&arrow_batch)
+            .await
+            .context(WriteParquetSnafu)?;
+        self.metrics.write_batch += start.elapsed();
+        Ok(Some(record_batch))
     }
 
     async fn maybe_init_writer(
@@ -388,6 +490,85 @@ impl SourceStats {
             self.time_range = Some((min_in_batch, max_in_batch));
         }
     }
+
+    fn update_flat(&mut self, record_batch: &RecordBatch) -> Result<()> {
+        if record_batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        self.num_rows += record_batch.num_rows();
+
+        // Get the timestamp column by index
+        let time_index_col_idx = time_index_column_index(record_batch.num_columns());
+        let timestamp_array = record_batch.column(time_index_col_idx);
+
+        if let Some((min_in_batch, max_in_batch)) = timestamp_range_from_array(timestamp_array)? {
+            if let Some(time_range) = &mut self.time_range {
+                time_range.0 = time_range.0.min(min_in_batch);
+                time_range.1 = time_range.1.max(max_in_batch);
+            } else {
+                self.time_range = Some((min_in_batch, max_in_batch));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Gets min and max timestamp from an timestamp array.
+fn timestamp_range_from_array(
+    timestamp_array: &ArrayRef,
+) -> Result<Option<(Timestamp, Timestamp)>> {
+    let (min_ts, max_ts) = match timestamp_array.data_type() {
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            let array = timestamp_array
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap();
+            let min_val = min(array).map(Timestamp::new_second);
+            let max_val = max(array).map(Timestamp::new_second);
+            (min_val, max_val)
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            let array = timestamp_array
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let min_val = min(array).map(Timestamp::new_millisecond);
+            let max_val = max(array).map(Timestamp::new_millisecond);
+            (min_val, max_val)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            let array = timestamp_array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let min_val = min(array).map(Timestamp::new_microsecond);
+            let max_val = max(array).map(Timestamp::new_microsecond);
+            (min_val, max_val)
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            let array = timestamp_array
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap();
+            let min_val = min(array).map(Timestamp::new_nanosecond);
+            let max_val = max(array).map(Timestamp::new_nanosecond);
+            (min_val, max_val)
+        }
+        _ => {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Unexpected data type of time index: {:?}",
+                    timestamp_array.data_type()
+                ),
+            }
+            .fail();
+        }
+    };
+
+    // If min timestamp exists, max timestamp should also exist.
+    Ok(min_ts.zip(max_ts))
 }
 
 /// Workaround for [AsyncArrowWriter] does not provide a method to

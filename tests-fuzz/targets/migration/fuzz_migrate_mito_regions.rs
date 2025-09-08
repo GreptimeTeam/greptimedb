@@ -24,32 +24,33 @@ use common_telemetry::info;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::{Executor, MySql, Pool};
 use store_api::storage::RegionId;
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
+use tests_fuzz::generator::Generator;
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
-use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    format_columns, generate_random_value, generate_unique_timestamp_for_mysql, replace_default,
-    sort_by_primary_keys, CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator,
+    CreateTableExpr, InsertIntoExpr, MySQLTsColumnTypeGenerator, format_columns,
+    generate_random_value, generate_unique_timestamp_for_mysql, replace_default,
+    sort_by_primary_keys,
 };
+use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
-use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::cluster_info::{fetch_nodes, PEER_TYPE_DATANODE};
+use tests_fuzz::utils::cluster_info::{PEER_TYPE_DATANODE, fetch_nodes};
 use tests_fuzz::utils::migration::migrate_region;
 use tests_fuzz::utils::partition::{fetch_partition, fetch_partitions, region_distribution};
 use tests_fuzz::utils::procedure::procedure_state;
 use tests_fuzz::utils::wait::wait_condition_fn;
 use tests_fuzz::utils::{
-    compact_table, flush_memtable, init_greptime_connections_via_env, Connections,
+    Connections, compact_table, flush_memtable, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 
@@ -233,7 +234,9 @@ async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<
     {
         let procedure_id =
             migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 240).await;
-        info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
+        info!(
+            "Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}"
+        );
         procedure_ids.push(procedure_id);
     }
 

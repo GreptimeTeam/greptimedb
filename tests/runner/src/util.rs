@@ -182,10 +182,14 @@ pub async fn pull_binary(version: &str) {
 /// Pull the binary if it does not exist and `pull_version_on_need` is true.
 pub async fn maybe_pull_binary(version: &str, pull_version_on_need: bool) {
     let exist = Path::new(version).join(PROGRAM).is_file();
-    match (exist, pull_version_on_need){
+    match (exist, pull_version_on_need) {
         (true, _) => println!("Binary {version} exists"),
-        (false, false) => panic!("Binary {version} does not exist, please run with --pull-version-on-need or manually download it"),
-        (false, true) => { pull_binary(version).await; },
+        (false, false) => panic!(
+            "Binary {version} does not exist, please run with --pull-version-on-need or manually download it"
+        ),
+        (false, true) => {
+            pull_binary(version).await;
+        }
     }
 }
 
@@ -363,9 +367,9 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
     }
 
     let mysql_image = if let Some(mysql_version) = mysql_version {
-        format!("public.ecr.aws/i8k6a5e1/bitnami/mysql:{mysql_version}")
+        format!("greptime/mysql:{mysql_version}")
     } else {
-        "public.ecr.aws/i8k6a5e1/bitnami/mysql:5.7".to_string()
+        "greptime/mysql:5.7".to_string()
     };
     let mysql_password = "admin";
     let mysql_user = "greptimedb";

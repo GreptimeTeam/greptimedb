@@ -29,24 +29,24 @@ use strum::{EnumIter, IntoEnumIterator};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result, UnexpectedSnafu};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
+use tests_fuzz::generator::Generator;
 use tests_fuzz::generator::alter_expr::{
     AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
     AlterExprModifyDataTypeGeneratorBuilder, AlterExprRenameGeneratorBuilder,
     AlterExprSetTableOptionsGeneratorBuilder, AlterExprUnsetTableOptionsGeneratorBuilder,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
-use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, CreateTableExpr,
+    AlterTableExpr, AlterTableOption, CreateTableExpr, droppable_columns, modifiable_columns,
 };
+use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
-use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::utils::{
-    get_gt_fuzz_input_max_columns, init_greptime_connections_via_env, Connections,
+    Connections, get_gt_fuzz_input_max_columns, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 struct FuzzContext {

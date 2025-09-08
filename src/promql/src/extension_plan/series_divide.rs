@@ -35,7 +35,7 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::compute;
 use datatypes::compute::SortOptions;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;

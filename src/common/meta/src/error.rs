@@ -25,8 +25,8 @@ use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::peer::Peer;
 use crate::DatanodeId;
+use crate::peer::Peer;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -534,9 +534,6 @@ pub enum Error {
         location: Location,
         source: common_wal::error::Error,
     },
-
-    #[snafu(display("Failed to resolve Kafka broker endpoint."))]
-    ResolveKafkaEndpoint { source: common_wal::error::Error },
 
     #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
@@ -1108,7 +1105,6 @@ impl ErrorExt for Error {
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | KafkaPartitionClient { .. }
-            | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. }

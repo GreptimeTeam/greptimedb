@@ -32,8 +32,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest, WriteType};
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::picker::{new_picker, PickerOutput};
-use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
+use crate::compaction::picker::{PickerOutput, new_picker};
+use crate::compaction::{CompactionSstReaderBuilder, find_ttl};
 use crate::config::MitoConfig;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -245,8 +245,18 @@ pub async fn open_compaction_region(
 }
 
 impl CompactionRegion {
+    /// Get the file purger of the compaction region.
     pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
         self.file_purger.clone()
+    }
+
+    /// Stop the file purger scheduler of the compaction region.
+    pub async fn stop_purger_scheduler(&self) -> Result<()> {
+        if let Some(file_purger) = &self.file_purger {
+            file_purger.stop_scheduler().await
+        } else {
+            Ok(())
+        }
     }
 }
 

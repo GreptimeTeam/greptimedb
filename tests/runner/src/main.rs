@@ -137,10 +137,10 @@ async fn main() {
         Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
     );
 
-    if let Some(d) = &args.case_dir {
-        if !d.is_dir() {
-            panic!("{} is not a directory", d.display());
-        }
+    if let Some(d) = &args.case_dir
+        && !d.is_dir()
+    {
+        panic!("{} is not a directory", d.display());
     }
     if args.jobs == 0 {
         args.jobs = num_cpus::get() / 2;
@@ -156,7 +156,9 @@ async fn main() {
         || args.test_filter != ".*"
     {
         args.jobs = 1;
-        println!("Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage");
+        println!(
+            "Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage"
+        );
     }
 
     let config = ConfigBuilder::default()

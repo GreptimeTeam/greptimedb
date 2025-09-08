@@ -96,12 +96,14 @@ async fn manager_without_checkpoint() {
     }
 
     // no checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // check files
     let mut expected = vec![
@@ -149,12 +151,14 @@ async fn manager_with_checkpoint_distance_1() {
     }
 
     // has checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // check files
     let mut expected = vec![
@@ -215,12 +219,14 @@ async fn test_corrupted_data_causing_checksum_error() {
     }
 
     // Check if there is a checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Corrupt the last checkpoint data
     let mut corrupted_bytes = manager
@@ -398,12 +404,14 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     }
 
     // has checkpoint
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // check files
     let mut expected = vec![
@@ -471,12 +479,14 @@ async fn test_checkpoint_bypass_in_staging_mode() {
     assert!(!manager.checkpointer().is_doing_checkpoint());
 
     // Verify no checkpoint was created in staging mode
-    assert!(manager
-        .store()
-        .load_last_checkpoint()
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Now switch to normal mode and apply one more action
     manager

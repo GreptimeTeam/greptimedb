@@ -18,7 +18,8 @@ use std::fmt;
 use std::fmt::Display;
 
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Vector;
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
@@ -64,10 +65,7 @@ impl Function for HllCalcFunction {
 
     fn signature(&self) -> Signature {
         // Only argument: HyperLogLogPlus state (binary)
-        Signature::exact(
-            vec![ConcreteDataType::binary_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -162,10 +160,12 @@ mod tests {
         let args: Vec<VectorRef> = vec![];
         let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("hll_count expects 1 argument"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("hll_count expects 1 argument")
+        );
 
         // Test with invalid binary data
         let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])]))]; // Invalid binary data

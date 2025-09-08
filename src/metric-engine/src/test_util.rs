@@ -23,8 +23,8 @@ use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::test_util::TestEnv as MitoTestEnv;
-use object_store::util::join_dir;
 use object_store::ObjectStore;
+use object_store::util::join_dir;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
@@ -425,8 +425,8 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
 
 #[cfg(test)]
 mod test {
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
     use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 
     use super::*;

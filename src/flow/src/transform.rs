@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_function::function::{FunctionContext, FunctionRef};
+use datafusion_expr::{Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
 use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
@@ -26,8 +27,8 @@ use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
 use substrait::substrait_proto_df as substrait_proto;
-use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
+use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 
 use crate::adapter::FlownodeContext;
 use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
@@ -145,8 +146,8 @@ impl common_function::function::Function for TumbleFunction {
         Ok(CDT::timestamp_millisecond_datatype())
     }
 
-    fn signature(&self) -> common_query::prelude::Signature {
-        common_query::prelude::Signature::variadic_any(common_query::prelude::Volatility::Immutable)
+    fn signature(&self) -> Signature {
+        Signature::variadic_any(Volatility::Immutable)
     }
 
     fn eval(
@@ -175,14 +176,14 @@ mod test {
     use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
     use itertools::Itertools;
     use prost::Message;
+    use query::QueryEngine;
     use query::options::QueryOptions;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
-    use query::QueryEngine;
     use session::context::QueryContext;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
     use substrait_proto::proto;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::test_util::MemTable;
 
     use super::*;
@@ -293,7 +294,9 @@ mod test {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = apply_df_optimizer(plan).await.unwrap();
+        let plan = apply_df_optimizer(plan, &QueryContext::arc())
+            .await
+            .unwrap();
 
         // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
         let bytes = DFLogicalSubstraitConvertor {}
@@ -315,7 +318,7 @@ mod test {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = apply_df_optimizer(plan).await;
+        let plan = apply_df_optimizer(plan, &QueryContext::arc()).await;
 
         assert!(plan.is_err());
     }

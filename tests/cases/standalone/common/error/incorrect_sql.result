@@ -1,0 +1,92 @@
+-- Migrated from DuckDB test: test/sql/error/incorrect_sql.test
+-- Typo in SELECT
+SELEC 42;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: SELEC
+
+-- Unrecognized column
+SELECT x FROM (SELECT 1 as y);
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named x. Valid fields are y.
+
+-- Unrecognized function
+SELECT FUNFUNFUN();
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'funfunfun'.
+Did you mean 'range_fn'?
+
+-- Wrong aggregate parameters
+SELECT SUM(42, 84, 11, 'hello');
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' user-defined coercion failed with "Execution error: sum function requires 1 argument, got 4" No function matches the given name and argument types 'sum(Int64, Int64, Int64, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	sum(UserDefined)
+
+-- No matching function signature
+SELECT cos(0, 1, 2, 3);
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'cos' function: coercion from [Int64, Int64, Int64, Int64] to the signature Uniform(1, [Float64, Float32]) failed No function matches the given name and argument types 'cos(Int64, Int64, Int64, Int64)'. You might need to add explicit type casts.
+	Candidate functions:
+	cos(Float64/Float32)
+
+-- Multiple WHERE clauses
+SELECT 42 WHERE 1=1 WHERE 1=0;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: WHERE
+
+-- Multiple statements without semicolon
+SELECT 42
+SELECT 42;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: SELECT
+
+-- Non-existent table
+SELECT * FROM integers2;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.integers2
+
+-- Non-existent schema
+SELECT * FROM bla.integers2;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.bla.integers2
+
+CREATE TABLE integers(integ INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE strings(str VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE chickens(feather INTEGER, beak INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- Non-existent column
+SELECT feathe FROM chickens;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named feathe. Valid fields are chickens.feather, chickens.beak, chickens.ts.
+
+-- Non-existent column with multiple tables
+SELECT feathe FROM chickens, integers, strings;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named feathe. Valid fields are chickens.feather, chickens.beak, chickens.ts, integers.integ, integers.ts, strings.str, strings.ts.
+
+-- Ambiguous column reference
+SELECT ts FROM chickens, integers;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Ambiguous reference to unqualified field ts
+
+-- Clean up
+DROP TABLE chickens;
+
+Affected Rows: 0
+
+DROP TABLE strings;
+
+Affected Rows: 0
+
+DROP TABLE integers;
+
+Affected Rows: 0
+

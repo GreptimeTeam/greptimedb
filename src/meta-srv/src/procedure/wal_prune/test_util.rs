@@ -19,11 +19,11 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::region_registry::{LeaderRegionRegistry, LeaderRegionRegistryRef};
 use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::build_kafka_client;
+use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::test_util::InMemoryPoisonStore;
-use common_procedure::ProcedureManagerRef;
-use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use common_wal::config::kafka::MetasrvKafkaConfig;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 use rskafka::client::Client;
 
 use crate::procedure::wal_prune::Context as WalPruneContext;

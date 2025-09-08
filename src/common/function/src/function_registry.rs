@@ -14,10 +14,9 @@
 
 //! functions registry
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use datafusion_expr::AggregateUDF;
-use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
 use crate::aggrs::aggr_wrapper::StateMergeHelper;
@@ -65,7 +64,18 @@ impl FunctionRegistry {
 
     /// Register a scalar function in the registry.
     pub fn register_scalar(&self, func: impl Function + 'static) {
-        self.register(Arc::new(func) as FunctionRef);
+        let func = Arc::new(func) as FunctionRef;
+
+        for alias in func.aliases() {
+            let func: ScalarFunctionFactory = func.clone().into();
+            let alias = ScalarFunctionFactory {
+                name: alias.to_string(),
+                ..func
+            };
+            self.register(alias);
+        }
+
+        self.register(func)
     }
 
     /// Register an aggregate function in the registry.
@@ -102,7 +112,7 @@ impl FunctionRegistry {
     }
 }
 
-pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
+pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(|| {
     let function_registry = FunctionRegistry::default();
 
     // Utility functions

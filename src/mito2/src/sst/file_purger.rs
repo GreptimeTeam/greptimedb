@@ -18,22 +18,26 @@ use std::sync::Arc;
 use common_telemetry::{error, info};
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileMeta;
-
-/// Request to remove a file.
-#[derive(Debug)]
-pub struct PurgeRequest {
-    /// File meta.
-    pub file_meta: FileMeta,
-}
+use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
-    /// Send a purge request to the background worker.
-    fn send_request(&self, request: PurgeRequest);
+    /// Send a request to remove the file.
+    /// If `is_delete` is true, the file will be deleted from the storage.
+    /// Otherwise, only the reference will be removed.
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool);
+
+    /// Notify the purger of a new file created.
+    /// This is useful for object store based storage, where we need to track the file references
+    /// The default implementation is a no-op.
+    fn new_file(&self, _: &FileMeta) {
+        // noop
+    }
 }
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
@@ -43,7 +47,7 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn send_request(&self, _: PurgeRequest) {
+    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool) {
         // noop
     }
 }
@@ -63,6 +67,42 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
+pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
+    sst_layer.object_store().info().scheme() == object_store::Scheme::Fs
+}
+
+/// Creates a file purger based on the storage type of the access layer.
+/// Should be use in combination with Gc Worker.
+///
+/// If the storage is local file system, a `LocalFilePurger` is created, which deletes
+/// the files from both the storage and the cache.
+///
+/// If the storage is an object store, an `ObjectStoreFilePurger` is created, which
+/// only manages the file references without deleting the actual files.
+///
+pub fn create_file_purger(
+    scheduler: SchedulerRef,
+    sst_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
+    file_ref_manager: FileReferenceManagerRef,
+) -> FilePurgerRef {
+    if is_local_fs(&sst_layer) {
+        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
+    } else {
+        Arc::new(ObjectStoreFilePurger { file_ref_manager })
+    }
+}
+
+/// Creates a local file purger that deletes files from both the storage and the cache.
+pub fn create_local_file_purger(
+    scheduler: SchedulerRef,
+    sst_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
+    _file_ref_manager: FileReferenceManagerRef,
+) -> FilePurgerRef {
+    Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
+}
+
 impl LocalFilePurger {
     /// Creates a new purger.
     pub fn new(
@@ -76,11 +116,14 @@ impl LocalFilePurger {
             cache_manager,
         }
     }
-}
 
-impl FilePurger for LocalFilePurger {
-    fn send_request(&self, request: PurgeRequest) {
-        let file_meta = request.file_meta;
+    /// Stop the scheduler of the file purger.
+    pub async fn stop_scheduler(&self) -> Result<()> {
+        self.scheduler.stop(true).await
+    }
+
+    /// Deletes the file(and it's index, if any) from cache and storage.
+    fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
 
         // Remove meta of the file from cache.
@@ -90,7 +133,7 @@ impl FilePurger for LocalFilePurger {
 
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(&file_meta).await {
+            if let Err(e) = sst_layer.delete_sst(&file_meta.file_id()).await {
                 error!(e; "Failed to delete SST file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             } else {
@@ -131,9 +174,43 @@ impl FilePurger for LocalFilePurger {
                 error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
                     file_meta.file_id(), file_meta.region_id);
             }
+            let file_id = file_meta.file_id();
+            if let Err(e) = sst_layer
+                .intermediate_manager()
+                .prune_sst_dir(&file_id.region_id(), &file_id.file_id())
+                .await
+            {
+                error!(e; "Failed to prune intermediate sst directory, region_id: {}, file_id: {}", file_id.region_id(), file_id.file_id());
+            }
         })) {
             error!(e; "Failed to schedule the file purge request");
         }
+    }
+}
+
+impl FilePurger for LocalFilePurger {
+    fn remove_file(&self, file_meta: FileMeta, is_delete: bool) {
+        if is_delete {
+            self.delete_file(file_meta);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ObjectStoreFilePurger {
+    file_ref_manager: FileReferenceManagerRef,
+}
+
+impl FilePurger for ObjectStoreFilePurger {
+    fn remove_file(&self, file_meta: FileMeta, _is_delete: bool) {
+        // if not on local file system, instead inform the global file purger to remove the file reference.
+        // notice that no matter whether the file is deleted or not, we need to remove the reference
+        // because the file is no longer in use nonetheless.
+        self.file_ref_manager.remove_file(&file_meta);
+    }
+
+    fn new_file(&self, file_meta: &FileMeta) {
+        self.file_ref_manager.add_file(file_meta);
     }
 }
 
@@ -142,8 +219,8 @@ mod tests {
     use std::num::NonZeroU64;
 
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
     use smallvec::SmallVec;
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;

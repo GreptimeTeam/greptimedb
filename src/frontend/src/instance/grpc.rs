@@ -26,10 +26,10 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
 use common_error::ext::BoxedError;
-use common_grpc::flight::FlightDecoder;
 use common_grpc::FlightData;
-use common_query::logical_plan::add_insert_to_logical_plan;
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
+use common_query::logical_plan::add_insert_to_logical_plan;
 use common_telemetry::tracing::{self};
 use datafusion::datasource::DefaultTableSource;
 use query::parser::PromQuery;
@@ -37,17 +37,17 @@ use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
-use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, Error, ExternalSnafu, InFlightWriteBytesExceededSnafu,
-    IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
-    SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
+    CatalogSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SubstraitDecodeLogicalPlanSnafu,
+    TableNotFoundSnafu, TableOperationSnafu,
 };
-use crate::instance::{attach_timer, Instance};
+use crate::instance::{Instance, attach_timer};
 use crate::metrics::{
     GRPC_HANDLE_PLAN_ELAPSED, GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED,
 };
@@ -68,11 +68,7 @@ impl GrpcQueryHandler for Instance {
             .context(PermissionSnafu)?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_request(&request);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(limiter.limit_request(&request).await?)
         } else {
             None
         };

@@ -21,7 +21,7 @@ use client::client_manager::NodeClients;
 use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_event_recorder::{EventRecorderImpl, EventRecorderRef, DEFAULT_COMPACTION_TIME_WINDOW};
+use common_event_recorder::{DEFAULT_COMPACTION_TIME_WINDOW, EventRecorderImpl, EventRecorderRef};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -30,10 +30,10 @@ use common_meta::ddl::{
 };
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants::{self};
-use common_meta::key::flow::flow_state::FlowStateManager;
-use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_state::FlowStateManager;
+use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
@@ -44,10 +44,10 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::stats::topic::TopicStatsRegistry;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
-use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use common_procedure::local::{LocalManager, ManagerConfig};
 use common_telemetry::{info, warn};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -62,17 +62,18 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
-    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
-    SelectorContext, SelectorRef, FLOW_ID_SEQ, METASRV_DATA_DIR, TABLE_ID_SEQ,
+    ElectionRef, FLOW_ID_SEQ, METASRV_DATA_DIR, Metasrv, MetasrvInfo, MetasrvOptions,
+    RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
-use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
-use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
+use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::wal_prune::Context as WalPruneContext;
+use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::region::flush_trigger::RegionFlushTrigger;
 use crate::region::supervisor::{
-    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
-    RegionSupervisorTicker, DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL,
+    DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL, HeartbeatAcceptor,
+    RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
+    RegionSupervisorTicker,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -319,7 +320,9 @@ impl MetasrvBuilder {
                 }
             );
             if options.allow_region_failover_on_local_wal {
-                warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
+                warn!(
+                    "Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!"
+                );
             }
         }
 
@@ -561,6 +564,7 @@ impl MetasrvBuilder {
             table_id_sequence,
             reconciliation_manager,
             topic_stats_registry,
+            resource_spec: Default::default(),
         })
     }
 }

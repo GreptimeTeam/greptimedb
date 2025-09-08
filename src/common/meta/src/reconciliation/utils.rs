@@ -18,12 +18,13 @@ use std::ops::AddAssign;
 use std::time::Instant;
 
 use api::v1::SemanticType;
-use common_procedure::{watcher, Context as ProcedureContext, ProcedureId};
+use common_procedure::{Context as ProcedureContext, ProcedureId, watcher};
 use common_telemetry::{error, warn};
 use datatypes::schema::ColumnSchema;
 use futures::future::{join_all, try_join_all};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, RawTableMeta};
 use table::table_name::TableName;
@@ -40,8 +41,8 @@ use crate::key::TableMetadataManagerRef;
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
-use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
+use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PartialRegionMetadata<'a> {
@@ -384,6 +385,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 
     *next_column_id = column_ids
         .iter()
+        .filter(|id| !ReservedColumnId::is_reserved(**id))
         .max()
         .map(|max| max + 1)
         .unwrap_or(*next_column_id)
@@ -539,7 +541,10 @@ impl Display for SubprocedureMeta {
                 write!(
                     f,
                     "ReconcileLogicalTable(procedure_id: {}, physical_table_id: {}, physical_table_name: {}, logical_tables: {:?})",
-                    meta.procedure_id, meta.physical_table_id, meta.physical_table_name, meta.logical_tables
+                    meta.procedure_id,
+                    meta.physical_table_id,
+                    meta.physical_table_name,
+                    meta.logical_tables
                 )
             }
             SubprocedureMeta::Database(meta) => {
@@ -685,7 +690,14 @@ pub struct ReconcileDatabaseMetrics {
 
 impl Display for ReconcileDatabaseMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "succeeded_tables: {}, failed_tables: {}, succeeded_procedures: {}, failed_procedures: {}", self.succeeded_tables, self.failed_tables, self.succeeded_procedures, self.failed_procedures)
+        write!(
+            f,
+            "succeeded_tables: {}, failed_tables: {}, succeeded_procedures: {}, failed_procedures: {}",
+            self.succeeded_tables,
+            self.failed_tables,
+            self.succeeded_procedures,
+            self.failed_procedures
+        )
     }
 }
 
@@ -1039,9 +1051,13 @@ mod tests {
     fn test_build_table_info_from_column_metadatas() {
         let mut column_metadatas = new_test_column_metadatas();
         column_metadatas.push(ColumnMetadata {
-            column_schema: ColumnSchema::new("col3", ConcreteDataType::string_datatype(), true),
+            column_schema: ColumnSchema::new(
+                "__table_id",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
             semantic_type: SemanticType::Tag,
-            column_id: 3,
+            column_id: ReservedColumnId::table_id(),
         });
 
         let table_id = 1;
@@ -1066,8 +1082,11 @@ mod tests {
         assert_eq!(new_table_meta.partition_key_indices, vec![2]);
         assert_eq!(new_table_meta.value_indices, vec![1, 2]);
         assert_eq!(new_table_meta.schema.timestamp_index, Some(1));
-        assert_eq!(new_table_meta.column_ids, vec![0, 1, 2, 3]);
-        assert_eq!(new_table_meta.next_column_id, 4);
+        assert_eq!(
+            new_table_meta.column_ids,
+            vec![0, 1, 2, ReservedColumnId::table_id()]
+        );
+        assert_eq!(new_table_meta.next_column_id, table_meta.next_column_id);
     }
 
     #[test]

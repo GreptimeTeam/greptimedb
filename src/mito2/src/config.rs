@@ -31,7 +31,7 @@ const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
 pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 /// Default maximum number of SST files to scan concurrently.
-pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 128;
+pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
 
 // Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
@@ -120,7 +120,7 @@ pub struct MitoConfig {
     pub sst_write_buffer_size: ReadableSize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
-    /// Maximum number of SST files to scan concurrently (default 128).
+    /// Maximum number of SST files to scan concurrently (default 384).
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,

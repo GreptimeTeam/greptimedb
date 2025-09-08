@@ -18,7 +18,7 @@ use arrow_flight::FlightData;
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::DataType;

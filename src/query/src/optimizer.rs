@@ -25,8 +25,8 @@ pub mod transcribe_atat;
 pub mod type_conversion;
 pub mod windowed_sort;
 
-use datafusion_common::config::ConfigOptions;
 use datafusion_common::Result;
+use datafusion_common::config::ConfigOptions;
 use datafusion_expr::LogicalPlan;
 
 use crate::QueryEngineContext;

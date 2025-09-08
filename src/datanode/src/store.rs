@@ -21,13 +21,13 @@ use common_telemetry::info;
 use object_store::factory::new_raw_object_store;
 use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
-use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, PrintDetailedError};
+use object_store::util::{PrintDetailedError, clean_temp_dir, join_dir, with_instrument_layers};
 use object_store::{
-    Access, ObjectStore, ObjectStoreBuilder, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR,
+    ATOMIC_WRITE_DIR, Access, OLD_ATOMIC_WRITE_DIR, ObjectStore, ObjectStoreBuilder,
 };
 use snafu::prelude::*;
 
-use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::config::{DEFAULT_OBJECT_STORE_CACHE_SIZE, ObjectStoreConfig};
 use crate::error::{self, CreateDirSnafu, Result};
 
 fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {

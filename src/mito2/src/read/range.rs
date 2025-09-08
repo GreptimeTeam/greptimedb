@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use common_time::Timestamp;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
 
@@ -25,12 +25,12 @@ use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
-use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
+use crate::sst::file::{FileHandle, FileTimeRange, overlaps};
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
 
@@ -135,10 +135,11 @@ impl RangeMeta {
     fn merge(&mut self, mut other: RangeMeta) {
         debug_assert!(self.overlaps(&other));
         debug_assert!(self.indices.iter().all(|idx| !other.indices.contains(idx)));
-        debug_assert!(self
-            .row_group_indices
-            .iter()
-            .all(|idx| !other.row_group_indices.contains(idx)));
+        debug_assert!(
+            self.row_group_indices
+                .iter()
+                .all(|idx| !other.row_group_indices.contains(idx))
+        );
 
         self.time_range = (
             self.time_range.0.min(other.time_range.0),
@@ -524,8 +525,8 @@ impl RangeBuilderList {
 
 #[cfg(test)]
 mod tests {
-    use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
 
     use super::*;
 

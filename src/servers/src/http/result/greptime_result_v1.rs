@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::response::{IntoResponse, Response};
 use common_query::Output;
 use headers::HeaderValue;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use serde_json::Value;
 use crate::http::header::{
     GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT, GREPTIME_DB_HEADER_METRICS,
 };
-use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
+use crate::http::{GreptimeQueryOutput, HttpResponse, ResponseFormat, handler, process_with_limit};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GreptimedbV1Response {

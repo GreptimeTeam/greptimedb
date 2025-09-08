@@ -52,13 +52,13 @@ use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampSecondVector,
-    UInt32Vector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector,
+    UInt8Vector, UInt8VectorBuilder, UInt32Vector, UInt64Vector, UInt64VectorBuilder, Vector,
     VectorRef,
 };
-use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -66,7 +66,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
     Result,
 };
-use crate::memtable::BoxedBatchIterator;
+use crate::memtable::{BoxedBatchIterator, BoxedRecordBatchIterator};
 use crate::read::prune::PruneReader;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
@@ -693,21 +693,21 @@ impl BatchChecker {
     pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
         batch.check_monotonic()?;
 
-        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
-            if start > first {
-                return Err(format!(
-                    "batch's first timestamp is before the start timestamp: {:?} > {:?}",
-                    start, first
-                ));
-            }
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp())
+            && start > first
+        {
+            return Err(format!(
+                "batch's first timestamp is before the start timestamp: {:?} > {:?}",
+                start, first
+            ));
         }
-        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
-            if end <= last {
-                return Err(format!(
-                    "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
-                    end, last
-                ));
-            }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp())
+            && end <= last
+        {
+            return Err(format!(
+                "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
+                end, last
+            ));
         }
 
         // Checks the batch is behind the last batch.
@@ -990,6 +990,24 @@ impl Source {
             Source::Iter(iter) => iter.next().transpose(),
             Source::Stream(stream) => stream.try_next().await,
             Source::PruneReader(reader) => reader.next_batch().await,
+        }
+    }
+}
+
+/// Async [RecordBatch] reader and iterator wrapper for flat format.
+pub enum FlatSource {
+    /// Source from a [BoxedRecordBatchIterator].
+    Iter(BoxedRecordBatchIterator),
+    /// Source from a [BoxedRecordBatchStream].
+    Stream(BoxedRecordBatchStream),
+}
+
+impl FlatSource {
+    /// Returns next [RecordBatch] from this data source.
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        match self {
+            FlatSource::Iter(iter) => iter.next().transpose(),
+            FlatSource::Stream(stream) => stream.try_next().await,
         }
     }
 }

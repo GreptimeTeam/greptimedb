@@ -22,19 +22,20 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
-use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::Expr;
+use datafusion_expr::utils::expr_to_columns;
+use futures::StreamExt;
 use smallvec::SmallVec;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
-use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::{mpsc, Semaphore};
+use table::predicate::{Predicate, build_time_range_predicate};
+use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
@@ -52,18 +53,21 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::{Batch, Source};
+use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
 };
-use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::parquet::reader::ReaderMetrics;
+
+/// Parallel scan channel size for flat format.
+const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -212,6 +216,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Whether to use flat format.
+    flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -236,6 +242,7 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -290,6 +297,13 @@ impl ScanRegion {
 
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -374,8 +388,10 @@ impl ScanRegion {
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
-            None => ProjectionMapper::all(&self.version.metadata, false)?,
+            Some(p) => {
+                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), self.flat_format)?
+            }
+            None => ProjectionMapper::all(&self.version.metadata, self.flat_format)?,
         };
 
         let ssts = &self.version.ssts;
@@ -449,11 +465,11 @@ impl ScanRegion {
         let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
-        // The mapper always computes projected column ids as the schema of SSTs may change.
-        let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
-            None => ProjectionMapper::all(&self.version.metadata, false)?,
-        };
+
+        if self.flat_format {
+            // The batch is already large enough so we use a small channel size here.
+            self.parallel_scan_channel_size = FLAT_SCAN_CHANNEL_SIZE;
+        }
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -471,7 +487,8 @@ impl ScanRegion {
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_distribution(self.request.distribution);
+            .with_distribution(self.request.distribution)
+            .with_flat_format(self.flat_format);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
@@ -673,6 +690,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Whether to use flat format.
+    pub(crate) flat_format: bool,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -701,6 +720,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            flat_format: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -845,6 +865,13 @@ impl ScanInput {
         self
     }
 
+    /// Sets whether to use flat format.
+    #[must_use]
+    pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -894,6 +921,7 @@ impl ScanInput {
             .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
             .fulltext_index_applier(self.fulltext_index_applier.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
+            .flat_format(self.flat_format)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {
@@ -959,6 +987,61 @@ impl ScanInput {
                         let _ = sender.send(Err(e)).await;
                         break;
                     }
+                }
+            }
+        });
+    }
+
+    /// Scans flat sources (RecordBatch streams) in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    pub(crate) fn create_parallel_flat_sources(
+        &self,
+        sources: Vec<BoxedRecordBatchStream>,
+        semaphore: Arc<Semaphore>,
+    ) -> Result<Vec<BoxedRecordBatchStream>> {
+        if sources.len() <= 1 {
+            return Ok(sources);
+        }
+
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
+                self.spawn_flat_scan_task(source, semaphore.clone(), sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
+                Box::pin(stream) as _
+            })
+            .collect();
+        Ok(sources)
+    }
+
+    /// Spawns a task to scan a flat source (RecordBatch stream) asynchronously.
+    pub(crate) fn spawn_flat_scan_task(
+        &self,
+        mut input: BoxedRecordBatchStream,
+        semaphore: Arc<Semaphore>,
+        sender: mpsc::Sender<Result<RecordBatch>>,
+    ) {
+        common_runtime::spawn_global(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit held.
+                let maybe_batch = {
+                    // Safety: We never close the semaphore.
+                    let _permit = semaphore.acquire().await.unwrap();
+                    input.next().await
+                };
+                match maybe_batch {
+                    Some(Ok(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Some(Err(e)) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                    None => break,
                 }
             }
         });
@@ -1188,12 +1271,11 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate() {
-                    if !predicate.exprs().is_empty() {
-                        let exprs: Vec<_> =
-                            predicate.exprs().iter().map(|e| e.to_string()).collect();
-                        write!(f, ", \"filters\": {:?}", exprs)?;
-                    }
+                if let Some(predicate) = &self.input.predicate.predicate()
+                    && !predicate.exprs().is_empty()
+                {
+                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
+                    write!(f, ", \"filters\": {:?}", exprs)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;

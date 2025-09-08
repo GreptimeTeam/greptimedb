@@ -371,7 +371,7 @@ impl VersionBuilder {
         self
     }
 
-    /// Sets truncated entty id.
+    /// Sets truncated entry id.
     pub(crate) fn truncated_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
         self.truncated_entry_id = entry_id;
         self
@@ -454,9 +454,7 @@ impl VersionBuilder {
         {
             info!(
                 "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
-                self.compaction_time_window,
-                compaction_time_window,
-                self.metadata.region_id
+                self.compaction_time_window, compaction_time_window, self.metadata.region_id
             );
         }
 

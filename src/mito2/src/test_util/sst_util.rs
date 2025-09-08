@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
-use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array};
+use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::read::{Batch, BatchBuilder, Source};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
-use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
+use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);

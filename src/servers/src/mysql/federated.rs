@@ -25,10 +25,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use once_cell::sync::Lazy;
-use regex::bytes::RegexSet;
 use regex::Regex;
-use session::context::QueryContextRef;
+use regex::bytes::RegexSet;
 use session::SessionRef;
+use session::context::QueryContextRef;
 
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
 static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
@@ -238,7 +238,10 @@ fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<
 
 fn check_show_variables(query: &str) -> Option<Output> {
     let recordbatches = if SHOW_SQL_MODE_PATTERN.is_match(query) {
-        Some(show_variables("sql_mode", "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"))
+        Some(show_variables(
+            "sql_mode",
+            "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION",
+        ))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
     } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
@@ -276,10 +279,10 @@ pub(crate) fn check(
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
     let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
-    if let Some(index) = the_6th_index {
-        if query[..index].eq_ignore_ascii_case("INSERT") {
-            return None;
-        }
+    if let Some(index) = the_6th_index
+        && query[..index].eq_ignore_ascii_case("INSERT")
+    {
+        return None;
     }
 
     // First to check the query is like "select @@variables".
@@ -295,8 +298,8 @@ mod test {
 
     use common_query::OutputData;
     use common_time::timezone::set_default_timezone;
-    use session::context::{Channel, QueryContext};
     use session::Session;
+    use session::context::{Channel, QueryContext};
 
     use super::*;
 

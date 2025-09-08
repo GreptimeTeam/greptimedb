@@ -18,8 +18,8 @@ use common_function::scalars::matches_term::MatchesTermFunction;
 use common_function::scalars::udf::create_udf;
 use common_function::state::FunctionState;
 use datafusion::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::Result;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
@@ -109,8 +109,8 @@ impl TreeNodeRewriter for TranscribeAtatRewriter {
 mod tests {
 
     use arrow_schema::SchemaRef;
-    use datafusion::datasource::{provider_as_source, MemTable};
-    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion::datasource::{MemTable, provider_as_source};
+    use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
     use datafusion_expr::{BinaryExpr, Operator};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 

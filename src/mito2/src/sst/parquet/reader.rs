@@ -30,7 +30,7 @@ use datatypes::data_type::ConcreteDataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
-use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
+use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
@@ -39,15 +39,15 @@ use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::CacheStrategy;
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
 };
 use crate::metrics::{
-    PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
-    READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
+    PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
+    READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
@@ -56,7 +56,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
-use crate::sst::parquet::format::{need_override_sequence, PrimaryKeyReadFormat, ReadFormat};
+use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
@@ -113,6 +113,8 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
+    /// Whether to use flat format for reading.
+    flat_format: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -135,6 +137,7 @@ impl ParquetReaderBuilder {
             bloom_filter_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
+            flat_format: false,
         }
     }
 
@@ -198,6 +201,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Sets the flat format flag.
+    #[must_use]
+    pub fn flat_format(mut self, flat_format: bool) -> Self {
+        self.flat_format = flat_format;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -227,23 +237,27 @@ impl ParquetReaderBuilder {
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
         let mut read_format = if let Some(column_ids) = &self.projection {
-            PrimaryKeyReadFormat::new(region_meta.clone(), column_ids.iter().copied())
+            ReadFormat::new(
+                region_meta.clone(),
+                column_ids.iter().copied(),
+                self.flat_format,
+            )
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            PrimaryKeyReadFormat::new(
+            ReadFormat::new(
                 region_meta.clone(),
                 expected_meta
                     .column_metadatas
                     .iter()
                     .map(|col| col.column_id),
+                self.flat_format,
             )
         };
         if need_override_sequence(&parquet_meta) {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
-        let read_format = ReadFormat::PrimaryKey(read_format);
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
@@ -442,11 +456,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -499,11 +513,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -554,11 +568,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+            return true;
         }
 
         // Slow path: apply the index from the file.
@@ -621,11 +635,11 @@ impl ParquetReaderBuilder {
             .cache_strategy
             .index_result_cache()
             .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
-        if let Some(result) = cached.as_ref() {
-            if all_required_row_groups_searched(output, result) {
-                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
-                return true;
-            }
+        if let Some(result) = cached.as_ref()
+            && all_required_row_groups_searched(output, result)
+        {
+            apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+            return true;
         }
 
         // Slow path: apply the index from the file.

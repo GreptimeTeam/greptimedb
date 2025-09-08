@@ -14,7 +14,7 @@
 
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
-use tracing::{event, subscriber, Level};
+use tracing::{Level, event, subscriber};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {

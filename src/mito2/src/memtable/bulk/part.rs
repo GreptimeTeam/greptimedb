@@ -17,9 +17,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
-use api::v1::{bulk_wal_entry, ArrowIpc, BulkWalEntry, Mutation, OpType};
+use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
@@ -28,8 +28,8 @@ use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray, StringBuilder,
     StringDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt64Builder,
-    UInt8Array, UInt8Builder,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt8Builder, UInt32Array,
+    UInt64Array, UInt64Builder,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
@@ -40,7 +40,7 @@ use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
 use mito_codec::row_converter::{
-    build_primary_key_codec, DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt,
+    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, build_primary_key_codec,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
@@ -49,18 +49,19 @@ use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use table::predicate::Predicate;
 
 use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
     EncodeSnafu, NewRecordBatchSnafu, Result,
 };
+use crate::memtable::BoxedRecordBatchIterator;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::BoxedRecordBatchIterator;
+use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -150,6 +151,18 @@ impl BulkPart {
             // If can not get slice memory size, assume 0 here.
             .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
             .sum()
+    }
+
+    /// Returns the estimated series count in this BulkPart.
+    /// This is calculated from the dictionary values count of the PrimaryKeyArray.
+    pub fn estimated_series_count(&self) -> usize {
+        let pk_column_idx = primary_key_column_index(self.batch.num_columns());
+        let pk_column = self.batch.column(pk_column_idx);
+        if let Some(dict_array) = pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+            dict_array.values().len()
+        } else {
+            0
+        }
     }
 
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
@@ -489,7 +502,7 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EncodedBulkPart {
     data: Bytes,
     metadata: BulkPartMeta,
@@ -528,7 +541,7 @@ impl EncodedBulkPart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BulkPartMeta {
     /// Total rows in part.
     pub num_rows: usize,
@@ -873,7 +886,7 @@ mod tests {
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::parquet::format::{PrimaryKeyReadFormat, ReadFormat};
-    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
     };
@@ -1343,7 +1356,7 @@ mod tests {
         check_prune_row_group(
             &part,
             Some(Predicate::new(vec![
-                datafusion_expr::col("k0").eq(datafusion_expr::lit("a"))
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a")),
             ])),
             100,
         );
@@ -1361,7 +1374,7 @@ mod tests {
         check_prune_row_group(
             &part,
             Some(Predicate::new(vec![
-                datafusion_expr::col("v0").eq(datafusion_expr::lit(150i64))
+                datafusion_expr::col("v0").eq(datafusion_expr::lit(150i64)),
             ])),
             1,
         );

@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
 use crate::key_values::KeyValue;
@@ -140,10 +140,10 @@ impl SparsePrimaryKeyCodec {
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
         // if the `columns` is not specified, all unknown columns is primary key(label field).
-        if let Some(columns) = &self.inner.columns {
-            if !columns.contains(&column_id) {
-                return None;
-            }
+        if let Some(columns) = &self.inner.columns
+            && !columns.contains(&column_id)
+        {
+            return None;
         }
 
         match column_id {
@@ -179,7 +179,7 @@ impl SparsePrimaryKeyCodec {
 
     pub fn encode_raw_tag_value<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
-        I: Iterator<Item = (ColumnId, &'a Bytes)>,
+        I: Iterator<Item = (ColumnId, &'a [u8])>,
     {
         for (tag_column_id, tag_value) in row {
             let value_len = tag_value.len();
@@ -385,8 +385,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, Value};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -568,11 +568,11 @@ mod tests {
             .unwrap();
         let tags: Vec<_> = tags
             .into_iter()
-            .map(|(col_id, tag_value)| (col_id, Bytes::from_static(tag_value.as_bytes())))
+            .map(|(col_id, tag_value)| (col_id, tag_value.as_bytes()))
             .collect();
         codec
             .encode_raw_tag_value(
-                tags.iter().map(|(c, b)| (*c, b)),
+                tags.iter().map(|(c, b)| (*c, *b)),
                 &mut buffer_by_raw_encoding,
             )
             .unwrap();

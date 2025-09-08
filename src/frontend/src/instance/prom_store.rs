@@ -23,15 +23,15 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::OutputData;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_query::Output;
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
-use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
-use servers::http::header::{collect_plan_metrics, CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
+use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, collect_plan_metrics};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
 use servers::prom_store::{self, Metrics};
@@ -176,11 +176,13 @@ impl PromStoreProtocolHandler for Instance {
         interceptor_ref.pre_write(&request, ctx.clone())?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&request);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
+            Some(
+                limiter
+                    .limit_row_inserts(&request)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::OtherSnafu)?,
+            )
         } else {
             None
         };

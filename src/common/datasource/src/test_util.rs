@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
@@ -24,8 +24,8 @@ use datafusion::datasource::physical_plan::{
     JsonOpener, JsonSource,
 };
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use object_store::services::Fs;
 use object_store::ObjectStore;
+use object_store::services::Fs;
 
 use crate::file_format::csv::stream_to_csv;
 use crate::file_format::json::stream_to_json;
@@ -111,15 +111,17 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
-    assert!(stream_to_json(
-        Box::pin(stream),
-        tmp_store.clone(),
-        &output_path,
-        threshold(size),
-        8
-    )
-    .await
-    .is_ok());
+    assert!(
+        stream_to_json(
+            Box::pin(stream),
+            tmp_store.clone(),
+            &output_path,
+            threshold(size),
+            8
+        )
+        .await
+        .is_ok()
+    );
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
@@ -148,15 +150,17 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
-    assert!(stream_to_csv(
-        Box::pin(stream),
-        tmp_store.clone(),
-        &output_path,
-        threshold(size),
-        8
-    )
-    .await
-    .is_ok());
+    assert!(
+        stream_to_csv(
+            Box::pin(stream),
+            tmp_store.clone(),
+            &output_path,
+            threshold(size),
+            8
+        )
+        .await
+        .is_ok()
+    );
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();

@@ -16,10 +16,12 @@
 
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatch;
-use datatypes::prelude::ConcreteDataType;
+use common_recordbatch::error::ExternalSnafu;
+use datatypes::arrow::datatypes::Field;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
@@ -27,6 +29,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
+use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 
@@ -51,6 +54,8 @@ pub struct FlatProjectionMapper {
     is_empty_projection: bool,
     /// The index in flat format [RecordBatch] for each column in the output [RecordBatch].
     batch_indices: Vec<usize>,
+    /// Precomputed Arrow schema for input batches.
+    input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
 }
 
 impl FlatProjectionMapper {
@@ -89,21 +94,6 @@ impl FlatProjectionMapper {
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
 
-        if is_empty_projection {
-            // If projection is empty, we don't output any column.
-            return Ok(FlatProjectionMapper {
-                metadata: metadata.clone(),
-                output_schema: Arc::new(Schema::new(vec![])),
-                column_ids,
-                batch_schema: vec![],
-                is_empty_projection,
-                batch_indices: vec![],
-            });
-        }
-
-        // Safety: Columns come from existing schema.
-        let output_schema = Arc::new(Schema::new(column_schemas));
-
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
         // TODO(yingwen): Support different flat schema options.
@@ -113,6 +103,27 @@ impl FlatProjectionMapper {
             metadata.column_metadatas.len() + 3,
             column_ids.iter().copied(),
         );
+
+        let batch_schema = flat_projected_columns(metadata, &format_projection);
+
+        // Safety: We get the column id from the metadata.
+        let input_arrow_schema = compute_input_arrow_schema(metadata, &batch_schema);
+
+        if is_empty_projection {
+            // If projection is empty, we don't output any column.
+            return Ok(FlatProjectionMapper {
+                metadata: metadata.clone(),
+                output_schema: Arc::new(Schema::new(vec![])),
+                column_ids,
+                batch_schema: vec![],
+                is_empty_projection,
+                batch_indices: vec![],
+                input_arrow_schema,
+            });
+        }
+
+        // Safety: Columns come from existing schema.
+        let output_schema = Arc::new(Schema::new(column_schemas));
 
         let batch_indices: Vec<_> = column_ids
             .iter()
@@ -126,8 +137,6 @@ impl FlatProjectionMapper {
             })
             .collect();
 
-        let batch_schema = flat_projected_columns(metadata, &format_projection);
-
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
@@ -135,6 +144,7 @@ impl FlatProjectionMapper {
             batch_schema,
             is_empty_projection,
             batch_indices,
+            input_arrow_schema,
         })
     }
 
@@ -154,10 +164,37 @@ impl FlatProjectionMapper {
         &self.column_ids
     }
 
+    /// Returns the field column start index in output batch.
+    pub(crate) fn field_column_start(&self) -> usize {
+        for (idx, column_id) in self
+            .batch_schema
+            .iter()
+            .map(|(column_id, _)| column_id)
+            .enumerate()
+        {
+            // Safety: We get the column id from the metadata in new().
+            if self
+                .metadata
+                .column_by_id(*column_id)
+                .unwrap()
+                .semantic_type
+                == SemanticType::Field
+            {
+                return idx;
+            }
+        }
+
+        self.batch_schema.len()
+    }
+
     /// Returns ids of columns of the batch that the mapper expects to convert.
     #[allow(dead_code)]
     pub(crate) fn batch_schema(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_schema
+    }
+
+    pub(crate) fn input_arrow_schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
+        self.input_arrow_schema.clone()
     }
 
     /// Returns the schema of converted [RecordBatch].
@@ -218,4 +255,36 @@ pub(crate) fn flat_projected_columns(
 
     // Safety: FormatProjection ensures all indices can be unwrapped.
     schema.into_iter().map(|id_type| id_type.unwrap()).collect()
+}
+
+/// Computes the Arrow schema for input batches.
+///
+/// # Panics
+/// Panics if it can't find the column by the column id in the batch_schema.
+fn compute_input_arrow_schema(
+    metadata: &RegionMetadata,
+    batch_schema: &[(ColumnId, ConcreteDataType)],
+) -> datatypes::arrow::datatypes::SchemaRef {
+    let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
+    for (column_id, _) in batch_schema {
+        let column_metadata = metadata.column_by_id(*column_id).unwrap();
+        let field = if column_metadata.semantic_type == SemanticType::Tag {
+            Field::new_dictionary(
+                &column_metadata.column_schema.name,
+                datatypes::arrow::datatypes::DataType::UInt32,
+                column_metadata.column_schema.data_type.as_arrow_type(),
+                column_metadata.column_schema.is_nullable(),
+            )
+        } else {
+            Field::new(
+                &column_metadata.column_schema.name,
+                column_metadata.column_schema.data_type.as_arrow_type(),
+                column_metadata.column_schema.is_nullable(),
+            )
+        };
+        new_fields.push(Arc::new(field));
+    }
+    new_fields.extend_from_slice(&internal_fields());
+
+    Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
 }
