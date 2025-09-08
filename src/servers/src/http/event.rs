@@ -46,6 +46,7 @@ use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use simd_json::Buffers;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use strum::{EnumIter, IntoEnumIterator};
 use table::table_reference::TableReference;
 use vrl::value::{KeyString, Value as VrlValue};
@@ -218,7 +219,7 @@ pub async fn query_pipeline_create_table(
         }
     );
     ensure!(
-        pipeline_name.eq_ignore_ascii_case(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME),
+        !pipeline_name.eq_ignore_ascii_case(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME),
         InvalidParameterSnafu {
             reason: "identity pipeline doesn't have fixed table schema",
         }
@@ -255,17 +256,22 @@ pub async fn query_pipeline_create_table(
         table: &table_name,
     };
 
-    let create_table_expr =
+    let mut create_table_expr =
         create_table_expr_by_column_schemas(&table_name_ref, schemas_def, default_engine(), None)
             .map_err(BoxedError::new)
             .context(OtherSnafu)?;
+
+    // manually set the append_mode to true
+    create_table_expr
+        .table_options
+        .insert(APPEND_MODE_KEY.to_string(), "true".to_string());
 
     let expr = expr_to_create(&create_table_expr, None)
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
 
     let sql = SqlOutput {
-        sql: expr.to_string(),
+        sql: format!("{:#}", expr),
         message: None,
     };
 

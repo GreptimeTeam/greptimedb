@@ -36,7 +36,11 @@ use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
-    COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema,
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema,
     SkippingIndexType,
 };
 use file_engine::FileOptions;
@@ -259,7 +263,7 @@ pub fn create_to_expr(
 /// - Table option normalization (e.g., "3days" -> "3d")
 /// - Primary key representation (always as constraints, not inline)
 pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Result<CreateTable> {
-    let quote_style = quote_style.unwrap_or('"');
+    let quote_style = quote_style.unwrap_or('`');
 
     // Convert table name
     let table_name = ObjectName(vec![sql::ast::ObjectNamePart::Identifier(
@@ -315,6 +319,65 @@ pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Resu
 
         // Note: We don't add inline PRIMARY KEY options here,
         // we'll handle all primary keys as constraints instead for consistency
+
+        // Handle column extensions (fulltext, inverted index, skipping index)
+        let mut extensions = ColumnExtensions::default();
+
+        // Add fulltext index options if present
+        if let Ok(Some(opt)) = column_schema.fulltext_options()
+            && opt.enable
+        {
+            let mut map = HashMap::from([
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                    opt.analyzer.to_string(),
+                ),
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                    opt.case_sensitive.to_string(),
+                ),
+                (
+                    COLUMN_FULLTEXT_OPT_KEY_BACKEND.to_string(),
+                    opt.backend.to_string(),
+                ),
+            ]);
+            if opt.backend == FulltextBackend::Bloom {
+                map.insert(
+                    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY.to_string(),
+                    opt.granularity.to_string(),
+                );
+                map.insert(
+                    COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE.to_string(),
+                    opt.false_positive_rate().to_string(),
+                );
+            }
+            extensions.fulltext_index_options = Some(map.into());
+        }
+
+        // Add skipping index options if present
+        if let Ok(Some(opt)) = column_schema.skipping_index_options() {
+            let map = HashMap::from([
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY.to_string(),
+                    opt.granularity.to_string(),
+                ),
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE.to_string(),
+                    opt.false_positive_rate().to_string(),
+                ),
+                (
+                    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE.to_string(),
+                    opt.index_type.to_string(),
+                ),
+            ]);
+            extensions.skipping_index_options = Some(map.into());
+        }
+
+        // Add inverted index options if present
+        if column_schema.is_inverted_indexed() {
+            extensions.inverted_index_options = Some(HashMap::new().into());
+        }
+
         let sql_column = SqlColumn {
             column_def: ColumnDef {
                 name: Ident::with_quote(quote_style, &column_def.name),
@@ -322,7 +385,7 @@ pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Resu
                     .context(ParseSqlSnafu)?,
                 options,
             },
-            extensions: ColumnExtensions::default(),
+            extensions,
         };
 
         columns.push(sql_column);
@@ -1441,10 +1504,9 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_expr_to_create() {
-        let sql = r#"
-CREATE TABLE IF NOT EXISTS `tt` (
+        let sql = r#"CREATE TABLE IF NOT EXISTS `tt` (
   `timestamp` TIMESTAMP(9) NOT NULL,
-  `ip_address` STRING NULL INVERTED INDEX,
+  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
   `username` STRING NULL,
   `http_method` STRING NULL INVERTED INDEX,
   `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),
@@ -1452,13 +1514,13 @@ CREATE TABLE IF NOT EXISTS `tt` (
   `status_code` INT NULL INVERTED INDEX,
   `response_size` BIGINT NULL,
   `message` STRING NULL,
-  TIME INDEX (`timestamp`)
+  TIME INDEX (`timestamp`),
+  PRIMARY KEY (`username`, `status_code`)
 )
 ENGINE=mito
 WITH(
   append_mode = 'true'
-)
-"#;
+)"#;
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
@@ -1474,7 +1536,6 @@ WITH(
 
         let create_table = expr_to_create(&expr, Some('`')).unwrap();
         let new_sql = format!("{:#}", create_table);
-        println!("new_sql: {}", new_sql);
         assert_eq!(sql, new_sql);
     }
 }
