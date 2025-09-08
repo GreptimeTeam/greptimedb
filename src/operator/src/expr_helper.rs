@@ -1441,7 +1441,24 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_expr_to_create() {
-        let sql = "CREATE TABLE monitor (host STRING,ts TIMESTAMP,TIME INDEX (ts),PRIMARY KEY(host)) ENGINE=mito WITH(ttl='3days');";
+        let sql = r#"
+CREATE TABLE IF NOT EXISTS `tt` (
+  `timestamp` TIMESTAMP(9) NOT NULL,
+  `ip_address` STRING NULL INVERTED INDEX,
+  `username` STRING NULL,
+  `http_method` STRING NULL INVERTED INDEX,
+  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),
+  `protocol` STRING NULL,
+  `status_code` INT NULL INVERTED INDEX,
+  `response_size` BIGINT NULL,
+  `message` STRING NULL,
+  TIME INDEX (`timestamp`)
+)
+ENGINE=mito
+WITH(
+  append_mode = 'true'
+)
+"#;
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
@@ -1454,49 +1471,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
         // Convert CreateTable -> CreateTableExpr -> CreateTable
         let expr = create_to_expr(&original_create, &QueryContext::arc()).unwrap();
-        let recreated_create = expr_to_create(&expr, Some('"')).unwrap();
 
-        // Verify basic properties
-        assert_eq!(
-            original_create.if_not_exists,
-            recreated_create.if_not_exists
-        );
-
-        // Compare table names (ignoring quote style)
-        assert_eq!(original_create.name.0.len(), recreated_create.name.0.len());
-        for (orig, recreated) in original_create
-            .name
-            .0
-            .iter()
-            .zip(recreated_create.name.0.iter())
-        {
-            let (
-                sql::ast::ObjectNamePart::Identifier(orig_ident),
-                sql::ast::ObjectNamePart::Identifier(recreated_ident),
-            ) = (orig, recreated);
-            assert_eq!(orig_ident.value, recreated_ident.value);
-        }
-
-        assert_eq!(original_create.engine, recreated_create.engine);
-        assert_eq!(
-            original_create.columns.len(),
-            recreated_create.columns.len()
-        );
-        assert_eq!(
-            original_create.constraints.len(),
-            recreated_create.constraints.len()
-        );
-
-        // Verify column names (ignoring quote style)
-        for (orig, recreated) in original_create
-            .columns
-            .iter()
-            .zip(recreated_create.columns.iter())
-        {
-            assert_eq!(orig.column_def.name.value, recreated.column_def.name.value);
-        }
-
-        // Verify table options (ttl should be converted to normalized format)
-        assert!(recreated_create.options.get("ttl").is_some());
+        let create_table = expr_to_create(&expr, Some('`')).unwrap();
+        let new_sql = format!("{:#}", create_table);
+        println!("new_sql: {}", new_sql);
+        assert_eq!(sql, new_sql);
     }
 }
