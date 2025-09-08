@@ -19,8 +19,8 @@ use arrow::datatypes::{
     TimestampNanosecondType as ArrowTimestampNanosecondType,
     TimestampSecondType as ArrowTimestampSecondType,
 };
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use enum_dispatch::enum_dispatch;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -200,8 +200,8 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
-    use common_time::timezone::set_default_timezone;
     use common_time::Date;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 

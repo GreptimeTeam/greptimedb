@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_meta::RegionIdent;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
-use common_meta::RegionIdent;
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use snafu::OptionExt;
@@ -140,10 +140,10 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             })
             .await;
 
-            if let Some(reply) = reply {
-                if let Err(e) = mailbox.send((meta, reply)).await {
-                    error!(e; "Failed to send reply to mailbox");
-                }
+            if let Some(reply) = reply
+                && let Err(e) = mailbox.send((meta, reply)).await
+            {
+                error!(e; "Failed to send reply to mailbox");
             }
         });
 
@@ -215,21 +215,27 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         let storage_path = "test";
         let instruction = open_region_instruction(region_id, storage_path);
-        assert!(heartbeat_handler
-            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+        assert!(
+            heartbeat_handler
+                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+        );
 
         // Close region
         let instruction = close_region_instruction(region_id);
-        assert!(heartbeat_handler
-            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+        assert!(
+            heartbeat_handler
+                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+        );
 
         // Downgrade region
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
         });
-        assert!(heartbeat_handler
-            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+        assert!(
+            heartbeat_handler
+                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+        );
 
         // Upgrade region
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {

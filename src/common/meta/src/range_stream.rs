@@ -19,8 +19,8 @@ use snafu::ensure;
 
 use crate::error::{self, Result};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::util::get_next_prefix_key;
 
 pub type KeyValueDecoderFn<T> = dyn Fn(KeyValue) -> Result<T> + Send + Sync;
@@ -195,8 +195,8 @@ mod tests {
 
     use super::*;
     use crate::error::{Error, Result};
-    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
     use crate::rpc::store::PutRequest;
 
     fn decoder(kv: KeyValue) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -266,14 +266,16 @@ mod tests {
         for i in 0..total {
             let key = vec![97 + i];
 
-            assert!(kv_backend
-                .put(PutRequest {
-                    key: key.clone(),
-                    value: key.clone(),
-                    ..Default::default()
-                })
-                .await
-                .is_ok());
+            assert!(
+                kv_backend
+                    .put(PutRequest {
+                        key: key.clone(),
+                        value: key.clone(),
+                        ..Default::default()
+                    })
+                    .await
+                    .is_ok()
+            );
 
             expected.insert(key, ());
         }

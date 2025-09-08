@@ -16,7 +16,7 @@ mod common;
 
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
-use pipeline::{setup_pipeline, PipelineContext};
+use pipeline::{PipelineContext, setup_pipeline};
 
 fn make_string_column_schema(name: String) -> greptime_proto::v1::ColumnSchema {
     common::make_column_schema(name, ColumnDataType::String, SemanticType::Field)

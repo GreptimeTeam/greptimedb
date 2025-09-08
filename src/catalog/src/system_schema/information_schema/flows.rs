@@ -16,10 +16,10 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_meta::key::FlowId;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
@@ -38,14 +38,14 @@ use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
     Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::{Predicates, FLOWS};
+use crate::information_schema::{FLOWS, Predicates};
 use crate::system_schema::information_schema::InformationTable;
 use crate::system_schema::utils;
-use crate::CatalogManager;
 
 const INIT_CAPACITY: usize = 42;
 

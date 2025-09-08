@@ -177,7 +177,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
     async fn test_handle_flush_region_hint() {
@@ -288,7 +288,7 @@ mod tests {
         assert!(reply.is_some());
         if let Some(InstructionReply::FlushRegions(flush_reply)) = reply {
             assert!(!flush_reply.overall_success); // Should fail due to non-existent regions
-                                                   // With fail-fast, only process regions until first failure
+            // With fail-fast, only process regions until first failure
             assert!(flush_reply.results.len() <= region_ids.len());
         } else {
             panic!("Expected FlushRegions reply");
@@ -324,7 +324,7 @@ mod tests {
         assert!(reply.is_some());
         if let Some(InstructionReply::FlushRegions(flush_reply)) = reply {
             assert!(!flush_reply.overall_success); // Should fail due to one non-existent region
-                                                   // With try-all, should process all regions
+            // With try-all, should process all regions
             assert_eq!(flush_reply.results.len(), region_ids.len());
             // First should succeed, second should fail
             assert!(flush_reply.results[0].1.is_ok());

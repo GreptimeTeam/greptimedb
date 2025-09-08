@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use opendal::Result;
 use opendal::raw::oio::Reader;
 use opendal::raw::{
     Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite,
 };
-use opendal::Result;
 mod read_cache;
 use std::time::Instant;
 

@@ -445,11 +445,7 @@ impl OrdValue {
         Ok(Self {
             val: {
                 let v = iter.next().ok_or_else(fail_accum::<Self>)?;
-                if v == Value::Null {
-                    None
-                } else {
-                    Some(v)
-                }
+                if v == Value::Null { None } else { Some(v) }
             },
             non_nulls: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
                 .map_err(err_try_from_val)?,
@@ -473,11 +469,7 @@ impl TryFrom<Vec<Value>> for OrdValue {
         Ok(Self {
             val: {
                 let v = iter.next().unwrap();
-                if v == Value::Null {
-                    None
-                } else {
-                    Some(v)
-                }
+                if v == Value::Null { None } else { Some(v) }
             },
             non_nulls: Diff::try_from(iter.next().unwrap()).map_err(err_try_from_val)?,
         })
@@ -917,10 +909,7 @@ mod test {
             if actual_state != state {
                 panic!(
                     "Failed to cast into state from accum for {:?} with input {:?}, expect state {:?}, got state {:?}",
-                    aggr_fn,
-                    input,
-                    state,
-                    actual_state
+                    aggr_fn, input, state, actual_state
                 );
             }
         }

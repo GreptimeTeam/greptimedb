@@ -15,9 +15,9 @@
 use api::v1::WalEntry;
 use futures::stream;
 use prost::Message;
+use store_api::logstore::EntryId;
 use store_api::logstore::entry::{Entry, MultiplePartEntry, MultiplePartHeader};
 use store_api::logstore::provider::Provider;
-use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
 use crate::error::Result;

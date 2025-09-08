@@ -20,7 +20,7 @@ use common_time::util as time_util;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -102,8 +102,8 @@ pub struct RegionStat {
     pub index_size: u64,
     /// The manifest infoof the region.
     pub region_manifest: RegionManifestInfo,
-    /// The write bytes.
-    pub write_bytes: u64,
+    /// The total bytes written of the region since region opened.
+    pub written_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
     pub data_topic_latest_entry_id: u64,
@@ -306,7 +306,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             sst_num: region_stat.sst_num,
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
-            write_bytes: region_stat.write_bytes,
+            written_bytes: region_stat.written_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
         }

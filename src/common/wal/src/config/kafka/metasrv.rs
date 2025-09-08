@@ -18,8 +18,8 @@ use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
-    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_AUTO_PRUNE_INTERVAL,
-    DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_CHECKPOINT_TRIGGER_SIZE,
+    DEFAULT_FLUSH_TRIGGER_SIZE, KafkaConnectionConfig, KafkaTopicConfig,
 };
 
 /// Kafka wal configurations for metasrv.

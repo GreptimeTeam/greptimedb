@@ -15,12 +15,12 @@
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, InvalidVectorStringSnafu, Result};
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::parse_string_to_vector_type_value;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 
@@ -39,10 +39,7 @@ impl Function for ParseVectorFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![ConcreteDataType::string_datatype()],
-            Volatility::Immutable,
-        )
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

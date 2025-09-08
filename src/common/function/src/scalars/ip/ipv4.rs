@@ -16,8 +16,8 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use common_query::prelude::{Signature, TypeSignature};
-use datafusion::logical_expr::Volatility;
+use datafusion_expr::{Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
@@ -34,9 +34,19 @@ use crate::function::{Function, FunctionContext};
 /// For example:
 /// - 167772160 (0x0A000000) returns "10.0.0.0"
 /// - 3232235521 (0xC0A80001) returns "192.168.0.1"
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4NumToString;
+pub struct Ipv4NumToString {
+    aliases: [String; 1],
+}
+
+impl Default for Ipv4NumToString {
+    fn default() -> Self {
+        Self {
+            aliases: ["inet_ntoa".to_string()],
+        }
+    }
+}
 
 impl Function for Ipv4NumToString {
     fn name(&self) -> &str {
@@ -49,7 +59,7 @@ impl Function for Ipv4NumToString {
 
     fn signature(&self) -> Signature {
         Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::uint32_datatype()]),
+            TypeSignature::Exact(vec![DataType::UInt32]),
             Volatility::Immutable,
         )
     }
@@ -85,6 +95,10 @@ impl Function for Ipv4NumToString {
 
         Ok(results.to_vector())
     }
+
+    fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
 }
 
 /// Function that converts a string representation of an IPv4 address to a UInt32 number.
@@ -107,10 +121,7 @@ impl Function for Ipv4StringToNum {
     }
 
     fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![ConcreteDataType::string_datatype()]),
-            Volatility::Immutable,
-        )
+        Signature::string(1, Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
@@ -159,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_num_to_string() {
-        let func = Ipv4NumToString;
+        let func = Ipv4NumToString::default();
         let ctx = FunctionContext::default();
 
         // Test data
@@ -196,7 +207,7 @@ mod tests {
     #[test]
     fn test_ipv4_conversions_roundtrip() {
         let to_num = Ipv4StringToNum;
-        let to_string = Ipv4NumToString;
+        let to_string = Ipv4NumToString::default();
         let ctx = FunctionContext::default();
 
         // Test data for string to num to string

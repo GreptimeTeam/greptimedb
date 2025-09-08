@@ -33,6 +33,7 @@ use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF};
 use datafusion::prelude::create_udaf;
+use datafusion_expr::Volatility;
 use datatypes::arrow::datatypes::DataType;
 use hyperloglogplus::{HyperLogLog, HyperLogLogPlus};
 
@@ -104,10 +105,10 @@ impl HllState {
     }
 
     fn merge(&mut self, raw: &[u8]) {
-        if let Ok(serialized) = bincode::deserialize::<HllStateType>(raw) {
-            if let Ok(()) = self.hll.merge(&serialized) {
-                return;
-            }
+        if let Ok(serialized) = bincode::deserialize::<HllStateType>(raw)
+            && let Ok(()) = self.hll.merge(&serialized)
+        {
+            return;
         }
         trace!("Warning: Failed to merge HyperLogLog from {:?}", raw);
     }
@@ -152,7 +153,7 @@ impl DfAccumulator for HllState {
                 return not_impl_err!(
                     "HLL functions do not support data type: {}",
                     array.data_type()
-                )
+                );
             }
         }
 

@@ -14,9 +14,9 @@
 
 mod flight;
 
+use api::v1::QueryRequest;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::QueryRequest;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use frontend::instance::Instance;
@@ -51,10 +51,10 @@ mod test {
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_table_expr, AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType,
-        ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
-        DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
-        SemanticType, VectorTypeExtension,
+        AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType, ColumnDataTypeExtension,
+        ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
+        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        VectorTypeExtension, alter_table_expr,
     };
     use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
@@ -76,10 +76,10 @@ mod test {
     use super::*;
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
-    use crate::tests::test_util::{
-        both_instances_cases, distributed, execute_sql, standalone, MockInstance,
-    };
     use crate::tests::MockDistributedInstance;
+    use crate::tests::test_util::{
+        MockInstance, both_instances_cases, distributed, execute_sql, standalone,
+    };
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_handle_ddl_request() {
@@ -371,18 +371,20 @@ mod test {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        assert!(instance
-            .frontend()
-            .catalog_manager()
-            .table(
-                "greptime",
-                "database_created_through_grpc",
-                "table_created_through_grpc",
-                None,
-            )
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            instance
+                .frontend()
+                .catalog_manager()
+                .table(
+                    "greptime",
+                    "database_created_through_grpc",
+                    "table_created_through_grpc",
+                    None,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -497,7 +499,9 @@ CREATE TABLE {table_name} (
         let instance = standalone.fe_instance();
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))");
+        let sql = format!(
+            "CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))"
+        );
         create_table(instance, sql).await;
 
         test_insert_delete_and_query_on_existing_table(instance, table_name).await;
@@ -1075,7 +1079,9 @@ CREATE TABLE {table_name} (
         let instance = standalone.fe_instance();
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))");
+        let sql = format!(
+            "CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))"
+        );
         create_table(instance, sql).await;
 
         let insert = InsertRequest {

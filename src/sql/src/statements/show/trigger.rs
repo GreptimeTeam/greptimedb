@@ -23,8 +23,8 @@ impl Display for ShowTriggers {
 mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
-    use crate::statements::show::trigger::ShowTriggers;
     use crate::statements::show::ShowKind;
+    use crate::statements::show::trigger::ShowTriggers;
     use crate::statements::statement::Statement;
 
     #[test]

@@ -64,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::local::{test_util, LocalManager, ManagerConfig};
+    use crate::local::{LocalManager, ManagerConfig, test_util};
     use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
     use crate::test_util::InMemoryPoisonStore;

@@ -17,8 +17,8 @@ pub mod etcd;
 pub mod rds;
 
 use std::fmt::{self, Debug};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_telemetry::{error, info, warn};
 use tokio::sync::broadcast::error::RecvError;

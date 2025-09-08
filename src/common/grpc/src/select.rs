@@ -18,11 +18,11 @@ use common_base::BitVec;
 use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
-    Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
+    Int8Vector, Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector,
     IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
-    UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
+    UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
 };
 use snafu::OptionExt;
 

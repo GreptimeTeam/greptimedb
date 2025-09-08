@@ -18,10 +18,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use client::OutputData;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use common_meta::rpc::store::{BatchPutRequest, DeleteRangeRequest, RangeRequest};
+use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::KeyValue;
-use common_procedure::{watcher, ProcedureId, ProcedureManagerRef};
+use common_meta::rpc::store::{BatchPutRequest, DeleteRangeRequest, RangeRequest};
+use common_procedure::{ProcedureId, ProcedureManagerRef, watcher};
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::tracing::info;
@@ -41,7 +41,7 @@ use session::context::{QueryContext, QueryContextRef};
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 use crate::test_util::StorageType;
-use crate::tests::{create_distributed_instance, MockDistributedInstance};
+use crate::tests::{MockDistributedInstance, create_distributed_instance};
 
 #[async_trait::async_trait]
 pub(crate) trait RebuildableMockInstance: MockInstance {

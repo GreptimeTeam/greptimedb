@@ -151,9 +151,11 @@ mod tests {
         let data = r#"{"properties":{"key1":"value1"}}"#;
         let deserialized = serde_json::from_str::<FileMetadata>(data);
 
-        assert!(deserialized
-            .unwrap_err()
-            .to_string()
-            .contains("missing field `blobs`"));
+        assert!(
+            deserialized
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `blobs`")
+        );
     }
 }

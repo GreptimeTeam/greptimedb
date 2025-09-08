@@ -1447,6 +1447,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-version",
+ "common-workload",
  "dashmap",
  "datafusion",
  "datatypes",
@@ -1464,6 +1465,7 @@ dependencies = [
  "promql-parser",
  "rand 0.9.1",
  "rustc-hash 2.1.1",
+ "serde",
  "serde_json",
  "session",
  "snafu 0.8.6",
@@ -2192,7 +2194,6 @@ dependencies = [
  "nalgebra",
  "num",
  "num-traits",
- "once_cell",
  "paste",
  "pretty_assertions",
  "s2",
@@ -2471,9 +2472,11 @@ name = "common-recordbatch"
 version = "0.18.0"
 dependencies = [
  "arc-swap",
+ "common-base",
  "common-error",
  "common-macro",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -5299,7 +5302,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=66eb089afa6baaa3ddfafabd0a4abbe317d012c3#66eb089afa6baaa3ddfafabd0a4abbe317d012c3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36#f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7591,6 +7594,7 @@ dependencies = [
  "crc32fast",
  "criterion 0.4.0",
  "crossbeam-utils",
+ "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

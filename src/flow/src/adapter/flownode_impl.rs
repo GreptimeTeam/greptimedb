@@ -14,12 +14,12 @@
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use api::v1::flow::{
-    flow_request, CreateRequest, DirtyWindowRequests, DropRequest, FlowRequest, FlowResponse,
-    FlushFlow,
+    CreateRequest, DirtyWindowRequests, DropRequest, FlowRequest, FlowResponse, FlushFlow,
+    flow_request,
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
@@ -35,7 +35,7 @@ use futures::TryStreamExt;
 use greptime_proto::v1::flow::DirtyWindowRequest;
 use itertools::Itertools;
 use session::context::QueryContextBuilder;
-use snafu::{ensure, IntoError, OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{Mutex, RwLock};
 
@@ -612,7 +612,7 @@ impl FlowEngine for FlowDualEngine {
                 return InternalSnafu {
                     reason: format!("Invalid flow type: {}", flow_type),
                 }
-                .fail()
+                .fail();
             }
         };
 

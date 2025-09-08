@@ -46,7 +46,7 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{new_picker, CompactionTask};
+use crate::compaction::picker::{CompactionTask, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -55,10 +55,10 @@ use crate::error::{
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
+use crate::read::BoxedBatchReader;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
-use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -689,13 +689,17 @@ fn time_range_to_predicate(
             ]
         }
         (Some(start), None) => {
-            vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .gt_eq(ts_to_lit(*start, ts_col_unit)?)]
+            vec![
+                datafusion_expr::col(ts_col.column_schema.name.clone())
+                    .gt_eq(ts_to_lit(*start, ts_col_unit)?),
+            ]
         }
 
         (None, Some(end)) => {
-            vec![datafusion_expr::col(ts_col.column_schema.name.clone())
-                .lt(ts_to_lit(*end, ts_col_unit)?)]
+            vec![
+                datafusion_expr::col(ts_col.column_schema.name.clone())
+                    .lt(ts_to_lit(*end, ts_col_unit)?),
+            ]
         }
         (None, None) => {
             return Ok(PredicateGroup::default());
@@ -761,7 +765,7 @@ mod tests {
     use crate::region::ManifestContext;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
-    use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
+    use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
 
     #[tokio::test]
     async fn test_schedule_empty() {
@@ -910,12 +914,14 @@ mod tests {
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
-        assert!(!scheduler
-            .region_status
-            .get(&builder.region_id())
-            .unwrap()
-            .waiters
-            .is_empty());
+        assert!(
+            !scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .waiters
+                .is_empty()
+        );
 
         // On compaction finished and schedule next compaction.
         scheduler
@@ -947,12 +953,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());
-        assert!(!scheduler
-            .region_status
-            .get(&builder.region_id())
-            .unwrap()
-            .waiters
-            .is_empty());
+        assert!(
+            !scheduler
+                .region_status
+                .get(&builder.region_id())
+                .unwrap()
+                .waiters
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1023,12 +1031,14 @@ mod tests {
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
-        assert!(scheduler
-            .region_status
-            .get(&region_id)
-            .unwrap()
-            .pending_request
-            .is_none());
+        assert!(
+            scheduler
+                .region_status
+                .get(&region_id)
+                .unwrap()
+                .pending_request
+                .is_none()
+        );
 
         // Schedule another manual compaction.
         let (tx, _rx) = oneshot::channel();

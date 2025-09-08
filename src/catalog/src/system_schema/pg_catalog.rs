@@ -34,10 +34,10 @@ use table::TableRef;
 pub use table_names::*;
 
 use self::pg_namespace::oid_map::{PGNamespaceOidMap, PGNamespaceOidMapRef};
+use crate::CatalogManager;
 use crate::system_schema::memory_table::MemoryTable;
 use crate::system_schema::utils::tables::u32_column;
 use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
-use crate::CatalogManager;
 
 lazy_static! {
     static ref MEMORY_TABLES: &'static [&'static str] = &[table_names::PG_TYPE];

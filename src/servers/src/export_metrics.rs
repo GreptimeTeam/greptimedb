@@ -17,14 +17,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
-use common_telemetry::metric::{convert_metric_to_write_request, MetricFilter};
+use common_telemetry::metric::{MetricFilter, convert_metric_to_write_request};
 use common_telemetry::{error, info};
 use common_time::Timestamp;
 use prost::Message;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextBuilder;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::time::{self, Interval};
 
 use crate::error::{InvalidExportMetricsConfigSnafu, Result, SendPromRemoteRequestSnafu};
@@ -131,7 +131,7 @@ impl ExportMetricsTask {
                         return InvalidExportMetricsConfigSnafu {
                             msg: format!("Export metrics: invalid HTTP header name: {}", k),
                         }
-                        .fail()
+                        .fail();
                     }
                 };
                 match TryInto::<HeaderValue>::try_into(v) {
@@ -140,7 +140,7 @@ impl ExportMetricsTask {
                         return InvalidExportMetricsConfigSnafu {
                             msg: format!("Export metrics: invalid HTTP header value: {}", v),
                         }
-                        .fail()
+                        .fail();
                     }
                 };
                 Ok(())
@@ -287,62 +287,72 @@ mod test {
     #[tokio::test]
     async fn test_config() {
         // zero write_interval
-        assert!(ExportMetricsTask::try_new(
-            &ExportMetricsOption {
-                enable: true,
-                write_interval: Duration::from_secs(0),
-                ..Default::default()
-            },
-            None
-        )
-        .is_err());
-        // none self_import and remote_write
-        assert!(ExportMetricsTask::try_new(
-            &ExportMetricsOption {
-                enable: true,
-                ..Default::default()
-            },
-            None
-        )
-        .is_err());
-        // both self_import and remote_write
-        assert!(ExportMetricsTask::try_new(
-            &ExportMetricsOption {
-                enable: true,
-                self_import: Some(SelfImportOption::default()),
-                remote_write: Some(RemoteWriteOption::default()),
-                ..Default::default()
-            },
-            None
-        )
-        .is_err());
-        // empty db
-        assert!(ExportMetricsTask::try_new(
-            &ExportMetricsOption {
-                enable: true,
-                self_import: Some(SelfImportOption {
-                    db: String::default()
-                }),
-                remote_write: None,
-                ..Default::default()
-            },
-            None
-        )
-        .is_err());
-        // empty url
-        assert!(ExportMetricsTask::try_new(
-            &ExportMetricsOption {
-                enable: true,
-                self_import: None,
-                remote_write: Some(RemoteWriteOption {
-                    url: String::default(),
+        assert!(
+            ExportMetricsTask::try_new(
+                &ExportMetricsOption {
+                    enable: true,
+                    write_interval: Duration::from_secs(0),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            None
-        )
-        .is_err());
+                },
+                None
+            )
+            .is_err()
+        );
+        // none self_import and remote_write
+        assert!(
+            ExportMetricsTask::try_new(
+                &ExportMetricsOption {
+                    enable: true,
+                    ..Default::default()
+                },
+                None
+            )
+            .is_err()
+        );
+        // both self_import and remote_write
+        assert!(
+            ExportMetricsTask::try_new(
+                &ExportMetricsOption {
+                    enable: true,
+                    self_import: Some(SelfImportOption::default()),
+                    remote_write: Some(RemoteWriteOption::default()),
+                    ..Default::default()
+                },
+                None
+            )
+            .is_err()
+        );
+        // empty db
+        assert!(
+            ExportMetricsTask::try_new(
+                &ExportMetricsOption {
+                    enable: true,
+                    self_import: Some(SelfImportOption {
+                        db: String::default()
+                    }),
+                    remote_write: None,
+                    ..Default::default()
+                },
+                None
+            )
+            .is_err()
+        );
+        // empty url
+        assert!(
+            ExportMetricsTask::try_new(
+                &ExportMetricsOption {
+                    enable: true,
+                    self_import: None,
+                    remote_write: Some(RemoteWriteOption {
+                        url: String::default(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None
+            )
+            .is_err()
+        );
         // self import but no handle
         let s = ExportMetricsTask::try_new(
             &ExportMetricsOption {

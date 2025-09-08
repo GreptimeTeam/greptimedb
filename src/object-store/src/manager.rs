@@ -59,11 +59,11 @@ impl ObjectStoreManager {
 
 #[cfg(test)]
 mod tests {
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
 
     use super::ObjectStoreManager;
-    use crate::services::Fs as Builder;
     use crate::ObjectStore;
+    use crate::services::Fs as Builder;
 
     fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();

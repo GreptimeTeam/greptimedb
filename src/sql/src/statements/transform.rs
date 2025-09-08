@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use expand_interval::ExpandIntervalTransformRule;
 use lazy_static::lazy_static;
-use sqlparser::ast::{visit_expressions_mut, Expr};
+use sqlparser::ast::{Expr, visit_expressions_mut};
 use type_alias::TypeAliasTransformRule;
 
 use crate::error::Result;

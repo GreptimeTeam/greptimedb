@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use arrow::array::{make_array, ArrayData, ArrayRef, BooleanArray};
+use arrow::array::{ArrayData, ArrayRef, BooleanArray, make_array};
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::or_kleene;
 use common_error::ext::BoxedError;
@@ -28,7 +28,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
 use dfir_rs::lattices::cc_traits::Iter;
 use itertools::Itertools;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
     DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
@@ -330,7 +330,8 @@ impl ScalarExpr {
         );
 
         ensure!(
-            then_input_vec.len() == else_input_vec.len() && then_input_vec.len() == batch.row_count(),
+            then_input_vec.len() == else_input_vec.len()
+                && then_input_vec.len() == batch.row_count(),
             InvalidArgumentSnafu {
                 reason: format!(
                     "then and else branch must have the same length(found {} and {}) which equals input batch's row count(which is {})",

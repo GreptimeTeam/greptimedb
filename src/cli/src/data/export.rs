@@ -24,18 +24,18 @@ use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use object_store::layers::LoggingLayer;
 use object_store::services::Oss;
-use object_store::{services, ObjectStore};
+use object_store::{ObjectStore, services};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::database::{parse_proxy_opts, DatabaseClient};
+use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, S3ConfigNotSetSnafu,
     SchemaNotFoundSnafu,
 };
-use crate::{database, Tool};
+use crate::{Tool, database};
 
 type TableReference = (String, String, String);
 

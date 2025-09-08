@@ -45,7 +45,7 @@ use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_table::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
-    build_table_meta_from_column_metadatas, Context, ReconcileTableMetrics,
+    Context, ReconcileTableMetrics, build_table_meta_from_column_metadatas,
 };
 
 pub struct ReconcileTableContext {
@@ -245,12 +245,9 @@ impl Procedure for ReconcileTableProcedure {
         if self.context.persistent_ctx.is_subprocedure {
             // The catalog and schema are already locked by the parent procedure.
             // Only lock the table name.
-            return LockKey::new(vec![TableNameLock::new(
-                table_ref.catalog,
-                table_ref.schema,
-                table_ref.table,
-            )
-            .into()]);
+            return LockKey::new(vec![
+                TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
+            ]);
         }
 
         LockKey::new(vec![

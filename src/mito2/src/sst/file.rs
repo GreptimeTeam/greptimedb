@@ -18,8 +18,8 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
@@ -30,7 +30,7 @@ use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 use uuid::Uuid;
 
-use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
+use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 
 /// Type to store SST level.
@@ -337,16 +337,14 @@ struct FileHandleInner {
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        if self.deleted.load(Ordering::Relaxed) {
-            self.file_purger.send_request(PurgeRequest {
-                file_meta: self.meta.clone(),
-            });
-        }
+        self.file_purger
+            .remove_file(self.meta.clone(), self.deleted.load(Ordering::Relaxed));
     }
 }
 
 impl FileHandleInner {
     fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandleInner {
+        file_purger.new_file(&meta);
         FileHandleInner {
             meta,
             compacting: AtomicBool::new(false),

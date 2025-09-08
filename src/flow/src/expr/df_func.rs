@@ -37,7 +37,7 @@ use crate::expr::error::{
 };
 use crate::expr::{Batch, ScalarExpr};
 use crate::repr::RelationDesc;
-use crate::transform::{from_scalar_fn_to_df_fn_impl, FunctionExtensions};
+use crate::transform::{FunctionExtensions, from_scalar_fn_to_df_fn_impl};
 
 /// A way to represent a scalar function that is implemented in Datafusion
 #[derive(Debug, Clone)]

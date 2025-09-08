@@ -23,7 +23,7 @@ use common_telemetry::{debug, error, info, tracing};
 use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::table_reference::TableReference;
@@ -231,9 +231,9 @@ async fn list_files_to_copy(req: &CopyDatabaseRequest, suffix: &str) -> error::R
 mod tests {
     use std::collections::HashSet;
 
+    use object_store::ObjectStore;
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
-    use object_store::ObjectStore;
     use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 

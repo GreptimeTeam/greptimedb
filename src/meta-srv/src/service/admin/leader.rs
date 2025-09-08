@@ -21,8 +21,8 @@ use tonic::codegen::http;
 
 use crate::error::{self, Result};
 use crate::metasrv::ElectionRef;
-use crate::service::admin::util::ErrorHandler;
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::ErrorHandler;
 
 #[derive(Clone)]
 pub struct LeaderHandler {

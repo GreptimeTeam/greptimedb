@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
-use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
 #[tokio::test]
 async fn test_staging_state_integration() {

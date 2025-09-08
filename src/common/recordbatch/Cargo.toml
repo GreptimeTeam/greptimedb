@@ -9,9 +9,11 @@ workspace = true
 
 [dependencies]
 arc-swap = "1.6"
+common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
+common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes.workspace = true

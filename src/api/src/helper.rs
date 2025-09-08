@@ -16,15 +16,15 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_base::BitVec;
-use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_decimal::Decimal128;
+use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
-    Int16Type, Int8Type, IntervalType, TimeType, TimestampType, UInt16Type, UInt8Type,
+    Int8Type, Int16Type, IntervalType, TimeType, TimestampType, UInt8Type, UInt16Type,
 };
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
@@ -295,7 +295,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_)
             | ConcreteDataType::Duration(_) => {
-                return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
+                return error::IntoColumnDataTypeSnafu { from: datatype }.fail();
             }
         };
         let datatype_extension = match column_datatype {

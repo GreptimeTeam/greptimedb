@@ -23,8 +23,8 @@ use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRe
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::UInt32Vector;
-use futures::task::{Context, Poll};
 use futures::Stream;
+use futures::task::{Context, Poll};
 use snafu::prelude::*;
 use store_api::data_source::DataSource;
 use store_api::storage::{RegionNumber, ScanRequest};

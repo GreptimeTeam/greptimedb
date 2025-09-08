@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::Signature;
+use datafusion_expr::Signature;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -70,6 +70,10 @@ pub trait Function: fmt::Display + Sync + Send {
 
     /// Evaluate the function, e.g. run/execute the function.
     fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef>;
+
+    fn aliases(&self) -> &[String] {
+        &[]
+    }
 }
 
 pub type FunctionRef = Arc<dyn Function>;

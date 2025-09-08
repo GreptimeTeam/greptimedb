@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::{
-    alter_request, region_request, AddColumn, AddColumns, AlterRequest, AlterRequests,
-    RegionColumnDef, RegionRequest, RegionRequestHeader,
+    AddColumn, AddColumns, AlterRequest, AlterRequests, RegionColumnDef, RegionRequest,
+    RegionRequestHeader, alter_request, region_request,
 };
 use api::v1::{self, AlterTableExpr};
 use common_telemetry::tracing_context::TracingContext;
@@ -33,7 +33,7 @@ use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution, TableMetadataManagerRef};
 use crate::node_manager::NodeManagerRef;
-use crate::rpc::router::{find_leaders, region_distribution, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// [AlterLogicalTablesExecutor] performs:
 /// - Alters logical regions on the datanodes.
@@ -113,7 +113,9 @@ impl<'a> AlterLogicalTablesExecutor<'a> {
         physical_columns: &[ColumnMetadata],
     ) -> Result<()> {
         if physical_columns.is_empty() {
-            warn!("No physical columns found, leaving the physical table's schema unchanged when altering logical tables");
+            warn!(
+                "No physical columns found, leaving the physical table's schema unchanged when altering logical tables"
+            );
             return Ok(());
         }
 

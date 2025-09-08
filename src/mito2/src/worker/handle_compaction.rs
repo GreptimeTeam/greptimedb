@@ -104,8 +104,7 @@ impl<S> RegionWorkerLoop<S> {
         let now = self.time_provider.current_time_millis();
         if now - region.last_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
-        {
-            if let Err(e) = self
+            && let Err(e) = self
                 .compaction_scheduler
                 .schedule_compaction(
                     region.region_id,
@@ -118,12 +117,11 @@ impl<S> RegionWorkerLoop<S> {
                     1,
                 )
                 .await
-            {
-                warn!(
-                    "Failed to schedule compaction for region: {}, err: {}",
-                    region.region_id, e
-                );
-            }
+        {
+            warn!(
+                "Failed to schedule compaction for region: {}, err: {}",
+                region.region_id, e
+            );
         }
     }
 }

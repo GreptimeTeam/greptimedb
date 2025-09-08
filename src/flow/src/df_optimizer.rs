@@ -40,10 +40,10 @@ use datafusion_expr::{
     BinaryExpr, ColumnarValue, Expr, Literal, Operator, Projection, ScalarFunctionArgs,
     ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
+use query::QueryEngine;
 use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
-use query::QueryEngine;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
@@ -163,68 +163,67 @@ impl AnalyzerRule for AvgExpandRule {
 fn put_aggr_to_proj_analyzer(
     plan: datafusion_expr::LogicalPlan,
 ) -> Result<Transformed<datafusion_expr::LogicalPlan>, DataFusionError> {
-    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan {
-        if let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref() {
-            let mut replace_old_proj_exprs = HashMap::new();
-            let mut expanded_aggr_exprs = vec![];
-            for aggr_expr in &aggr.aggr_expr {
-                let mut is_composite = false;
-                if let Expr::AggregateFunction(_) = &aggr_expr {
-                    expanded_aggr_exprs.push(aggr_expr.clone());
-                } else {
-                    let old_name = aggr_expr.name_for_alias()?;
-                    let new_proj_expr = aggr_expr
-                        .clone()
-                        .transform(|ch| {
-                            if let Expr::AggregateFunction(_) = &ch {
-                                is_composite = true;
-                                expanded_aggr_exprs.push(ch.clone());
-                                Ok(Transformed::yes(Expr::Column(Column::from_qualified_name(
-                                    ch.name_for_alias()?,
-                                ))))
-                            } else {
-                                Ok(Transformed::no(ch))
-                            }
-                        })?
-                        .data;
-                    replace_old_proj_exprs.insert(old_name, new_proj_expr);
-                }
+    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan
+        && let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref()
+    {
+        let mut replace_old_proj_exprs = HashMap::new();
+        let mut expanded_aggr_exprs = vec![];
+        for aggr_expr in &aggr.aggr_expr {
+            let mut is_composite = false;
+            if let Expr::AggregateFunction(_) = &aggr_expr {
+                expanded_aggr_exprs.push(aggr_expr.clone());
+            } else {
+                let old_name = aggr_expr.name_for_alias()?;
+                let new_proj_expr = aggr_expr
+                    .clone()
+                    .transform(|ch| {
+                        if let Expr::AggregateFunction(_) = &ch {
+                            is_composite = true;
+                            expanded_aggr_exprs.push(ch.clone());
+                            Ok(Transformed::yes(Expr::Column(Column::from_qualified_name(
+                                ch.name_for_alias()?,
+                            ))))
+                        } else {
+                            Ok(Transformed::no(ch))
+                        }
+                    })?
+                    .data;
+                replace_old_proj_exprs.insert(old_name, new_proj_expr);
             }
+        }
 
-            if expanded_aggr_exprs.len() > aggr.aggr_expr.len() {
-                let mut aggr = aggr.clone();
-                aggr.aggr_expr = expanded_aggr_exprs;
-                let mut aggr_plan = datafusion_expr::LogicalPlan::Aggregate(aggr);
-                // important to recompute schema after changing aggr_expr
-                aggr_plan = aggr_plan.recompute_schema()?;
+        if expanded_aggr_exprs.len() > aggr.aggr_expr.len() {
+            let mut aggr = aggr.clone();
+            aggr.aggr_expr = expanded_aggr_exprs;
+            let mut aggr_plan = datafusion_expr::LogicalPlan::Aggregate(aggr);
+            // important to recompute schema after changing aggr_expr
+            aggr_plan = aggr_plan.recompute_schema()?;
 
-                // reconstruct proj with new proj_exprs
-                let mut new_proj_exprs = proj.expr.clone();
-                for proj_expr in new_proj_exprs.iter_mut() {
-                    if let Some(new_proj_expr) =
-                        replace_old_proj_exprs.get(&proj_expr.name_for_alias()?)
-                    {
-                        *proj_expr = new_proj_expr.clone();
-                    }
-                    *proj_expr = proj_expr
-                        .clone()
-                        .transform(|expr| {
-                            if let Some(new_expr) =
-                                replace_old_proj_exprs.get(&expr.name_for_alias()?)
-                            {
-                                Ok(Transformed::yes(new_expr.clone()))
-                            } else {
-                                Ok(Transformed::no(expr))
-                            }
-                        })?
-                        .data;
+            // reconstruct proj with new proj_exprs
+            let mut new_proj_exprs = proj.expr.clone();
+            for proj_expr in new_proj_exprs.iter_mut() {
+                if let Some(new_proj_expr) =
+                    replace_old_proj_exprs.get(&proj_expr.name_for_alias()?)
+                {
+                    *proj_expr = new_proj_expr.clone();
                 }
-                let proj = datafusion_expr::LogicalPlan::Projection(Projection::try_new(
-                    new_proj_exprs,
-                    Arc::new(aggr_plan),
-                )?);
-                return Ok(Transformed::yes(proj));
+                *proj_expr = proj_expr
+                    .clone()
+                    .transform(|expr| {
+                        if let Some(new_expr) = replace_old_proj_exprs.get(&expr.name_for_alias()?)
+                        {
+                            Ok(Transformed::yes(new_expr.clone()))
+                        } else {
+                            Ok(Transformed::no(expr))
+                        }
+                    })?
+                    .data;
             }
+            let proj = datafusion_expr::LogicalPlan::Projection(Projection::try_new(
+                new_proj_exprs,
+                Arc::new(aggr_plan),
+            )?);
+            return Ok(Transformed::yes(proj));
         }
     }
     Ok(Transformed::no(plan))
@@ -276,47 +275,45 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
     type Node = Expr;
 
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>, DataFusionError> {
-        if let Expr::AggregateFunction(aggr_func) = &expr {
-            if aggr_func.func.name() == "avg" {
-                let sum_expr = {
-                    let mut tmp = aggr_func.clone();
-                    tmp.func = sum_udaf();
-                    Expr::AggregateFunction(tmp)
-                };
-                let sum_cast = {
-                    let mut tmp = sum_expr.clone();
-                    tmp = Expr::Cast(datafusion_expr::Cast {
-                        expr: Box::new(tmp),
-                        data_type: arrow_schema::DataType::Float64,
-                    });
-                    tmp
-                };
+        if let Expr::AggregateFunction(aggr_func) = &expr
+            && aggr_func.func.name() == "avg"
+        {
+            let sum_expr = {
+                let mut tmp = aggr_func.clone();
+                tmp.func = sum_udaf();
+                Expr::AggregateFunction(tmp)
+            };
+            let sum_cast = {
+                let mut tmp = sum_expr.clone();
+                tmp = Expr::Cast(datafusion_expr::Cast {
+                    expr: Box::new(tmp),
+                    data_type: arrow_schema::DataType::Float64,
+                });
+                tmp
+            };
 
-                let count_expr = {
-                    let mut tmp = aggr_func.clone();
-                    tmp.func = count_udaf();
+            let count_expr = {
+                let mut tmp = aggr_func.clone();
+                tmp.func = count_udaf();
 
-                    Expr::AggregateFunction(tmp)
-                };
-                let count_expr_ref =
-                    Expr::Column(Column::from_qualified_name(count_expr.name_for_alias()?));
+                Expr::AggregateFunction(tmp)
+            };
+            let count_expr_ref =
+                Expr::Column(Column::from_qualified_name(count_expr.name_for_alias()?));
 
-                let div =
-                    BinaryExpr::new(Box::new(sum_cast), Operator::Divide, Box::new(count_expr));
-                let div_expr = Box::new(Expr::BinaryExpr(div));
+            let div = BinaryExpr::new(Box::new(sum_cast), Operator::Divide, Box::new(count_expr));
+            let div_expr = Box::new(Expr::BinaryExpr(div));
 
-                let zero = Box::new(0.lit());
-                let not_zero =
-                    BinaryExpr::new(Box::new(count_expr_ref), Operator::NotEq, zero.clone());
-                let not_zero = Box::new(Expr::BinaryExpr(not_zero));
-                let null = Box::new(Expr::Literal(ScalarValue::Null, None));
+            let zero = Box::new(0.lit());
+            let not_zero = BinaryExpr::new(Box::new(count_expr_ref), Operator::NotEq, zero.clone());
+            let not_zero = Box::new(Expr::BinaryExpr(not_zero));
+            let null = Box::new(Expr::Literal(ScalarValue::Null, None));
 
-                let case_when =
-                    datafusion_expr::Case::new(None, vec![(not_zero, div_expr)], Some(null));
-                let case_when_expr = Expr::Case(case_when);
+            let case_when =
+                datafusion_expr::Case::new(None, vec![(not_zero, div_expr)], Some(null));
+            let case_when_expr = Expr::Case(case_when);
 
-                return Ok(Transformed::yes(case_when_expr));
-            }
+            return Ok(Transformed::yes(case_when_expr));
         }
 
         Ok(Transformed::no(expr))
@@ -350,81 +347,79 @@ impl AnalyzerRule for TumbleExpandRule {
 fn expand_tumble_analyzer(
     plan: datafusion_expr::LogicalPlan,
 ) -> Result<Transformed<datafusion_expr::LogicalPlan>, DataFusionError> {
-    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan {
-        if let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref() {
-            let mut new_group_expr = vec![];
-            let mut alias_to_expand = HashMap::new();
-            let mut encountered_tumble = false;
-            for expr in aggr.group_expr.iter() {
-                match expr {
-                    datafusion_expr::Expr::ScalarFunction(func) if func.name() == "tumble" => {
-                        encountered_tumble = true;
+    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan
+        && let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref()
+    {
+        let mut new_group_expr = vec![];
+        let mut alias_to_expand = HashMap::new();
+        let mut encountered_tumble = false;
+        for expr in aggr.group_expr.iter() {
+            match expr {
+                datafusion_expr::Expr::ScalarFunction(func) if func.name() == "tumble" => {
+                    encountered_tumble = true;
 
-                        let tumble_start = TumbleExpand::new(TUMBLE_START);
-                        let tumble_start = datafusion_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(tumble_start.into()),
-                            func.args.clone(),
-                        );
-                        let tumble_start = datafusion_expr::Expr::ScalarFunction(tumble_start);
-                        let start_col_name = tumble_start.name_for_alias()?;
-                        new_group_expr.push(tumble_start);
+                    let tumble_start = TumbleExpand::new(TUMBLE_START);
+                    let tumble_start = datafusion_expr::expr::ScalarFunction::new_udf(
+                        Arc::new(tumble_start.into()),
+                        func.args.clone(),
+                    );
+                    let tumble_start = datafusion_expr::Expr::ScalarFunction(tumble_start);
+                    let start_col_name = tumble_start.name_for_alias()?;
+                    new_group_expr.push(tumble_start);
 
-                        let tumble_end = TumbleExpand::new(TUMBLE_END);
-                        let tumble_end = datafusion_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(tumble_end.into()),
-                            func.args.clone(),
-                        );
-                        let tumble_end = datafusion_expr::Expr::ScalarFunction(tumble_end);
-                        let end_col_name = tumble_end.name_for_alias()?;
-                        new_group_expr.push(tumble_end);
+                    let tumble_end = TumbleExpand::new(TUMBLE_END);
+                    let tumble_end = datafusion_expr::expr::ScalarFunction::new_udf(
+                        Arc::new(tumble_end.into()),
+                        func.args.clone(),
+                    );
+                    let tumble_end = datafusion_expr::Expr::ScalarFunction(tumble_end);
+                    let end_col_name = tumble_end.name_for_alias()?;
+                    new_group_expr.push(tumble_end);
 
-                        alias_to_expand
-                            .insert(expr.name_for_alias()?, (start_col_name, end_col_name));
-                    }
-                    _ => new_group_expr.push(expr.clone()),
+                    alias_to_expand.insert(expr.name_for_alias()?, (start_col_name, end_col_name));
                 }
+                _ => new_group_expr.push(expr.clone()),
             }
-            if !encountered_tumble {
-                return Ok(Transformed::no(plan));
-            }
-            let mut new_aggr = aggr.clone();
-            new_aggr.group_expr = new_group_expr;
-            let new_aggr = datafusion_expr::LogicalPlan::Aggregate(new_aggr).recompute_schema()?;
-            // replace alias in projection if needed, and add new column ref if necessary
-            let mut new_proj_expr = vec![];
-            let mut have_expanded = false;
-
-            for proj_expr in proj.expr.iter() {
-                if let Some((start_col_name, end_col_name)) =
-                    alias_to_expand.get(&proj_expr.name_for_alias()?)
-                {
-                    let start_col = Column::from_qualified_name(start_col_name);
-                    let end_col = Column::from_qualified_name(end_col_name);
-                    new_proj_expr.push(datafusion_expr::Expr::Column(start_col));
-                    new_proj_expr.push(datafusion_expr::Expr::Column(end_col));
-                    have_expanded = true;
-                } else {
-                    new_proj_expr.push(proj_expr.clone());
-                }
-            }
-
-            // append to end of projection if not exist
-            if !have_expanded {
-                for (start_col_name, end_col_name) in alias_to_expand.values() {
-                    let start_col = Column::from_qualified_name(start_col_name);
-                    let end_col = Column::from_qualified_name(end_col_name);
-                    new_proj_expr
-                        .push(datafusion_expr::Expr::Column(start_col).alias("window_start"));
-                    new_proj_expr.push(datafusion_expr::Expr::Column(end_col).alias("window_end"));
-                }
-            }
-
-            let new_proj = datafusion_expr::LogicalPlan::Projection(Projection::try_new(
-                new_proj_expr,
-                Arc::new(new_aggr),
-            )?);
-            return Ok(Transformed::yes(new_proj));
         }
+        if !encountered_tumble {
+            return Ok(Transformed::no(plan));
+        }
+        let mut new_aggr = aggr.clone();
+        new_aggr.group_expr = new_group_expr;
+        let new_aggr = datafusion_expr::LogicalPlan::Aggregate(new_aggr).recompute_schema()?;
+        // replace alias in projection if needed, and add new column ref if necessary
+        let mut new_proj_expr = vec![];
+        let mut have_expanded = false;
+
+        for proj_expr in proj.expr.iter() {
+            if let Some((start_col_name, end_col_name)) =
+                alias_to_expand.get(&proj_expr.name_for_alias()?)
+            {
+                let start_col = Column::from_qualified_name(start_col_name);
+                let end_col = Column::from_qualified_name(end_col_name);
+                new_proj_expr.push(datafusion_expr::Expr::Column(start_col));
+                new_proj_expr.push(datafusion_expr::Expr::Column(end_col));
+                have_expanded = true;
+            } else {
+                new_proj_expr.push(proj_expr.clone());
+            }
+        }
+
+        // append to end of projection if not exist
+        if !have_expanded {
+            for (start_col_name, end_col_name) in alias_to_expand.values() {
+                let start_col = Column::from_qualified_name(start_col_name);
+                let end_col = Column::from_qualified_name(end_col_name);
+                new_proj_expr.push(datafusion_expr::Expr::Column(start_col).alias("window_start"));
+                new_proj_expr.push(datafusion_expr::Expr::Column(end_col).alias("window_end"));
+            }
+        }
+
+        let new_proj = datafusion_expr::LogicalPlan::Projection(Projection::try_new(
+            new_proj_expr,
+            Arc::new(new_aggr),
+        )?);
+        return Ok(Transformed::yes(new_proj));
     }
 
     Ok(Transformed::no(plan))
@@ -479,13 +474,12 @@ impl ScalarUDFImpl for TumbleExpand {
                     ));
                 }
 
-                if let Some(start_time) = opt{
-                    if !matches!(start_time,  Utf8 | Date32 | Timestamp(_, _)){
+                if let Some(start_time) = opt
+                    && !matches!(start_time,  Utf8 | Date32 | Timestamp(_, _)){
                         return Err(DataFusionError::Plan(
                             format!("Expect start_time to either be date, timestamp or string, found {:?}", start_time)
                         ));
                     }
-                }
 
                 Ok(arg_types.to_vec())
             }
@@ -548,20 +542,24 @@ impl AnalyzerRule for CheckGroupByRule {
 fn check_group_by_analyzer(
     plan: datafusion_expr::LogicalPlan,
 ) -> Result<Transformed<datafusion_expr::LogicalPlan>, DataFusionError> {
-    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan {
-        if let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref() {
-            let mut found_column_used = FindColumn::new();
-            proj.expr
-                .iter()
-                .map(|i| i.visit(&mut found_column_used))
-                .count();
-            for expr in aggr.group_expr.iter() {
-                if !found_column_used
-                    .names_for_alias
-                    .contains(&expr.name_for_alias()?)
-                {
-                    return Err(DataFusionError::Plan(format!("Expect {} expr in group by also exist in select list, but select list only contain {:?}",expr.name_for_alias()?, found_column_used.names_for_alias)));
-                }
+    if let datafusion_expr::LogicalPlan::Projection(proj) = &plan
+        && let datafusion_expr::LogicalPlan::Aggregate(aggr) = proj.input.as_ref()
+    {
+        let mut found_column_used = FindColumn::new();
+        proj.expr
+            .iter()
+            .map(|i| i.visit(&mut found_column_used))
+            .count();
+        for expr in aggr.group_expr.iter() {
+            if !found_column_used
+                .names_for_alias
+                .contains(&expr.name_for_alias()?)
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "Expect {} expr in group by also exist in select list, but select list only contain {:?}",
+                    expr.name_for_alias()?,
+                    found_column_used.names_for_alias
+                )));
             }
         }
     }

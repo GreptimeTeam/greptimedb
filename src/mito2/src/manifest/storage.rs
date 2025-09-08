@@ -21,15 +21,15 @@ use std::sync::{Arc, RwLock};
 use common_datasource::compression::CompressionType;
 use common_telemetry::debug;
 use crc32fast::Hasher;
-use futures::future::try_join_all;
 use futures::TryStreamExt;
+use futures::future::try_join_all;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, Lister, ObjectStore};
+use object_store::{Entry, ErrorKind, Lister, ObjectStore, util};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
-use store_api::storage::RegionId;
+use snafu::{ResultExt, ensure};
 use store_api::ManifestVersion;
+use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
 use crate::error::{
@@ -364,11 +364,7 @@ impl ManifestObjectStore {
                 .iter()
                 .filter_map(
                     |(_e, is_checkpoint, version)| {
-                        if *is_checkpoint {
-                            Some(version)
-                        } else {
-                            None
-                        }
+                        if *is_checkpoint { Some(version) } else { None }
                     },
                 )
                 .max()
@@ -400,11 +396,7 @@ impl ManifestObjectStore {
 
         debug!(
             "Deleting {} logs from manifest storage path {} until {}, checkpoint_version: {:?}, paths: {:?}",
-            ret,
-            self.path,
-            end,
-            checkpoint_version,
-            paths,
+            ret, self.path, end, checkpoint_version, paths,
         );
 
         self.object_store
@@ -774,8 +766,8 @@ impl CheckpointMetadata {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
 
     use super::*;
 
@@ -879,11 +871,13 @@ mod tests {
 
         // delete all logs and checkpoints
         let _ = log_store.delete_until(11, false).await.unwrap();
-        assert!(log_store
-            .load_checkpoint(new_checkpoint_metadata_with_version(3))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            log_store
+                .load_checkpoint(new_checkpoint_metadata_with_version(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(log_store.load_last_checkpoint().await.unwrap().is_none());
         let manifests = log_store.fetch_manifests(0, 11).await.unwrap();
         let mut it = manifests.into_iter();

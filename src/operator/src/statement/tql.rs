@@ -18,8 +18,8 @@ use common_query::Output;
 use common_telemetry::tracing;
 use datafusion_expr::LogicalPlan;
 use query::parser::{
-    PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME,
-    DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME,
+    ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME, DEFAULT_LOOKBACK_STRING, EXPLAIN_NODE_NAME,
+    EXPLAIN_VERBOSE_NODE_NAME, PromQuery, QueryLanguageParser,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;

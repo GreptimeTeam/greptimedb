@@ -91,13 +91,13 @@ where
         let mut locks = self.inner.lock().unwrap();
         let mut keys = Vec::new();
         for key in iter {
-            if let Some(lock) = locks.get(key) {
-                if lock.try_write().is_ok() {
-                    debug_assert_eq!(Arc::weak_count(lock), 0);
-                    // Ensures nobody keeps this ref.
-                    if Arc::strong_count(lock) == 1 {
-                        keys.push(key);
-                    }
+            if let Some(lock) = locks.get(key)
+                && lock.try_write().is_ok()
+            {
+                debug_assert_eq!(Arc::weak_count(lock), 0);
+                // Ensures nobody keeps this ref.
+                if Arc::strong_count(lock) == 1 {
+                    keys.push(key);
                 }
             }
         }

@@ -63,10 +63,8 @@ pub trait GrpcQueryHandlerWithBoxedError: Send + Sync + 'static {
 
 /// auto impl
 #[async_trait::async_trait]
-impl<
-        E: ErrorExt + Send + Sync + 'static,
-        T: GrpcQueryHandler<Error = E> + Send + Sync + 'static,
-    > GrpcQueryHandlerWithBoxedError for T
+impl<E: ErrorExt + Send + Sync + 'static, T: GrpcQueryHandler<Error = E> + Send + Sync + 'static>
+    GrpcQueryHandlerWithBoxedError for T
 {
     async fn do_query(
         &self,

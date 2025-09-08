@@ -15,7 +15,6 @@
 pub use datafusion_common::ScalarValue;
 
 pub use crate::columnar_value::ColumnarValue;
-pub use crate::signature::{Signature, TypeSignature, Volatility};
 
 /// Default timestamp column name for Prometheus metrics.
 pub const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";

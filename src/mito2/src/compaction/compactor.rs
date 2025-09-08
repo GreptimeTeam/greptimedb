@@ -31,8 +31,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest, WriteType};
 use crate::cache::{CacheManager, CacheManagerRef};
-use crate::compaction::picker::{new_picker, PickerOutput};
-use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
+use crate::compaction::picker::{PickerOutput, new_picker};
+use crate::compaction::{CompactionSstReaderBuilder, find_ttl};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};

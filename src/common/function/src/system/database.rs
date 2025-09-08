@@ -16,7 +16,7 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
-use common_query::prelude::{Signature, Volatility};
+use datafusion_expr::{Signature, Volatility};
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::vectors::{StringVector, UInt32Vector, VectorRef};
 use derive_more::Display;
@@ -68,6 +68,8 @@ impl Function for DatabaseFunction {
     }
 }
 
+// Though "current_schema" can be aliased to "database", to not cause any breaking changes,
+// we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
 impl Function for CurrentSchemaFunction {
     fn name(&self) -> &str {
         CURRENT_SCHEMA_FUNCTION_NAME
@@ -78,7 +80,7 @@ impl Function for CurrentSchemaFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
@@ -98,7 +100,7 @@ impl Function for SessionUserFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {

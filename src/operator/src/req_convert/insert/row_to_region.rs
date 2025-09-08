@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use ahash::{HashMap, HashSet};
-use api::v1::region::{InsertRequest, InsertRequests as RegionInsertRequests};
 use api::v1::RowInsertRequests;
+use api::v1::region::{InsertRequest, InsertRequests as RegionInsertRequests};
 use partition::manager::PartitionRuleManager;
 use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
