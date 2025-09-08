@@ -24,9 +24,9 @@ mod handle_drop;
 mod handle_flush;
 mod handle_manifest;
 mod handle_open;
+mod handle_rebuild_index;
 mod handle_truncate;
 mod handle_write;
-mod handle_rebuild_index;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -167,7 +167,8 @@ impl WorkerGroup {
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
-        let index_build_job_pool = Arc::new(LocalScheduler::new(config.max_background_index_builds));
+        let index_build_job_pool =
+            Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -328,7 +329,8 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
-        let index_build_job_pool = Arc::new(LocalScheduler::new(config.max_background_index_builds));
+        let index_build_job_pool =
+            Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -740,7 +742,7 @@ struct RegionWorkerLoop<S> {
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
     /// Scheduler for index build task.
-    index_build_scheduler : IndexBuildScheduler,
+    index_build_scheduler: IndexBuildScheduler,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.
@@ -1043,7 +1045,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::IndexBuildFinished(req) => {
                 self.handle_index_build_finished(region_id, req).await
             }
-            BackgroundNotify::IndexBuildFailed(req) => self.handle_index_build_failed(region_id, req).await,
+            BackgroundNotify::IndexBuildFailed(req) => {
+                self.handle_index_build_failed(region_id, req).await
+            }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
             }

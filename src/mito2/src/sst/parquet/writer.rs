@@ -193,10 +193,13 @@ where
             match self.index_config.build_mode {
                 IndexBuildMode::Sync => {
                     index_output = self.current_indexer.as_mut().unwrap().finish().await;
-                },
+                }
                 IndexBuildMode::Async => {
-                    debug!("Index for file {} will be built asynchronously later", self.current_file);
-                },
+                    debug!(
+                        "Index for file {} will be built asynchronously later",
+                        self.current_file
+                    );
+                }
             }
             current_writer.flush().await.context(WriteParquetSnafu)?;
 
@@ -274,8 +277,8 @@ where
                                 .unwrap()
                                 .update(&mut batch)
                                 .await;
-                        },
-                        IndexBuildMode::Async => {},
+                        }
+                        IndexBuildMode::Async => {}
                     }
                     self.metrics.update_index += start.elapsed();
                     if let Some(max_file_size) = opts.max_file_size

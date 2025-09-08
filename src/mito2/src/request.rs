@@ -600,6 +600,7 @@ pub(crate) enum WorkerRequest {
     SyncRegion(RegionSyncRequest),
 
     /// Build indexes of a region.
+    #[allow(dead_code)]
     BuildIndexRegion(RegionBuildIndexRequest),
 
     /// Bulk inserts request and region metadata.
@@ -784,6 +785,7 @@ pub(crate) enum BackgroundNotify {
     /// Index build has finished.
     IndexBuildFinished(IndexBuildFinished),
     /// Index build has failed.
+    #[allow(dead_code)]
     IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
@@ -843,6 +845,7 @@ pub(crate) struct FlushFailed {
 
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
+    #[allow(dead_code)]
     pub(crate) region_id: RegionId,
     pub(crate) edit: RegionEdit,
 }
@@ -850,6 +853,7 @@ pub(crate) struct IndexBuildFinished {
 /// Notifies an index build job has failed.
 #[derive(Debug)]
 pub(crate) struct IndexBuildFailed {
+    #[allow(dead_code)]
     pub(crate) err: Arc<Error>,
 }
 

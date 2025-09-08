@@ -1,19 +1,34 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Handles index build requests.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
-use puffin::puffin_manager;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::access_layer::{self, OperationType};
+use crate::access_layer::OperationType;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
-use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState};
-use crate::request::{self, IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
+use crate::region::{MitoRegionRef, RegionLeaderState};
+use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
-use crate::sst::location::{self, sst_file_path};
+use crate::sst::location::{self};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
 
@@ -53,7 +68,6 @@ impl<S> RegionWorkerLoop<S> {
             flushed_sequence: Some(version.flushed_sequence),
             access_layer: access_layer.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
-            manifest_ctx: region.manifest_ctx.clone(),
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
@@ -137,13 +151,12 @@ impl<S> RegionWorkerLoop<S> {
 
             // Check if the file exists in the object store.
             let path = location::sst_file_path(
-                region.access_layer.table_dir(), 
+                region.access_layer.table_dir(),
                 RegionFileId::new(file_meta.region_id, file_id),
                 PathType::Bare,
             );
             region.access_layer.object_store().exists(&path).await.map_err(|e| {
                 warn!(e; "SST file not found for index build, region: {}, file_id: {}", region_id, file_meta.file_id);
-                return;
             }).ok();
         }
 
@@ -172,16 +185,15 @@ impl<S> RegionWorkerLoop<S> {
                     "Failed to update manifest for index build, region: {}, error: {:?}",
                     region_id, e
                 );
-                return;
             }
         }
     }
 
     pub(crate) async fn handle_index_build_failed(
         &mut self,
-        region_id: RegionId,
-        request: IndexBuildFailed,
+        _region_id: RegionId,
+        _request: IndexBuildFailed,
     ) {
-        // todo!("index build failed handling not implemented yet");
+        unreachable!();
     }
 }
