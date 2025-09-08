@@ -49,7 +49,7 @@ use table::table_reference::TableReference;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    CatalogSnafu, Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
     status_code_to_http_status,
 };
 use crate::http::HttpResponse;
@@ -72,6 +72,8 @@ const GREPTIME_PIPELINE_SKIP_ERROR_KEY: &str = "skip_error";
 
 const CREATE_TABLE_SQL_SUFFIX_EXISTS: &str =
     "the pipeline has dispatcher or table_suffix, the table name may not be fixed";
+const CREATE_TABLE_SQL_TABLE_EXISTS: &str =
+    "table already exists, the CREATE TABLE SQL may be different";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -262,7 +264,14 @@ pub async fn query_pipeline_create_table(
         .map_err(BoxedError::new)
         .context(OtherSnafu)?;
 
-    let message = if pipeline.is_variant_table_name() {
+    let message = if handler
+        .get_table(&table_name, &query_ctx)
+        .await
+        .context(CatalogSnafu)?
+        .is_some()
+    {
+        Some(CREATE_TABLE_SQL_TABLE_EXISTS.to_string())
+    } else if pipeline.is_variant_table_name() {
         Some(CREATE_TABLE_SQL_SUFFIX_EXISTS.to_string())
     } else {
         None
