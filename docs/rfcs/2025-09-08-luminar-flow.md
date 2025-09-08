@@ -9,7 +9,7 @@ Author: "discord9 <discord9@163.com>"
 
 ## Summary
 
-This RFC proposes a redesign of the flow architecture where flownode becomes a lightweight in-memory state management and forwarding node, while delegating actual computation to frontend nodes. This approach optimizes resource utilization and improves scalability by separating state management from computation execution.
+This RFC proposes a redesign of the flow architecture where flownode becomes a lightweight in-memory state management node with an embedded frontend for direct computation. This approach optimizes resource utilization and improves scalability by eliminating network hops while maintaining clear separation between coordination and computation tasks.
 
 ## Motivation
 
@@ -18,11 +18,11 @@ The current flow architecture has several limitations:
 1. **Resource Inefficiency**: Flownodes perform both state management and computation, leading to resource duplication and inefficient utilization.
 2. **Scalability Constraints**: Computation resources are tied to flownode instances, limiting horizontal scaling capabilities.
 3. **State Management Complexity**: Mixing computation with state management makes the system harder to maintain and debug.
-4. **Limited Computation Distribution**: Computation cannot be easily distributed across available frontend nodes.
+4. **Network Overhead**: Additional network hops between flownode and separate frontend nodes add latency.
 
 The Luminar Flow architecture addresses these issues by:
-- Separating concerns between state management (flownode) and computation (frontend)
-- Enabling better resource utilization through computation distribution
+- Consolidating computation within flownode through embedded frontend
+- Eliminating network overhead by removing separate frontend node communication
 - Simplifying state management by focusing flownode on its core responsibility
 - Improving system scalability and maintainability
 
@@ -30,28 +30,22 @@ The Luminar Flow architecture addresses these issues by:
 
 ### Architecture Overview
 
-The Luminar Flow architecture transforms flownode into a lightweight coordinator that maintains flow state while delegating computation to frontend nodes. The key components involved are:
+The Luminar Flow architecture transforms flownode into a lightweight coordinator that maintains flow state with an embedded frontend for computation. The key components involved are:
 
-1. **Flownode**: Maintains in-memory state and coordinates computation
-2. **Frontend**: Executes **incremental** computations on demand
+1. **Flownode**: Maintains in-memory state, coordinates computation, and includes an embedded frontend for query execution
+2. **Embedded Frontend**: Executes **incremental** computations within the flownode
 3. **Datanode**: Stores final results and source data
 
 ```mermaid
 graph TB
     subgraph "Luminar Flow Architecture"
-        subgraph Flownode["Flownode (State Manager)"]
+        subgraph Flownode["Flownode (State Manager + Embedded Frontend)"]
             StateMap["Flow State Map<br/>Map<Timestamp, (Map<Key, Value>, Sequence)>"]
             Coordinator["Computation Coordinator"]
-        end
-        
-        subgraph Frontend1["Frontend Node 1"]
-            QueryEngine1["Query Engine"]
-            AggrState1["__aggr_state Executor"]
-        end
-        
-        subgraph Frontend2["Frontend Node 2"]
-            QueryEngine2["Query Engine"]
-            AggrState2["__aggr_state Executor"]
+            subgraph EmbeddedFrontend["Embedded Frontend"]
+                QueryEngine["Query Engine"]
+                AggrState["__aggr_state Executor"]
+            end
         end
         
         subgraph Datanode["Datanode"]
@@ -60,13 +54,10 @@ graph TB
         end
     end
     
-    Flownode -->|Query Request| Frontend1
-    Flownode -->|Query Request| Frontend2
-    Frontend1 -->|State Results| Flownode
-    Frontend2 -->|State Results| Flownode
-    Flownode -->|Final Results| Datanode
-    Frontend1 -.->|Read Data| Datanode
-    Frontend2 -.->|Read Data| Datanode
+    Coordinator -->|Internal Query| EmbeddedFrontend
+    EmbeddedFrontend -->|Incremental States| Coordinator
+    Flownode -->|Incremental Results| Datanode
+    EmbeddedFrontend -.->|Read Data| Datanode
 ```
 
 ### Core Components
@@ -94,7 +85,7 @@ The computation process follows these steps:
    - Data volume thresholds
    - Sequence progress requirements
 
-2. **Query Dispatch**: Flownode sends `__aggr_state` queries to randomly selected frontend nodes with:
+2. **Query Execution**: Flownode executes `__aggr_state` queries using its embedded frontend with:
    - Time window filters
    - Sequence range constraints
 
@@ -105,24 +96,24 @@ The computation process follows these steps:
 
 4. **Result Materialization**: Flownode computes final results using `__aggr_merge` operations:
    - Processes only updated time windows(and time series) for efficiency
-   - Writes results back to datanode through frontend or embedded frontend
+   - Writes results back to datanode directly through its embedded frontend
 
 ### Detailed Workflow
 
 #### Incremental State Query
 
 ```sql
--- Example incremental state query sent to frontend
-SELECT 
+-- Example incremental state query executed by embedded frontend
+SELECT
     __aggr_state(avg(value)) as state,
     time_window,
     group_key
-FROM source_table 
-WHERE 
-    timestamp >= :window_start 
+FROM source_table
+WHERE
+    timestamp >= :window_start
     AND timestamp < :window_end
-    AND __sequence >= :last_sequence 
-    AND __sequence < :current_sequence 
+    AND __sequence >= :last_sequence
+    AND __sequence < :current_sequence
     -- sequence range is actually written in grpc header, but shown here for clarity
 GROUP BY time_window, group_key;
 ```
@@ -131,19 +122,20 @@ GROUP BY time_window, group_key;
 
 ```mermaid
 sequenceDiagram
-    participant F as Flownode
-    participant FE as Frontend
-    participant DN as Datanode
+    participant F as Flownode (Coordinator)
+    participant EF as Embedded Frontend (Lightweight)
+    participant DN as Datanode (Heavy Computation)
     
     F->>F: Evaluate trigger conditions
-    F->>FE: Send __aggr_state query with sequence range
-    FE->>DN: Read incremental data
-    FE->>FE: Compute partial aggregation state
-    FE->>F: Return state results
+    F->>EF: Execute __aggr_state query with sequence range
+    EF->>DN: Send query to datanode (Heavy scan & aggregation)
+    DN->>DN: Scan data and compute partial aggregation state (Heavy CPU/I/O)
+    DN->>EF: Return aggregated state results
+    EF->>F: Forward state results (Lightweight merge)
     F->>F: Merge with existing state
-    F->>F: Update sequence markers
-    F->>F: Compute final results with __aggr_merge
-    F->>DN: Write final results
+    F->>F: Update sequence markers (Lightweight)
+    F->>EF: Compute incremental results with __aggr_merge
+    EF->>DN: Write incremental results to datanode
 ```
 
 ### Refill Implementation and State Management
@@ -186,7 +178,7 @@ struct MirrorWrite {
 ```
 
 This optimization:
-- Reduces network overhead between frontend and flownode
+- Eliminates network overhead by using embedded frontend
 - Enables flownode to track pending time windows efficiently
 - Allows flownode to decide processing mode (stream vs batch) based on timestamp age
 
@@ -230,14 +222,14 @@ graph LR
 #### Memory Usage
 
 - **Flownode**: O(active_time_windows × group_cardinality) for state storage
-- **Frontend**: O(query_batch_size) for temporary computation
+- **Embedded Frontend**: O(query_batch_size) for temporary computation
 - **Overall**: Significantly reduced compared to current architecture
 
 #### Computation Distribution
 
-- **Load Balancing**: Queries distributed across available frontend nodes
-- **Fault Tolerance**: Failed queries can be retried on different frontend nodes
-- **Scalability**: Computation capacity scales with frontend node count
+- **Direct Processing**: Queries processed directly within flownode's embedded frontend
+- **Fault Tolerance**: Simplified error handling with fewer distributed components
+- **Scalability**: Computation capacity scales with flownode instances
 
 #### Network Optimization
 
@@ -250,7 +242,7 @@ graph LR
 ### Phase 1: Core Infrastructure
 
 1. **State Management**: Implement in-memory state map in flownode
-2. **Query Interface**: Develop `__aggr_state` query interface in frontend(Already done in previous query pushdown optimizer work)
+2. **Query Interface**: Integrate `__aggr_state` query interface in embedded frontend(Already done in previous query pushdown optimizer work)
 3. **Basic Coordination**: Implement query dispatch and result collection
 4. **Sequence Tracking**: Implement sequence-based incremental processing(Can use similar interface which leader range read use)
 
@@ -263,17 +255,17 @@ After phase 1, the system should support basic flow operations with incremental 
 
 ### Phase 3: Advanced Features
 
-1. **Load Balancing**: Implement intelligent frontend selection
+1. **Load Balancing**: Implement intelligent resource allocation for partitioned flow(Flow distributed executed on multiple flownodes)
 2. **Fault Tolerance**: Add retry mechanisms and error handling
 3. **Performance Tuning**: Optimize query batching and state management
 
 ## Drawbacks
 
-### Increased Network Communication
+### Reduced Network Communication
 
-- **Additional Hops**: Computation requires flownode ↔ frontend communication
-- **Latency Impact**: Query dispatch and result collection add latency
-- **Network Dependency**: System becomes more sensitive to network issues
+- **Eliminated Hops**: Direct communication between flownode and datanode through embedded frontend
+- **Reduced Latency**: No separate frontend node communication overhead
+- **Simplified Network Topology**: Fewer network dependencies and failure points
 
 ### Complexity in Error Handling
 
@@ -281,11 +273,11 @@ After phase 1, the system should support basic flow operations with incremental 
 - **State Consistency**: Ensuring state consistency during partial failures
 - **Recovery Complexity**: More complex recovery procedures
 
-### Frontend Resource Requirements
+### Datanode Resource Requirements
 
-- **Computation Load**: Frontend nodes need sufficient resources for flow queries
-- **Query Interference**: Flow queries may impact regular query performance
-- **Resource Contention**: Need careful resource management and isolation
+- **Computation Load**: Datanode handles the heavy computational workload for flow queries
+- **Query Interference**: Flow queries may impact regular query performance on datanode
+- **Resource Contention**: Need careful resource management and isolation on datanode
 
 ## Alternatives
 
@@ -341,7 +333,7 @@ Embed lightweight computation engines within flownode:
 
 ### Integration Improvements
 
-- **Frontend Integration**: Deeper integration with frontend query planning
+- **Embedded Frontend Optimization**: Optimize embedded frontend query planning and execution
 - **Datanode Optimization**: Optimize result writing from flownode
 - **Metasrv Coordination**: Enhanced metadata management and coordination
 
@@ -352,7 +344,7 @@ The Luminar Flow architecture represents a significant improvement over the curr
 The key benefits include:
 
 1. **Improved Scalability**: Computation can scale independently of state management
-2. **Better Resource Utilization**: Leverages existing frontend infrastructure
+2. **Better Resource Utilization**: Eliminates network overhead and leverages embedded frontend infrastructure
 3. **Simplified Architecture**: Clear separation of concerns between components
 4. **Enhanced Performance**: Sequence-based incremental processing reduces computational overhead
 
