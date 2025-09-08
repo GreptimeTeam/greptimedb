@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use pipeline::error::Result;
-use pipeline::{parse, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo};
+use pipeline::{Content, Pipeline, PipelineContext, SchemaInfo, parse, setup_pipeline};
 use serde_json::Deserializer;
 use vrl::value::Value as VrlValue;
 

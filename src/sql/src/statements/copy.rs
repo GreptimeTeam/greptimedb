@@ -18,8 +18,8 @@ use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
+use crate::statements::statement::Statement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Copy {

@@ -25,12 +25,12 @@ use table::table_reference::TableReference;
 
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, MetadataValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
+use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
-use crate::kv_backend::KvBackendRef;
-use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{BatchGetRequest, RangeRequest};
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TableNameKey<'a> {

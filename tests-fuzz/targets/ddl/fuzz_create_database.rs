@@ -23,15 +23,15 @@ use snafu::ResultExt;
 use sqlx::{MySql, Pool};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
-use tests_fuzz::generator::create_expr::CreateDatabaseExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
+use tests_fuzz::generator::create_expr::CreateDatabaseExprGeneratorBuilder;
 use tests_fuzz::ir::CreateDatabaseExpr;
-use tests_fuzz::translator::mysql::create_expr::CreateDatabaseExprTranslator;
 use tests_fuzz::translator::DslTranslator;
-use tests_fuzz::utils::{init_greptime_connections_via_env, Connections};
+use tests_fuzz::translator::mysql::create_expr::CreateDatabaseExprTranslator;
+use tests_fuzz::utils::{Connections, init_greptime_connections_via_env};
 
 struct FuzzContext {
     greptime: Pool<MySql>,

@@ -21,7 +21,7 @@ use std::time::Instant;
 use common_recordbatch::RecordBatch as GtRecordBatch;
 use common_telemetry::warn;
 use datafusion::arrow::array::AsArray;
-use datafusion::arrow::compute::{self, concat_batches, SortOptions};
+use datafusion::arrow::compute::{self, SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -44,7 +44,7 @@ use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::schema::Schema as GtSchema;
 use datatypes::value::{OrderedF64, ValueRef};
 use datatypes::vectors::MutableVector;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
 /// computing.

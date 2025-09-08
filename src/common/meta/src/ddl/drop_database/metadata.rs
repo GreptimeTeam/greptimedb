@@ -18,9 +18,9 @@ use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
 use crate::cache_invalidator::Context;
+use crate::ddl::DdlContext;
 use crate::ddl::drop_database::end::DropDatabaseEnd;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
-use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::schema_name::{SchemaName, SchemaNameKey};
@@ -104,7 +104,7 @@ mod tests {
     use crate::ddl::drop_database::metadata::{DropDatabaseRemoveMetadata, DropMetadataBroadcast};
     use crate::ddl::drop_database::{DropDatabaseContext, State};
     use crate::key::schema_name::SchemaNameKey;
-    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     #[tokio::test]
     async fn test_next() {
@@ -129,12 +129,14 @@ mod tests {
             .downcast_ref::<DropMetadataBroadcast>()
             .unwrap();
         assert!(!status.is_done());
-        assert!(!ddl_context
-            .table_metadata_manager
-            .schema_manager()
-            .exists(SchemaNameKey::new("foo", "bar"))
-            .await
-            .unwrap());
+        assert!(
+            !ddl_context
+                .table_metadata_manager
+                .schema_manager()
+                .exists(SchemaNameKey::new("foo", "bar"))
+                .await
+                .unwrap()
+        );
 
         let mut state = DropMetadataBroadcast;
         let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();

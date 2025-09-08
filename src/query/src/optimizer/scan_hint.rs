@@ -21,7 +21,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
-use datafusion_expr::{utils, Expr, LogicalPlan};
+use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -302,7 +302,7 @@ mod test {
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
     use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
-    use datafusion_expr::{col, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, col};
     use datafusion_optimizer::OptimizerContext;
     use store_api::storage::RegionId;
 

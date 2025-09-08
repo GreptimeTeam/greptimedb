@@ -20,8 +20,8 @@ use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -101,7 +101,7 @@ impl FlowServiceOperator {
         let mut final_result: Option<api::v1::flow::FlowResponse> = None;
         for node in all_flow_nodes {
             let res = {
-                use api::v1::flow::{flow_request, FlowRequest, FlushFlow};
+                use api::v1::flow::{FlowRequest, FlushFlow, flow_request};
                 let flush_req = FlowRequest {
                     header: Some(FlowRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),

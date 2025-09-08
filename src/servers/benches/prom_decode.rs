@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use api::prom_store::remote::WriteRequest;
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prost::Message;
 use servers::http::PromValidationMode;
 use servers::prom_store::to_grpc_row_insert_requests;

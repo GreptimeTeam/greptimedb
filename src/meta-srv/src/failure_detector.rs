@@ -443,8 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_available_if_it_starts_heartbeat_again_after_being_marked_dead_due_to_detection_of_failure(
-    ) {
+    fn test_is_available_if_it_starts_heartbeat_again_after_being_marked_dead_due_to_detection_of_failure()
+     {
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,

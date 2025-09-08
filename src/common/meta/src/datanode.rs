@@ -20,7 +20,7 @@ use common_time::util as time_util;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;

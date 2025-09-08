@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
-use crate::parser::{ParserContext, FLOW};
+use crate::parser::{FLOW, ParserContext};
 #[cfg(feature = "enterprise")]
 use crate::statements::drop::trigger::DropTrigger;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};

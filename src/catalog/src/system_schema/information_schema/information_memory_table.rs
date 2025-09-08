@@ -89,9 +89,9 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
                 vec![
                     Arc::new(StringVector::from(vec![build_info.branch.to_string()])),
                     Arc::new(StringVector::from(vec![build_info.commit.to_string()])),
-                    Arc::new(StringVector::from(vec![build_info
-                        .commit_short
-                        .to_string()])),
+                    Arc::new(StringVector::from(vec![
+                        build_info.commit_short.to_string(),
+                    ])),
                     Arc::new(StringVector::from(vec![build_info.clean.to_string()])),
                     Arc::new(StringVector::from(vec![build_info.version.to_string()])),
                 ],
@@ -369,17 +369,9 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
         TRIGGERS => (
             vec![
                 string_column("TRIGGER_NAME"),
-                ColumnSchema::new(
-                    "trigger_id",
-                    ConcreteDataType::uint64_datatype(),
-                    false,
-                ),
+                ColumnSchema::new("trigger_id", ConcreteDataType::uint64_datatype(), false),
                 string_column("TRIGGER_DEFINITION"),
-                ColumnSchema::new(
-                    "flownode_id",
-                    ConcreteDataType::uint64_datatype(),
-                    true,
-                ),
+                ColumnSchema::new("flownode_id", ConcreteDataType::uint64_datatype(), true),
             ],
             vec![],
         ),

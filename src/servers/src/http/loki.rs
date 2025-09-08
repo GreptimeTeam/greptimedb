@@ -21,8 +21,8 @@ use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
-use axum::extract::State;
 use axum::Extension;
+use axum::extract::State;
 use axum_extra::TypedHeader;
 use bytes::Bytes;
 use chrono::DateTime;
@@ -39,17 +39,17 @@ use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
-use crate::http::event::{LogState, PipelineIngestRequest, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
+use crate::http::HttpResponse;
+use crate::http::event::{JSON_CONTENT_TYPE, LogState, PB_CONTENT_TYPE, PipelineIngestRequest};
 use crate::http::extractor::{LogTableName, PipelineInfo};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
-use crate::http::HttpResponse;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_LOKI_LOGS_INGESTION_COUNTER, METRIC_LOKI_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,

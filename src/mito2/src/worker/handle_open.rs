@@ -32,7 +32,7 @@ use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
-use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
+use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     async fn check_and_cleanup_region(

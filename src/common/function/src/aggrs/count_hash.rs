@@ -28,9 +28,9 @@ use datafusion_common::cast::as_list_array;
 use datafusion_common::error::Result;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::utils::SingleRowListArrayBuilder;
-use datafusion_common::{internal_err, not_impl_err, ScalarValue};
+use datafusion_common::{ScalarValue, internal_err, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion_expr::utils::{format_state_name, AggregateOrderSensitivity};
+use datafusion_expr::utils::{AggregateOrderSensitivity, format_state_name};
 use datafusion_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, EmitTo, GroupsAccumulator, ReversedUDAF,
     SetMonotonicity, Signature, TypeSignature, Volatility,

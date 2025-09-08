@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::RegionRequest;
 use api::v1::ResponseHeader;
+use api::v1::region::RegionRequest;
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -33,7 +33,7 @@ use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
-use snafu::{location, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, location};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
@@ -41,7 +41,7 @@ use crate::error::{
     self, ConvertFlightDataSnafu, FlightGetSnafu, IllegalDatabaseResponseSnafu,
     IllegalFlightMessagesSnafu, MissingFieldSnafu, Result, ServerSnafu,
 };
-use crate::{metrics, Client, Error};
+use crate::{Client, Error, metrics};
 
 #[derive(Debug)]
 pub struct RegionRequester {
@@ -115,11 +115,10 @@ impl RegionRequester {
                     flight_client.addr(),
                     tonic_code
                 );
-                let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+                Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
                     addr: flight_client.addr().to_string(),
                     tonic_code,
-                });
-                error
+                })
             })?;
 
         let flight_data_stream = response.into_inner();

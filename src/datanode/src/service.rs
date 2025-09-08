@@ -16,8 +16,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_config::Configurable;
-use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServer;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};

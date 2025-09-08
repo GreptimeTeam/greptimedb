@@ -24,7 +24,7 @@ use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 

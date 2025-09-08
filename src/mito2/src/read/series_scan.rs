@@ -26,15 +26,15 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
-use smallvec::{smallvec, SmallVec};
-use snafu::{ensure, OptionExt, ResultExt};
+use smallvec::{SmallVec, smallvec};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
 };
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Semaphore;
 
 use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
@@ -43,7 +43,7 @@ use crate::error::{
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
-use crate::read::seq_scan::{build_sources, SeqScan};
+use crate::read::seq_scan::{SeqScan, build_sources};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 

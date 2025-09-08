@@ -22,20 +22,20 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
-use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::Expr;
+use datafusion_expr::utils::expr_to_columns;
 use futures::StreamExt;
 use smallvec::SmallVec;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
-use table::predicate::{build_time_range_predicate, Predicate};
-use tokio::sync::{mpsc, Semaphore};
+use table::predicate::{Predicate, build_time_range_predicate};
+use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
@@ -60,10 +60,10 @@ use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
 };
-use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
-use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
@@ -1271,12 +1271,11 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate() {
-                    if !predicate.exprs().is_empty() {
-                        let exprs: Vec<_> =
-                            predicate.exprs().iter().map(|e| e.to_string()).collect();
-                        write!(f, ", \"filters\": {:?}", exprs)?;
-                    }
+                if let Some(predicate) = &self.input.predicate.predicate()
+                    && !predicate.exprs().is_empty()
+                {
+                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
+                    write!(f, ", \"filters\": {:?}", exprs)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;

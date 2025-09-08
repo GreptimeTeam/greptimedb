@@ -18,14 +18,15 @@ pub mod opener;
 pub mod options;
 pub(crate) mod version;
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
+use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
@@ -34,7 +35,6 @@ use store_api::region_engine::{
 };
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
-use store_api::ManifestVersion;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
@@ -1029,14 +1029,14 @@ impl ManifestStats {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
     use crossbeam_utils::atomic::AtomicCell;
-    use object_store::services::Fs;
     use object_store::ObjectStore;
+    use object_store::services::Fs;
     use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
     use store_api::region_request::PathType;

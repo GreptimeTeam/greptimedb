@@ -29,11 +29,11 @@ use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
 
+use crate::StreamingEngine;
 use crate::adapter::table_source::TableDesc;
-use crate::adapter::{TableName, WorkerHandle, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, TableName, WorkerHandle};
 use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
-use crate::StreamingEngine;
 impl StreamingEngine {
     /// Get a worker handle for creating flow, using round robin to select a worker
     pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {

@@ -18,11 +18,11 @@ use api::v1::{ColumnSchema, Mutation, OpType, Row, Rows};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Deserializer;
-use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
 
-use crate::row_converter::{SortField, COLUMN_ID_ENCODE_SIZE};
+use crate::row_converter::{COLUMN_ID_ENCODE_SIZE, SortField};
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -333,7 +333,7 @@ mod tests {
     use api::v1::{self, ColumnDataType, SemanticType};
 
     use super::*;
-    use crate::test_util::{i64_value, TestRegionMetadataBuilder};
+    use crate::test_util::{TestRegionMetadataBuilder, i64_value};
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;

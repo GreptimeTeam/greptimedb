@@ -14,8 +14,8 @@
 
 use std::collections::BTreeMap;
 
-use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use api::v1::value::ValueData;
 use ordered_float::NotNan;
 use snafu::{OptionExt, ResultExt};
 use vrl::prelude::Bytes;

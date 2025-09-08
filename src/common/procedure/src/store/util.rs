@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use async_stream::try_stream;
 use futures::{Stream, TryStreamExt};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error;
 use crate::error::Result;
@@ -135,8 +135,8 @@ pub fn multiple_value_stream(
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use futures::stream::{self};
     use futures::TryStreamExt;
+    use futures::stream::{self};
 
     use super::*;
     use crate::error::{self};

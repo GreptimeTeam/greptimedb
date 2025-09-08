@@ -30,12 +30,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use catalog::CatalogManagerRef;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
-use catalog::CatalogManagerRef;
+use client::RecordBatches;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::{InsertOptions, Inserter};
-use client::RecordBatches;
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -47,33 +47,33 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
 use common_telemetry::tracing;
-use common_time::range::TimestampRange;
 use common_time::Timestamp;
+use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use humantime::format_duration;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
-use query::parser::QueryStatement;
 use query::QueryEngineRef;
+use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use set::{set_query_timeout, set_read_preference};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
+use sql::statements::OptionMap;
 use sql::statements::copy::{
     CopyDatabase, CopyDatabaseArgument, CopyQueryToArgument, CopyTable, CopyTableArgument,
 };
 use sql::statements::set_variables::SetVariables;
 use sql::statements::show::ShowCreateTableVariant;
 use sql::statements::statement::Statement;
-use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use table::TableRef;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, CopyTableRequest};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
-use table::TableRef;
 
 use self::set::{
     set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
@@ -440,7 +440,7 @@ impl StatementExecutor {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),
                     }
-                    .fail()
+                    .fail();
                 }
             },
             "STATEMENT_TIMEOUT" => {

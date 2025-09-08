@@ -26,7 +26,7 @@ use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
@@ -200,7 +200,9 @@ impl DowngradeLeaderRegion {
                 if !exists {
                     warn!(
                         "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
-                        region_id, leader, now.elapsed()
+                        region_id,
+                        leader,
+                        now.elapsed()
                     );
                 } else {
                     info!(
@@ -226,7 +228,7 @@ impl DowngradeLeaderRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}, elapsed: {:?}", 
+                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}, elapsed: {:?}",
                     leader,
                     now.elapsed()
                 );
@@ -260,11 +262,8 @@ impl DowngradeLeaderRegion {
             if elapsed >= (REGION_LEASE_SECS * 1000) as i64 {
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 info!(
-                    "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {}", 
-                    leader,
-                    last_connection_at,
-                    region_lease,
-                    ctx.persistent_ctx.region_id
+                    "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {}",
+                    leader, last_connection_at, region_lease, ctx.persistent_ctx.region_id
                 );
             } else if elapsed > 0 {
                 // `now - last_connection_at` < REGION_LEASE_SECS * 1000
@@ -275,7 +274,11 @@ impl DowngradeLeaderRegion {
                     .set_leader_region_lease_deadline(lease_timeout);
                 info!(
                     "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {}",
-                    leader, last_connection_at, elapsed, ctx.volatile_ctx.leader_region_lease_deadline, ctx.persistent_ctx.region_id
+                    leader,
+                    last_connection_at,
+                    elapsed,
+                    ctx.volatile_ctx.leader_region_lease_deadline,
+                    ctx.persistent_ctx.region_id
                 );
             } else {
                 warn!(
@@ -353,7 +356,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
-    use crate::procedure::region_migration::test_util::{new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_downgrade_region_reply, send_mock_reply,

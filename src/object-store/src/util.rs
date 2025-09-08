@@ -23,7 +23,7 @@ use opendal::{Error, ErrorKind};
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
-use crate::{error, ObjectStore};
+use crate::{ObjectStore, error};
 
 /// Join two paths and normalize the output dir.
 ///
@@ -195,7 +195,9 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
 
 pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<HttpClient> {
     if config.skip_ssl_validation {
-        common_telemetry::warn!("Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted.");
+        common_telemetry::warn!(
+            "Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted."
+        );
     }
 
     let client = reqwest::ClientBuilder::new()

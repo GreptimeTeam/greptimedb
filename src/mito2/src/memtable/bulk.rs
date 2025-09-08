@@ -42,7 +42,7 @@ use crate::memtable::{
     MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, PredicateGroup,
 };
 use crate::sst::file::FileId;
-use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// All parts in a bulk memtable.
 #[derive(Default)]
@@ -460,7 +460,7 @@ mod tests {
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::scan_region::PredicateGroup;
-    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn create_bulk_part_with_converter(

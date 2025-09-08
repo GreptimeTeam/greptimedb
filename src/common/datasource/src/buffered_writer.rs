@@ -45,11 +45,11 @@ pub trait ArrowWriterCloser {
 }
 
 impl<
-        T: AsyncWrite + Send + Unpin,
-        U: DfRecordBatchEncoder + ArrowWriterCloser,
-        F: Fn(String) -> Fut,
-        Fut: Future<Output = Result<T>>,
-    > LazyBufferedWriter<T, U, F>
+    T: AsyncWrite + Send + Unpin,
+    U: DfRecordBatchEncoder + ArrowWriterCloser,
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<T>>,
+> LazyBufferedWriter<T, U, F>
 {
     /// Closes `LazyBufferedWriter` and optionally flushes all data to underlying storage
     /// if any row's been written.
@@ -67,11 +67,11 @@ impl<
 }
 
 impl<
-        T: AsyncWrite + Send + Unpin,
-        U: DfRecordBatchEncoder,
-        F: Fn(String) -> Fut,
-        Fut: Future<Output = Result<T>>,
-    > LazyBufferedWriter<T, U, F>
+    T: AsyncWrite + Send + Unpin,
+    U: DfRecordBatchEncoder,
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<T>>,
+> LazyBufferedWriter<T, U, F>
 {
     /// Closes the writer and flushes the buffer data.
     pub async fn close_inner_writer(&mut self) -> Result<()> {

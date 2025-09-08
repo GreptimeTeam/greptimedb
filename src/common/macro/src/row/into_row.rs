@@ -18,8 +18,8 @@ use syn::spanned::Spanned;
 use syn::{DeriveInput, Result};
 
 use crate::row::utils::{
-    convert_column_data_type_to_value_data_ident, extract_struct_fields, get_column_data_type,
-    parse_fields_from_fields_named, ParsedField,
+    ParsedField, convert_column_data_type_to_value_data_ident, extract_struct_fields,
+    get_column_data_type, parse_fields_from_fields_named,
 };
 use crate::row::{META_KEY_COL, META_KEY_DATATYPE};
 

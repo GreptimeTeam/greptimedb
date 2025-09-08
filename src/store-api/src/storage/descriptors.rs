@@ -200,10 +200,10 @@ impl ColumnDescriptorBuilder {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if let Some(name) = &self.name {
-            if name.is_empty() {
-                return Err("name should not be empty".to_string());
-            }
+        if let Some(name) = &self.name
+            && name.is_empty()
+        {
+            return Err("name should not be empty".to_string());
         }
 
         if let (Some(Some(constraint)), Some(data_type)) =
@@ -273,11 +273,13 @@ mod tests {
             .unwrap();
         assert_eq!("A test column", desc.comment);
 
-        assert!(new_column_desc_builder()
-            .is_nullable(false)
-            .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
-            .build()
-            .is_err());
+        assert!(
+            new_column_desc_builder()
+                .is_nullable(false)
+                .default_constraint(Some(ColumnDefaultConstraint::Value(Value::Null)))
+                .build()
+                .is_err()
+        );
     }
 
     #[test]

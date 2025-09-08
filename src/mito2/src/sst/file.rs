@@ -18,8 +18,8 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;

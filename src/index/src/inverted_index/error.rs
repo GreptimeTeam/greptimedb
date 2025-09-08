@@ -80,7 +80,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unexpected inverted index footer payload size, max: {max_payload_size}, actual: {actual_payload_size}"))]
+    #[snafu(display(
+        "Unexpected inverted index footer payload size, max: {max_payload_size}, actual: {actual_payload_size}"
+    ))]
     UnexpectedFooterPayloadSize {
         max_payload_size: u64,
         actual_payload_size: u64,
@@ -88,7 +90,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unexpected inverted index offset size, offset: {offset}, size: {size}, blob_size: {blob_size}, payload_size: {payload_size}"))]
+    #[snafu(display(
+        "Unexpected inverted index offset size, offset: {offset}, size: {size}, blob_size: {blob_size}, payload_size: {payload_size}"
+    ))]
     UnexpectedOffsetSize {
         offset: u64,
         size: u64,
@@ -208,7 +212,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Inconsistent row count, index_name: {index_name}, total_row_count: {total_row_count}, expected: {expected_row_count}"))]
+    #[snafu(display(
+        "Inconsistent row count, index_name: {index_name}, total_row_count: {total_row_count}, expected: {expected_row_count}"
+    ))]
     InconsistentRowCount {
         index_name: String,
         total_row_count: usize,

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use api::v1::meta::MailboxMessage;
 use common_base::readable_size::ReadableSize;
 use common_meta::instruction::{FlushRegions, Instruction};
-use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
 use common_meta::peer::Peer;
 use common_meta::region_registry::{LeaderRegion, LeaderRegionRegistryRef};
 use common_meta::stats::topic::TopicStatsRegistryRef;
@@ -425,7 +425,12 @@ fn filter_regions_by_replay_size<I: Iterator<Item = (RegionId, u64)>>(
             if replay_size > threshold.as_bytes() {
                 debug!(
                     "Region {}: estimated replay size {} exceeds threshold {}, entry id: {}, topic latest entry id: {}, topic: '{}'",
-                    region_id, ReadableSize(replay_size), threshold, entry_id, latest_entry_id, topic
+                    region_id,
+                    ReadableSize(replay_size),
+                    threshold,
+                    entry_id,
+                    latest_entry_id,
+                    topic
                 );
                 regions_to_flush.push(region_id);
             }

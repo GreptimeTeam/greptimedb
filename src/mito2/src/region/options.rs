@@ -21,12 +21,12 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_time::TimeToLive;
-use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
+use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
-use snafu::{ensure, ResultExt};
+use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::ColumnId;
 use strum::EnumString;

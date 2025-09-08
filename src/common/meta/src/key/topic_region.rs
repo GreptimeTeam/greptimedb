@@ -24,12 +24,12 @@ use table::metadata::TableId;
 use crate::ddl::utils::parse_region_wal_options;
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, MetadataValue, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, PutRequest, RangeRequest,
 };
-use crate::rpc::KeyValue;
 
 // The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
 // The layout of the key is `__topic_region/{topic_name}/{region_id}`.

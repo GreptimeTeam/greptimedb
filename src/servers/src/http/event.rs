@@ -37,23 +37,23 @@ use mime_guess::mime;
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Map, Value as JsonValue};
+use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use simd_json::Buffers;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::{EnumIter, IntoEnumIterator};
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result, status_code_to_http_status,
 };
+use crate::http::HttpResponse;
 use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
 use crate::http::header::{
     CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
-use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
@@ -887,7 +887,7 @@ pub trait LogValidator: Send + Sync {
     /// validate payload by source before processing
     /// Return a `Some` result to indicate validation failure.
     async fn validate(&self, source: Option<&str>, payload: &Bytes)
-        -> Option<Result<HttpResponse>>;
+    -> Option<Result<HttpResponse>>;
 }
 
 pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;

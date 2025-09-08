@@ -364,7 +364,11 @@ impl MergeScanExec {
                 if explain_verbose {
                     common_telemetry::info!(
                         "Merge scan finish one region, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
-                        partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
+                        partition,
+                        region_id,
+                        poll_duration,
+                        metric.first_consume_time(),
+                        do_get_cost
                     );
                 }
 
@@ -543,12 +547,18 @@ impl PartitionMetrics {
         if self.explain_verbose {
             common_telemetry::info!(
                 "MergeScan partition {} finished: {} regions, total_poll_duration: {:?}, total_do_get_cost: {:?}",
-                self.partition, self.total_regions, self.total_poll_duration, self.total_do_get_cost
+                self.partition,
+                self.total_regions,
+                self.total_poll_duration,
+                self.total_do_get_cost
             );
         } else {
             common_telemetry::debug!(
                 "MergeScan partition {} finished: {} regions, total_poll_duration: {:?}, total_do_get_cost: {:?}",
-                self.partition, self.total_regions, self.total_poll_duration, self.total_do_get_cost
+                self.partition,
+                self.total_regions,
+                self.total_poll_duration,
+                self.total_do_get_cost
             );
         }
     }
@@ -623,19 +633,23 @@ impl DisplayAs for MergeScanExec {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "\"partition_{}\":{{\"regions\":{},\"total_poll_duration\":\"{:?}\",\"total_do_get_cost\":\"{:?}\",\"region_metrics\":[",
-                           pm.partition, pm.total_regions,
-                           pm.total_poll_duration,
-                           pm.total_do_get_cost)?;
+                    write!(
+                        f,
+                        "\"partition_{}\":{{\"regions\":{},\"total_poll_duration\":\"{:?}\",\"total_do_get_cost\":\"{:?}\",\"region_metrics\":[",
+                        pm.partition,
+                        pm.total_regions,
+                        pm.total_poll_duration,
+                        pm.total_do_get_cost
+                    )?;
                     for (j, rm) in pm.region_metrics.iter().enumerate() {
                         if j > 0 {
                             write!(f, ",")?;
                         }
-                        write!(f, "{{\"region_id\":\"{}\",\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
-                               rm.region_id,
-                               rm.poll_duration,
-                               rm.do_get_cost,
-                               rm.total_cost)?;
+                        write!(
+                            f,
+                            "{{\"region_id\":\"{}\",\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
+                            rm.region_id, rm.poll_duration, rm.do_get_cost, rm.total_cost
+                        )?;
                     }
                     write!(f, "]}}")?;
                 }

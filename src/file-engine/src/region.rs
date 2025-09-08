@@ -22,9 +22,9 @@ use store_api::path_utils::region_name;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
+use crate::FileOptions;
 use crate::error::Result;
 use crate::manifest::FileRegionManifest;
-use crate::FileOptions;
 
 #[derive(Debug)]
 pub struct FileRegion {
@@ -140,10 +140,12 @@ mod tests {
         assert_eq!(region.metadata.region_id, region_id);
         assert_eq!(region.metadata.primary_key, vec![1]);
 
-        assert!(object_store
-            .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            object_store
+                .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         // Object exists, should fail
         let err = FileRegion::create(region_id, request, &object_store)
@@ -214,16 +216,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(object_store
-            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            object_store
+                .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         FileRegion::drop(&region, &object_store).await.unwrap();
-        assert!(!object_store
-            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
-            .await
-            .unwrap());
+        assert!(
+            !object_store
+                .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
+                .await
+                .unwrap()
+        );
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),

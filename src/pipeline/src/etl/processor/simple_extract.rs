@@ -15,15 +15,15 @@
 use snafu::OptionExt as _;
 use vrl::value::{KeyString, Value as VrlValue};
 
+use crate::Processor;
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, KEY_NAME,
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, KEY_NAME, yaml_bool, yaml_new_field,
+    yaml_new_fields, yaml_string,
 };
-use crate::Processor;
 
 pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
 
