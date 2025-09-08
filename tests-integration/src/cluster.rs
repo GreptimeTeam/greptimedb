@@ -441,7 +441,6 @@ impl GreptimeDbClusterBuilder {
             instance,
             servers,
             heartbeat_task: Some(heartbeat_task),
-            export_metrics_task: None,
         }
     }
 
