@@ -52,6 +52,8 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            cpus: info.cpus,
+            memory_bytes: info.memory_bytes,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -85,6 +87,8 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            cpus: info.cpus,
+            memory_bytes: info.memory_bytes,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -136,6 +140,8 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
+            cpus: info.cpus,
+            memory_bytes: info.memory_bytes,
         };
 
         put_into_memory_store(ctx, key, value).await?;

@@ -39,6 +39,24 @@ pub fn get_sys_total_memory() -> Option<ReadableSize> {
     }
 }
 
+/// `ResourceSpec` holds the static resource specifications of a node,
+/// such as CPU cores and memory capacity. These values are fixed
+/// at startup and do not change dynamically during runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceSpec {
+    pub cpus: usize,
+    pub memory: Option<ReadableSize>,
+}
+
+impl Default for ResourceSpec {
+    fn default() -> Self {
+        Self {
+            cpus: get_cpus(),
+            memory: get_sys_total_memory(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

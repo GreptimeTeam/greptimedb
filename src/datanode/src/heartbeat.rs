@@ -20,6 +20,7 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
+use common_config::utils::ResourceSpec;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
@@ -62,6 +63,7 @@ pub struct HeartbeatTask {
     interval: u64,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     region_alive_keeper: Arc<RegionAliveKeeper>,
+    resource_spec: ResourceSpec,
 }
 
 impl Drop for HeartbeatTask {
@@ -104,6 +106,7 @@ impl HeartbeatTask {
             interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
             region_alive_keeper,
+            resource_spec: Default::default(),
         })
     }
 
@@ -231,6 +234,8 @@ impl HeartbeatTask {
 
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
+        let cpus = self.resource_spec.cpus as u32;
+        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -244,7 +249,8 @@ impl HeartbeatTask {
                     version: build_info.version.to_string(),
                     git_commit: build_info.commit_short.to_string(),
                     start_time_ms: node_epoch,
-                    cpus: num_cpus::get() as u32,
+                    cpus,
+                    memory_bytes,
                 }),
                 node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
                     types: workload_types.iter().map(|w| w.to_i32()).collect(),

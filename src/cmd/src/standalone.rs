@@ -787,6 +787,10 @@ impl InformationExtension for StandaloneInformationExtension {
             // Use `self.start_time_ms` instead.
             // It's not precise but enough.
             start_time_ms: self.start_time_ms,
+            cpus: common_config::utils::get_cpus() as u32,
+            memory_bytes: common_config::utils::get_sys_total_memory()
+                .unwrap_or_default()
+                .as_bytes(),
         };
         Ok(vec![node_info])
     }
