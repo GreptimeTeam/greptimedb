@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use common_meta::peer::Peer;
 
+use crate::discovery::lease;
 use crate::error::Result;
-use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};

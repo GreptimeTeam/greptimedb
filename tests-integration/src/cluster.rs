@@ -316,11 +316,13 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..100 {
-            let alive_datanodes =
-                meta_srv::lease::alive_datanodes(meta_peer_client, Duration::from_secs(u64::MAX))
-                    .await
-                    .unwrap()
-                    .len();
+            let alive_datanodes = meta_srv::discovery::alive_datanodes(
+                meta_peer_client,
+                Duration::from_secs(u64::MAX),
+            )
+            .await
+            .unwrap()
+            .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }

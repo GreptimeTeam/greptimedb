@@ -132,8 +132,8 @@ mod tests {
     use common_meta::datanode::Stat;
 
     use super::*;
+    use crate::discovery::lease::find_datanode_lease_value;
     use crate::handler::test_utils::TestEnv;
-    use crate::lease::find_datanode_lease_value;
 
     #[tokio::test]
     async fn test_put_into_memory_store() {

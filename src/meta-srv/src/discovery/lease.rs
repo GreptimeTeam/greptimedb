@@ -335,11 +335,11 @@ mod tests {
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
 
-    use crate::key::{DatanodeLeaseKey, LeaseValue};
-    use crate::lease::{
+    use super::{
         ClusterRole, MetaPeerLookupService, alive_datanodes, is_datanode_accept_ingest_workload,
         lookup_frontends,
     };
+    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
 
     async fn put_lease_value(

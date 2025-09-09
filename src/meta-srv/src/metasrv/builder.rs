@@ -51,6 +51,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::discovery::lease::MetaPeerLookupService;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
@@ -60,7 +61,6 @@ use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
-use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, FLOW_ID_SEQ, METASRV_DATA_DIR, Metasrv, MetasrvInfo, MetasrvOptions,
     RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef, TABLE_ID_SEQ,

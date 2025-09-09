@@ -24,9 +24,9 @@ use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use table::metadata::TableId;
 
+use crate::discovery::lease;
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
-use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};

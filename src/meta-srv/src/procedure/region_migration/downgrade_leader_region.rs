@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{Instant, sleep};
 
+use crate::discovery::find_datanode_lease_value;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::lease::find_datanode_lease_value;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::procedure::region_migration::{Context, State};

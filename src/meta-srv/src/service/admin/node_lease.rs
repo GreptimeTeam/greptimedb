@@ -23,9 +23,9 @@ use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::lease;
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
-use crate::lease;
 use crate::service::admin::HttpHandler;
 use crate::service::admin::util::ErrorHandler;
 

@@ -61,6 +61,7 @@ use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::lookup_datanode_peer;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
@@ -68,7 +69,6 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
-use crate::lease::lookup_datanode_peer;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;

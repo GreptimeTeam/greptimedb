@@ -20,8 +20,8 @@ use std::time::Duration;
 use common_meta::peer::Peer;
 use snafu::ensure;
 
+use crate::discovery::lease;
 use crate::error::{NoEnoughAvailableNodeSnafu, Result};
-use crate::lease;
 use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::{Selector, SelectorOptions};
