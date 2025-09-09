@@ -111,6 +111,7 @@ use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
+use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -129,12 +130,14 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     object_store_manager: ObjectStoreManagerRef,
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
 impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_home: &'a str,
         config: MitoConfig,
@@ -142,6 +145,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Self {
         Self {
@@ -152,6 +156,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             schema_metadata_manager,
             file_ref_manager,
             plugins,
+            partition_expr_fetcher,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -179,6 +184,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             self.object_store_manager,
             self.schema_metadata_manager,
             self.file_ref_manager,
+            self.partition_expr_fetcher.clone(),
             self.plugins,
         )
         .await?;
@@ -209,6 +215,7 @@ pub struct MitoEngine {
 
 impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new<S: LogStore>(
         data_home: &str,
         config: MitoConfig,
@@ -216,6 +223,7 @@ impl MitoEngine {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let builder = MitoEngineBuilder::new(
@@ -225,6 +233,7 @@ impl MitoEngine {
             object_store_manager,
             schema_metadata_manager,
             file_ref_manager,
+            partition_expr_fetcher,
             plugins,
         );
         builder.try_build().await
@@ -946,6 +955,7 @@ impl MitoEngine {
         time_provider: crate::time_provider::TimeProviderRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -962,6 +972,7 @@ impl MitoEngine {
                     schema_metadata_manager,
                     file_ref_manager,
                     time_provider,
+                    partition_expr_fetcher,
                 )
                 .await?,
                 config,

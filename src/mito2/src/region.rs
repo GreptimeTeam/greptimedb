@@ -41,7 +41,9 @@ use crate::error::{
     FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
     UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{
+    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -321,7 +323,7 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
-        let _manager = self.manifest_ctx.manifest_manager.write().await;
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -418,6 +420,36 @@ impl MitoRegion {
                             "Cannot start downgrade for region {} from state {:?}",
                             self.region_id, current_state
                         );
+                    }
+                }
+            }
+        }
+
+        // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
+        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
+            let manifest_meta = &manager.manifest().metadata;
+            let current_meta = &self.version().metadata;
+            if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
+                let action = RegionMetaAction::Change(RegionChange {
+                    metadata: current_meta.clone(),
+                });
+                let result = manager
+                    .update(
+                        RegionMetaActionList::with_action(action),
+                        RegionRoleState::Leader(RegionLeaderState::Writable),
+                    )
+                    .await;
+
+                match result {
+                    Ok(version) => {
+                        info!(
+                            "Successfully persisted backfilled metadata for region {}, version: {}",
+                            self.region_id, version
+                        );
+                    }
+                    Err(e) => {
+                        warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
                     }
                 }
             }

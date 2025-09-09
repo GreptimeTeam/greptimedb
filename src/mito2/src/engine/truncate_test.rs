@@ -304,6 +304,7 @@ async fn test_engine_truncate_during_flush() {
             MitoConfig::default(),
             Some(write_buffer_manager),
             Some(listener.clone()),
+            None,
         )
         .await;
 
