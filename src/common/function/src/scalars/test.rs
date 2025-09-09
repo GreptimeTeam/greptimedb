@@ -18,7 +18,6 @@ use std::sync::Arc;
 use common_query::error::Result;
 use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
 use crate::function::{Function, FunctionContext};
@@ -32,8 +31,8 @@ impl Function for TestAndFunction {
         "test_and"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {

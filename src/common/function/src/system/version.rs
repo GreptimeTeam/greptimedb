@@ -16,8 +16,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{StringVector, VectorRef};
 use session::context::Channel;
 
@@ -37,8 +37,8 @@ impl Function for VersionFunction {
         "version"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {

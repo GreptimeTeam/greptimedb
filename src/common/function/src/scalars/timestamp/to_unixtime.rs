@@ -61,8 +61,8 @@ impl Function for ToUnixtimeFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::int64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Int64)
     }
 
     fn signature(&self) -> Signature {
@@ -131,7 +131,6 @@ impl fmt::Display for ToUnixtimeFunction {
 #[cfg(test)]
 mod tests {
     use datafusion_expr::TypeSignature;
-    use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
         DateVector, StringVector, TimestampMillisecondVector, TimestampSecondVector,
@@ -143,10 +142,7 @@ mod tests {
     fn test_string_to_unixtime() {
         let f = ToUnixtimeFunction;
         assert_eq!("to_unixtime", f.name());
-        assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            f.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Int64, f.return_type(&[]).unwrap());
 
         assert!(matches!(f.signature(),
                          Signature {

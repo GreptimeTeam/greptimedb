@@ -15,8 +15,8 @@
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
 use derive_more::Display;
@@ -39,8 +39,8 @@ impl Function for STDistance {
         "st_distance"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
@@ -87,8 +87,8 @@ impl Function for STDistanceSphere {
         "st_distance_sphere_m"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
@@ -145,8 +145,8 @@ impl Function for STArea {
         "st_area"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
