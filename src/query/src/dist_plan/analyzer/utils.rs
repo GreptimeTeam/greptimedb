@@ -195,10 +195,39 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                 ))
             } else if node.inputs().len() == 1 {
                 if input_schema != output_schema {
-                    Err(datafusion::error::DataFusionError::Internal(format!(
-                        "AliasScopeTracker only accept plan that doesn't modify schema, found {}",
-                        node
-                    )))
+                    let input_columns = input_schema.columns();
+                    let all_input_is_in_output = input_columns
+                        .iter()
+                        .all(|c| output_schema.is_column_from_schema(c));
+                    if all_input_is_in_output {
+                        // all input is in output, so it's just adding some columns, we can do identity mapping for input columns
+                        let mut layer = AliasLayer::default();
+                        for col in input_columns {
+                            layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                        }
+                        Ok(layer)
+                    } else {
+                        // otherwise use the intersection of input and output
+                        // TODO(discord9): maybe just make this case unsupported for now?
+                        common_telemetry::warn!(
+                            "Might be unsupported plan for alias tracking, track alias anyway: {}",
+                            node
+                        );
+                        let input_columns = input_schema.columns();
+                        let output_columns =
+                            output_schema.columns().into_iter().collect::<HashSet<_>>();
+                        let common_columns: HashSet<Column> = input_columns
+                            .iter()
+                            .filter(|c| output_columns.contains(c))
+                            .cloned()
+                            .collect();
+
+                        let mut layer = AliasLayer::default();
+                        for col in &common_columns {
+                            layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                        }
+                        Ok(layer)
+                    }
                 } else {
                     // identity mapping
                     let mut layer = AliasLayer::default();
