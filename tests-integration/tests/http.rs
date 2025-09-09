@@ -2578,7 +2578,7 @@ transform:
     assert_eq!(res.status(), StatusCode::OK);
 
     let res = client
-        .get("/v1/pipelines/test/create_table?table=logs1")
+        .get("/v1/pipelines/test/ddl?table=logs1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

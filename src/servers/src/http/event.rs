@@ -205,8 +205,9 @@ pub async fn query_pipeline(
     ))
 }
 
+/// Generate DDL from pipeline definition.
 #[axum_macros::debug_handler]
-pub async fn query_pipeline_create_table(
+pub async fn query_pipeline_ddl(
     State(state): State<LogState>,
     Extension(mut query_ctx): Extension<QueryContext>,
     Query(query_params): Query<LogIngesterQueryParams>,
