@@ -17,8 +17,8 @@ use std::iter::repeat_n;
 use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
 use memchr::memmem;
@@ -92,8 +92,8 @@ impl Function for MatchesTermFunction {
         "matches_term"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {

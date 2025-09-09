@@ -232,6 +232,7 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
+    use datatypes::data_type::ConcreteDataType as CDT;
     use datatypes::prelude::ConcreteDataType;
     use pretty_assertions::assert_eq;
 
@@ -239,7 +240,6 @@ mod test {
     use crate::expr::GlobalId;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
-    use crate::transform::CDT;
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]

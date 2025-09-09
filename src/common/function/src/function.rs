@@ -16,8 +16,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::Signature;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 
@@ -63,7 +63,7 @@ pub trait Function: fmt::Display + Sync + Send {
     fn name(&self) -> &str;
 
     /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
+    fn return_type(&self, input_types: &[DataType]) -> Result<DataType>;
 
     /// The signature of function.
     fn signature(&self) -> Signature;

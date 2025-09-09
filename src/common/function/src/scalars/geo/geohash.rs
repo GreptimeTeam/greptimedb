@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::fmt;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::Field;
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::DataType;
@@ -86,8 +88,8 @@ impl Function for GeohashFunction {
         Self::NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -172,10 +174,12 @@ impl Function for GeohashNeighboursFunction {
         GeohashNeighboursFunction::NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::string_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "x",
+            DataType::Utf8,
+            false,
+        ))))
     }
 
     fn signature(&self) -> Signature {

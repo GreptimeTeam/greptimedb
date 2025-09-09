@@ -16,8 +16,9 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, UInt32Vector, VectorRef};
 use derive_more::Display;
 
@@ -53,8 +54,8 @@ impl Function for DatabaseFunction {
         DATABASE_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -75,8 +76,8 @@ impl Function for CurrentSchemaFunction {
         CURRENT_SCHEMA_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -95,8 +96,8 @@ impl Function for SessionUserFunction {
         SESSION_USER_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -115,8 +116,8 @@ impl Function for ReadPreferenceFunction {
         READ_PREFERENCE_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -135,8 +136,8 @@ impl Function for PgBackendPidFunction {
         PG_BACKEND_PID
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -155,8 +156,8 @@ impl Function for ConnectionIdFunction {
         CONNECTION_ID
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -205,10 +206,7 @@ mod tests {
     fn test_build_function() {
         let build = DatabaseFunction;
         assert_eq!("database", build.name());
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            build.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, build.return_type(&[]).unwrap());
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default()

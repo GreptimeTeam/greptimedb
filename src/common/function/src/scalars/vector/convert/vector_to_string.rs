@@ -15,9 +15,9 @@
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::type_coercion::aggregates::BINARYS;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::vector_type_value_to_string;
 use datatypes::value::Value;
@@ -36,8 +36,8 @@ impl Function for VectorToStringFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {

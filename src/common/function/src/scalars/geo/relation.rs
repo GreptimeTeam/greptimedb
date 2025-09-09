@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
 use derive_more::Display;
@@ -36,8 +36,8 @@ impl Function for STContains {
         "st_contains"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -84,8 +84,8 @@ impl Function for STWithin {
         "st_within"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -132,8 +132,8 @@ impl Function for STIntersects {
         "st_intersects"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {

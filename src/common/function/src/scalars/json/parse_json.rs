@@ -15,6 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
@@ -35,8 +36,8 @@ impl Function for ParseJsonFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::json_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Binary)
     }
 
     fn signature(&self) -> Signature {
@@ -118,10 +119,8 @@ mod tests {
 
         assert_eq!("parse_json", parse_json.name());
         assert_eq!(
-            ConcreteDataType::json_datatype(),
-            parse_json
-                .return_type(&[ConcreteDataType::json_datatype()])
-                .unwrap()
+            DataType::Binary,
+            parse_json.return_type(&[DataType::Binary]).unwrap()
         );
 
         let json_strings = [

@@ -387,6 +387,7 @@ mod test {
 
     use bytes::BytesMut;
     use common_time::{IntervalMonthDayNano, Timestamp};
+    use datatypes::data_type::ConcreteDataType as CDT;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use pretty_assertions::assert_eq;
@@ -395,7 +396,6 @@ mod test {
     use crate::expr::{BinaryFunc, DfScalarFunction, GlobalId, RawDfScalarFn};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
-    use crate::transform::CDT;
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]
