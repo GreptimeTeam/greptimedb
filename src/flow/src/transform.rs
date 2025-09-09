@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_function::function::{FunctionContext, FunctionRef};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion_expr::{Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
-use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -142,8 +142,8 @@ impl common_function::function::Function for TumbleFunction {
         &self.name
     }
 
-    fn return_type(&self, _input_types: &[CDT]) -> common_query::error::Result<CDT> {
-        Ok(CDT::timestamp_millisecond_datatype())
+    fn return_type(&self, _: &[DataType]) -> common_query::error::Result<DataType> {
+        Ok(DataType::Timestamp(TimeUnit::Millisecond, None))
     }
 
     fn signature(&self) -> Signature {
@@ -170,6 +170,7 @@ mod test {
 
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
+    use datatypes::data_type::ConcreteDataType as CDT;
     use datatypes::prelude::*;
     use datatypes::schema::Schema;
     use datatypes::timestamp::TimestampMillisecond;

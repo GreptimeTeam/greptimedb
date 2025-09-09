@@ -16,8 +16,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::{ConcreteDataType, Value};
+use datatypes::prelude::Value;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, StringVectorBuilder, VectorRef};
 use derive_more::Display;
@@ -39,8 +40,8 @@ impl Function for Ipv6NumToString {
         "ipv6_num_to_string"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -128,8 +129,8 @@ impl Function for Ipv6StringToNum {
         "ipv6_string_to_num"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::binary_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Binary)
     }
 
     fn signature(&self) -> Signature {

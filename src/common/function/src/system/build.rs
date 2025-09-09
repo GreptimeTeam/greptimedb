@@ -16,8 +16,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::*;
 use datatypes::vectors::{StringVector, VectorRef};
 
 use crate::function::{Function, FunctionContext};
@@ -37,8 +37,8 @@ impl Function for BuildFunction {
         "build"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -61,10 +61,7 @@ mod tests {
     fn test_build_function() {
         let build = BuildFunction;
         assert_eq!("build", build.name());
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            build.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, build.return_type(&[]).unwrap());
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
         let build_info = common_version::build_info().to_string();
         let vector = build.eval(&FunctionContext::default(), &[]).unwrap();

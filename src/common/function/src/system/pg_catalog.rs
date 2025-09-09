@@ -24,6 +24,7 @@ use datafusion_postgres::pg_catalog::create_format_type_udf;
 use datafusion_postgres::pg_catalog::create_has_table_privilege_2param_udf;
 use datafusion_postgres::pg_catalog::create_has_table_privilege_3param_udf;
 use datafusion_postgres::pg_catalog::create_pg_get_partkeydef_udf;
+use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::ListValue;
@@ -64,8 +65,8 @@ impl Function for CurrentSchemaFunction {
         CURRENT_SCHEMA_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -84,21 +85,21 @@ impl Function for CurrentSchemasFunction {
         CURRENT_SCHEMAS_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::string_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "x",
+            DataType::Utf8,
+            false,
+        ))))
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![arrow::datatypes::DataType::Boolean],
-            Volatility::Immutable,
-        )
+        Signature::exact(vec![DataType::Boolean], Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         let input = &columns[0];
+
         // Create a UTF8 array with a single value
         let mut values = vec!["public".into()];
         // include implicit schemas
@@ -123,8 +124,8 @@ impl Function for SessionUserFunction {
         SESSION_USER_FUNCTION_NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {

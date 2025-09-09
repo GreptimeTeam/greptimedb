@@ -18,7 +18,6 @@ use std::fmt::Display;
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_expr::Signature;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
 use snafu::ensure;
@@ -53,11 +52,8 @@ impl Function for VectorKthElemFunction {
         NAME
     }
 
-    fn return_type(
-        &self,
-        _input_types: &[ConcreteDataType],
-    ) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float32_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float32)
     }
 
     fn signature(&self) -> Signature {

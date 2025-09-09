@@ -17,6 +17,7 @@ use std::fmt::Display;
 
 use common_query::error;
 use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::compute;
@@ -45,13 +46,13 @@ impl Function for ModuloFunction {
         NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        if input_types.iter().all(ConcreteDataType::is_signed) {
-            Ok(ConcreteDataType::int64_datatype())
-        } else if input_types.iter().all(ConcreteDataType::is_unsigned) {
-            Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
+        if input_types.iter().all(DataType::is_signed_integer) {
+            Ok(DataType::Int64)
+        } else if input_types.iter().all(DataType::is_unsigned_integer) {
+            Ok(DataType::UInt64)
         } else {
-            Ok(ConcreteDataType::float64_datatype())
+            Ok(DataType::Float64)
         }
     }
 
@@ -108,16 +109,12 @@ mod tests {
         let function = ModuloFunction;
         assert_eq!("mod", function.name());
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::int64_datatype()])
-                .unwrap()
+            DataType::Int64,
+            function.return_type(&[DataType::Int64]).unwrap()
         );
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::int32_datatype()])
-                .unwrap()
+            DataType::Int64,
+            function.return_type(&[DataType::Int32]).unwrap()
         );
 
         let nums = vec![18, -17, 5, -6];
@@ -140,16 +137,12 @@ mod tests {
         let function = ModuloFunction;
         assert_eq!("mod", function.name());
         assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::uint64_datatype()])
-                .unwrap()
+            DataType::UInt64,
+            function.return_type(&[DataType::UInt64]).unwrap()
         );
         assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::uint32_datatype()])
-                .unwrap()
+            DataType::UInt64,
+            function.return_type(&[DataType::UInt32]).unwrap()
         );
 
         let nums: Vec<u32> = vec![18, 17, 5, 6];
@@ -172,16 +165,12 @@ mod tests {
         let function = ModuloFunction;
         assert_eq!("mod", function.name());
         assert_eq!(
-            ConcreteDataType::float64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::float64_datatype()])
-                .unwrap()
+            DataType::Float64,
+            function.return_type(&[DataType::Float64]).unwrap()
         );
         assert_eq!(
-            ConcreteDataType::float64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::float32_datatype()])
-                .unwrap()
+            DataType::Float64,
+            function.return_type(&[DataType::Float32]).unwrap()
         );
 
         let nums = vec![18.0, 17.0, 5.0, 6.0];

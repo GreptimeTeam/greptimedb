@@ -19,7 +19,7 @@ use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_common::types;
 use datafusion_expr::{Coercion, Signature, TypeSignature, TypeSignatureClass, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::{ConcreteDataType, Value};
+use datatypes::prelude::Value;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
 use derive_more::Display;
@@ -45,8 +45,8 @@ impl Function for Ipv4ToCidr {
         "ipv4_to_cidr"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -174,8 +174,8 @@ impl Function for Ipv6ToCidr {
         "ipv6_to_cidr"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
