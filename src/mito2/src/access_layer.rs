@@ -343,6 +343,7 @@ impl AccessLayer {
                     file_path: path.to_string(),
                     file_size,
                     last_modified_ms,
+                    node_id: None,
                 };
 
                 yield entry;

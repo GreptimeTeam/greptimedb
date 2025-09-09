@@ -223,6 +223,10 @@ impl FileReferenceManager {
             GC_REF_FILE_CNT.dec();
         }
     }
+
+    pub fn node_id(&self) -> Option<u64> {
+        self.node_id
+    }
 }
 
 #[cfg(test)]

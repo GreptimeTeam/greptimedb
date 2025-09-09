@@ -35,7 +35,7 @@ use crate::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, ScanRequest
 pub struct ManifestSstEntry {
     /// The table directory this file belongs to.
     pub table_dir: String,
-    /// The region id this file belongs to.
+    /// The region id of region that refers to the file.
     pub region_id: RegionId,
     /// The table id this file belongs to.
     pub table_id: TableId,
@@ -67,6 +67,10 @@ pub struct ManifestSstEntry {
     pub max_ts: Timestamp,
     /// The sequence number associated with this file.
     pub sequence: Option<u64>,
+    /// The region id of region that creates the file.
+    pub origin_region_id: RegionId,
+    /// The node id fetched from the manifest.
+    pub node_id: Option<u64>,
 }
 
 impl ManifestSstEntry {
@@ -91,6 +95,8 @@ impl ManifestSstEntry {
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
+            ColumnSchema::new("origin_region_id", Ty::uint64_datatype(), false),
+            ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
         ]))
     }
 
@@ -122,6 +128,8 @@ impl ManifestSstEntry {
                 .map(|ts| ts.value())
         });
         let sequences = entries.iter().map(|e| e.sequence);
+        let origin_region_ids = entries.iter().map(|e| e.origin_region_id.as_u64());
+        let node_ids = entries.iter().map(|e| e.node_id);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(table_dirs)),
@@ -141,6 +149,8 @@ impl ManifestSstEntry {
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
+            Arc::new(UInt64Array::from_iter_values(origin_region_ids)),
+            Arc::new(UInt64Array::from_iter(node_ids)),
         ];
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
@@ -174,6 +184,8 @@ pub struct StorageSstEntry {
     pub file_size: Option<u64>,
     /// Last modified time in milliseconds since epoch, if available from storage.
     pub last_modified_ms: Option<Timestamp>,
+    /// The node id fetched from the manifest.
+    pub node_id: Option<u64>,
 }
 
 impl StorageSstEntry {
@@ -188,6 +200,7 @@ impl StorageSstEntry {
                 Ty::timestamp_millisecond_datatype(),
                 true,
             ),
+            ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
         ]))
     }
 
@@ -200,11 +213,13 @@ impl StorageSstEntry {
             e.last_modified_ms
                 .and_then(|ts| ts.convert_to(TimeUnit::Millisecond).map(|ts| ts.value()))
         });
+        let node_ids = entries.iter().map(|e| e.node_id);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(file_paths)),
             Arc::new(UInt64Array::from_iter(file_sizes)),
             Arc::new(TimestampMillisecondArray::from_iter(last_modified_ms)),
+            Arc::new(UInt64Array::from_iter(node_ids)),
         ];
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
@@ -299,6 +314,8 @@ mod tests {
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
+                origin_region_id: region_id1,
+                node_id: Some(1),
             },
             ManifestSstEntry {
                 table_dir: "tdir2".to_string(),
@@ -318,6 +335,8 @@ mod tests {
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
+                origin_region_id: region_id2,
+                node_id: None,
             },
         ];
 
@@ -469,6 +488,22 @@ mod tests {
             .unwrap();
         assert!(sequences.is_null(0));
         assert_eq!(9, sequences.value(1));
+
+        let origin_region_ids = batch
+            .column(17)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(region_id1.as_u64(), origin_region_ids.value(0));
+        assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
+
+        let node_ids = batch
+            .column(18)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(1, node_ids.value(0));
+        assert!(node_ids.is_null(1));
     }
 
     #[test]
@@ -478,11 +513,13 @@ mod tests {
                 file_path: "/s1".to_string(),
                 file_size: None,
                 last_modified_ms: None,
+                node_id: Some(1),
             },
             StorageSstEntry {
                 file_path: "/s2".to_string(),
                 file_size: Some(123),
                 last_modified_ms: Some(Timestamp::new_millisecond(456)),
+                node_id: None,
             },
         ];
 
@@ -515,6 +552,14 @@ mod tests {
             .unwrap();
         assert!(last_modified.is_null(0));
         assert_eq!(456, last_modified.value(1));
+
+        let node_ids = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(1, node_ids.value(0));
+        assert!(node_ids.is_null(1));
     }
 
     #[test]

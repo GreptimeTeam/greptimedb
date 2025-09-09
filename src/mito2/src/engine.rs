@@ -406,14 +406,20 @@ impl MitoEngine {
 
     /// Lists all SSTs from the manifest of all regions in the engine.
     pub fn all_ssts_from_manifest(&self) -> impl Iterator<Item = ManifestSstEntry> + use<'_> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
         self.inner
             .workers
             .all_regions()
             .flat_map(|region| region.manifest_sst_entries())
+            .map(move |mut entry| {
+                entry.node_id = node_id;
+                entry
+            })
     }
 
     /// Lists all SSTs from the storage layer of all regions in the engine.
     pub fn all_ssts_from_storage(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
         let regions = self.inner.workers.all_regions();
 
         let mut layers_distinct_table_dirs = HashMap::new();
@@ -428,6 +434,12 @@ impl MitoEngine {
         stream::iter(layers_distinct_table_dirs)
             .map(|(_, access_layer)| access_layer.storage_sst_entries())
             .flatten()
+            .map(move |entry| {
+                entry.map(move |mut entry| {
+                    entry.node_id = node_id;
+                    entry
+                })
+            })
     }
 }
 
