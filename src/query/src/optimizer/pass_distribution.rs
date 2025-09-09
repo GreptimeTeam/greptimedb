@@ -65,13 +65,12 @@ impl PassDistribution {
         current_req: Option<Distribution>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         // If this is a MergeScanExec, try to apply the current requirement.
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
-            if let Some(distribution) = current_req.as_ref()
-                && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
-            {
-                // Leaf node; no children to process
-                return Ok(Arc::new(new_plan) as _);
-            }
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+            && let Some(distribution) = current_req.as_ref()
+            && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
+        {
+            // Leaf node; no children to process
+            return Ok(Arc::new(new_plan) as _);
         }
 
         // Compute per-child requirements from the current node.
