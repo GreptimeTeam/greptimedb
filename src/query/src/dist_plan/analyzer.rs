@@ -537,18 +537,27 @@ impl PlanRewriter {
             "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
         );
 
+        let partition_cols = self
+            .partition_cols
+            .clone()
+            .unwrap_or_default()
+            .values()
+            .cloned()
+            .flatten()
+            .map(|c| c.to_string())
+            .collect();
+        debug!(
+            "PlanRewriter: expand on node: {on_node} with partition cols: {:?} and partition col alias mapping: {:?}",
+            partition_cols, self.partition_cols
+        );
+
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
             on_node,
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
-            self.partition_cols
-                .clone()
-                .unwrap_or_default()
-                .keys()
-                .cloned()
-                .collect(),
+            partition_cols,
         )
         .into_logical_plan();
 
