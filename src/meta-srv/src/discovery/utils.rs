@@ -68,12 +68,12 @@ pub fn build_active_filter<T: LastActiveTs>(
 
 /// Returns the alive datanode lease values.
 pub async fn alive_datanode_lease_values(
-    lister: &impl LeaseValueAccessor,
+    accessor: &impl LeaseValueAccessor,
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<HashMap<u64, LeaseValue>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    lister
+    accessor
         .lease_values(LeaseValueType::Datanode)
         .try_filter(|(_, lease_value)| {
             futures::future::ready(
@@ -86,12 +86,12 @@ pub async fn alive_datanode_lease_values(
 
 /// Returns the alive datanodes.
 pub async fn alive_datanodes(
-    lister: &impl LeaseValueAccessor,
+    accessor: &impl LeaseValueAccessor,
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    lister
+    accessor
         .lease_values(LeaseValueType::Datanode)
         .try_filter(|(_, lease_value)| {
             futures::future::ready(
@@ -105,12 +105,12 @@ pub async fn alive_datanodes(
 
 /// Returns the alive flownodes.
 pub async fn alive_flownodes(
-    lister: &impl LeaseValueAccessor,
+    accessor: &impl LeaseValueAccessor,
     active_duration: Duration,
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    lister
+    accessor
         .lease_values(LeaseValueType::Flownode)
         .try_filter(|(_, lease_value)| {
             futures::future::ready(

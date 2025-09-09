@@ -23,6 +23,7 @@ use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::{
     DATANODE_LEASE_SECS, FLOWNODE_LEASE_SECS, FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
 };
+use common_meta::error::Result;
 use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
 use common_meta::{DatanodeId, FlownodeId};
 use snafu::ResultExt;
@@ -32,7 +33,7 @@ use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 
 #[async_trait::async_trait]
 impl PeerDiscovery for MetaPeerClient {
-    async fn active_frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
+    async fn active_frontends(&self) -> Result<Vec<Peer>> {
         utils::alive_frontends(
             self,
             Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS),
@@ -45,7 +46,7 @@ impl PeerDiscovery for MetaPeerClient {
     async fn active_datanodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> common_meta::error::Result<Vec<Peer>> {
+    ) -> Result<Vec<Peer>> {
         utils::alive_datanodes(self, Duration::from_secs(DATANODE_LEASE_SECS), filter)
             .await
             .map_err(BoxedError::new)
@@ -55,7 +56,7 @@ impl PeerDiscovery for MetaPeerClient {
     async fn active_flownodes(
         &self,
         filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
-    ) -> common_meta::error::Result<Vec<Peer>> {
+    ) -> Result<Vec<Peer>> {
         utils::alive_flownodes(self, Duration::from_secs(FLOWNODE_LEASE_SECS), filter)
             .await
             .map_err(BoxedError::new)
@@ -65,7 +66,7 @@ impl PeerDiscovery for MetaPeerClient {
 
 #[async_trait::async_trait]
 impl PeerResolver for MetaPeerClient {
-    async fn datanode(&self, id: DatanodeId) -> common_meta::error::Result<Option<Peer>> {
+    async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         let peer = self
             .lease_value(LeaseValueType::Datanode, id)
             .await
@@ -75,7 +76,7 @@ impl PeerResolver for MetaPeerClient {
         Ok(peer)
     }
 
-    async fn flownode(&self, id: FlownodeId) -> common_meta::error::Result<Option<Peer>> {
+    async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         let peer = self
             .lease_value(LeaseValueType::Flownode, id)
             .await
