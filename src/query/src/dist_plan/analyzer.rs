@@ -311,8 +311,6 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            // since `plan` is parent to current node, and partition columns to be checked
-            // should come from `plan`'s child, so `at_level` should be `self.level` which is current node's level
             let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
             match comm {
                 Commutativity::PartialCommutative => {
@@ -439,7 +437,7 @@ impl PlanRewriter {
             })?;
 
             for (_col_name, alias_set) in part_cols.iter_mut() {
-                let aliased_cols = aliased_columns_for(alias_set.clone(), plan, Some(child))?;
+                let aliased_cols = aliased_columns_for(alias_set, plan, Some(child))?;
                 *alias_set = aliased_cols.into_values().flatten().collect();
             }
 
