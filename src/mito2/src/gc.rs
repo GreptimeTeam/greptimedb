@@ -145,11 +145,40 @@ impl LocalGcWorker {
     /// 2. if can't get the files that got removed from old manifest to new manifest(possible if just did a checkpoint),
     ///    then can do nothing as can't sure whether a file is truly unused or just tmp ref file sets haven't report it, so need to report back and try next gc round to handle those files with newer tmp ref file sets.
     ///
-    pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
+    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
+        let mut outdated_regions = HashSet::new();
         for (region_id, region_mgr) in &self.manifest_mgrs {
             let current_version = region_mgr.manifest().manifest_version;
+            if &current_version
+                > self
+                    .file_ref_manifest
+                    .manifest_version
+                    .get(region_id)
+                    .with_context(|| UnexpectedSnafu {
+                        reason: format!(
+                            "Region {} not found in tmp ref manifest version map",
+                            region_id
+                        ),
+                    })?
+            {
+                outdated_regions.insert(*region_id);
+            }
         }
-        todo!("verify manifest version before reading tmp ref files")
+        // TODO(discord9): verify manifest version before reading tmp ref files
+
+        let mut tmp_ref_files = HashMap::new();
+        for file_ref in &self.file_ref_manifest.file_refs {
+            if outdated_regions.contains(&file_ref.region_id) {
+                // skip outdated regions
+                continue;
+            }
+            tmp_ref_files
+                .entry(file_ref.region_id)
+                .or_insert_with(HashSet::new)
+                .insert(file_ref.file_id);
+        }
+
+        Ok(tmp_ref_files)
     }
 
     /// Run the GC worker in serial mode,
@@ -163,6 +192,10 @@ impl LocalGcWorker {
         let tmp_ref_files = self.read_tmp_ref_files().await?;
         for region_id in self.manifest_mgrs.keys() {
             info!("Doing gc for region {}", region_id);
+            let tmp_ref_files = tmp_ref_files
+                .get(region_id)
+                .cloned()
+                .unwrap_or_else(HashSet::new);
             self.do_region_gc(*region_id, &tmp_ref_files).await?;
             info!("Gc for region {} finished", region_id);
         }
