@@ -291,8 +291,8 @@ impl Memtable for BulkMemtable {
         let local_metrics = WriteMetrics {
             key_bytes: 0,
             value_bytes: fragment.estimated_size(),
-            min_ts: fragment.min_ts,
-            max_ts: fragment.max_ts,
+            min_ts: fragment.min_timestamp,
+            max_ts: fragment.max_timestamp,
             num_rows: fragment.num_rows(),
             max_sequence: fragment.sequence,
         };
@@ -717,7 +717,7 @@ impl PartToMerge {
     /// Gets the minimum timestamp of this part.
     fn min_timestamp(&self) -> i64 {
         match self {
-            PartToMerge::Bulk { part, .. } => part.min_ts,
+            PartToMerge::Bulk { part, .. } => part.min_timestamp,
             PartToMerge::Encoded { part, .. } => part.metadata().min_timestamp,
         }
     }
@@ -725,7 +725,7 @@ impl PartToMerge {
     /// Gets the maximum timestamp of this part.
     fn max_timestamp(&self) -> i64 {
         match self {
-            PartToMerge::Bulk { part, .. } => part.max_ts,
+            PartToMerge::Bulk { part, .. } => part.max_timestamp,
             PartToMerge::Encoded { part, .. } => part.metadata().max_timestamp,
         }
     }

@@ -73,11 +73,12 @@ use crate::sst::to_sst_arrow_schema;
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
+/// A raw bulk part in the memtable.
 #[derive(Clone)]
 pub struct BulkPart {
     pub batch: RecordBatch,
-    pub max_ts: i64,
-    pub min_ts: i64,
+    pub max_timestamp: i64,
+    pub min_timestamp: i64,
     pub sequence: u64,
     pub timestamp_index: usize,
     pub raw_data: Option<ArrowIpc>,
@@ -96,8 +97,8 @@ impl TryFrom<BulkWalEntry> for BulkPart {
                     .context(error::ConvertBulkWalEntrySnafu)?;
                 Ok(Self {
                     batch,
-                    max_ts: value.max_ts,
-                    min_ts: value.min_ts,
+                    max_timestamp: value.max_ts,
+                    min_timestamp: value.min_ts,
                     sequence: value.sequence,
                     timestamp_index: value.timestamp_index as usize,
                     raw_data: Some(ipc),
@@ -114,8 +115,8 @@ impl TryFrom<&BulkPart> for BulkWalEntry {
         if let Some(ipc) = &value.raw_data {
             Ok(BulkWalEntry {
                 sequence: value.sequence,
-                max_ts: value.max_ts,
-                min_ts: value.min_ts,
+                max_ts: value.max_timestamp,
+                min_ts: value.min_timestamp,
                 timestamp_index: value.timestamp_index as u32,
                 body: Some(Body::ArrowIpc(ipc.clone())),
             })
@@ -135,8 +136,8 @@ impl TryFrom<&BulkPart> for BulkWalEntry {
                 })?;
             Ok(BulkWalEntry {
                 sequence: value.sequence,
-                max_ts: value.max_ts,
-                min_ts: value.min_ts,
+                max_ts: value.max_timestamp,
+                min_ts: value.min_timestamp,
                 timestamp_index: value.timestamp_index as u32,
                 body: Some(Body::ArrowIpc(ArrowIpc {
                     schema: schema_bytes,
@@ -150,12 +151,7 @@ impl TryFrom<&BulkPart> for BulkWalEntry {
 
 impl BulkPart {
     pub(crate) fn estimated_size(&self) -> usize {
-        self.batch
-            .columns()
-            .iter()
-            // If can not get slice memory size, assume 0 here.
-            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
-            .sum()
+        record_batch_estimated_size(&self.batch)
     }
 
     /// Returns the estimated series count in this BulkPart.
@@ -233,6 +229,16 @@ impl BulkPart {
     pub fn num_rows(&self) -> usize {
         self.batch.num_rows()
     }
+}
+
+/// More accurate estimation of the size of a record batch.
+pub(crate) fn record_batch_estimated_size(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
+        .iter()
+        // If can not get slice memory size, assume 0 here.
+        .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+        .sum()
 }
 
 /// Primary key column builder for handling strings specially.
@@ -440,8 +446,8 @@ impl BulkPartConverter {
 
         Ok(BulkPart {
             batch,
-            max_ts: self.max_ts,
-            min_ts: self.min_ts,
+            max_timestamp: self.max_ts,
+            min_timestamp: self.min_ts,
             sequence: self.max_sequence,
             timestamp_index,
             raw_data: None,
@@ -665,7 +671,7 @@ impl BulkPartEncoder {
                 continue;
             }
 
-            metrics.raw_size += batch.get_array_memory_size();
+            metrics.raw_size += record_batch_estimated_size(&batch);
             let write_start = Instant::now();
             writer.write(&batch).context(EncodeMemtableSnafu)?;
             metrics.write_cost += write_start.elapsed();
@@ -679,9 +685,9 @@ impl BulkPartEncoder {
             return Ok(None);
         }
 
-        let write_start = Instant::now();
+        let close_start = Instant::now();
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
-        metrics.write_cost += write_start.elapsed();
+        metrics.write_cost += close_start.elapsed();
         metrics.encoded_size += buf.len();
         metrics.num_rows += total_rows;
 
@@ -724,8 +730,8 @@ impl BulkPartEncoder {
             data: buf,
             metadata: BulkPartMeta {
                 num_rows: part.batch.num_rows(),
-                max_timestamp: part.max_ts,
-                min_timestamp: part.min_ts,
+                max_timestamp: part.max_timestamp,
+                min_timestamp: part.min_timestamp,
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
             },
@@ -1539,8 +1545,8 @@ mod tests {
         let bulk_part = converter.convert().unwrap();
 
         assert_eq!(bulk_part.num_rows(), 3);
-        assert_eq!(bulk_part.min_ts, 1000);
-        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.min_timestamp, 1000);
+        assert_eq!(bulk_part.max_timestamp, 2000);
         assert_eq!(bulk_part.sequence, 2);
         assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
 
@@ -1657,8 +1663,8 @@ mod tests {
         let bulk_part = converter.convert().unwrap();
 
         assert_eq!(bulk_part.num_rows(), 0);
-        assert_eq!(bulk_part.min_ts, i64::MAX);
-        assert_eq!(bulk_part.max_ts, i64::MIN);
+        assert_eq!(bulk_part.min_timestamp, i64::MAX);
+        assert_eq!(bulk_part.max_timestamp, i64::MIN);
         assert_eq!(bulk_part.sequence, SequenceNumber::MIN);
 
         // Validate primary key columns are present in schema even for empty batch
@@ -1719,8 +1725,8 @@ mod tests {
         let bulk_part = converter.convert().unwrap();
 
         assert_eq!(bulk_part.num_rows(), 3);
-        assert_eq!(bulk_part.min_ts, 1000);
-        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.min_timestamp, 1000);
+        assert_eq!(bulk_part.max_timestamp, 2000);
         assert_eq!(bulk_part.sequence, 2);
         assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
 
@@ -1923,8 +1929,8 @@ mod tests {
         let bulk_part = converter.convert().unwrap();
 
         assert_eq!(bulk_part.num_rows(), 3);
-        assert_eq!(bulk_part.min_ts, 1000);
-        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.min_timestamp, 1000);
+        assert_eq!(bulk_part.max_timestamp, 2000);
         assert_eq!(bulk_part.sequence, 2);
         assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
 
