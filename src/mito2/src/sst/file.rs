@@ -411,7 +411,7 @@ impl FileHandleInner {
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
-    use partition::expr::{col, PartitionExpr};
+    use partition::expr::{PartitionExpr, col};
 
     use super::*;
 
