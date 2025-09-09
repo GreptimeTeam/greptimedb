@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
@@ -338,7 +338,9 @@ fn get_alias_original_column(alias: &Alias) -> Option<Column> {
 }
 
 /// Mapping of original column in table to all the alias at current node
-pub type AliasMapping = HashMap<String, HashSet<Column>>;
+pub type AliasMapping = BTreeMap<String, BTreeSet<Column>>;
+
+pub type HashableAliasMapping = BTreeMap<String, BTreeSet<Column>>;
 
 #[cfg(test)]
 mod tests {

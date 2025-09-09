@@ -52,6 +52,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
 
+use crate::dist_plan::analyzer::HashableAliasMapping;
 use crate::error::ConvertSchemaSnafu;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
@@ -62,7 +63,7 @@ pub struct MergeScanLogicalPlan {
     input: LogicalPlan,
     /// If this plan is a placeholder
     is_placeholder: bool,
-    partition_cols: Vec<String>,
+    partition_cols: HashableAliasMapping,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -103,7 +104,11 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: Vec<String>) -> Self {
+    pub fn new(
+        input: LogicalPlan,
+        is_placeholder: bool,
+        partition_cols: HashableAliasMapping,
+    ) -> Self {
         Self {
             input,
             is_placeholder,
@@ -130,7 +135,7 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 
-    pub fn partition_cols(&self) -> &[String] {
+    pub fn partition_cols(&self) -> &HashableAliasMapping {
         &self.partition_cols
     }
 }
@@ -150,7 +155,7 @@ pub struct MergeScanExec {
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
-    partition_cols: Vec<String>,
+    partition_cols: HashableAliasMapping,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -175,7 +180,7 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
-        partition_cols: Vec<String>,
+        partition_cols: HashableAliasMapping,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
@@ -215,12 +220,18 @@ impl MergeScanExec {
         let partition_exprs = partition_cols
             .iter()
             .filter_map(|col| {
-                session_state
-                    .create_physical_expr(
-                        Expr::Column(ColumnExpr::new_unqualified(col)),
-                        plan.schema(),
-                    )
-                    .ok()
+                if let Some(first_alias) = col.1.first() {
+                    session_state
+                        .create_physical_expr(
+                            Expr::Column(ColumnExpr::new_unqualified(
+                                first_alias.name().to_string(),
+                            )),
+                            plan.schema(),
+                        )
+                        .ok()
+                } else {
+                    None
+                }
             })
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);

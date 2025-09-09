@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -47,7 +47,7 @@ mod test;
 mod fallback;
 mod utils;
 
-pub(crate) use utils::AliasMapping;
+pub(crate) use utils::{AliasMapping, HashableAliasMapping};
 
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
@@ -437,7 +437,11 @@ impl PlanRewriter {
             })?;
 
             for (_col_name, alias_set) in part_cols.iter_mut() {
-                let aliased_cols = aliased_columns_for(alias_set, plan, Some(child))?;
+                let aliased_cols = aliased_columns_for(
+                    &alias_set.clone().into_iter().collect(),
+                    plan,
+                    Some(child),
+                )?;
                 *alias_set = aliased_cols.into_values().flatten().collect();
             }
 
@@ -502,9 +506,9 @@ impl PlanRewriter {
                                             "PlanRewriter: maybe_set_partitions: column index {index} out of bounds in schema of plan: {plan}"
                                         ))
                                     })?;
-                                    Ok((c.clone(), HashSet::from([column])))
+                                    Ok((c.clone(), BTreeSet::from([column])))
                                 })
-                                .collect::<DfResult<AliasMapping>>()?,
+                                .collect::<DfResult<HashableAliasMapping>>()?,
                         );
             }
         }
@@ -537,18 +541,9 @@ impl PlanRewriter {
             "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
         );
 
-        let partition_cols = self
-            .partition_cols
-            .clone()
-            .unwrap_or_default()
-            .values()
-            .cloned()
-            .flatten()
-            .map(|c| c.name().to_string())
-            .collect();
         debug!(
-            "PlanRewriter: expand on node: {on_node} with partition cols: {:?} and partition col alias mapping: {:?}",
-            partition_cols, self.partition_cols
+            "PlanRewriter: expand on node: {on_node} with partition col alias mapping: {:?}",
+            self.partition_cols
         );
 
         // add merge scan as the new root
@@ -557,7 +552,7 @@ impl PlanRewriter {
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
-            partition_cols,
+            self.partition_cols.clone().unwrap_or_default(),
         )
         .into_logical_plan();
 
