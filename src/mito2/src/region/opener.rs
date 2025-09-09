@@ -16,21 +16,21 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::logstore::provider::Provider;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -49,9 +49,9 @@ use crate::error::{
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -68,6 +68,18 @@ use crate::sst::location::region_dir_from_table_dir;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
+
+/// A fetcher to retrieve partition expr for a region.
+///
+/// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
+/// while newer ones do. On open, we backfill it via this fetcher and persist it
+/// to the manifest so future opens don't need refetching.
+#[async_trait::async_trait]
+pub trait PartitionExprFetcher {
+    async fn fetch_expr(&self, region_id: RegionId) -> Option<String>;
+}
+
+pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
 
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
@@ -88,6 +100,7 @@ pub(crate) struct RegionOpener {
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl RegionOpener {
@@ -105,6 +118,7 @@ impl RegionOpener {
         intermediate_manager: IntermediateManager,
         time_provider: TimeProviderRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -124,6 +138,7 @@ impl RegionOpener {
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,
+            partition_expr_fetcher,
         }
     }
 
@@ -390,8 +405,18 @@ impl RegionOpener {
             return Ok(None);
         };
 
+        // Backfill `partition_expr` if missing. Use the backfilled metadata in-memory during this open.
         let manifest = manifest_manager.manifest();
-        let metadata = manifest.metadata.clone();
+        let metadata = if manifest.metadata.partition_expr.is_none()
+            && let Some(expr_json) = self.partition_expr_fetcher.fetch_expr(self.region_id).await
+        {
+            let metadata = manifest.metadata.as_ref().clone();
+            let mut builder = RegionMetadataBuilder::from_existing(metadata);
+            builder.partition_expr_json(Some(expr_json));
+            Arc::new(builder.build().context(InvalidMetadataSnafu)?)
+        } else {
+            manifest.metadata.clone()
+        };
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -455,10 +480,7 @@ impl RegionOpener {
                 .max(flushed_entry_id);
             info!(
                 "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}",
-                replay_from_entry_id,
-                region_id,
-                manifest.manifest_version,
-                flushed_entry_id
+                replay_from_entry_id, region_id, manifest.manifest_version, flushed_entry_id
             );
             replay_memtable(
                 &provider,
@@ -472,15 +494,12 @@ impl RegionOpener {
             .await?;
             // For remote WAL, we need to set topic_latest_entry_id to current topic's latest entry id.
             // Only set after the WAL replay is completed.
-            let topic_latest_entry_id = if provider.is_remote_wal()
-                && version_control.current().version.memtables.is_empty()
-            {
+
+            if provider.is_remote_wal() && version_control.current().version.memtables.is_empty() {
                 wal.store().latest_entry_id(&provider).unwrap_or(0)
             } else {
                 0
-            };
-
-            topic_latest_entry_id
+            }
         } else {
             info!(
                 "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
@@ -677,7 +696,10 @@ where
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         if entry_id <= flushed_entry_id {
-            warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
+            warn!(
+                "Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}",
+                region_id, flushed_entry_id, entry_id
+            );
             ensure!(
                 allow_stale_entries,
                 StaleLogEntrySnafu {
@@ -735,7 +757,13 @@ where
     let series_count = version_control.current().series_count();
     info!(
         "Replay WAL for region: {}, provider: {:?}, rows recovered: {}, replay from entry id: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
-        region_id, provider, rows_replayed, replay_from_entry_id, last_entry_id, series_count, now.elapsed()
+        region_id,
+        provider,
+        rows_replayed,
+        replay_from_entry_id,
+        last_entry_id,
+        series_count,
+        now.elapsed()
     );
     Ok(last_entry_id)
 }

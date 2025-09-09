@@ -227,7 +227,9 @@ impl DataRegion {
                     .map(|result| result.affected_rows)
             }
             _ => {
-                info!("Metric region received alter request {request:?} on physical region {region_id:?}");
+                info!(
+                    "Metric region received alter request {request:?} on physical region {region_id:?}"
+                );
                 FORBIDDEN_OPERATION_COUNT.inc();
 
                 ForbiddenPhysicalAlterSnafu.fail()

@@ -141,7 +141,7 @@ impl Display for ScanRequest {
 
 #[cfg(test)]
 mod tests {
-    use datafusion_expr::{binary_expr, col, lit, Operator};
+    use datafusion_expr::{Operator, binary_expr, col, lit};
 
     use super::*;
 

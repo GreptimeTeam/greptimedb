@@ -16,13 +16,13 @@ use std::cmp::Ordering;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use pin_project::pin_project;
 
+use crate::Bytes;
 use crate::bitmap::Bitmap;
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::Result;
-use crate::Bytes;
 
 /// A [`Stream`] implementation that merges two sorted streams into a single sorted stream
 #[pin_project]

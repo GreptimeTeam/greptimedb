@@ -23,7 +23,7 @@ use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::grpc::{cancellation, TonicResult};
+use crate::grpc::{TonicResult, cancellation};
 use crate::hint_headers;
 
 pub(crate) struct DatabaseService {

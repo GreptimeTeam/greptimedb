@@ -289,9 +289,11 @@ mod tests {
         let _manager = IntermediateManager::init_fs(path).await.unwrap();
 
         // cleaned up by `init_fs`
-        assert!(!tokio::fs::try_exists(format!("{path}/{INTERMEDIATE_DIR}"))
-            .await
-            .unwrap());
+        assert!(
+            !tokio::fs::try_exists(format!("{path}/{INTERMEDIATE_DIR}"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -396,9 +398,11 @@ mod tests {
         assert_eq!(pi.next().unwrap(), INTERMEDIATE_DIR);
         assert_eq!(pi.next().unwrap(), "0"); // region id
         assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.to_string())); // sst file id
-        assert!(Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
-            .unwrap()
-            .is_match(&pi.next().unwrap().to_string_lossy())); // fulltext path
+        assert!(
+            Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
+                .unwrap()
+                .is_match(&pi.next().unwrap().to_string_lossy())
+        ); // fulltext path
         assert!(pi.next().is_none());
     }
 
@@ -448,12 +452,14 @@ mod tests {
 
         provider.cleanup().await.unwrap();
 
-        assert!(provider
-            .manager
-            .store()
-            .list(location.dir_to_cleanup())
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            provider
+                .manager
+                .store()
+                .list(location.dir_to_cleanup())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

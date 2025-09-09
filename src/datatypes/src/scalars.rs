@@ -18,8 +18,8 @@ use common_decimal::Decimal128;
 use common_time::Date;
 
 use crate::types::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type,
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
+    UInt32Type, UInt64Type,
 };
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{

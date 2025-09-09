@@ -22,14 +22,14 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use tonic::metadata::MetadataMap;
 use tonic::Status;
+use tonic::metadata::MetadataMap;
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{AuthSnafu, InvalidParameterSnafu, NotFoundAuthHeaderSnafu, Result};
 use crate::grpc::TonicResult;
-use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
+use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::metrics::METRIC_AUTH_FAILURE;
 
 /// Create a query context from the grpc metadata.

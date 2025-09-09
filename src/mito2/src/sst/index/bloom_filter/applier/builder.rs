@@ -20,8 +20,8 @@ use datafusion_expr::expr::InList;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
-use index::bloom_filter::applier::InListPredicate;
 use index::Bytes;
+use index::bloom_filter::applier::InListPredicate;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -335,7 +335,7 @@ fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Bytes> {
 mod tests {
     use api::v1::SemanticType;
     use datafusion_common::Column;
-    use datafusion_expr::{col, lit, Literal};
+    use datafusion_expr::{Literal, col, lit};
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};

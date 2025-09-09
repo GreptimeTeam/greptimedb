@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use arrow_schema::DataType;
@@ -21,16 +21,16 @@ use catalog::table_source::DfTableSourceProvider;
 use common_function::function::FunctionContext;
 use datafusion::common::TableReference;
 use datafusion::datasource::cte_worktable::CteWorkTable;
-use datafusion::datasource::file_format::{format_as_file_type, FileFormatFactory};
+use datafusion::datasource::file_format::{FileFormatFactory, format_as_file_type};
 use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
 use datafusion::execution::SessionStateDefaults;
+use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::variable::VarType;
+use datafusion_common::DataFusionError;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
-use datafusion_common::DataFusionError;
 use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
@@ -224,15 +224,22 @@ impl ContextProvider for DfContextProviderAdapter {
         name: &str,
         args: Vec<datafusion_expr::Expr>,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let tbl_func = self
-            .session_state
-            .table_functions()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| DataFusionError::Plan(format!("table function '{name}' not found")))?;
-        let provider = tbl_func.create_table_provider(&args)?;
+        if let Some(tbl_func) = self.engine_state.table_function(name) {
+            let provider = tbl_func.create_table_provider(&args)?;
+            Ok(provider_as_source(provider))
+        } else {
+            let tbl_func = self
+                .session_state
+                .table_functions()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!("table function '{name}' not found"))
+                })?;
+            let provider = tbl_func.create_table_provider(&args)?;
 
-        Ok(provider_as_source(provider))
+            Ok(provider_as_source(provider))
+        }
     }
 
     fn create_cte_work_table(

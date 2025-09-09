@@ -21,7 +21,7 @@ use common_meta::rpc::store::{
     PutRequest, RangeRequest,
 };
 use meta_client::client::MetaClientBuilder;
-use tracing::{event, subscriber, Level};
+use tracing::{Level, event, subscriber};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {

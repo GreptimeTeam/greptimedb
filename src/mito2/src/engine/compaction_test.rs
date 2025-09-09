@@ -31,10 +31,10 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::CompactionListener;
 use crate::engine::MitoEngine;
+use crate::engine::listener::CompactionListener;
 use crate::test_util::{
-    build_rows_for_key, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
 
 async fn put_and_flush(
@@ -231,14 +231,16 @@ async fn test_infer_compaction_time_window() {
         .await
         .unwrap();
     // time window should be absent
-    assert!(engine
-        .get_region(region_id)
-        .unwrap()
-        .version_control
-        .current()
-        .version
-        .compaction_time_window
-        .is_none());
+    assert!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .current()
+            .version
+            .compaction_time_window
+            .is_none()
+    );
 
     put_and_flush(&engine, region_id, &column_schemas, 1..2).await;
     put_and_flush(&engine, region_id, &column_schemas, 2..3).await;
@@ -517,6 +519,7 @@ async fn test_readonly_during_compaction() {
             },
             None,
             Some(listener.clone()),
+            None,
         )
         .await;
 

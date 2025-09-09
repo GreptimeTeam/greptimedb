@@ -26,7 +26,7 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{
     DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics, TableReference,
 };
-use datafusion::datasource::{provider_as_source, MemTable};
+use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionState, TaskContext};
 use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::PhysicalPlanner;
-use datafusion::prelude::{col, lit, Expr};
+use datafusion::prelude::{Expr, col, lit};
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;

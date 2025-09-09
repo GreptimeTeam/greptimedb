@@ -15,8 +15,8 @@
 //! Test utilities for mito codec.
 
 use api::greptime_proto::v1;
-use api::v1::value::ValueData;
 use api::v1::SemanticType;
+use api::v1::value::ValueData;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};

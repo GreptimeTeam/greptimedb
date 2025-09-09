@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlx::{MySqlPool, Row};
 
 use crate::error::{self, Result, UnexpectedSnafu};
@@ -74,8 +74,8 @@ mod tests {
     use common_time::Duration;
 
     use super::*;
-    use crate::ir::alter_expr::Ttl;
     use crate::ir::AlterTableOption;
+    use crate::ir::alter_expr::Ttl;
 
     #[test]
     fn test_parse_show_create() {

@@ -22,7 +22,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
 use crate::function::{Function, FunctionContext};
-use crate::scalars::expression::{scalar_binary_op, EvalContext};
+use crate::scalars::expression::{EvalContext, scalar_binary_op};
 
 #[derive(Clone, Default)]
 pub(crate) struct TestAndFunction;

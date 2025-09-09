@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::GrantedRegion;
 use async_trait::async_trait;
@@ -26,12 +26,12 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
-use store_api::region_engine::RegionRole;
+use store_api::region_engine::{RegionRole, SettableRegionRoleState};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
 use tokio::sync::oneshot;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
@@ -144,13 +144,13 @@ impl RegionAliveKeeper {
     async fn close_staled_region(&self, region_id: RegionId) {
         info!("Closing staled region: {region_id}");
         let request = RegionRequest::Close(RegionCloseRequest {});
-        if let Err(e) = self.region_server.handle_request(region_id, request).await {
-            if e.status_code() != StatusCode::RegionNotFound {
-                let _ = self
-                    .region_server
-                    .set_region_role(region_id, RegionRole::Follower);
-                error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
-            }
+        if let Err(e) = self.region_server.handle_request(region_id, request).await
+            && e.status_code() != StatusCode::RegionNotFound
+        {
+            let _ = self
+                .region_server
+                .set_region_role(region_id, RegionRole::Follower);
+            error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
         }
     }
 
@@ -196,7 +196,7 @@ impl RegionAliveKeeper {
                         return error::UnexpectedSnafu {
                             violated: "RegionServerEventSender closed",
                         }
-                        .fail()
+                        .fail();
                     }
                     Err(mpsc::error::TryRecvError::Empty) => {
                         break;
@@ -423,17 +423,27 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                            let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
                             if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
                                 if err.status_code() == StatusCode::RegionNotFound {
                                     // Table metadata in metasrv is deleted after its regions are dropped.
                                     // The datanode may still receive lease renewal responses that depend on the metadata
                                     // during the short period before it is removed.
                                     warn!(err; "Failed to set region role to {role} for region {region_id}");
-                                }else{
+                                } else {
                                     error!(err; "Failed to set region role to {role} for region {region_id}");
                                 }
 
+                            // Finalize leadership: persist backfilled metadata.
+                            } else if !prev_role_leader && role == RegionRole::Leader
+                                && let Err(err) = self
+                                    .region_server
+                                    .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
+                                    .await
+                            {
+                                error!(err; "Failed to set region role state gracefully to {role} for region {region_id}");
                             }
+
                             if let Some(ext_handler) = self.handler_ext.as_ref() {
                                 ext_handler.reset_deadline(
                                     &self.region_server,

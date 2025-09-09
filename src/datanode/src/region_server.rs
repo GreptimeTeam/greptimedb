@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod catalog;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -22,7 +24,7 @@ use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    region_request, ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest,
+    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -31,33 +33,31 @@ use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
-use common_query::request::QueryRequest;
 use common_query::OutputData;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
-use datafusion::datasource::{provider_as_source, TableProvider};
-use datafusion::error::Result as DfResult;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_expr::{LogicalPlan, TableSource};
+use datafusion::datasource::TableProvider;
+use datafusion_common::tree_node::TreeNode;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
-use mito2::engine::MITO_ENGINE_NAME;
+use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
+use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
-use query::QueryEngineRef;
 use serde_json;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
+use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use servers::grpc::FlightCompression;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
@@ -82,6 +82,7 @@ use crate::error::{
     Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
+use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -215,10 +216,11 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
-        let provider = self
-            .table_provider(region_id, Some(query_ctx.clone()))
-            .await?;
-        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
+        let catalog_list = Arc::new(NameAwareCatalogList::new(
+            self.clone(),
+            region_id,
+            query_ctx.clone(),
+        ));
 
         if query_ctx.explain_verbose() {
             common_telemetry::info!("Handle remote read for region: {}", region_id);
@@ -259,33 +261,15 @@ impl RegionServer {
         let ctx = request.header.as_ref().map(|h| h.into());
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
-        let provider = self
-            .table_provider(request.region_id, Some(query_ctx.clone()))
+        let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
+            .context(DataFusionSnafu)?;
+        let mut injector = injector_builder
+            .build(self, request.region_id, query_ctx.clone())
             .await?;
-
-        struct RegionDataSourceInjector {
-            source: Arc<dyn TableSource>,
-        }
-
-        impl TreeNodeRewriter for RegionDataSourceInjector {
-            type Node = LogicalPlan;
-
-            fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-                Ok(match node {
-                    LogicalPlan::TableScan(mut scan) => {
-                        scan.source = self.source.clone();
-                        Transformed::yes(LogicalPlan::TableScan(scan))
-                    }
-                    _ => Transformed::no(node),
-                })
-            }
-        }
 
         let plan = request
             .plan
-            .rewrite(&mut RegionDataSourceInjector {
-                source: provider_as_source(provider),
-            })
+            .rewrite(&mut injector)
             .context(DataFusionSnafu)?
             .data;
 
@@ -697,6 +681,10 @@ struct RegionServerInner {
     parallelism: Option<RegionServerParallelism>,
     // The topic stats reporter.
     topic_stats_reporter: RwLock<Option<Box<dyn TopicStatsReporter>>>,
+    // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
+    // server with a concrete engine; acceptable for now to fetch Mito-specific
+    // info (e.g., list SSTs). Consider a diagnostics trait later.
+    mito_engine: RwLock<Option<MitoEngine>>,
 }
 
 struct RegionServerParallelism {
@@ -763,11 +751,18 @@ impl RegionServerInner {
             table_provider_factory,
             parallelism,
             topic_stats_reporter: RwLock::new(None),
+            mito_engine: RwLock::new(None),
         }
     }
 
     pub fn register_engine(&self, engine: RegionEngineRef) {
         let engine_name = engine.name();
+        if engine_name == MITO_ENGINE_NAME
+            && let Some(mito_engine) = engine.as_any().downcast_ref::<MitoEngine>()
+        {
+            *self.mito_engine.write().unwrap() = Some(mito_engine.clone());
+        }
+
         info!("Region Engine {engine_name} is registered");
         self.engines
             .write()
@@ -792,7 +787,7 @@ impl RegionServerInner {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(engine) => engine,
                     RegionEngineWithStatus::Deregistering(_) => {
-                        return error::RegionBusySnafu { region_id }.fail()
+                        return error::RegionBusySnafu { region_id }.fail();
                     }
                     RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
                 },
@@ -809,10 +804,10 @@ impl RegionServerInner {
             RegionChange::Deregisters => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
-                        return error::RegionBusySnafu { region_id }.fail()
+                        return error::RegionBusySnafu { region_id }.fail();
                     }
                     RegionEngineWithStatus::Deregistering(_) => {
-                        return Ok(CurrentEngine::EarlyReturn(0))
+                        return Ok(CurrentEngine::EarlyReturn(0));
                     }
                     RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
                 },
@@ -822,10 +817,10 @@ impl RegionServerInner {
                 match current_region_status {
                     Some(status) => match status.clone() {
                         RegionEngineWithStatus::Registering(_) => {
-                            return error::RegionNotReadySnafu { region_id }.fail()
+                            return error::RegionNotReadySnafu { region_id }.fail();
                         }
                         RegionEngineWithStatus::Deregistering(_) => {
-                            return error::RegionNotFoundSnafu { region_id }.fail()
+                            return error::RegionNotFoundSnafu { region_id }.fail();
                         }
                         RegionEngineWithStatus::Ready(engine) => engine,
                     },
@@ -1286,6 +1281,7 @@ impl RegionServerInner {
         self.region_map.clear();
         info!("closed {num_regions} regions");
 
+        drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
         for (engine_name, engine) in engines {
             engine
@@ -1366,7 +1362,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
     async fn test_region_registering() {

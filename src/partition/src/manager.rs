@@ -21,7 +21,7 @@ use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -29,7 +29,7 @@ use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
 use crate::splitter::RowSplitter;
-use crate::{error, PartitionRuleRef};
+use crate::{PartitionRuleRef, error};
 
 #[async_trait::async_trait]
 pub trait TableRouteCacheInvalidator: Send + Sync {

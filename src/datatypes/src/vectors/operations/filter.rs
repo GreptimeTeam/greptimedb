@@ -111,7 +111,7 @@ mod tests {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
             use std::sync::Arc;
 
-            use $crate::vectors::{$VectorType, VectorRef};
+            use $crate::vectors::{VectorRef, $VectorType};
 
             let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
             let filter = BooleanVector::from_slice(&[false, true, false, true, true]);

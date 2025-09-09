@@ -27,9 +27,9 @@ use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
     InvalidFlowQuerySnafu, Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
+use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
-use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -150,11 +150,11 @@ impl Column {
 
 impl Display for Column {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(vector_options) = &self.extensions.vector_options {
-            if let Some(dim) = vector_options.get(VECTOR_OPT_DIM) {
-                write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
-                return Ok(());
-            }
+        if let Some(vector_options) = &self.extensions.vector_options
+            && let Some(dim) = vector_options.get(VECTOR_OPT_DIM)
+        {
+            write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
+            return Ok(());
         }
 
         write!(f, "{}", self.column_def)?;

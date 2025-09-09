@@ -59,7 +59,7 @@ mod tests {
     use store_api::region_request::RegionPutRequest;
 
     use super::*;
-    use crate::test_util::{build_rows, row_schema_with_tags, TestEnv};
+    use crate::test_util::{TestEnv, build_rows, row_schema_with_tags};
 
     #[tokio::test]
     async fn test_list_ssts_after_write_and_flush_metric() {

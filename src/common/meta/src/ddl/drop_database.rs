@@ -31,8 +31,8 @@ use snafu::ResultExt;
 use tonic::async_trait;
 
 use self::start::DropDatabaseStart;
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};

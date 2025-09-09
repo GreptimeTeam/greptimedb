@@ -16,11 +16,11 @@ use proc_macro::TokenStream;
 use quote::{quote, quote_spanned};
 use syn::parse::Parser;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, DeriveInput, ItemStruct};
+use syn::{DeriveInput, ItemStruct, parse_macro_input};
 
 pub(crate) fn impl_aggr_func_type_store(ast: &DeriveInput) -> TokenStream {
     let name = &ast.ident;
-    let gen = quote! {
+    let generated = quote! {
         impl common_query::logical_plan::accumulator::AggrFuncTypeStore for #name {
             fn input_types(&self) -> std::result::Result<Vec<datatypes::prelude::ConcreteDataType>, common_query::error::Error> {
                 let input_types = self.input_types.load();
@@ -40,7 +40,7 @@ pub(crate) fn impl_aggr_func_type_store(ast: &DeriveInput) -> TokenStream {
             }
         }
     };
-    gen.into()
+    generated.into()
 }
 
 pub(crate) fn impl_as_aggr_func_creator(_args: TokenStream, input: TokenStream) -> TokenStream {

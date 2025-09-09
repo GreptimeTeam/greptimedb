@@ -19,7 +19,7 @@ use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
 use chrono::DateTime;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO2_ENGINE, MITO_ENGINE,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, MITO2_ENGINE,
 };
 use datatypes::schema::RawSchema;
 use derive_builder::Builder;

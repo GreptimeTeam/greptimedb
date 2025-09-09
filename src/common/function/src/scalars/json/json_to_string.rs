@@ -78,7 +78,7 @@ impl Function for JsonToStringFunction {
                                 return InvalidFuncArgsSnafu {
                                     err_msg: format!("Illegal json binary: {:?}", json),
                                 }
-                                .fail()
+                                .fail();
                             }
                         },
                         _ => None,

@@ -21,7 +21,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
-use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::BackendImpl;
@@ -30,7 +30,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
+use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 

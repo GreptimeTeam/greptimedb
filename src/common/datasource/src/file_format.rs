@@ -42,11 +42,11 @@ use self::csv::CsvFormat;
 use self::json::JsonFormat;
 use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub const FORMAT_COMPRESSION_TYPE: &str = "compression_type";
 pub const FORMAT_DELIMITER: &str = "delimiter";
@@ -158,10 +158,10 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
 
         let stream = futures::stream::poll_fn(move |cx| {
             loop {
-                if buffered.is_empty() {
-                    if let Some(result) = futures::ready!(upstream.poll_next_unpin(cx)) {
-                        buffered = result?;
-                    };
+                if buffered.is_empty()
+                    && let Some(result) = futures::ready!(upstream.poll_next_unpin(cx))
+                {
+                    buffered = result?;
                 }
 
                 let decoded = decoder.decode(buffered.as_ref())?;

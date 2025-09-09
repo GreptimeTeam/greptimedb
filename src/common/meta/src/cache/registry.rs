@@ -142,8 +142,8 @@ impl CacheRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     use moka::future::{Cache, CacheBuilder};
 

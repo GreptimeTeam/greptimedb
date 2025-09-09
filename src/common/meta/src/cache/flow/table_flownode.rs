@@ -205,11 +205,11 @@ mod tests {
     use moka::future::CacheBuilder;
     use table::table_name::TableName;
 
-    use crate::cache::flow::table_flownode::{new_table_flownode_set_cache, FlowIdent};
+    use crate::cache::flow::table_flownode::{FlowIdent, new_table_flownode_set_cache};
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
+    use crate::key::flow::FlowMetadataManager;
     use crate::key::flow::flow_info::FlowInfoValue;
     use crate::key::flow::flow_route::FlowRouteValue;
-    use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
 

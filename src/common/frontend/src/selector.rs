@@ -18,8 +18,8 @@ use std::time::Duration;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
 use greptime_proto::v1::frontend::{
-    frontend_client, KillProcessRequest, KillProcessResponse, ListProcessRequest,
-    ListProcessResponse,
+    KillProcessRequest, KillProcessResponse, ListProcessRequest, ListProcessResponse,
+    frontend_client,
 };
 use meta_client::MetaClientRef;
 use snafu::ResultExt;

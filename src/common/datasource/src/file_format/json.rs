@@ -17,7 +17,7 @@ use std::io::BufReader;
 use std::str::FromStr;
 
 use arrow::json;
-use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
+use arrow::json::reader::{ValueIter, infer_json_schema_from_iterator};
 use arrow::json::writer::LineDelimited;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
@@ -32,7 +32,7 @@ use tokio_util::io::SyncIoBridge;
 use crate::buffered_writer::DfRecordBatchEncoder;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, stream_to_file, FileFormat};
+use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +133,7 @@ mod tests {
     use common_test_util::find_workspace_path;
 
     use super::*;
-    use crate::file_format::{FileFormat, FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD};
+    use crate::file_format::{FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat};
     use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {

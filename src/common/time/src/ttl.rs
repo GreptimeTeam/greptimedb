@@ -18,8 +18,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{Error, InvalidDatabaseTtlSnafu, ParseDurationSnafu};
 use crate::Timestamp;
+use crate::error::{Error, InvalidDatabaseTtlSnafu, ParseDurationSnafu};
 
 pub const INSTANT: &str = "instant";
 pub const FOREVER: &str = "forever";

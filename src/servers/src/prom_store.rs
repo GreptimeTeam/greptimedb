@@ -26,13 +26,13 @@ use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
-use datafusion::prelude::{col, lit, regexp_match, Expr};
+use datafusion::prelude::{Expr, col, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
@@ -655,7 +655,10 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None)\n  TableScan: ?table?", display_string);
+        assert_eq!(
+            "Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None)\n  TableScan: ?table?",
+            display_string
+        );
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -684,7 +687,10 @@ mod tests {
         let plan = query_to_plan(DataFrame::DataFusion(dataframe), &q).unwrap();
         let display_string = format!("{}", plan.display_indent());
 
-        assert_eq!("Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?", display_string);
+        assert_eq!(
+            "Filter: ?table?.greptime_timestamp >= TimestampMillisecond(1000, None) AND ?table?.greptime_timestamp <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
+            display_string
+        );
     }
 
     fn column_schemas_with(

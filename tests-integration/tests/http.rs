@@ -25,14 +25,14 @@ use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use chrono::Utc;
 use common_catalog::consts::{
-    trace_services_table_name, DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME,
+    DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME, trace_services_table_name,
 };
 use common_error::status_code::StatusCode as ErrorCode;
 use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
 };
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -41,7 +41,8 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
@@ -53,13 +54,11 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
-use servers::http::GreptimeQueryOutput;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    setup_test_http_app, setup_test_http_app_with_frontend,
+    StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    StorageType,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -125,6 +124,7 @@ macro_rules! http_tests {
                 test_pipeline_2,
                 test_pipeline_skip_error,
                 test_pipeline_filter,
+                test_pipeline_create_table,
 
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
@@ -591,7 +591,10 @@ async fn test_sql_format_api() {
         .get("formatted")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    assert_eq!(formatted, "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;");
+    assert_eq!(
+        formatted,
+        "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;"
+    );
 
     guard.remove_all().await;
 }
@@ -639,7 +642,10 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let csv_body = &res.text().await;
-    assert_eq!("0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n", csv_body);
+    assert_eq!(
+        "0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n",
+        csv_body
+    );
 
     guard.remove_all().await;
 }
@@ -810,12 +816,16 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required")));
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments")));
+    assert!(
+        prom_resp
+            .error
+            .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required"))
+    );
+    assert!(
+        prom_resp
+            .error_type
+            .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments"))
+    );
 
     // single match[]
     let res = client
@@ -2497,6 +2507,98 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_create_table(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_create_table").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+- dissect:
+    fields:
+      - message
+    patterns:
+      - '%{ip_address} - %{username} [%{timestamp}] "%{http_method} %{request_line} %{protocol}" %{status_code} %{response_size}'
+    ignore_missing: true
+- date:
+    fields:
+      - timestamp
+    formats:
+      - "%d/%b/%Y:%H:%M:%S %z"
+
+transform:
+  - fields:
+      - timestamp
+    type: time
+    index: timestamp
+  - fields:
+      - ip_address
+    type: string
+    index: skipping
+  - fields:
+      - username
+    type: string
+    tag: true
+  - fields:
+      - http_method
+    type: string
+    index: inverted
+  - fields:
+      - request_line
+    type: string
+    index: fulltext
+  - fields:
+      - protocol
+    type: string
+  - fields:
+      - status_code
+    type: int32
+    index: inverted
+    tag: true
+  - fields:
+      - response_size
+    type: int64
+    on_failure: default
+    default: 0
+  - fields:
+      - message
+    type: string
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .get("/v1/pipelines/test/ddl?table=logs1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let sql = resp
+        .get("sql")
+        .unwrap()
+        .get("sql")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert_eq!(
+        "CREATE TABLE IF NOT EXISTS `logs1` (\n  `timestamp` TIMESTAMP(9) NOT NULL,\n  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  `username` STRING NULL,\n  `http_method` STRING NULL INVERTED INDEX,\n  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\n  `protocol` STRING NULL,\n  `status_code` INT NULL INVERTED INDEX,\n  `response_size` BIGINT NULL,\n  `message` STRING NULL,\n  TIME INDEX (`timestamp`),\n  PRIMARY KEY (`username`, `status_code`)\n)\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)",
+        sql
+    );
+
+    guard.remove_all().await;
+}
+
 pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -3638,7 +3740,12 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body: Value = res.json().await;
-        assert_eq!(body["error"], json!("Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"));
+        assert_eq!(
+            body["error"],
+            json!(
+                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"
+            )
+        );
 
         body_for_text["data_type"] = json!("application/json");
         let res = client
@@ -3651,7 +3758,9 @@ transform:
         let body: Value = res.json().await;
         assert_eq!(
             body["error"],
-            json!("Invalid request parameter: json format error, please check the date is valid JSON.")
+            json!(
+                "Invalid request parameter: json format error, please check the date is valid JSON."
+            )
         );
 
         body_for_text["data_type"] = json!("text/plain");
@@ -4837,7 +4946,7 @@ processors:
     .await;
 
     // test content
-    let expected =      "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
+    let expected = "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
     validate_data(
         "loki_pb_content",
         &client,
@@ -4897,7 +5006,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected =  "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,

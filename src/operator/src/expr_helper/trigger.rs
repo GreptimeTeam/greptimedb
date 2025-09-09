@@ -4,7 +4,7 @@ use api::v1::{
     WebhookOptions as PbWebhookOptions,
 };
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sql::ast::{ObjectName, ObjectNamePartExt};
 use sql::statements::create::trigger::{ChannelType, CreateTrigger, TriggerOn};
 

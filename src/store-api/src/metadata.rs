@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use api::v1::column_def::try_as_column_schema;
 use api::v1::region::RegionColumnDef;
-use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -34,7 +34,7 @@ use datatypes::types::TimestampType;
 use itertools::Itertools;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
-use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
+use snafu::{Location, OptionExt, ResultExt, Snafu, ensure};
 
 use crate::codec::PrimaryKeyEncoding;
 use crate::region_request::{
@@ -1213,8 +1213,10 @@ fn set_column_fulltext_options(
                 && current_options.case_sensitive == options.case_sensitive,
             InvalidColumnOptionSnafu {
                 column_name,
-                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
-                current_options.analyzer, current_options.case_sensitive),
+                msg: format!(
+                    "Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                    current_options.analyzer, current_options.case_sensitive
+                ),
             }
         );
     }
@@ -1931,7 +1933,10 @@ mod test {
     fn test_debug_for_column_metadata() {
         let region_metadata = build_test_region_metadata();
         let formatted = format!("{:?}", region_metadata);
-        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0, partition_expr: Some(\"\") }");
+        assert_eq!(
+            formatted,
+            "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0, partition_expr: Some(\"\") }"
+        );
     }
 
     #[test]

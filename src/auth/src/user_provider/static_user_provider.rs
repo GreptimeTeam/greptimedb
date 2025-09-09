@@ -102,10 +102,10 @@ pub mod test {
 
     use common_test_util::temp_dir::create_temp_dir;
 
+    use crate::UserProvider;
     use crate::user_info::DefaultUserInfo;
     use crate::user_provider::static_user_provider::StaticUserProvider;
     use crate::user_provider::{Identity, Password};
-    use crate::UserProvider;
 
     async fn test_authenticate(provider: &dyn UserProvider, username: &str, password: &str) {
         let re = provider
@@ -143,12 +143,13 @@ pub mod test {
             let file = File::create(&file_path);
             let file = file.unwrap();
             let mut lw = LineWriter::new(file);
-            assert!(lw
-                .write_all(
+            assert!(
+                lw.write_all(
                     b"root=123456
 admin=654321",
                 )
-                .is_ok());
+                .is_ok()
+            );
             lw.flush().unwrap();
         }
 

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    cluster_server, BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse,
-    MetasrvNodeInfo, MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
-    RangeResponse as PbRangeResponse,
+    BatchGetRequest as PbBatchGetRequest, BatchGetResponse as PbBatchGetResponse, MetasrvNodeInfo,
+    MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
+    RangeResponse as PbRangeResponse, cluster_server,
 };
 use common_telemetry::warn;
 use snafu::ResultExt;
@@ -98,6 +98,8 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
+            cpus: self.resource_spec().cpus as u32,
+            memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
         }
         .into()
     }

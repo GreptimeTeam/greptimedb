@@ -23,7 +23,7 @@ use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
 use processor::{Processor, Processors};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use transform::Transforms;
 use vrl::core::Value as VrlValue;
 use yaml_rust::{Yaml, YamlLoader};
@@ -341,6 +341,12 @@ impl Pipeline {
             TransformerMode::GreptimeTransformer(t) => Some(t.schemas()),
             TransformerMode::AutoTransform(_, _) => None,
         }
+    }
+
+    pub fn is_variant_table_name(&self) -> bool {
+        // even if the pipeline doesn't have dispatcher or table_suffix,
+        // it can still be a variant because of VRL processor and hint
+        self.dispatcher.is_some() || self.tablesuffix.is_some()
     }
 }
 
