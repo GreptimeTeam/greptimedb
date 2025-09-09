@@ -36,7 +36,7 @@ use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
 use common_meta::node_expiry_listener::NodeExpiryListener;
-use common_meta::peer::Peer;
+use common_meta::peer::{Peer, PeerDiscoveryRef};
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
@@ -57,7 +57,6 @@ use servers::http::HttpOptions;
 use servers::tls::TlsOption;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
@@ -414,12 +413,7 @@ impl Display for SelectTarget {
 
 #[derive(Clone)]
 pub struct SelectorContext {
-    pub server_addr: String,
-    pub datanode_lease_secs: u64,
-    pub flownode_lease_secs: u64,
-    pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
-    pub table_id: Option<TableId>,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;

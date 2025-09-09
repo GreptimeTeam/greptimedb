@@ -18,8 +18,11 @@ pub mod utils;
 
 use std::time::Duration;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
+use common_meta::distributed_time_constants::{
+    DATANODE_LEASE_SECS, FLOWNODE_LEASE_SECS, FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
+};
 use common_meta::peer::{Peer, PeerDiscovery, PeerResolver};
 use common_meta::{DatanodeId, FlownodeId};
 use snafu::ResultExt;
@@ -37,6 +40,26 @@ impl PeerDiscovery for MetaPeerClient {
         .await
         .map_err(BoxedError::new)
         .context(common_meta::error::ExternalSnafu)
+    }
+
+    async fn active_datanodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> common_meta::error::Result<Vec<Peer>> {
+        utils::alive_datanodes(self, Duration::from_secs(DATANODE_LEASE_SECS), filter)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
+    }
+
+    async fn active_flownodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> common_meta::error::Result<Vec<Peer>> {
+        utils::alive_flownodes(self, Duration::from_secs(FLOWNODE_LEASE_SECS), filter)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
     }
 }
 

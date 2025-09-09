@@ -12,46 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
 
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
-use common_meta::key::TableMetadataManager;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::find_leaders;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use snafu::ResultExt;
-use table::metadata::TableId;
 
-use crate::discovery::{self, lease};
-use crate::error::{self, Result};
+use crate::cluster::MetaPeerClientRef;
+use crate::discovery::utils::is_datanode_accept_ingest_workload;
+use crate::error::{ListActiveDatanodesSnafu, Result};
 use crate::metasrv::SelectorContext;
-use crate::node_excluder::NodeExcluderRef;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
-use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
+use crate::selector::weight_compute::WeightCompute;
 use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Selector, SelectorOptions};
 
 pub struct LoadBasedSelector<C> {
     weight_compute: C,
-    node_excluder: NodeExcluderRef,
+    meta_peer_client: MetaPeerClientRef,
 }
 
 impl<C> LoadBasedSelector<C> {
-    pub fn new(weight_compute: C, node_excluder: NodeExcluderRef) -> Self {
+    pub fn new(weight_compute: C, meta_peer_client: MetaPeerClientRef) -> Self {
         Self {
             weight_compute,
-            node_excluder,
-        }
-    }
-}
-
-impl Default for LoadBasedSelector<RegionNumsBasedWeightCompute> {
-    fn default() -> Self {
-        Self {
-            weight_compute: RegionNumsBasedWeightCompute,
-            node_excluder: Arc::new(Vec::new()),
+            meta_peer_client,
         }
     }
 }
@@ -66,12 +52,11 @@ where
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
-        let alive_datanodes = discovery::utils::alive_datanodes(
-            ctx.meta_peer_client.as_ref(),
-            Duration::from_secs(ctx.datanode_lease_secs),
-            Some(lease::is_datanode_accept_ingest_workload),
-        )
-        .await?;
+        let alive_datanodes = ctx
+            .peer_discovery
+            .active_datanodes(Some(is_datanode_accept_ingest_workload))
+            .await
+            .context(ListActiveDatanodesSnafu)?;
 
         // 2. get stat kvs and filter out expired datanodes.
         let stat_keys = alive_datanodes
@@ -79,40 +64,16 @@ where
             .map(|k| DatanodeStatKey { node_id: k.id })
             .collect();
         let stat_kvs = filter_out_expired_datanode(
-            ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?,
+            self.meta_peer_client.get_dn_stat_kvs(stat_keys).await?,
             &alive_datanodes,
         );
 
-        // 3. try to make the regions of a table distributed on different datanodes as much as possible.
-        let stat_kvs = if let Some(table_id) = ctx.table_id {
-            let table_metadata_manager = TableMetadataManager::new(ctx.kv_backend.clone());
-            let leader_peer_ids = get_leader_peer_ids(&table_metadata_manager, table_id).await?;
-            let filter_result = filter_out_datanode_by_table(&stat_kvs, &leader_peer_ids);
-            if filter_result.is_empty() {
-                info!(
-                    "The regions of the table cannot be allocated to completely different datanodes, table id: {}.",
-                    table_id
-                );
-                stat_kvs
-            } else {
-                filter_result
-            }
-        } else {
-            stat_kvs
-        };
-
-        // 4. compute weight array.
+        // 3. compute weight array.
         let mut weight_array = self.weight_compute.compute(&stat_kvs);
 
+        // 4. filter out excluded peers.
+        filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
         // 5. choose peers by weight_array.
-        let mut exclude_peer_ids = self
-            .node_excluder
-            .excluded_datanode_ids()
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        exclude_peer_ids.extend(opts.exclude_peer_ids.iter());
-        filter_out_excluded_peers(&mut weight_array, &exclude_peer_ids);
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
         let selected = choose_items(&opts, &mut weighted_choose)?;
 
@@ -133,43 +94,6 @@ fn filter_out_expired_datanode(
         .iter()
         .filter_map(|p| stat_kvs.remove_entry(&DatanodeStatKey { node_id: p.id }))
         .collect()
-}
-
-fn filter_out_datanode_by_table(
-    stat_kvs: &HashMap<DatanodeStatKey, DatanodeStatValue>,
-    leader_peer_ids: &[u64],
-) -> HashMap<DatanodeStatKey, DatanodeStatValue> {
-    stat_kvs
-        .iter()
-        .filter(|(stat_k, _)| leader_peer_ids.contains(&stat_k.node_id))
-        .map(|(stat_k, stat_v)| (*stat_k, stat_v.clone()))
-        .collect()
-}
-
-async fn get_leader_peer_ids(
-    table_metadata_manager: &TableMetadataManager,
-    table_id: TableId,
-) -> Result<Vec<u64>> {
-    table_metadata_manager
-        .table_route_manager()
-        .table_route_storage()
-        .get(table_id)
-        .await
-        .context(error::TableMetadataManagerSnafu)
-        .map(|route| {
-            route.map_or_else(
-                || Ok(Vec::new()),
-                |route| {
-                    let region_routes = route
-                        .region_routes()
-                        .context(error::UnexpectedLogicalRouteTableSnafu { err_msg: "" })?;
-                    Ok(find_leaders(region_routes)
-                        .into_iter()
-                        .map(|peer| peer.id)
-                        .collect())
-                },
-            )
-        })?
 }
 
 #[cfg(test)]

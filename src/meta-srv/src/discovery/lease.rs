@@ -12,18 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::heartbeat_request::NodeWorkloads;
 use async_stream::try_stream;
-use common_meta::DatanodeId;
-use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
+use common_meta::kv_backend::KvBackend;
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::RangeRequest;
-use common_workload::DatanodeWorkloadType;
 use futures::stream::BoxStream;
-use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClient;
-use crate::error::{KvBackendSnafu, Result};
+use crate::error::Result;
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
 #[derive(Clone, Copy)]
@@ -99,44 +95,6 @@ impl LeaseValueAccessor for MetaPeerClient {
     }
 }
 
-/// Returns true if the datanode can accept ingest workload based on its workload types.
-///
-/// A datanode is considered to accept ingest workload if it supports either:
-/// - Hybrid workload (both ingest and query workloads)
-/// - Ingest workload (only ingest workload)
-pub fn is_datanode_accept_ingest_workload(lease_value: &LeaseValue) -> bool {
-    match &lease_value.workloads {
-        NodeWorkloads::Datanode(workloads) => workloads
-            .types
-            .iter()
-            .filter_map(|w| DatanodeWorkloadType::from_i32(*w))
-            .any(|w| w.accept_ingest()),
-        _ => false,
-    }
-}
-
-/// Returns the lease value of the given datanode id, if the datanode is not found, returns None.
-pub async fn find_datanode_lease_value(
-    datanode_id: DatanodeId,
-    in_memory_key: &ResettableKvBackendRef,
-) -> Result<Option<LeaseValue>> {
-    let lease_key = DatanodeLeaseKey {
-        node_id: datanode_id,
-    };
-    let lease_key_bytes: Vec<u8> = lease_key.try_into()?;
-    let Some(kv) = in_memory_key
-        .get(&lease_key_bytes)
-        .await
-        .context(KvBackendSnafu)?
-    else {
-        return Ok(None);
-    };
-
-    let lease_value: LeaseValue = kv.value.try_into()?;
-
-    Ok(Some(lease_value))
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -151,8 +109,7 @@ mod tests {
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
 
-    use super::is_datanode_accept_ingest_workload;
-    use crate::discovery::utils;
+    use crate::discovery::utils::{self, is_datanode_accept_ingest_workload};
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
 

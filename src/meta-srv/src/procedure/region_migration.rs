@@ -40,7 +40,7 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use common_meta::kv_backend::ResettableKvBackendRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
@@ -336,7 +336,7 @@ impl ContextFactory for DefaultContextFactory {
 pub struct Context {
     persistent_ctx: Arc<PersistentContext>,
     volatile_ctx: VolatileContext,
-    in_memory: ResettableKvBackendRef,
+    in_memory: KvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,

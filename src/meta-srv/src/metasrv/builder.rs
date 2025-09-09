@@ -49,8 +49,9 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
 
+use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
-use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
@@ -216,7 +217,7 @@ impl MetasrvBuilder {
             event_inserter,
         ))));
 
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
@@ -235,12 +236,7 @@ impl MetasrvBuilder {
         ));
 
         let selector_ctx = SelectorContext {
-            server_addr: options.grpc.server_addr.clone(),
-            datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
-            flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
-            kv_backend: kv_backend.clone(),
-            meta_peer_client: meta_peer_client.clone(),
-            table_id: None,
+            peer_discovery: meta_peer_client.clone(),
         };
 
         let wal_options_allocator = build_wal_options_allocator(&options.wal, kv_backend.clone())
@@ -267,10 +263,8 @@ impl MetasrvBuilder {
         });
         let table_id_sequence = table_metadata_allocator.table_id_sequence();
 
-        let flow_selector = Arc::new(RoundRobinSelector::new(
-            SelectTarget::Flownode,
-            Arc::new(Vec::new()),
-        )) as SelectorRef;
+        let flow_selector =
+            Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)) as SelectorRef;
 
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
@@ -565,19 +559,6 @@ impl MetasrvBuilder {
             resource_spec: Default::default(),
         })
     }
-}
-
-fn build_default_meta_peer_client(
-    election: &Option<ElectionRef>,
-    in_memory: &ResettableKvBackendRef,
-) -> MetaPeerClientRef {
-    MetaPeerClientBuilder::default()
-        .election(election.clone())
-        .in_memory(in_memory.clone())
-        .build()
-        .map(Arc::new)
-        // Safety: all required fields set at initialization
-        .unwrap()
 }
 
 fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 pub use api::v1::meta::Peer;
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
@@ -36,6 +37,16 @@ pub type PeerResolverRef = Arc<dyn PeerResolver>;
 pub trait PeerDiscovery: Send + Sync {
     /// Returns all currently active frontend nodes that have reported a heartbeat within the most recent heartbeat interval from the in-memory backend.
     async fn active_frontends(&self) -> Result<Vec<Peer>, Error>;
+
+    async fn active_datanodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> Result<Vec<Peer>, Error>;
+
+    async fn active_flownodes(
+        &self,
+        filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+    ) -> Result<Vec<Peer>, Error>;
 }
 
 pub type PeerDiscoveryRef = Arc<dyn PeerDiscovery>;

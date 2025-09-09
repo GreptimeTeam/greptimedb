@@ -132,7 +132,7 @@ mod tests {
     use common_meta::datanode::Stat;
 
     use super::*;
-    use crate::discovery::lease::find_datanode_lease_value;
+    use crate::discovery::utils::find_datanode_lease_value;
     use crate::handler::test_utils::TestEnv;
 
     #[tokio::test]
@@ -143,7 +143,8 @@ mod tests {
         let handler = DatanodeKeepLeaseHandler;
         handle_request_many_times(ctx.clone(), &handler, 1).await;
 
-        let lease_value = find_datanode_lease_value(1, &ctx.in_memory)
+        let in_memory = ctx.in_memory.clone() as _;
+        let lease_value = find_datanode_lease_value(&in_memory, 1)
             .await
             .unwrap()
             .unwrap();

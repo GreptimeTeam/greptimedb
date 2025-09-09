@@ -15,15 +15,20 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use common_meta::DatanodeId;
 use common_meta::cluster::NodeInfo;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_time::util::{DefaultSystemTimer, SystemTimer};
+use common_workload::DatanodeWorkloadType;
 use futures::TryStreamExt;
+use snafu::ResultExt;
 
 use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 use crate::discovery::node_info::{NodeInfoAccessor, NodeInfoType};
-use crate::error::Result;
-use crate::key::LeaseValue;
+use crate::error::{KvBackendSnafu, Result};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 
 impl LastActiveTs for LeaseValue {
     fn last_active_ts(&self) -> i64 {
@@ -65,14 +70,14 @@ pub fn build_active_filter<T: LastActiveTs>(
 pub async fn alive_datanode_lease_values(
     lister: &impl LeaseValueAccessor,
     active_duration: Duration,
-    condition: Option<fn(&LeaseValue) -> bool>,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<HashMap<u64, LeaseValue>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
     lister
         .lease_values(LeaseValueType::Datanode)
         .try_filter(|(_, lease_value)| {
             futures::future::ready(
-                active_filter(lease_value) && condition.unwrap_or(|_| true)(lease_value),
+                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
             )
         })
         .try_collect::<HashMap<_, _>>()
@@ -83,14 +88,14 @@ pub async fn alive_datanode_lease_values(
 pub async fn alive_datanodes(
     lister: &impl LeaseValueAccessor,
     active_duration: Duration,
-    condition: Option<fn(&LeaseValue) -> bool>,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
     lister
         .lease_values(LeaseValueType::Datanode)
         .try_filter(|(_, lease_value)| {
             futures::future::ready(
-                active_filter(lease_value) && condition.unwrap_or(|_| true)(lease_value),
+                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
             )
         })
         .map_ok(|(peer_id, lease_value)| Peer::new(peer_id, lease_value.node_addr))
@@ -102,11 +107,16 @@ pub async fn alive_datanodes(
 pub async fn alive_flownodes(
     lister: &impl LeaseValueAccessor,
     active_duration: Duration,
+    condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
     lister
         .lease_values(LeaseValueType::Flownode)
-        .try_filter(|(_, lease_value)| futures::future::ready(active_filter(lease_value)))
+        .try_filter(|(_, lease_value)| {
+            futures::future::ready(
+                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
+            )
+        })
         .map_ok(|(peer_id, lease_value)| Peer::new(peer_id, lease_value.node_addr))
         .try_collect::<Vec<_>>()
         .await
@@ -140,4 +150,41 @@ pub async fn alive_datanode(
         .map(|(peer_id, lease)| Peer::new(peer_id, lease.node_addr));
 
     Ok(v)
+}
+
+/// Returns true if the datanode can accept ingest workload based on its workload types.
+///
+/// A datanode is considered to accept ingest workload if it supports either:
+/// - Hybrid workload (both ingest and query workloads)
+/// - Ingest workload (only ingest workload)
+pub fn is_datanode_accept_ingest_workload(datanode_workloads: &NodeWorkloads) -> bool {
+    match &datanode_workloads {
+        NodeWorkloads::Datanode(workloads) => workloads
+            .types
+            .iter()
+            .filter_map(|w| DatanodeWorkloadType::from_i32(*w))
+            .any(|w| w.accept_ingest()),
+        _ => false,
+    }
+}
+
+/// Returns the lease value of the given datanode id, if the datanode is not found, returns None.
+pub async fn find_datanode_lease_value(
+    in_memory: &KvBackendRef,
+    datanode_id: DatanodeId,
+) -> Result<Option<LeaseValue>> {
+    let lease_key = DatanodeLeaseKey {
+        node_id: datanode_id,
+    };
+    let lease_key_bytes: Vec<u8> = lease_key.try_into()?;
+    let Some(kv) = in_memory
+        .get(&lease_key_bytes)
+        .await
+        .context(KvBackendSnafu)?
+    else {
+        return Ok(None);
+    };
+
+    let lease_value: LeaseValue = kv.value.try_into()?;
+    Ok(Some(lease_value))
 }

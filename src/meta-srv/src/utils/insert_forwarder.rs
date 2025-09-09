@@ -24,7 +24,7 @@ use common_telemetry::{debug, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
 
-use crate::error::{LookupFrontendsSnafu, NoAvailableFrontendSnafu};
+use crate::error::{ListActiveFrontendsSnafu, NoAvailableFrontendSnafu};
 
 pub type InsertForwarderRef = Arc<InsertForwarder>;
 
@@ -52,7 +52,7 @@ impl InsertForwarder {
             .peer_discovery
             .active_frontends()
             .await
-            .context(LookupFrontendsSnafu)?;
+            .context(ListActiveFrontendsSnafu)?;
 
         ensure!(!frontends.is_empty(), NoAvailableFrontendSnafu);
 
