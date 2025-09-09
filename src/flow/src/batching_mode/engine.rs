@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::flow::{DirtyWindowRequests, FlowResponse};
+use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
@@ -94,7 +94,7 @@ impl BatchingEngine {
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
-    ) -> Result<FlowResponse, Error> {
+    ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
         let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
@@ -203,7 +203,7 @@ impl BatchingEngine {
             }
         }
 
-        Ok(Default::default())
+        Ok(())
     }
 
     pub async fn handle_inserts_inner(
@@ -713,5 +713,11 @@ impl FlowEngine for BatchingEngine {
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
         self.handle_inserts_inner(request).await
+    }
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
+    ) -> Result<(), Error> {
+        self.handle_mark_dirty_time_window(req).await
     }
 }

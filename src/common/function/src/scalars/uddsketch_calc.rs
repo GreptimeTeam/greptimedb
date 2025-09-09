@@ -20,7 +20,6 @@ use std::fmt::Display;
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
 use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Vector;
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::vectors::{BinaryVector, Float64VectorBuilder, MutableVector, VectorRef};
@@ -59,8 +58,8 @@ impl Function for UddSketchCalcFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
@@ -141,10 +140,8 @@ mod tests {
         let function = UddSketchCalcFunction;
         assert_eq!("uddsketch_calc", function.name());
         assert_eq!(
-            ConcreteDataType::float64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::float64_datatype()])
-                .unwrap()
+            DataType::Float64,
+            function.return_type(&[DataType::Float64]).unwrap()
         );
 
         // Create a test sketch

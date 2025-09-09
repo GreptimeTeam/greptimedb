@@ -30,6 +30,7 @@ use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
+use datafusion::catalog::TableFunction;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -506,6 +507,10 @@ impl QueryEngine for DatafusionQueryEngine {
     /// Will override if the function with same name is already registered.
     fn register_scalar_function(&self, func: ScalarFunctionFactory) {
         self.state.register_scalar_function(func);
+    }
+
+    fn register_table_function(&self, func: Arc<TableFunction>) {
+        self.state.register_table_function(func);
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {

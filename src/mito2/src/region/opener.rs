@@ -69,6 +69,18 @@ use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
 
+/// A fetcher to retrieve partition expr for a region.
+///
+/// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
+/// while newer ones do. On open, we backfill it via this fetcher and persist it
+/// to the manifest so future opens don't need refetching.
+#[async_trait::async_trait]
+pub trait PartitionExprFetcher {
+    async fn fetch_expr(&self, region_id: RegionId) -> Option<String>;
+}
+
+pub type PartitionExprFetcherRef = Arc<dyn PartitionExprFetcher + Send + Sync>;
+
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
@@ -88,6 +100,7 @@ pub(crate) struct RegionOpener {
     wal_entry_reader: Option<Box<dyn WalEntryReader>>,
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl RegionOpener {
@@ -105,6 +118,7 @@ impl RegionOpener {
         intermediate_manager: IntermediateManager,
         time_provider: TimeProviderRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
@@ -124,6 +138,7 @@ impl RegionOpener {
             wal_entry_reader: None,
             replay_checkpoint: None,
             file_ref_manager,
+            partition_expr_fetcher,
         }
     }
 
@@ -390,8 +405,18 @@ impl RegionOpener {
             return Ok(None);
         };
 
+        // Backfill `partition_expr` if missing. Use the backfilled metadata in-memory during this open.
         let manifest = manifest_manager.manifest();
-        let metadata = manifest.metadata.clone();
+        let metadata = if manifest.metadata.partition_expr.is_none()
+            && let Some(expr_json) = self.partition_expr_fetcher.fetch_expr(self.region_id).await
+        {
+            let metadata = manifest.metadata.as_ref().clone();
+            let mut builder = RegionMetadataBuilder::from_existing(metadata);
+            builder.partition_expr_json(Some(expr_json));
+            Arc::new(builder.build().context(InvalidMetadataSnafu)?)
+        } else {
+            manifest.metadata.clone()
+        };
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;

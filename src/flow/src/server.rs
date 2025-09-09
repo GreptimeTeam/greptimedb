@@ -143,8 +143,7 @@ impl flow_server::Flow for FlowService {
         reqs: Request<DirtyWindowRequests>,
     ) -> Result<Response<FlowResponse>, Status> {
         self.dual_engine
-            .batching_engine()
-            .handle_mark_dirty_time_window(reqs.into_inner())
+            .handle_mark_window_dirty(reqs.into_inner())
             .await
             .map(Response::new)
             .map_err(to_status_with_last_err)

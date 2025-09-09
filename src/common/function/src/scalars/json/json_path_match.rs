@@ -36,8 +36,8 @@ impl Function for JsonPathMatchFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -126,10 +126,8 @@ mod tests {
 
         assert_eq!("json_path_match", json_path_match.name());
         assert_eq!(
-            ConcreteDataType::boolean_datatype(),
-            json_path_match
-                .return_type(&[ConcreteDataType::json_datatype()])
-                .unwrap()
+            DataType::Boolean,
+            json_path_match.return_type(&[DataType::Binary]).unwrap()
         );
 
         assert!(matches!(json_path_match.signature(),

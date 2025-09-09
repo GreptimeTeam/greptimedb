@@ -58,8 +58,8 @@ impl Function for MatchesFunction {
         "matches"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
