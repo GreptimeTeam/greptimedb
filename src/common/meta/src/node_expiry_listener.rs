@@ -17,14 +17,14 @@ use std::time::Duration;
 
 use common_telemetry::{debug, error, info, warn};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::cluster::{NodeInfo, NodeInfoKey};
 use crate::error;
 use crate::kv_backend::ResettableKvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
+use crate::rpc::store::RangeRequest;
 
 /// [NodeExpiryListener] periodically checks all node info in memory and removes
 /// expired node info to prevent memory leak.

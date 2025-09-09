@@ -17,14 +17,14 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    region_request, ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest,
+    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -33,8 +33,8 @@ use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
-use common_query::request::QueryRequest;
 use common_query::OutputData;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
@@ -45,19 +45,19 @@ use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
-use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
+use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
 use prost::Message;
+use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
-use query::QueryEngineRef;
 use serde_json;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
+use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use servers::grpc::FlightCompression;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
@@ -684,7 +684,7 @@ struct RegionServerInner {
     // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
     // server with a concrete engine; acceptable for now to fetch Mito-specific
     // info (e.g., list SSTs). Consider a diagnostics trait later.
-    mito_engine: OnceLock<MitoEngine>,
+    mito_engine: RwLock<Option<MitoEngine>>,
 }
 
 struct RegionServerParallelism {
@@ -751,7 +751,7 @@ impl RegionServerInner {
             table_provider_factory,
             parallelism,
             topic_stats_reporter: RwLock::new(None),
-            mito_engine: OnceLock::new(),
+            mito_engine: RwLock::new(None),
         }
     }
 
@@ -760,7 +760,7 @@ impl RegionServerInner {
         if engine_name == MITO_ENGINE_NAME
             && let Some(mito_engine) = engine.as_any().downcast_ref::<MitoEngine>()
         {
-            let _ = self.mito_engine.set(mito_engine.clone());
+            *self.mito_engine.write().unwrap() = Some(mito_engine.clone());
         }
 
         info!("Region Engine {engine_name} is registered");
@@ -787,7 +787,7 @@ impl RegionServerInner {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(engine) => engine,
                     RegionEngineWithStatus::Deregistering(_) => {
-                        return error::RegionBusySnafu { region_id }.fail()
+                        return error::RegionBusySnafu { region_id }.fail();
                     }
                     RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
                 },
@@ -804,10 +804,10 @@ impl RegionServerInner {
             RegionChange::Deregisters => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
-                        return error::RegionBusySnafu { region_id }.fail()
+                        return error::RegionBusySnafu { region_id }.fail();
                     }
                     RegionEngineWithStatus::Deregistering(_) => {
-                        return Ok(CurrentEngine::EarlyReturn(0))
+                        return Ok(CurrentEngine::EarlyReturn(0));
                     }
                     RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
                 },
@@ -817,10 +817,10 @@ impl RegionServerInner {
                 match current_region_status {
                     Some(status) => match status.clone() {
                         RegionEngineWithStatus::Registering(_) => {
-                            return error::RegionNotReadySnafu { region_id }.fail()
+                            return error::RegionNotReadySnafu { region_id }.fail();
                         }
                         RegionEngineWithStatus::Deregistering(_) => {
-                            return error::RegionNotFoundSnafu { region_id }.fail()
+                            return error::RegionNotFoundSnafu { region_id }.fail();
                         }
                         RegionEngineWithStatus::Ready(engine) => engine,
                     },
@@ -1281,6 +1281,7 @@ impl RegionServerInner {
         self.region_map.clear();
         info!("closed {num_regions} regions");
 
+        drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
         for (engine_name, engine) in engines {
             engine
@@ -1361,7 +1362,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::tests::{mock_region_server, MockRegionEngine};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
     async fn test_region_registering() {

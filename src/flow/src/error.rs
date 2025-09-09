@@ -26,8 +26,8 @@ use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
-use crate::expr::EvalError;
 use crate::FlowId;
+use crate::expr::EvalError;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -76,9 +76,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "No available frontend found after timeout: {timeout:?}, context: {context}"
-    ))]
+    #[snafu(display("No available frontend found after timeout: {timeout:?}, context: {context}"))]
     NoAvailableFrontend {
         timeout: std::time::Duration,
         context: String,

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_telemetry::{info, warn};
 use notify::{EventKind, RecursiveMode, Watcher};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{FileWatchSnafu, InvalidConfigSnafu, Result};
 use crate::user_info::DefaultUserInfo;
@@ -133,9 +133,9 @@ pub mod test {
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::time::sleep;
 
+    use crate::UserProvider;
     use crate::user_provider::watch_file_user_provider::WatchFileUserProvider;
     use crate::user_provider::{Identity, Password};
-    use crate::UserProvider;
 
     async fn test_authenticate(
         provider: &dyn UserProvider,

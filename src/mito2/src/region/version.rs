@@ -454,9 +454,7 @@ impl VersionBuilder {
         {
             info!(
                 "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
-                self.compaction_time_window,
-                compaction_time_window,
-                self.metadata.region_id
+                self.compaction_time_window, compaction_time_window, self.metadata.region_id
             );
         }
 

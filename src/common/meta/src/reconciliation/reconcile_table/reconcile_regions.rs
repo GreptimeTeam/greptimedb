@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use api::v1::column_def::try_as_column_def;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
-    alter_request, AlterRequest, RegionColumnDef, RegionRequest, RegionRequestHeader, SyncColumns,
+    AlterRequest, RegionColumnDef, RegionRequest, RegionRequestHeader, SyncColumns, alter_request,
 };
 use api::v1::{ColumnDef, SemanticType};
 use async_trait::async_trait;
@@ -145,7 +145,10 @@ impl State for ReconcileRegions {
 
         // Checks all column metadatas are consistent, and updates the table info if needed.
         if column_metadatas != self.column_metadatas {
-            info!("Datanode column metadatas are not consistent with metasrv, updating metasrv's column metadatas, table: {}, table_id: {}", table_name, table_id);
+            info!(
+                "Datanode column metadatas are not consistent with metasrv, updating metasrv's column metadatas, table: {}, table_id: {}",
+                table_name, table_id
+            );
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             return Ok((

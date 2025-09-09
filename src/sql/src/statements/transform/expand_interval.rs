@@ -215,10 +215,10 @@ mod tests {
 
     use sqlparser::ast::{BinaryOperator, CastKind, DataType, Expr, Interval, Value};
 
-    use crate::statements::transform::expand_interval::{
-        normalize_interval_name, single_quoted_string_expr, ExpandIntervalTransformRule,
-    };
     use crate::statements::transform::TransformRule;
+    use crate::statements::transform::expand_interval::{
+        ExpandIntervalTransformRule, normalize_interval_name, single_quoted_string_expr,
+    };
 
     fn create_interval(value: Box<Expr>) -> Expr {
         Expr::Interval(Interval {

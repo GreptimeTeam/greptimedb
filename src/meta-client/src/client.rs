@@ -41,6 +41,7 @@ use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -51,7 +52,6 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
@@ -372,6 +372,8 @@ impl ClusterInfo for MetaClient {
                     version: node.version,
                     git_commit: node.git_commit,
                     start_time_ms: node.start_time_ms,
+                    cpus: node.cpus,
+                    memory_bytes: node.memory_bytes,
                 })
                 .chain(leader.into_iter().map(|node| NodeInfo {
                     peer: node.peer.unwrap_or_default(),
@@ -380,6 +382,8 @@ impl ClusterInfo for MetaClient {
                     version: node.version,
                     git_commit: node.git_commit,
                     start_time_ms: node.start_time_ms,
+                    cpus: node.cpus,
+                    memory_bytes: node.memory_bytes,
                 }))
                 .collect::<Vec<_>>()
         } else {

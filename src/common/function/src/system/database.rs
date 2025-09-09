@@ -68,6 +68,8 @@ impl Function for DatabaseFunction {
     }
 }
 
+// Though "current_schema" can be aliased to "database", to not cause any breaking changes,
+// we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
 impl Function for CurrentSchemaFunction {
     fn name(&self) -> &str {
         CURRENT_SCHEMA_FUNCTION_NAME

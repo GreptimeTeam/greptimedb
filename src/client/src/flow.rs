@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests, FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
 use snafu::ResultExt;
 
-use crate::error::{FlowServerSnafu, Result};
 use crate::Client;
+use crate::error::{FlowServerSnafu, Result};
 
 #[derive(Debug)]
 pub struct FlowRequester {
@@ -47,7 +47,7 @@ impl Flownode for FlowRequester {
 
     async fn handle_mark_window_dirty(
         &self,
-        req: DirtyWindowRequest,
+        req: DirtyWindowRequests,
     ) -> common_meta::error::Result<FlowResponse> {
         self.handle_mark_window_dirty(req)
             .await
@@ -102,12 +102,10 @@ impl FlowRequester {
         Ok(response)
     }
 
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse> {
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> Result<FlowResponse> {
         let (addr, mut client) = self.client.raw_flow_client()?;
         let response = client
-            .handle_mark_dirty_time_window(DirtyWindowRequests {
-                requests: vec![req],
-            })
+            .handle_mark_dirty_time_window(req)
             .await
             .or_else(|e| {
                 let code = e.code();

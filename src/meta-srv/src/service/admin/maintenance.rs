@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ use crate::error::{
     self, MissingRequiredParameterSnafu, ParseBoolSnafu, Result, RuntimeSwitchManagerSnafu,
     UnsupportedSnafu,
 };
-use crate::service::admin::util::{to_json_response, to_not_found_response, ErrorHandler};
 use crate::service::admin::HttpHandler;
+use crate::service::admin::util::{ErrorHandler, to_json_response, to_not_found_response};
 
 #[derive(Clone)]
 pub struct MaintenanceHandler {
@@ -177,7 +177,9 @@ impl HttpHandler for MaintenanceHandler {
             http::Method::PUT => {
                 // Handle PUT request to '/admin/maintenance' with URL parameters. (The legacy version)
                 if path.ends_with(MAINTENANCE_PATH) {
-                    warn!("Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future");
+                    warn!(
+                        "Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future"
+                    );
                     let response = self.handle_legacy_maintenance(params).await?;
                     to_json_response(response)
                 } else {
@@ -195,7 +197,9 @@ impl HttpHandler for MaintenanceHandler {
                     to_json_response(response)
                 } else if path.ends_with(MAINTENANCE_PATH) {
                     // Handle POST request to '/admin/maintenance' with URL parameters. (The legacy version)
-                    warn!("Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future");
+                    warn!(
+                        "Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future"
+                    );
                     let response = self.handle_legacy_maintenance(params).await?;
                     to_json_response(response)
                 } else {

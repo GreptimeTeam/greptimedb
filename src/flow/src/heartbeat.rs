@@ -14,10 +14,11 @@
 
 //! Send heartbeat from flownode to metasrv
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::{HeartbeatRequest, Peer};
+use common_config::utils::ResourceSpec;
 use common_error::ext::BoxedError;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -68,6 +69,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
+    resource_spec: ResourceSpec,
 }
 
 impl HeartbeatTask {
@@ -91,6 +93,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
+            resource_spec: Default::default(),
         }
     }
 
@@ -174,13 +177,14 @@ impl HeartbeatTask {
         })
     }
 
-    fn build_node_info(start_time_ms: u64) -> Option<NodeInfo> {
+    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus: num_cpus::get() as u32,
+            cpus,
+            memory_bytes,
         })
     }
 
@@ -195,6 +199,8 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
+        let cpus = self.resource_spec.cpus as u32;
+        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
 
         let query_stat_size = self.query_stat_size.clone();
 
@@ -208,7 +214,7 @@ impl HeartbeatTask {
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
                 node_epoch,
-                info: Self::build_node_info(node_epoch),
+                info: Self::build_node_info(node_epoch, cpus, memory_bytes),
                 ..Default::default()
             };
 

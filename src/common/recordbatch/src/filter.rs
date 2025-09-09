@@ -23,7 +23,7 @@ use datafusion_common::arrow::array::{ArrayRef, Datum, Scalar};
 use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
 use datafusion_common::cast::{as_boolean_array, as_null_array, as_string_array};
-use datafusion_common::{internal_err, DataFusionError, ScalarValue};
+use datafusion_common::{DataFusionError, ScalarValue, internal_err};
 use datatypes::arrow::array::{
     Array, ArrayAccessor, ArrayData, BooleanArray, BooleanBufferBuilder, RecordBatch,
     StringArrayType,
@@ -213,7 +213,7 @@ impl SimpleFilterEvaluator {
                 return UnsupportedOperationSnafu {
                     reason: format!("{:?}", self.op),
                 }
-                .fail()
+                .fail();
             }
         };
         result
@@ -346,7 +346,7 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::execution::context::ExecutionProps;
-    use datafusion::logical_expr::{col, lit, BinaryExpr};
+    use datafusion::logical_expr::{BinaryExpr, col, lit};
     use datafusion::physical_expr::create_physical_expr;
     use datafusion_common::{Column, DFSchema};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -503,7 +503,10 @@ mod test {
         assert_eq!(or_evaluator.column_name, "col");
         assert_eq!(or_evaluator.op, Operator::Or);
         assert_eq!(or_evaluator.literal_list.len(), 3);
-        assert_eq!(format!("{:?}", or_evaluator.literal_list), "[Scalar(StringArray\n[\n  \"B\",\n]), Scalar(StringArray\n[\n  \"C\",\n]), Scalar(StringArray\n[\n  \"D\",\n])]");
+        assert_eq!(
+            format!("{:?}", or_evaluator.literal_list),
+            "[Scalar(StringArray\n[\n  \"B\",\n]), Scalar(StringArray\n[\n  \"C\",\n]), Scalar(StringArray\n[\n  \"D\",\n])]"
+        );
 
         // Create a schema and batch for testing
         let schema = Schema::new(vec![Field::new("col", DataType::Utf8, false)]);

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
 use arrow_array::iterator::ArrayIter;
 use arrow_array::{Array, ArrayRef, Decimal128Array};
-use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_decimal::Decimal128;
+use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use snafu::{OptionExt, ResultExt};
 
 use crate::arrow::datatypes::DataType as ArrowDataType;
@@ -430,8 +430,8 @@ pub mod tests {
     use common_decimal::Decimal128;
 
     use super::*;
-    use crate::vectors::operations::VectorOp;
     use crate::vectors::Int8Vector;
+    use crate::vectors::operations::VectorOp;
 
     #[test]
     fn test_from_arrow_decimal128_array() {

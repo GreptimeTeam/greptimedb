@@ -19,14 +19,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::InvertedIndexMetas;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
-use crate::inverted_index::format::reader::footer::{
-    InvertedIndexFooterReader, DEFAULT_PREFETCH_SIZE,
-};
-use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
+use crate::inverted_index::format::reader::InvertedIndexReader;
+use crate::inverted_index::format::reader::footer::{
+    DEFAULT_PREFETCH_SIZE, InvertedIndexFooterReader,
+};
 
 /// Inverted index blob reader, implements [`InvertedIndexReader`]
 pub struct InvertedIndexBlobReader<R> {

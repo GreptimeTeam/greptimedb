@@ -29,7 +29,9 @@ use crate::instruction::CacheIdent;
 impl CreateLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
         if self.data.physical_columns.is_empty() {
-            warn!("No physical columns found, leaving the physical table's schema unchanged when creating logical tables");
+            warn!(
+                "No physical columns found, leaving the physical table's schema unchanged when creating logical tables"
+            );
             return Ok(());
         }
 

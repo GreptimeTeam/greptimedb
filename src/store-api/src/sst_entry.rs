@@ -15,13 +15,13 @@
 use std::sync::Arc;
 
 use common_recordbatch::DfRecordBatch;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
 use datatypes::arrow::array::{
-    ArrayRef, TimestampMillisecondArray, TimestampNanosecondArray, UInt32Array, UInt64Array,
-    UInt8Array,
+    ArrayRef, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt32Array,
+    UInt64Array,
 };
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow_array::StringArray;
@@ -256,10 +256,10 @@ fn build_plan_helper(
 #[cfg(test)]
 mod tests {
     use datafusion_common::TableReference;
-    use datafusion_expr::{binary_expr, col, lit, LogicalPlan, Operator};
+    use datafusion_expr::{LogicalPlan, Operator, binary_expr, col, lit};
     use datatypes::arrow::array::{
-        Array, TimestampMillisecondArray, TimestampNanosecondArray, UInt32Array, UInt64Array,
-        UInt8Array,
+        Array, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow_array::StringArray;
 

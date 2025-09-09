@@ -23,7 +23,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::region::opener::{check_recovered_region, RegionOpener};
+use crate::region::opener::{RegionOpener, check_recovered_region};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -67,6 +67,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
             self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
         )
         .metadata_builder(builder)
         .parse_options(request.options)?

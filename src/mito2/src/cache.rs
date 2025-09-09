@@ -290,13 +290,13 @@ impl CacheManager {
 
         // Try to get metadata from write cache
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
-        if let Some(write_cache) = &self.write_cache {
-            if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
-                let metadata = Arc::new(metadata);
-                // Put metadata into sst meta cache
-                self.put_parquet_meta_data(file_id, metadata.clone());
-                return Some(metadata);
-            }
+        if let Some(write_cache) = &self.write_cache
+            && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
+        {
+            let metadata = Arc::new(metadata);
+            // Put metadata into sst meta cache
+            self.put_parquet_meta_data(file_id, metadata.clone());
+            return Some(metadata);
         };
 
         None
@@ -781,9 +781,11 @@ mod tests {
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
-            .is_none());
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+                .is_none()
+        );
 
         let key = PageKey::new(file_id.file_id(), 1, vec![Range { start: 0, end: 5 }]);
         let pages = Arc::new(PageValue::default());
@@ -810,9 +812,11 @@ mod tests {
     fn test_repeated_vector_cache() {
         let cache = CacheManager::builder().vector_cache_size(4096).build();
         let value = Value::Int64(10);
-        assert!(cache
-            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
-            .is_none());
+        assert!(
+            cache
+                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+                .is_none()
+        );
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         let cached = cache

@@ -21,29 +21,29 @@ use async_trait::async_trait;
 use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
 use datafusion::error::Result as DatafusionResult;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
-use datafusion::parquet::arrow::{parquet_to_arrow_schema, ArrowWriter};
+use datafusion::parquet::arrow::{ArrowWriter, parquet_to_arrow_schema};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
 use datafusion::parquet::format::FileMetaData;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::schema::SchemaRef;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use object_store::{FuturesAsyncReader, ObjectStore};
-use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::AsyncArrowWriter;
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
+use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::{ArrowWriterCloser, DfRecordBatchEncoder};
 use crate::error::{self, Result, WriteObjectSnafu, WriteParquetSnafu};
 use crate::file_format::FileFormat;
 use crate::share_buffer::SharedBuffer;
-use crate::DEFAULT_WRITE_BUFFER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ParquetFormat {}

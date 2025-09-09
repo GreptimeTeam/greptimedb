@@ -7,7 +7,7 @@ use std::ops::{Div, Mul};
 use std::str::FromStr;
 
 use serde::de::{Unexpected, Visitor};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 const UNIT: u64 = 1;
 

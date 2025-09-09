@@ -25,19 +25,19 @@ use api::v1::meta::{
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef, TxnService};
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use common_meta::rpc::KeyValue;
 use common_meta::util;
 use common_telemetry::warn;
 use derive_builder::Builder;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error;
-use crate::error::{match_for_io_error, Result};
+use crate::error::{Result, match_for_io_error};
 use crate::metasrv::ElectionRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
@@ -370,7 +370,7 @@ mod tests {
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
     use common_meta::rpc::KeyValue;
 
-    use super::{check_resp_header, to_stat_kv_map, Context};
+    use super::{Context, check_resp_header, to_stat_kv_map};
     use crate::error;
 
     #[test]

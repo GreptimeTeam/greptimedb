@@ -20,9 +20,9 @@ use common_error::ext::BoxedError;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{OptionExt, ResultExt};
 use tantivy::indexer::NoMergePolicy;
-use tantivy::schema::{Schema, STORED, TEXT};
+use tantivy::schema::{STORED, Schema, TEXT};
 use tantivy::store::{Compressor, ZstdCompressor};
-use tantivy::{doc, Index, IndexWriter};
+use tantivy::{Index, IndexWriter, doc};
 
 use crate::fulltext_index::create::FulltextIndexCreator;
 use crate::fulltext_index::error::{
@@ -163,10 +163,10 @@ mod tests {
 
     use common_test_util::temp_dir::create_temp_dir;
     use futures::AsyncRead;
+    use tantivy::TantivyDocument;
     use tantivy::collector::DocSetCollector;
     use tantivy::query::QueryParser;
     use tantivy::schema::Value;
-    use tantivy::TantivyDocument;
 
     use super::*;
     use crate::fulltext_index::Analyzer;

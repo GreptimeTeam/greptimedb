@@ -20,7 +20,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::parse_string_to_vector_type_value;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::function::{Function, FunctionContext};
 

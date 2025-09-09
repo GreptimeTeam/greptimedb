@@ -21,8 +21,8 @@ use datafusion::catalog::{
 use datafusion::datasource::provider_as_source;
 use datafusion::error as df_error;
 use datafusion::error::Result as DfResult;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::DataFusionError;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_expr::{LogicalPlan, TableSource};
 use futures::TryStreamExt;
 use session::context::QueryContextRef;
@@ -65,9 +65,12 @@ impl InternalTableKind {
 impl RegionServer {
     /// Expose SSTs listed in Manifest as an in-memory table for inspection.
     pub async fn inspect_sst_manifest_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let mito = self.inner.mito_engine.get().context(UnexpectedSnafu {
-            violated: "mito engine not available",
-        })?;
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
 
         let entries = mito.all_ssts_from_manifest().collect::<Vec<_>>();
         let schema = ManifestSstEntry::schema().arrow_schema().clone();
@@ -81,10 +84,12 @@ impl RegionServer {
 
     /// Expose SSTs found in storage as an in-memory table for inspection.
     pub async fn inspect_sst_storage_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let mito = self.inner.mito_engine.get().context(UnexpectedSnafu {
-            violated: "mito engine not available",
-        })?;
-
+        let mito = {
+            let guard = self.inner.mito_engine.read().unwrap();
+            guard.as_ref().cloned().context(UnexpectedSnafu {
+                violated: "mito engine not available",
+            })?
+        };
         let entries = mito
             .all_ssts_from_storage()
             .try_collect::<Vec<_>>()
@@ -313,7 +318,7 @@ mod tests {
 
     use datafusion::catalog::MemTable as DfMemTable;
     use datafusion_common::tree_node::TreeNode;
-    use datafusion_expr::{table_scan, LogicalPlanBuilder};
+    use datafusion_expr::{LogicalPlanBuilder, table_scan};
     use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;

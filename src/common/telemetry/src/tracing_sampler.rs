@@ -14,10 +14,10 @@
 
 use std::collections::HashSet;
 
+use opentelemetry::KeyValue;
 use opentelemetry::trace::{
     Link, SamplingDecision, SamplingResult, SpanKind, TraceContextExt, TraceId, TraceState,
 };
-use opentelemetry::KeyValue;
 use opentelemetry_sdk::trace::{Sampler, ShouldSample};
 use serde::{Deserialize, Serialize};
 

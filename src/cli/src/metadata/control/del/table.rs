@@ -18,16 +18,16 @@ use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::ddl::utils::get_region_wal_options;
-use common_meta::key::table_name::TableNameManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::key::table_name::TableNameManager;
 use common_meta::kv_backend::KvBackendRef;
 use store_api::storage::TableId;
 
+use crate::Tool;
 use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu};
 use crate::metadata::common::StoreConfig;
 use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
 use crate::metadata::control::utils::get_table_id_by_name;
-use crate::Tool;
 
 /// Delete table metadata logically from the metadata store.
 #[derive(Debug, Default, Parser)]
@@ -183,15 +183,15 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
-    use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::chroot::ChrootKvBackend;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::{KvBackend, KvBackendRef};
     use common_meta::rpc::store::RangeRequest;
 
-    use crate::metadata::control::del::table::TableMetadataDeleter;
     use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
+    use crate::metadata::control::del::table::TableMetadataDeleter;
     use crate::metadata::control::test_utils::prepare_physical_table_metadata;
 
     #[tokio::test]

@@ -41,7 +41,7 @@ use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::StringArray;
 use datatypes::compute::SortOptions;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;

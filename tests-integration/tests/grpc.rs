@@ -15,23 +15,23 @@
 use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
-    column, AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
+    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, SemanticType,
+    PromqlRequest, RequestHeader, SemanticType, column,
 };
 use auth::user_provider_from_option;
-use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
 use common_catalog::consts::MITO_ENGINE;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
+use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_test_util::find_workspace_path;
-use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::BatchArrowRecords;
-use servers::grpc::builder::GrpcServerBuilder;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
 use servers::grpc::GrpcServerConfig;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
     PrometheusResponse,
@@ -39,10 +39,10 @@ use servers::http::prometheus::{
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
-    setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
+    StorageType, setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider,
 };
-use tonic::metadata::MetadataValue;
 use tonic::Request;
+use tonic::metadata::MetadataValue;
 
 #[macro_export]
 macro_rules! grpc_test {

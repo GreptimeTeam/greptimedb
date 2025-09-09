@@ -24,8 +24,8 @@ use std::fmt::Debug;
 use api::region::RegionResponse;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    region_request, MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader,
-    SyncRequest,
+    MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader, SyncRequest,
+    region_request,
 };
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use common_error::ext::BoxedError;
@@ -34,7 +34,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
 use futures::future::join_all;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
@@ -53,7 +53,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::key::{TableMetadataManager, TableMetadataManagerRef};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{find_follower_regions, find_followers, RegionRoute};
+use crate::rpc::router::{RegionRoute, find_follower_regions, find_followers};
 
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {

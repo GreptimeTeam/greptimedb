@@ -17,8 +17,8 @@ use std::sync::Arc;
 use datafusion::arrow::array::Float64Array;
 use datafusion::logical_expr::ScalarUDF;
 use datafusion::physical_plan::ColumnarValue;
-use datafusion_common::config::ConfigOptions;
 use datafusion_common::ScalarValue;
+use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::{DataType, Field};
 
@@ -62,12 +62,14 @@ pub fn simple_range_udf_runner(
         .iter()
         .collect();
     assert_eq!(eval_result.len(), expected.len());
-    assert!(eval_result
-        .iter()
-        .zip(expected.iter())
-        .all(|(x, y)| match (*x, *y) {
-            (Some(x), Some(y)) => (x - y).abs() < 0.0001,
-            (None, None) => true,
-            _ => false,
-        }));
+    assert!(
+        eval_result
+            .iter()
+            .zip(expected.iter())
+            .all(|(x, y)| match (*x, *y) {
+                (Some(x), Some(y)) => (x - y).abs() < 0.0001,
+                (None, None) => true,
+                _ => false,
+            })
+    );
 }

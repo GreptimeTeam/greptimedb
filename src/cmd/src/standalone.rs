@@ -23,12 +23,12 @@ use catalog::information_schema::{DatanodeInspectRequest, InformationExtension};
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
-use client::api::v1::meta::RegionRole;
 use client::SendableRecordBatchStream;
-use common_base::readable_size::ReadableSize;
+use client::api::v1::meta::RegionRole;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
+use common_config::{Configurable, KvBackendConfig, metadata_store_dir};
 use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::cluster::{NodeInfo, NodeStatus};
@@ -37,8 +37,8 @@ use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
-use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -46,13 +46,13 @@ use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
+use common_meta::wal_options_allocator::{WalOptionsAllocatorRef, build_wal_options_allocator};
 use common_options::memory::MemoryOptions;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_query::request::QueryRequest;
 use common_telemetry::info;
 use common_telemetry::logging::{
-    LoggingOptions, SlowQueryOptions, TracingOptions, DEFAULT_LOGGING_DIR,
+    DEFAULT_LOGGING_DIR, LoggingOptions, SlowQueryOptions, TracingOptions,
 };
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
@@ -88,7 +88,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile, App};
+use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
 
@@ -790,6 +790,10 @@ impl InformationExtension for StandaloneInformationExtension {
             // Use `self.start_time_ms` instead.
             // It's not precise but enough.
             start_time_ms: self.start_time_ms,
+            cpus: common_config::utils::get_cpus() as u32,
+            memory_bytes: common_config::utils::get_sys_total_memory()
+                .unwrap_or_default()
+                .as_bytes(),
         };
         Ok(vec![node_info])
     }

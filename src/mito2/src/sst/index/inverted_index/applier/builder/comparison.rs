@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use datafusion_expr::{Expr as DfExpr, Operator};
-use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePredicate};
 use index::Bytes;
+use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePredicate};
 
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;

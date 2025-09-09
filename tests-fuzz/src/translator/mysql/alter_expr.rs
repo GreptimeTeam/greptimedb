@@ -22,8 +22,8 @@ use crate::error::{Error, Result};
 use crate::ir::alter_expr::AlterTableOperation;
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{AlterTableExpr, Column};
-use crate::translator::common::CommonAlterTableTranslator;
 use crate::translator::DslTranslator;
+use crate::translator::common::CommonAlterTableTranslator;
 
 pub struct AlterTableExprTranslator;
 

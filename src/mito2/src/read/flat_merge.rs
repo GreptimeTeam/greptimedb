@@ -825,7 +825,7 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt8Array, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
 

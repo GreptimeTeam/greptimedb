@@ -18,19 +18,19 @@ use common_catalog::consts::{
     INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID, INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID,
 };
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use datatypes::schema::SchemaRef;
 use snafu::{IntoError, ResultExt};
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
 
+use crate::CatalogManager;
 use crate::error::{ProjectSchemaSnafu, Result};
 use crate::information_schema::{
     DatanodeInspectKind, DatanodeInspectRequest, InformationTable, SSTS_MANIFEST, SSTS_STORAGE,
 };
 use crate::system_schema::utils;
-use crate::CatalogManager;
 
 /// Information schema table for sst manifest.
 pub struct InformationSchemaSstsManifest {
