@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
+use datafusion::catalog::TableFunction;
 use datafusion_expr::AggregateUDF;
 
 use crate::admin::AdminFunction;
@@ -42,6 +43,7 @@ use crate::system::SystemFunction;
 pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
+    table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
 }
 
 impl FunctionRegistry {
@@ -87,6 +89,15 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), func);
     }
 
+    /// Register a table function
+    pub fn register_table_function(&self, func: TableFunction) {
+        let _ = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(func.name().to_string(), Arc::new(func));
+    }
+
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
@@ -99,6 +110,15 @@ impl FunctionRegistry {
     /// Returns a list of all aggregate functions registered in the registry.
     pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
         self.aggregate_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn table_functions(&self) -> Vec<Arc<TableFunction>> {
+        self.table_functions
             .read()
             .unwrap()
             .values()
