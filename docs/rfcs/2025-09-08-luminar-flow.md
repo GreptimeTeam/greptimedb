@@ -172,7 +172,7 @@ Mirror writes are simplified to only transmit timestamps to flownode:
 
 ```rust
 struct MirrorWrite {
-    timestamp: Timestamp,
+    timestamps: Vec<Timestamp>,
     // Removed: actual data payload
 }
 ```
@@ -181,6 +181,8 @@ This optimization:
 - Eliminates network overhead by using embedded frontend
 - Enables flownode to track pending time windows efficiently
 - Allows flownode to decide processing mode (stream vs batch) based on timestamp age
+
+Another optimization could be just send dirty time windows range for each flow to flownode directly, no need to send timestamps one by one.
 
 ### Query Optimization Strategies
 
