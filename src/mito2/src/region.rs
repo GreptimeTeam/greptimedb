@@ -543,7 +543,8 @@ impl MitoRegion {
             .flat_map(|level| {
                 level.files().map(|file| {
                     let meta = file.meta_ref();
-                    let region_id = meta.region_id;
+                    let region_id = self.region_id;
+                    let origin_region_id = meta.region_id;
                     let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
                         let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
                         (Some(index_file_path), Some(meta.index_file_size))
@@ -568,6 +569,8 @@ impl MitoRegion {
                         min_ts: meta.time_range.0,
                         max_ts: meta.time_range.1,
                         sequence: meta.sequence.map(|s| s.get()),
+                        origin_region_id,
+                        node_id: None,
                     }
                 })
             })
