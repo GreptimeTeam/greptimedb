@@ -239,6 +239,116 @@ graph LR
 - **Efficient Queries**: Sequence constraints minimize data transfer
 - **Result Caching**: State results cached in flownode memory
 
+### Sequential Read Implementation for Incremental Queries
+
+#### Sequence Management
+
+Flow maintains two critical sequences to track incremental query progress for each region:
+
+- **`memtable_last_seq`**: Tracks the latest sequence number read from the memtable
+- **`sst_last_seq`**: Tracks the latest sequence number read from SST files
+
+These sequences enable precise incremental data processing by defining the exact range of data to query in subsequent iterations.
+
+#### Query Protocol
+
+When executing incremental queries, flownode provides both sequence parameters to datanode:
+
+```rust
+struct GrpcHeader {
+    ...
+    // Sequence tracking for incremental reads
+    memtable_last_seq: HashMap<RegionId, SequenceNumber>,
+    sst_last_seqs: HashMap<RegionId, SequenceNumber>,
+}
+```
+
+The datanode processes these parameters to return only the data within the specified sequence ranges, ensuring efficient incremental processing.
+
+#### Sequence Invalidation and Refill Mechanism
+
+A critical challenge occurs when data referenced by `memtable_last_seq` gets flushed from memory to disk. Since SST files only maintain a single maximum sequence number for the entire file (rather than per-record sequence tracking), precise incremental queries become impossible for the affected time ranges.
+
+**Detection of Invalidation:**
+```rust
+// When memtable_last_seq data has been flushed to SST
+if memtable_last_seq_flushed_to_disk {
+    // Incremental query is no longer feasible
+    // Need to trigger refill for affected time ranges
+}
+```
+
+**Refill Process:**
+1. **Identify Affected Time Range**: Query the time range corresponding to the flushed `memtable_last_seq` data
+2. **Full Recomputation**: Execute a complete aggregation query for the affected time windows
+3. **State Replacement**: Replace the existing flow state for these time ranges with newly computed values
+4. **Sequence Update**: Update `memtable_last_seq` to the current latest sequence, while `sst_last_seq` continues normal incremental updates
+
+```sql
+-- Refill query when memtable data has been flushed
+SELECT
+    __aggr_state(aggregation_functions) as state,
+    time_window,
+    group_keys
+FROM source_table
+WHERE
+    timestamp >= :affected_time_start
+    AND timestamp < :affected_time_end
+    -- Full scan required since sequence precision is lost in SST
+GROUP BY time_window, group_keys;
+```
+
+#### Datanode Implementation Requirements
+
+Datanode must implement enhanced query processing capabilities to support sequence-based incremental reads:
+
+**Input Processing:**
+- Accept `memtable_last_seq` and `sst_last_seq` parameters in query requests
+- Filter data based on sequence ranges across both memtable and SST storage layers
+
+**Output Enhancement:**
+```rust
+struct OutputMeta {
+    pub plan: Option<Arc<dyn ExecutionPlan>>,
+    pub cost: OutputCost,
+    pub sequence_info: HashMap<RegionId, SequenceInfo>, // New field for sequence tracking per regions involved in the query
+}
+
+struct SequenceInfo {
+    // Sequence tracking for next iteration
+    max_memtable_seq: SequenceNumber,  // Highest sequence from memtable in this result
+    max_sst_seq: SequenceNumber,       // Highest sequence from SST in this result
+}
+```
+
+**Sequence Tracking Logic:**
+datanode already impl `max_sst_seq` in leader range read, can reuse similar logic for `max_memtable_seq`.
+
+#### Sequence Update Strategy
+
+**Normal Incremental Updates:**
+- Update both `memtable_last_seq` and `sst_last_seq` after successful query execution
+- Use returned `max_memtable_seq` and `max_sst_seq` values for next iteration
+
+**Refill Scenario:**
+- Reset `memtable_last_seq` to current maximum after refill completion
+- Continue normal `sst_last_seq` updates based on successful query responses
+- Maintain separate tracking to detect future flush events
+
+#### Performance Considerations
+
+**Sequence Range Optimization:**
+- Minimize sequence range spans to reduce scan overhead
+- Batch multiple small incremental updates when beneficial
+- Balance between query frequency and processing efficiency
+
+**Memory Management:**
+- Monitor memtable flush frequency to predict refill requirements
+- Implement adaptive query scheduling based on flush patterns
+- Optimize state storage to handle frequent updates efficiently
+
+This sequential read implementation ensures reliable incremental processing while gracefully handling the complexities of storage architecture, maintaining both correctness and performance in the face of background compaction and flush operations.
+
 ## Implementation Plan
 
 ### Phase 1: Core Infrastructure
