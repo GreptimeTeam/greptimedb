@@ -24,9 +24,8 @@ use datafusion_common::{Column, TableReference};
 use datafusion_expr::dml::InsertOp;
 use datafusion_expr::{DmlStatement, TableSource, WriteOp, col};
 pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
-use snafu::ResultExt;
 
-use crate::error::{GeneralDataFusionSnafu, Result};
+use crate::error::Result;
 
 /// Rename columns by applying a new projection. Returns an error if the column to be
 /// renamed does not exist. The `renames` parameter is a `Vector` with elements
@@ -122,7 +121,7 @@ pub fn add_insert_to_logical_plan(
         WriteOp::Insert(InsertOp::Append),
         Arc::new(input),
     ));
-    let plan = plan.recompute_schema().context(GeneralDataFusionSnafu)?;
+    let plan = plan.recompute_schema()?;
     Ok(plan)
 }
 
