@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
@@ -22,7 +21,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_time::util::{DefaultSystemTimer, SystemTimer};
 use common_workload::DatanodeWorkloadType;
-use futures::TryStreamExt;
 use snafu::ResultExt;
 
 use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
@@ -66,24 +64,6 @@ pub fn build_active_filter<T: LastActiveTs>(
     }
 }
 
-/// Returns the alive datanode lease values.
-pub async fn alive_datanode_lease_values(
-    accessor: &impl LeaseValueAccessor,
-    active_duration: Duration,
-    condition: Option<fn(&NodeWorkloads) -> bool>,
-) -> Result<HashMap<u64, LeaseValue>> {
-    let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    accessor
-        .lease_values(LeaseValueType::Datanode)
-        .try_filter(|(_, lease_value)| {
-            futures::future::ready(
-                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
-            )
-        })
-        .try_collect::<HashMap<_, _>>()
-        .await
-}
-
 /// Returns the alive datanodes.
 pub async fn alive_datanodes(
     accessor: &impl LeaseValueAccessor,
@@ -91,16 +71,19 @@ pub async fn alive_datanodes(
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    accessor
+    let condition = condition.unwrap_or(|_| true);
+    Ok(accessor
         .lease_values(LeaseValueType::Datanode)
-        .try_filter(|(_, lease_value)| {
-            futures::future::ready(
-                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
-            )
+        .await?
+        .into_iter()
+        .filter_map(|(peer_id, lease_value)| {
+            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+                Some(Peer::new(peer_id, lease_value.node_addr))
+            } else {
+                None
+            }
         })
-        .map_ok(|(peer_id, lease_value)| Peer::new(peer_id, lease_value.node_addr))
-        .try_collect::<Vec<_>>()
-        .await
+        .collect::<Vec<_>>())
 }
 
 /// Returns the alive flownodes.
@@ -110,16 +93,19 @@ pub async fn alive_flownodes(
     condition: Option<fn(&NodeWorkloads) -> bool>,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    accessor
+    let condition = condition.unwrap_or(|_| true);
+    Ok(accessor
         .lease_values(LeaseValueType::Flownode)
-        .try_filter(|(_, lease_value)| {
-            futures::future::ready(
-                active_filter(lease_value) && condition.unwrap_or(|_| true)(&lease_value.workloads),
-            )
+        .await?
+        .into_iter()
+        .filter_map(|(peer_id, lease_value)| {
+            if active_filter(&lease_value) && condition(&lease_value.workloads) {
+                Some(Peer::new(peer_id, lease_value.node_addr))
+            } else {
+                None
+            }
         })
-        .map_ok(|(peer_id, lease_value)| Peer::new(peer_id, lease_value.node_addr))
-        .try_collect::<Vec<_>>()
-        .await
+        .collect::<Vec<_>>())
 }
 
 /// Returns the alive frontends.
@@ -128,12 +114,18 @@ pub async fn alive_frontends(
     active_duration: Duration,
 ) -> Result<Vec<Peer>> {
     let active_filter = build_active_filter(DefaultSystemTimer, active_duration);
-    lister
+    Ok(lister
         .node_infos(NodeInfoType::Frontend)
-        .try_filter(|(_, node_info)| futures::future::ready(active_filter(node_info)))
-        .map_ok(|(_, node_info)| node_info.peer)
-        .try_collect::<Vec<_>>()
-        .await
+        .await?
+        .into_iter()
+        .filter_map(|(_, node_info)| {
+            if active_filter(&node_info) {
+                Some(node_info.peer)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>())
 }
 
 /// Returns the alive datanode peer.

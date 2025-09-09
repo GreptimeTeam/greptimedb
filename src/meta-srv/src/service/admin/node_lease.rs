@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
@@ -39,8 +38,9 @@ impl NodeLeaseHandler {
         let leases = self
             .meta_peer_client
             .lease_values(LeaseValueType::Datanode)
-            .try_collect::<HashMap<_, _>>()
-            .await?;
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
 
         let leases = leases
             .into_iter()

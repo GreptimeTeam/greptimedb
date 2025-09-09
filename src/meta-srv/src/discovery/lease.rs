@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_stream::try_stream;
 use common_meta::kv_backend::KvBackend;
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::RangeRequest;
-use futures::stream::BoxStream;
 
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
@@ -31,10 +29,10 @@ pub enum LeaseValueType {
 #[async_trait::async_trait]
 pub trait LeaseValueAccessor: Send + Sync {
     /// Returns the peer id and lease value.
-    fn lease_values(
+    async fn lease_values(
         &self,
         lease_value_type: LeaseValueType,
-    ) -> BoxStream<Result<(u64, LeaseValue)>>;
+    ) -> Result<Vec<(u64, LeaseValue)>>;
 
     async fn lease_value(
         &self,
@@ -60,24 +58,24 @@ fn decoder(lease_value_type: LeaseValueType, kv: KeyValue) -> Result<(u64, Lease
 
 #[async_trait::async_trait]
 impl LeaseValueAccessor for MetaPeerClient {
-    fn lease_values(
+    async fn lease_values(
         &self,
         lease_value_type: LeaseValueType,
-    ) -> BoxStream<Result<(u64, LeaseValue)>> {
+    ) -> Result<Vec<(u64, LeaseValue)>> {
         let prefix = match lease_value_type {
             LeaseValueType::Flownode => FlownodeLeaseKey::prefix_key_by_cluster(),
             LeaseValueType::Datanode => DatanodeLeaseKey::prefix_key(),
         };
         let range_request = RangeRequest::new().with_prefix(prefix);
-        let fut = self.range(range_request);
-        let stream = try_stream! {
-            let response = fut.await?;
-            for kv in response.kvs {
+        let response = self.range(range_request).await?;
+        response
+            .kvs
+            .into_iter()
+            .map(|kv| {
                 let (lease_key, lease_value) = decoder(lease_value_type, kv)?;
-                yield (lease_key, lease_value);
-            }
-        };
-        Box::pin(stream)
+                Ok((lease_key, lease_value))
+            })
+            .collect::<Result<Vec<_>>>()
     }
 
     async fn lease_value(

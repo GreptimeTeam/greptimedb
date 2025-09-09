@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_stream::try_stream;
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::kv_backend::KvBackend;
 use common_meta::rpc::store::RangeRequest;
-use futures::stream::BoxStream;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClient;
@@ -39,24 +37,27 @@ impl From<NodeInfoType> for Role {
     }
 }
 
+/// Trait for types that can access node info.
+#[async_trait::async_trait]
 pub trait NodeInfoAccessor: Send + Sync {
     /// Returns the peer id and node info.
-    fn node_infos(&self, node_info_type: NodeInfoType) -> BoxStream<Result<(u64, NodeInfo)>>;
+    async fn node_infos(&self, node_info_type: NodeInfoType) -> Result<Vec<(u64, NodeInfo)>>;
 }
 
+#[async_trait::async_trait]
 impl NodeInfoAccessor for MetaPeerClient {
-    fn node_infos(&self, node_info_type: NodeInfoType) -> BoxStream<Result<(u64, NodeInfo)>> {
+    async fn node_infos(&self, node_info_type: NodeInfoType) -> Result<Vec<(u64, NodeInfo)>> {
         let range_request = RangeRequest::new()
             .with_prefix(NodeInfoKey::key_prefix_with_role(node_info_type.into()));
-        let fut = self.range(range_request);
+        let response = self.range(range_request).await?;
 
-        let stream = try_stream! {
-            let response = fut.await?;
-            for kv in response.kvs {
+        response
+            .kvs
+            .into_iter()
+            .map(|kv| {
                 let node_info = NodeInfo::try_from(kv.value).context(InvalidNodeInfoFormatSnafu)?;
-                yield (node_info.peer.id, node_info);
-            }
-        };
-        Box::pin(stream)
+                Ok((node_info.peer.id, node_info))
+            })
+            .collect::<Result<Vec<_>>>()
     }
 }
