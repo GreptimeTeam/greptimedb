@@ -544,7 +544,7 @@ impl PlanRewriter {
             .values()
             .cloned()
             .flatten()
-            .map(|c| c.to_string())
+            .map(|c| c.name().to_string())
             .collect();
         debug!(
             "PlanRewriter: expand on node: {on_node} with partition cols: {:?} and partition col alias mapping: {:?}",
