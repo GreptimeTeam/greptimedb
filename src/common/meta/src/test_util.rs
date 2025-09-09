@@ -35,7 +35,7 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::node_manager::{
     Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
-use crate::peer::{Peer, PeerLookupService};
+use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
@@ -208,20 +208,16 @@ pub fn new_ddl_context_with_kv_backend(
     }
 }
 
-pub struct NoopPeerLookupService;
+pub struct NoopPeerResolver;
 
 #[async_trait::async_trait]
-impl PeerLookupService for NoopPeerLookupService {
+impl PeerResolver for NoopPeerResolver {
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
-    }
-
-    async fn active_frontends(&self) -> Result<Vec<Peer>> {
-        Ok(vec![])
     }
 }
 

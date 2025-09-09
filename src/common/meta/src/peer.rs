@@ -19,17 +19,23 @@ pub use api::v1::meta::Peer;
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
 
-/// PeerLookupService is a service that can lookup peers.
+/// PeerResolver is a service that can resolve peers.
 #[async_trait::async_trait]
-pub trait PeerLookupService {
+pub trait PeerResolver: Send + Sync {
     /// Returns the datanode with the given id. It may return inactive peers.
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>, Error>;
 
     /// Returns the flownode with the given id. It may return inactive peers.
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
+}
 
+pub type PeerResolverRef = Arc<dyn PeerResolver>;
+
+/// PeerDiscovery is a service that can discover peers.
+#[async_trait::async_trait]
+pub trait PeerDiscovery: Send + Sync {
     /// Returns all currently active frontend nodes that have reported a heartbeat within the most recent heartbeat interval from the in-memory backend.
     async fn active_frontends(&self) -> Result<Vec<Peer>, Error>;
 }
 
-pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;
+pub type PeerDiscoveryRef = Arc<dyn PeerDiscovery>;

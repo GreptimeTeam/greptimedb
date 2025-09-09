@@ -20,7 +20,7 @@ use std::time::Duration;
 use common_meta::peer::Peer;
 use snafu::ensure;
 
-use crate::discovery::lease;
+use crate::discovery::{self, lease};
 use crate::error::{NoEnoughAvailableNodeSnafu, Result};
 use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::node_excluder::NodeExcluderRef;
@@ -62,11 +62,11 @@ impl RoundRobinSelector {
         let mut peers = match self.select_target {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
-                let lease_kvs = lease::alive_datanodes(
-                    &ctx.meta_peer_client,
+                let alive_datanodes = discovery::utils::alive_datanodes(
+                    ctx.meta_peer_client.as_ref(),
                     Duration::from_secs(ctx.datanode_lease_secs),
+                    Some(lease::is_datanode_accept_ingest_workload),
                 )
-                .with_condition(lease::is_datanode_accept_ingest_workload)
                 .await?;
 
                 let mut exclude_peer_ids = self
@@ -76,26 +76,19 @@ impl RoundRobinSelector {
                     .cloned()
                     .collect::<HashSet<_>>();
                 exclude_peer_ids.extend(opts.exclude_peer_ids.iter());
-                // 2. map into peers
-                lease_kvs
+
+                // 2. filter out excluded datanodes.
+                alive_datanodes
                     .into_iter()
-                    .filter(|(k, _)| !exclude_peer_ids.contains(&k.node_id))
-                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
+                    .filter(|p| !exclude_peer_ids.contains(&p.id))
                     .collect::<Vec<_>>()
             }
             SelectTarget::Flownode => {
-                // 1. get alive flownodes.
-                let lease_kvs = lease::alive_flownodes(
-                    &ctx.meta_peer_client,
+                discovery::utils::alive_flownodes(
+                    ctx.meta_peer_client.as_ref(),
                     Duration::from_secs(ctx.flownode_lease_secs),
                 )
-                .await?;
-
-                // 2. map into peers
-                lease_kvs
-                    .into_iter()
-                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
-                    .collect::<Vec<_>>()
+                .await?
             }
         };
 

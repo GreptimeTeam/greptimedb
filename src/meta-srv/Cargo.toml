@@ -19,6 +19,7 @@ local-ip-address.workspace = true
 
 [dependencies]
 api.workspace = true
+async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 axum-extra.workspace = true

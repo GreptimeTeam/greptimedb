@@ -18,6 +18,7 @@
 #![feature(let_chains)]
 #![feature(duration_constructors_lite)]
 #![feature(duration_constructors)]
+#![feature(string_from_utf8_lossy_owned)]
 
 pub mod bootstrap;
 pub mod cache_invalidator;

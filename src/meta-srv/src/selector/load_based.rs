@@ -24,9 +24,8 @@ use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use table::metadata::TableId;
 
-use crate::discovery::lease;
+use crate::discovery::{self, lease};
 use crate::error::{self, Result};
-use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::metasrv::SelectorContext;
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
@@ -67,18 +66,21 @@ where
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
-        let lease_kvs = lease::alive_datanodes(
-            &ctx.meta_peer_client,
+        let alive_datanodes = discovery::utils::alive_datanodes(
+            ctx.meta_peer_client.as_ref(),
             Duration::from_secs(ctx.datanode_lease_secs),
+            Some(lease::is_datanode_accept_ingest_workload),
         )
-        .with_condition(lease::is_datanode_accept_ingest_workload)
         .await?;
 
         // 2. get stat kvs and filter out expired datanodes.
-        let stat_keys = lease_kvs.keys().map(|k| k.into()).collect();
+        let stat_keys = alive_datanodes
+            .iter()
+            .map(|k| DatanodeStatKey { node_id: k.id })
+            .collect();
         let stat_kvs = filter_out_expired_datanode(
             ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?,
-            &lease_kvs,
+            &alive_datanodes,
         );
 
         // 3. try to make the regions of a table distributed on different datanodes as much as possible.
@@ -125,11 +127,11 @@ where
 
 fn filter_out_expired_datanode(
     mut stat_kvs: HashMap<DatanodeStatKey, DatanodeStatValue>,
-    lease_kvs: &HashMap<DatanodeLeaseKey, LeaseValue>,
+    datanodes: &[Peer],
 ) -> HashMap<DatanodeStatKey, DatanodeStatValue> {
-    lease_kvs
+    datanodes
         .iter()
-        .filter_map(|(lease_k, _)| stat_kvs.remove_entry(&lease_k.into()))
+        .filter_map(|p| stat_kvs.remove_entry(&DatanodeStatKey { node_id: p.id }))
         .collect()
 }
 
@@ -174,12 +176,9 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::meta::DatanodeWorkloads;
-    use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
-    use common_workload::DatanodeWorkloadType;
+    use common_meta::peer::Peer;
 
-    use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
 
     #[test]
@@ -198,18 +197,7 @@ mod tests {
             DatanodeStatValue { stats: vec![] },
         );
 
-        let mut lease_kvs = HashMap::new();
-        lease_kvs.insert(
-            DatanodeLeaseKey { node_id: 1 },
-            LeaseValue {
-                timestamp_millis: 0,
-                node_addr: "127.0.0.1:3002".to_string(),
-                workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
-                }),
-            },
-        );
-
+        let lease_kvs = vec![Peer::new(1, "127.0.0.1:3002".to_string())];
         let alive_stat_kvs = filter_out_expired_datanode(stat_kvs, &lease_kvs);
 
         assert_eq!(1, alive_stat_kvs.len());

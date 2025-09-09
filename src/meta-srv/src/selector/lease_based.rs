@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common_meta::peer::Peer;
 
-use crate::discovery::lease;
+use crate::discovery::{self, lease};
 use crate::error::Result;
 use crate::metasrv::SelectorContext;
 use crate::node_excluder::NodeExcluderRef;
@@ -52,21 +52,18 @@ impl Selector for LeaseBasedSelector {
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
-        let lease_kvs = lease::alive_datanodes(
-            &ctx.meta_peer_client,
+        let alive_datanodes = discovery::utils::alive_datanodes(
+            ctx.meta_peer_client.as_ref(),
             Duration::from_secs(ctx.datanode_lease_secs),
+            Some(lease::is_datanode_accept_ingest_workload),
         )
-        .with_condition(lease::is_datanode_accept_ingest_workload)
         .await?;
 
         // 2. compute weight array, but the weight of each item is the same.
-        let mut weight_array = lease_kvs
+        let mut weight_array = alive_datanodes
             .into_iter()
-            .map(|(k, v)| WeightedItem {
-                item: Peer {
-                    id: k.node_id,
-                    addr: v.node_addr.clone(),
-                },
+            .map(|p| WeightedItem {
+                item: p,
                 weight: 1.0,
             })
             .collect();

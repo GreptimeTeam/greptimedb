@@ -61,7 +61,7 @@ use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::discovery::lookup_datanode_peer;
+use crate::discovery;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
@@ -708,9 +708,9 @@ impl Metasrv {
     /// Looks up a datanode peer by peer_id, returning it only when it's alive.
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
-        lookup_datanode_peer(
+        discovery::utils::alive_datanode(
+            self.meta_peer_client.as_ref(),
             peer_id,
-            &self.meta_peer_client,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
         )
         .await

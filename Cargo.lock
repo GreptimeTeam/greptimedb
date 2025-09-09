@@ -7355,6 +7355,7 @@ name = "meta-srv"
 version = "0.18.0"
 dependencies = [
  "api",
+ "async-stream",
  "async-trait",
  "axum 0.8.4",
  "axum-extra",

@@ -12,42 +12,90 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::hash::Hash;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
-
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use common_error::ext::BoxedError;
-use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
-use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
+use async_stream::try_stream;
+use common_meta::DatanodeId;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
-use common_meta::peer::{Peer, PeerLookupService};
+use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::RangeRequest;
-use common_meta::{DatanodeId, FlownodeId, util};
-use common_time::util as time_util;
 use common_workload::DatanodeWorkloadType;
+use futures::stream::BoxStream;
 use snafu::ResultExt;
 
-use crate::cluster::MetaPeerClientRef;
-use crate::error::{Error, KvBackendSnafu, Result};
+use crate::cluster::MetaPeerClient;
+use crate::error::{KvBackendSnafu, Result};
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
-enum Value<'a> {
-    LeaseValue(&'a LeaseValue),
-    NodeInfo(&'a NodeInfo),
+#[derive(Clone, Copy)]
+pub enum LeaseValueType {
+    Flownode,
+    Datanode,
 }
 
-fn build_lease_filter(lease: Duration) -> impl Fn(Value) -> bool {
-    move |value: Value| {
-        let active_time = match value {
-            Value::LeaseValue(lease_value) => lease_value.timestamp_millis,
-            Value::NodeInfo(node_info) => node_info.last_activity_ts,
+#[async_trait::async_trait]
+pub trait LeaseValueAccessor: Send + Sync {
+    /// Returns the peer id and lease value.
+    fn lease_values(
+        &self,
+        lease_value_type: LeaseValueType,
+    ) -> BoxStream<Result<(u64, LeaseValue)>>;
+
+    async fn lease_value(
+        &self,
+        lease_value_type: LeaseValueType,
+        node_id: u64,
+    ) -> Result<Option<(u64, LeaseValue)>>;
+}
+
+fn decoder(lease_value_type: LeaseValueType, kv: KeyValue) -> Result<(u64, LeaseValue)> {
+    match lease_value_type {
+        LeaseValueType::Flownode => {
+            let lease_key: FlownodeLeaseKey = kv.key.try_into()?;
+            let lease_value: LeaseValue = kv.value.try_into()?;
+            Ok((lease_key.node_id, lease_value))
+        }
+        LeaseValueType::Datanode => {
+            let lease_key: DatanodeLeaseKey = kv.key.try_into()?;
+            let lease_value: LeaseValue = kv.value.try_into()?;
+            Ok((lease_key.node_id, lease_value))
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LeaseValueAccessor for MetaPeerClient {
+    fn lease_values(
+        &self,
+        lease_value_type: LeaseValueType,
+    ) -> BoxStream<Result<(u64, LeaseValue)>> {
+        let prefix = match lease_value_type {
+            LeaseValueType::Flownode => FlownodeLeaseKey::prefix_key_by_cluster(),
+            LeaseValueType::Datanode => DatanodeLeaseKey::prefix_key(),
+        };
+        let range_request = RangeRequest::new().with_prefix(prefix);
+        let fut = self.range(range_request);
+        let stream = try_stream! {
+            let response = fut.await?;
+            for kv in response.kvs {
+                let (lease_key, lease_value) = decoder(lease_value_type, kv)?;
+                yield (lease_key, lease_value);
+            }
+        };
+        Box::pin(stream)
+    }
+
+    async fn lease_value(
+        &self,
+        lease_value_type: LeaseValueType,
+        node_id: u64,
+    ) -> Result<Option<(u64, LeaseValue)>> {
+        let key: Vec<u8> = match lease_value_type {
+            LeaseValueType::Flownode => FlownodeLeaseKey { node_id }.try_into()?,
+            LeaseValueType::Datanode => DatanodeLeaseKey { node_id }.try_into()?,
         };
 
-        ((time_util::current_time_millis() - active_time) as u64) < lease.as_millis() as u64
+        let response = self.get(&key).await?;
+        response.map(|kv| decoder(lease_value_type, kv)).transpose()
     }
 }
 
@@ -89,256 +137,22 @@ pub async fn find_datanode_lease_value(
     Ok(Some(lease_value))
 }
 
-/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], will only return if it's alive under given `lease_secs`
-pub async fn lookup_datanode_peer(
-    datanode_id: DatanodeId,
-    meta_peer_client: &MetaPeerClientRef,
-    lease: Duration,
-) -> Result<Option<Peer>> {
-    let lease_filter = build_lease_filter(lease);
-    let lease_key = DatanodeLeaseKey {
-        node_id: datanode_id,
-    };
-    let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
-    let Some(kv) = meta_peer_client.get(&lease_key_bytes).await? else {
-        return Ok(None);
-    };
-    let lease_value: LeaseValue = kv.value.try_into()?;
-    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
-    if is_alive {
-        Ok(Some(Peer {
-            id: lease_key.node_id,
-            addr: lease_value.node_addr,
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
-type LeaseFilterFuture<'a, K> =
-    Pin<Box<dyn Future<Output = Result<HashMap<K, LeaseValue>>> + Send + 'a>>;
-
-pub struct LeaseFilter<'a, K>
-where
-    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
-{
-    lease: Duration,
-    key_prefix: Vec<u8>,
-    meta_peer_client: &'a MetaPeerClientRef,
-    condition: Option<fn(&LeaseValue) -> bool>,
-    inner_future: Option<LeaseFilterFuture<'a, K>>,
-}
-
-impl<'a, K> LeaseFilter<'a, K>
-where
-    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
-{
-    pub fn new(
-        lease: Duration,
-        key_prefix: Vec<u8>,
-        meta_peer_client: &'a MetaPeerClientRef,
-    ) -> Self {
-        Self {
-            lease,
-            key_prefix,
-            meta_peer_client,
-            condition: None,
-            inner_future: None,
-        }
-    }
-
-    /// Set the condition for the lease filter.
-    pub fn with_condition(mut self, condition: fn(&LeaseValue) -> bool) -> Self {
-        self.condition = Some(condition);
-        self
-    }
-}
-
-impl<'a, K> Future for LeaseFilter<'a, K>
-where
-    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
-{
-    type Output = Result<HashMap<K, LeaseValue>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        if this.inner_future.is_none() {
-            let lease_filter = build_lease_filter(this.lease);
-            let condition = this.condition;
-            let key_prefix = std::mem::take(&mut this.key_prefix);
-            let fut = filter(key_prefix, this.meta_peer_client, move |v| {
-                lease_filter(Value::LeaseValue(v)) && condition.unwrap_or(|_| true)(v)
-            });
-
-            this.inner_future = Some(Box::pin(fut));
-        }
-
-        let fut = this.inner_future.as_mut().unwrap();
-        let result = futures::ready!(fut.as_mut().poll(cx))?;
-
-        Poll::Ready(Ok(result))
-    }
-}
-
-/// Find all alive datanodes
-pub fn alive_datanodes(
-    meta_peer_client: &MetaPeerClientRef,
-    lease: Duration,
-) -> LeaseFilter<'_, DatanodeLeaseKey> {
-    LeaseFilter::new(lease, DatanodeLeaseKey::prefix_key(), meta_peer_client)
-}
-
-/// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], only return if it's alive under given `lease_secs`
-pub async fn lookup_flownode_peer(
-    flownode_id: FlownodeId,
-    meta_peer_client: &MetaPeerClientRef,
-    lease: Duration,
-) -> Result<Option<Peer>> {
-    let lease_filter = build_lease_filter(lease);
-    let lease_key = FlownodeLeaseKey {
-        node_id: flownode_id,
-    };
-    let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
-    let Some(kv) = meta_peer_client.get(&lease_key_bytes).await? else {
-        return Ok(None);
-    };
-    let lease_value: LeaseValue = kv.value.try_into()?;
-
-    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
-    if is_alive {
-        Ok(Some(Peer {
-            id: lease_key.node_id,
-            addr: lease_value.node_addr,
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Lookup all alive frontends from the memory backend, only return if it's alive under given `lease_secs`.
-pub async fn lookup_frontends(
-    meta_peer_client: &MetaPeerClientRef,
-    lease: Duration,
-) -> Result<Vec<Peer>> {
-    let range_request =
-        RangeRequest::new().with_prefix(NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend));
-
-    let response = meta_peer_client.range(range_request).await?;
-    let lease_filter = build_lease_filter(lease);
-
-    let mut peers = Vec::with_capacity(response.kvs.len());
-    for kv in response.kvs {
-        let node_info = NodeInfo::try_from(kv.value).context(KvBackendSnafu)?;
-        let is_alive = lease_filter(Value::NodeInfo(&node_info));
-        if is_alive {
-            peers.push(node_info.peer);
-        }
-    }
-
-    Ok(peers)
-}
-
-/// Find all alive flownodes
-pub fn alive_flownodes(
-    meta_peer_client: &MetaPeerClientRef,
-    lease: Duration,
-) -> LeaseFilter<'_, FlownodeLeaseKey> {
-    LeaseFilter::new(
-        lease,
-        FlownodeLeaseKey::prefix_key_by_cluster(),
-        meta_peer_client,
-    )
-}
-
-pub async fn filter<P, K>(
-    key: Vec<u8>,
-    meta_peer_client: &MetaPeerClientRef,
-    predicate: P,
-) -> Result<HashMap<K, LeaseValue>>
-where
-    P: Fn(&LeaseValue) -> bool,
-    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error>,
-{
-    let range_end = util::get_prefix_end_key(&key);
-    let range_req = common_meta::rpc::store::RangeRequest {
-        key,
-        range_end,
-        keys_only: false,
-        ..Default::default()
-    };
-    let kvs = meta_peer_client.range(range_req).await?.kvs;
-    let mut lease_kvs = HashMap::new();
-    for kv in kvs {
-        let lease_key: K = kv.key.try_into()?;
-        let lease_value: LeaseValue = kv.value.try_into()?;
-        if !predicate(&lease_value) {
-            continue;
-        }
-        let _ = lease_kvs.insert(lease_key, lease_value);
-    }
-
-    Ok(lease_kvs)
-}
-
-#[derive(Clone)]
-pub struct MetaPeerLookupService {
-    pub meta_peer_client: MetaPeerClientRef,
-}
-
-impl MetaPeerLookupService {
-    pub fn new(meta_peer_client: MetaPeerClientRef) -> Self {
-        Self { meta_peer_client }
-    }
-}
-
-#[async_trait::async_trait]
-impl PeerLookupService for MetaPeerLookupService {
-    async fn datanode(&self, id: DatanodeId) -> common_meta::error::Result<Option<Peer>> {
-        lookup_datanode_peer(id, &self.meta_peer_client, Duration::from_secs(u64::MAX))
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
-    }
-
-    async fn flownode(&self, id: FlownodeId) -> common_meta::error::Result<Option<Peer>> {
-        lookup_flownode_peer(id, &self.meta_peer_client, Duration::from_secs(u64::MAX))
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
-    }
-
-    async fn active_frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
-        // Get the active frontends within the last heartbeat interval.
-        lookup_frontends(
-            &self.meta_peer_client,
-            // TODO(zyy17): How to get the heartbeat interval of the frontend if it uses a custom heartbeat interval?
-            Duration::from_millis(FRONTEND_HEARTBEAT_INTERVAL_MILLIS),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(common_meta::error::ExternalSnafu)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use api::v1::meta::DatanodeWorkloads;
     use api::v1::meta::heartbeat_request::NodeWorkloads;
-    use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus};
+    use common_meta::cluster::{FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus, Role};
     use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
     use common_meta::kv_backend::ResettableKvBackendRef;
-    use common_meta::peer::{Peer, PeerLookupService};
+    use common_meta::peer::{Peer, PeerDiscovery};
     use common_meta::rpc::store::PutRequest;
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
 
-    use super::{
-        ClusterRole, MetaPeerLookupService, alive_datanodes, is_datanode_accept_ingest_workload,
-        lookup_frontends,
-    };
+    use super::is_datanode_accept_ingest_workload;
+    use crate::discovery::utils;
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
 
@@ -385,11 +199,15 @@ mod tests {
             }),
         };
         put_lease_value(&in_memory, key.clone(), value.clone()).await;
-        let leases = alive_datanodes(&client, Duration::from_secs(lease_secs as u64))
-            .await
-            .unwrap();
-        assert_eq!(leases.len(), 1);
-        assert_eq!(leases.get(&key), Some(&value));
+        let peers = utils::alive_datanodes(
+            client.as_ref(),
+            Duration::from_secs(lease_secs as u64),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers, vec![Peer::new(2, "127.0.0.1:20202".to_string())]);
     }
 
     #[tokio::test]
@@ -443,12 +261,15 @@ mod tests {
         };
         put_lease_value(&in_memory, key, value).await;
 
-        let leases = alive_datanodes(&client, Duration::from_secs(lease_secs))
-            .with_condition(is_datanode_accept_ingest_workload)
-            .await
-            .unwrap();
-        assert_eq!(leases.len(), 1);
-        assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 2 }));
+        let peers = utils::alive_datanodes(
+            client.as_ref(),
+            Duration::from_secs(lease_secs),
+            Some(is_datanode_accept_ingest_workload),
+        )
+        .await
+        .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert!(peers.contains(&Peer::new(2, "127.0.0.1:20202".to_string())));
     }
 
     #[tokio::test]
@@ -471,7 +292,7 @@ mod tests {
             memory_bytes: 0,
         };
 
-        let key_prefix = NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend);
+        let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
 
         in_memory
             .put(PutRequest {
@@ -505,10 +326,9 @@ mod tests {
             .await
             .unwrap();
 
-        let peers = lookup_frontends(&client, Duration::from_secs(lease_secs))
+        let peers = utils::alive_frontends(client.as_ref(), Duration::from_secs(lease_secs))
             .await
             .unwrap();
-
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].id, 0);
     }
@@ -534,7 +354,7 @@ mod tests {
             memory_bytes: 0,
         };
 
-        let key_prefix = NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend);
+        let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
 
         in_memory
             .put(PutRequest {
@@ -545,8 +365,7 @@ mod tests {
             .await
             .unwrap();
 
-        let service = MetaPeerLookupService::new(client);
-        let peers = service.active_frontends().await.unwrap();
+        let peers = client.active_frontends().await.unwrap();
         assert_eq!(peers.len(), 0);
     }
 }

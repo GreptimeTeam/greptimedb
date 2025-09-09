@@ -51,7 +51,6 @@ use snafu::{ResultExt, ensure};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::discovery::lease::MetaPeerLookupService;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
@@ -203,10 +202,9 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
-            peer_lookup_service.clone(),
+            meta_peer_client.clone(),
             Some(InsertOptions {
                 ttl: options.event_recorder.ttl,
                 append_mode: true,
@@ -378,7 +376,7 @@ impl MetasrvBuilder {
                 supervisor_selector,
                 region_migration_manager.clone(),
                 runtime_switch_manager.clone(),
-                peer_lookup_service.clone(),
+                meta_peer_client.clone(),
                 leader_cached_kv_backend.clone(),
             );
 
@@ -470,7 +468,7 @@ impl MetasrvBuilder {
 
         let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
             let inserter = Box::new(InsertForwarder::new(
-                peer_lookup_service.clone(),
+                meta_peer_client.clone(),
                 Some(InsertOptions {
                     ttl: options.stats_persistence.ttl,
                     append_mode: true,
