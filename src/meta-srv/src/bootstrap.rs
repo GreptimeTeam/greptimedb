@@ -34,6 +34,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
+use either::Either;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
@@ -77,7 +78,7 @@ use crate::{error, Result};
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
 
-    http_server: HttpServer,
+    http_server: Either<Option<HttpServerBuilder>, HttpServer>,
 
     opts: MetasrvOptions,
 
@@ -103,11 +104,10 @@ impl MetasrvInstance {
         // Wire up the admin_axum_router as an extra router
         let extra_routers = admin_axum_router(metasrv.clone());
 
-        let http_server = HttpServerBuilder::new(opts.http.clone())
+        let builder = HttpServerBuilder::new(opts.http.clone())
             .with_metrics_handler(MetricsHandler)
             .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
-            .with_extra_router(extra_routers)
-            .build();
+            .with_extra_router(extra_routers);
 
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
@@ -115,7 +115,7 @@ impl MetasrvInstance {
             .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
-            http_server,
+            http_server: Either::Left(Some(builder)),
             opts,
             signal_sender: None,
             plugins,
@@ -126,6 +126,25 @@ impl MetasrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        if let Some(builder) = self.http_server.as_mut().left()
+            && let Some(builder) = builder.take()
+        {
+            let mut server = builder.build();
+
+            let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
+                addr: &self.opts.http.addr,
+            })?;
+            info!("starting http server at {}", addr);
+            server.start(addr).await.context(error::StartHttpSnafu)?;
+
+            self.http_server = Either::Right(server);
+        } else {
+            // If the http server builder is not present, the Metasrv has to be called "start"
+            // already, regardless of the startup was successful or not. Return an `Ok` here for
+            // simplicity.
+            return Ok(());
+        };
+
         self.metasrv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
@@ -149,14 +168,6 @@ impl MetasrvInstance {
                 .await?;
         self.bind_addr = Some(socket_addr);
 
-        let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
-            addr: &self.opts.http.addr,
-        })?;
-        self.http_server
-            .start(addr)
-            .await
-            .context(error::StartHttpSnafu)?;
-
         *self.serve_state.lock().await = Some(serve_state_rx);
         Ok(())
     }
@@ -174,12 +185,15 @@ impl MetasrvInstance {
                 .context(error::SendShutdownSignalSnafu)?;
         }
         self.metasrv.shutdown().await?;
-        self.http_server
-            .shutdown()
-            .await
-            .context(error::ShutdownServerSnafu {
-                server: self.http_server.name(),
-            })?;
+
+        if let Some(http_server) = self.http_server.as_ref().right() {
+            http_server
+                .shutdown()
+                .await
+                .context(error::ShutdownServerSnafu {
+                    server: http_server.name(),
+                })?;
+        }
         Ok(())
     }
 
@@ -192,6 +206,14 @@ impl MetasrvInstance {
     }
     pub fn bind_addr(&self) -> &Option<SocketAddr> {
         &self.bind_addr
+    }
+
+    pub fn mut_http_server(&mut self) -> &mut Either<Option<HttpServerBuilder>, HttpServer> {
+        &mut self.http_server
+    }
+
+    pub fn http_server(&self) -> Option<&HttpServer> {
+        self.http_server.as_ref().right()
     }
 }
 
