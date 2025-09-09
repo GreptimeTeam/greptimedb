@@ -190,9 +190,10 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
             // only accept at most one child plan, and if not one of the above nodes,
             // also shouldn't modify the schema or else alias scope tracker can't support them
             if node.inputs().len() > 1 {
-                Err(datafusion::error::DataFusionError::Internal(
-                    "only accept plan with at most one child".to_string(),
-                ))
+                Err(datafusion::error::DataFusionError::Internal(format!(
+                    "only accept plan with at most one child, found: {}",
+                    node
+                )))
             } else if node.inputs().len() == 1 {
                 if input_schema != output_schema {
                     let input_columns = input_schema.columns();
