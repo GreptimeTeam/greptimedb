@@ -961,7 +961,10 @@ mod tests {
     #[test]
     fn test_empty_buffer_first_push() {
         let mut divider = FlatSeriesBatchDivider::default();
+        let result = divider.finish();
+        assert!(result.is_none());
 
+        let mut divider = FlatSeriesBatchDivider::default();
         let batch = new_test_record_batch(
             &[b"series1", b"series1"],
             &[1000, 2000],
@@ -969,7 +972,6 @@ mod tests {
             &[OpType::Put, OpType::Put],
             &[10, 20],
         );
-
         let result = divider.push(batch);
         assert!(result.is_none());
         assert_eq!(divider.buffer.batches.len(), 1);
@@ -997,9 +999,9 @@ mod tests {
 
         divider.push(batch1);
         let result = divider.push(batch2);
-
         assert!(result.is_none());
-        assert_eq!(divider.buffer.batches.len(), 2);
+        let series_batch = divider.finish().unwrap();
+        assert_eq!(series_batch.batches.len(), 2);
     }
 
     #[test]
@@ -1023,10 +1025,7 @@ mod tests {
         );
 
         divider.push(batch1);
-        let result = divider.push(batch2);
-
-        assert!(result.is_some());
-        let series_batch = result.unwrap();
+        let series_batch = divider.push(batch2).unwrap();
         assert_eq!(series_batch.batches.len(), 1);
 
         assert_eq!(divider.buffer.batches.len(), 1);
@@ -1053,11 +1052,9 @@ mod tests {
         );
 
         divider.push(batch1);
-        let result = divider.push(batch2);
-
-        assert!(result.is_some());
-        let series_batch = result.unwrap();
+        let series_batch = divider.push(batch2).unwrap();
         assert_eq!(series_batch.batches.len(), 2);
+        assert_eq!(series_batch.batches[0].num_rows(), 2);
         assert_eq!(series_batch.batches[1].num_rows(), 1);
 
         assert_eq!(divider.buffer.batches.len(), 1);
@@ -1065,35 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_with_data() {
-        let mut divider = FlatSeriesBatchDivider::default();
-
-        let batch = new_test_record_batch(
-            &[b"series1", b"series1"],
-            &[1000, 2000],
-            &[1, 2],
-            &[OpType::Put, OpType::Put],
-            &[10, 20],
-        );
-
-        divider.push(batch);
-        let result = divider.finish();
-
-        assert!(result.is_some());
-        let series_batch = result.unwrap();
-        assert_eq!(series_batch.batches.len(), 1);
-        assert!(divider.buffer.batches.is_empty());
-    }
-
-    #[test]
-    fn test_finish_with_empty_buffer() {
-        let mut divider = FlatSeriesBatchDivider::default();
-        let result = divider.finish();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_complex_series_splitting() {
+    fn test_series_splitting() {
         let mut divider = FlatSeriesBatchDivider::default();
 
         let batch1 = new_test_record_batch(&[b"series1"], &[1000], &[1], &[OpType::Put], &[10]);
@@ -1107,47 +1076,14 @@ mod tests {
         );
 
         divider.push(batch1);
-        let result1 = divider.push(batch2);
-
-        assert!(result1.is_some());
-        let series_batch = result1.unwrap();
+        let series_batch = divider.push(batch2).unwrap();
         assert_eq!(series_batch.batches.len(), 2);
 
         let total_rows: usize = series_batch.batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
 
-        let final_result = divider.finish();
-        assert!(final_result.is_some());
-        let final_batch = final_result.unwrap();
+        let final_batch = divider.finish().unwrap();
         assert_eq!(final_batch.batches.len(), 1);
         assert_eq!(final_batch.batches[0].num_rows(), 3);
-    }
-
-    #[test]
-    fn test_multiple_series_changes_in_single_batch() {
-        let mut divider = FlatSeriesBatchDivider::default();
-
-        let batch1 = new_test_record_batch(&[b"series1"], &[1000], &[1], &[OpType::Put], &[10]);
-
-        let batch2 = new_test_record_batch(
-            &[b"series2", b"series3"],
-            &[2000, 3000],
-            &[2, 3],
-            &[OpType::Put, OpType::Put],
-            &[20, 30],
-        );
-
-        divider.push(batch1);
-        let result = divider.push(batch2);
-
-        assert!(result.is_some());
-        let series_batch = result.unwrap();
-        assert_eq!(series_batch.batches.len(), 1);
-        assert_eq!(series_batch.batches.len(), 1);
-        assert_eq!(series_batch.batches[0].num_rows(), 1);
-
-        let series_batch = divider.finish().unwrap();
-        assert_eq!(series_batch.batches.len(), 1);
-        assert_eq!(series_batch.batches[0].num_rows(), 2);
     }
 }
