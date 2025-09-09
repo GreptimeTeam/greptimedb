@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use datatypes::schema::SchemaRef;
-use snafu::{IntoError, ResultExt};
+use snafu::ResultExt;
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
 
@@ -73,9 +73,11 @@ impl InformationTable for InformationSchemaSstsManifest {
         };
 
         let future = async move {
-            info_ext.inspect_datanode(req).await.map_err(|e| {
-                common_recordbatch::error::ExternalSnafu.into_error(BoxedError::new(e))
-            })
+            info_ext
+                .inspect_datanode(req)
+                .await
+                .map_err(BoxedError::new)
+                .context(common_recordbatch::error::ExternalSnafu)
         };
         Ok(Box::pin(AsyncRecordBatchStreamAdapter::new(
             schema,
@@ -126,9 +128,11 @@ impl InformationTable for InformationSchemaSstsStorage {
         };
 
         let future = async move {
-            info_ext.inspect_datanode(req).await.map_err(|e| {
-                common_recordbatch::error::ExternalSnafu.into_error(BoxedError::new(e))
-            })
+            info_ext
+                .inspect_datanode(req)
+                .await
+                .map_err(BoxedError::new)
+                .context(common_recordbatch::error::ExternalSnafu)
         };
         Ok(Box::pin(AsyncRecordBatchStreamAdapter::new(
             schema,
