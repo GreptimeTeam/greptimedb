@@ -36,8 +36,8 @@ impl Function for DateFormatFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -129,7 +129,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion_expr::{TypeSignature, Volatility};
-    use datatypes::prelude::{ConcreteDataType, ScalarVector};
+    use datatypes::prelude::ScalarVector;
     use datatypes::value::Value;
     use datatypes::vectors::{DateVector, StringVector, TimestampSecondVector};
 
@@ -140,19 +140,16 @@ mod tests {
         let f = DateFormatFunction;
         assert_eq!("date_format", f.name());
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_microsecond_datatype()])
+            DataType::Utf8,
+            f.return_type(&[DataType::Timestamp(TimeUnit::Microsecond, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_second_datatype()])
+            DataType::Utf8,
+            f.return_type(&[DataType::Timestamp(TimeUnit::Second, None)])
                 .unwrap()
         );
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, f.return_type(&[DataType::Date32]).unwrap());
         assert!(matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),

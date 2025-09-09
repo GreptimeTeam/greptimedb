@@ -37,8 +37,8 @@ macro_rules! json_is {
                     stringify!([<$name:snake>])
                 }
 
-                fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                    Ok(ConcreteDataType::boolean_datatype())
+                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+                    Ok(DataType::Boolean)
                 }
 
                 fn signature(&self) -> Signature {
@@ -161,9 +161,8 @@ mod tests {
         for (func, expected_name) in json_is_functions.iter().zip(expected_names.iter()) {
             assert_eq!(func.name(), *expected_name);
             assert_eq!(
-                func.return_type(&[ConcreteDataType::json_datatype()])
-                    .unwrap(),
-                ConcreteDataType::boolean_datatype()
+                func.return_type(&[DataType::Binary]).unwrap(),
+                DataType::Boolean
             );
             assert_eq!(
                 func.signature(),

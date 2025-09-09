@@ -20,7 +20,6 @@ use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::compute::kernels::cast;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::*;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
 
@@ -41,8 +40,8 @@ impl Function for RateFunction {
         "rate"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
@@ -84,10 +83,7 @@ mod tests {
     fn test_rate_function() {
         let rate = RateFunction;
         assert_eq!("rate", rate.name());
-        assert_eq!(
-            ConcreteDataType::float64_datatype(),
-            rate.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Float64, rate.return_type(&[]).unwrap());
         assert!(matches!(rate.signature(),
                          Signature {
                              type_signature: TypeSignature::Uniform(2, valid_types),

@@ -19,7 +19,6 @@ use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
 use derive_more::Display;
@@ -43,8 +42,8 @@ impl Function for LatLngToPointWkt {
         "wkt_point_from_latlng"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {

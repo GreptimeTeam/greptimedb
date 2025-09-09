@@ -260,8 +260,8 @@ impl Memtable for TimeSeriesMemtable {
         }
 
         metrics.max_sequence = part.sequence;
-        metrics.max_ts = part.max_ts;
-        metrics.min_ts = part.min_ts;
+        metrics.max_ts = part.max_timestamp;
+        metrics.min_ts = part.min_timestamp;
         metrics.num_rows = part.num_rows();
         self.update_stats(metrics);
         Ok(())

@@ -15,10 +15,9 @@
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::InvalidFuncArgsSnafu;
+use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_expr::Signature;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
 use nalgebra::DVectorView;
@@ -51,11 +50,8 @@ impl Function for VectorSubFunction {
         NAME
     }
 
-    fn return_type(
-        &self,
-        _input_types: &[ConcreteDataType],
-    ) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::binary_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Binary)
     }
 
     fn signature(&self) -> Signature {
