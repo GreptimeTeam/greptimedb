@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use config::{Environment, File, FileFormat};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu, TomlFormatSnafu};

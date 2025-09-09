@@ -29,8 +29,8 @@ mod handle_write;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
@@ -41,15 +41,15 @@ use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
-use rand::{rng, Rng};
-use snafu::{ensure, ResultExt};
+use rand::{Rng, rng};
+use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
@@ -59,6 +59,7 @@ use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
+use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
@@ -145,6 +146,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -209,6 +211,7 @@ impl WorkerGroup {
                     plugins: plugins.clone(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
                     file_ref_manager: file_ref_manager.clone(),
+                    partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
             })
@@ -306,6 +309,7 @@ impl WorkerGroup {
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
         time_provider: TimeProviderRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
@@ -363,6 +367,7 @@ impl WorkerGroup {
                     plugins: Plugins::new(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
                     file_ref_manager: file_ref_manager.clone(),
+                    partition_expr_fetcher: partition_expr_fetcher.clone(),
                 }
                 .start()
             })
@@ -443,6 +448,7 @@ struct WorkerStarter<S> {
     plugins: Plugins,
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -496,6 +502,7 @@ impl<S: LogStore> WorkerStarter<S> {
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
+            partition_expr_fetcher: self.partition_expr_fetcher,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -747,6 +754,8 @@ struct RegionWorkerLoop<S> {
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Datanode level file references manager.
     file_ref_manager: FileReferenceManagerRef,
+    /// Partition expr fetcher used to backfill partition expr on open for compatibility.
+    partition_expr_fetcher: PartitionExprFetcherRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

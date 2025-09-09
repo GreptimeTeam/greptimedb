@@ -19,7 +19,7 @@ use async_compression::futures::bufread::ZstdEncoder;
 use async_trait::async_trait;
 use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite, StreamExt};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use uuid::Uuid;
 

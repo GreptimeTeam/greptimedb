@@ -23,10 +23,10 @@ use table::metadata::{TableId, TableType};
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
+use crate::ddl::DdlContext;
 use crate::ddl::drop_database::executor::DropDatabaseExecutor;
 use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
-use crate::ddl::DdlContext;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
@@ -210,7 +210,7 @@ mod tests {
     use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
     use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
     use crate::ddl::test_util::{create_logical_table, create_physical_table};
-    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     #[tokio::test]
     async fn test_next_without_logical_tables() {

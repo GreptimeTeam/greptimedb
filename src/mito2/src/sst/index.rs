@@ -393,8 +393,8 @@ mod tests {
     use datatypes::schema::{
         ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
     };
-    use object_store::services::Memory;
     use object_store::ObjectStore;
+    use object_store::services::Memory;
     use puffin_manager::PuffinManagerFactory;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 

@@ -34,9 +34,19 @@ use crate::function::{Function, FunctionContext};
 /// For example:
 /// - 167772160 (0x0A000000) returns "10.0.0.0"
 /// - 3232235521 (0xC0A80001) returns "192.168.0.1"
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4NumToString;
+pub struct Ipv4NumToString {
+    aliases: [String; 1],
+}
+
+impl Default for Ipv4NumToString {
+    fn default() -> Self {
+        Self {
+            aliases: ["inet_ntoa".to_string()],
+        }
+    }
+}
 
 impl Function for Ipv4NumToString {
     fn name(&self) -> &str {
@@ -84,6 +94,10 @@ impl Function for Ipv4NumToString {
         }
 
         Ok(results.to_vector())
+    }
+
+    fn aliases(&self) -> &[String] {
+        &self.aliases
     }
 }
 
@@ -156,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_num_to_string() {
-        let func = Ipv4NumToString;
+        let func = Ipv4NumToString::default();
         let ctx = FunctionContext::default();
 
         // Test data
@@ -193,7 +207,7 @@ mod tests {
     #[test]
     fn test_ipv4_conversions_roundtrip() {
         let to_num = Ipv4StringToNum;
-        let to_string = Ipv4NumToString;
+        let to_string = Ipv4NumToString::default();
         let ctx = FunctionContext::default();
 
         // Test data for string to num to string

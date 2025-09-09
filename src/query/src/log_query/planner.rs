@@ -20,7 +20,7 @@ use datafusion::execution::SessionState;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
-    col, lit, not, BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator, col, lit, not,
 };
 use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
@@ -556,8 +556,8 @@ impl LogQueryPlanner {
 mod tests {
     use std::sync::Arc;
 
-    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use common_query::test_util::DummyDecoder;
     use datafusion::execution::SessionStateBuilder;

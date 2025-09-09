@@ -25,7 +25,7 @@ use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::tests::create_view::{test_create_view_task, test_table_names};
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropViewTask;
-use crate::test_util::{new_ddl_context, MockDatanodeManager};
+use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 fn new_drop_view_task(view: &str, view_id: TableId, drop_if_exists: bool) -> DropViewTask {
     DropViewTask {
@@ -145,13 +145,15 @@ async fn test_drop_view_success() {
         .await
         .unwrap();
 
-    assert!(ddl_context
-        .table_metadata_manager
-        .view_info_manager()
-        .get(view_id)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .view_info_manager()
+            .get(view_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let task = new_drop_view_task(view_name, view_id, false);
     // Prepare success
@@ -160,13 +162,15 @@ async fn test_drop_view_success() {
     assert_eq!(DropViewState::InvalidateViewCache, procedure.state());
 
     // Assert view info is removed
-    assert!(ddl_context
-        .table_metadata_manager
-        .view_info_manager()
-        .get(view_id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .view_info_manager()
+            .get(view_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Drop again
     let task = new_drop_view_task(view_name, view_id, false);

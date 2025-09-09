@@ -16,8 +16,8 @@ use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
 use common_telemetry::info;
-use common_wal::config::kafka::MetasrvKafkaConfig;
 use common_wal::TopicSelectorType;
+use common_wal::config::kafka::MetasrvKafkaConfig;
 use snafu::ensure;
 
 use crate::error::{InvalidNumTopicsSnafu, Result};

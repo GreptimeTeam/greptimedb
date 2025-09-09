@@ -28,6 +28,7 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
+use datafusion::catalog::TableFunction;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
@@ -84,6 +85,9 @@ pub trait QueryEngine: Send + Sync {
     /// Register a scalar function.
     /// Will override if the function with same name is already registered.
     fn register_scalar_function(&self, func: ScalarFunctionFactory);
+
+    /// Register table function
+    fn register_table_function(&self, func: Arc<TableFunction>);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
@@ -163,6 +167,10 @@ fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
 
     for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
         query_engine.register_aggregate_function(accumulator);
+    }
+
+    for table_function in FUNCTION_REGISTRY.table_functions() {
+        query_engine.register_table_function(table_function);
     }
 }
 

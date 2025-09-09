@@ -20,7 +20,7 @@ use puffin::puffin_manager::{PuffinWriter, PutOptions};
 
 pub use crate::fulltext_index::create::bloom_filter::BloomFilterFulltextIndexCreator;
 pub use crate::fulltext_index::create::tantivy::{
-    TantivyFulltextIndexCreator, ROWID_FIELD_NAME, TEXT_FIELD_NAME,
+    ROWID_FIELD_NAME, TEXT_FIELD_NAME, TantivyFulltextIndexCreator,
 };
 use crate::fulltext_index::error::Result;
 

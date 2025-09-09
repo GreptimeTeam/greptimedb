@@ -15,17 +15,17 @@
 use std::sync::Arc;
 
 use common_telemetry::{error, warn};
+use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
-use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::ToDFSchema;
+use datafusion_common::pruning::PruningStatistics;
 use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
-use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::scalar_value_to_timestamp;
 use snafu::ResultExt;
@@ -349,10 +349,10 @@ fn extract_from_in_list_expr(
 mod tests {
     use std::sync::Arc;
 
-    use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{col, lit, BinaryExpr, Literal, Operator};
+    use datafusion_expr::{BinaryExpr, Literal, Operator, col, lit};
     use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;

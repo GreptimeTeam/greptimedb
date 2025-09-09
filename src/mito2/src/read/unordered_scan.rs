@@ -36,11 +36,11 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    scan_file_ranges, scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
-    PartitionMetrics, PartitionMetricsList,
+    PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
+    scan_flat_mem_ranges, scan_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{scan_util, Batch, ScannerMetrics};
+use crate::read::{Batch, ScannerMetrics, scan_util};
 
 /// Scans a region without providing any output ordering guarantee.
 ///

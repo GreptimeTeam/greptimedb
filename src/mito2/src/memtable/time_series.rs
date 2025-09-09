@@ -33,11 +33,11 @@ use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt64Vector, UInt8Vector,
+    TimestampSecondVector, UInt8Vector, UInt64Vector,
 };
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -260,8 +260,8 @@ impl Memtable for TimeSeriesMemtable {
         }
 
         metrics.max_sequence = part.sequence;
-        metrics.max_ts = part.max_ts;
-        metrics.min_ts = part.min_ts;
+        metrics.max_ts = part.max_timestamp;
+        metrics.min_ts = part.min_timestamp;
         metrics.num_rows = part.num_rows();
         self.update_stats(metrics);
         Ok(())
@@ -803,10 +803,12 @@ impl Series {
             let column_size = frozen[0].fields.len() + 3;
 
             if cfg!(debug_assertions) {
-                debug_assert!(frozen
-                    .iter()
-                    .zip(frozen.iter().skip(1))
-                    .all(|(prev, next)| { prev.fields.len() == next.fields.len() }));
+                debug_assert!(
+                    frozen
+                        .iter()
+                        .zip(frozen.iter().skip(1))
+                        .all(|(prev, next)| { prev.fields.len() == next.fields.len() })
+                );
             }
 
             let arrays = frozen.iter().map(|v| v.columns()).collect::<Vec<_>>();

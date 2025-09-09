@@ -678,9 +678,11 @@ pub mod tests {
         ];
         let input = new_list_vector(&data);
         builder.extend_slice_of(&input, 1, 2).unwrap();
-        assert!(builder
-            .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
-            .is_err());
+        assert!(
+            builder
+                .extend_slice_of(&crate::vectors::Int32Vector::from_slice([13]), 0, 1)
+                .is_err()
+        );
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(new_list_vector(&[

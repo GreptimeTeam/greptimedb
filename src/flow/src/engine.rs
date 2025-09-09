@@ -93,4 +93,9 @@ pub trait FlowEngine {
         &self,
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error>;
+
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
+    ) -> Result<(), Error>;
 }

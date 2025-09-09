@@ -16,8 +16,8 @@ use common_error::ext::BoxedError;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::Context;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 
 impl UpdateMetadata {
     /// Rollbacks the downgraded leader region if the candidate region is unreachable.
@@ -70,7 +70,7 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
     use crate::region::supervisor::RegionFailureDetectorControl;

@@ -25,12 +25,12 @@ use common_meta::ddl::create_logical_tables::{CreateLogicalTablesProcedure, Crea
 use common_meta::ddl::create_table::*;
 use common_meta::ddl::test_util::columns::TestColumnDefBuilder;
 use common_meta::ddl::test_util::create_table::{
-    build_raw_table_info_from_expr, TestCreateTableExprBuilder,
+    TestCreateTableExprBuilder, build_raw_table_info_from_expr,
 };
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::rpc::ddl::CreateTableTask;
-use common_meta::rpc::router::{find_leaders, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_procedure::Status;
 use store_api::storage::RegionId;
 

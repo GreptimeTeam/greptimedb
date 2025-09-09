@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::{error, info};
 use notify::{EventKind, RecursiveMode, Watcher};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, read_one, Item};
+use rustls_pemfile::{Item, certs, read_one};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;

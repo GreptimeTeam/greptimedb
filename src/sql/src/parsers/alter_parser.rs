@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
 use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
@@ -150,7 +150,7 @@ impl ParserContext<'_> {
                                     return Err(ParserError::ParserError(format!(
                                         "expect table name, actual: {new_table_name_obj}"
                                     )))
-                                    .context(error::SyntaxSnafu)
+                                    .context(error::SyntaxSnafu);
                                 }
                             };
                             AlterTableOperation::RenameTable { new_table_name }
@@ -642,11 +642,13 @@ mod tests {
                         assert_eq!(add_columns.len(), 1);
                         assert_eq!("tagk_i", add_columns[0].column_def.name.value);
                         assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
-                        assert!(add_columns[0]
-                            .column_def
-                            .options
-                            .iter()
-                            .any(|o| matches!(o.option, ColumnOption::Null)));
+                        assert!(
+                            add_columns[0]
+                                .column_def
+                                .options
+                                .iter()
+                                .any(|o| matches!(o.option, ColumnOption::Null))
+                        );
                         assert_eq!(&None, &add_columns[0].location);
                     }
                     _ => unreachable!(),
@@ -676,11 +678,13 @@ mod tests {
                     AlterTableOperation::AddColumns { add_columns } => {
                         assert_eq!("tagk_i", add_columns[0].column_def.name.value);
                         assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
-                        assert!(add_columns[0]
-                            .column_def
-                            .options
-                            .iter()
-                            .any(|o| matches!(o.option, ColumnOption::Null)));
+                        assert!(
+                            add_columns[0]
+                                .column_def
+                                .options
+                                .iter()
+                                .any(|o| matches!(o.option, ColumnOption::Null))
+                        );
                         assert_eq!(&Some(AddColumnLocation::First), &add_columns[0].location);
                     }
                     _ => unreachable!(),
@@ -961,7 +965,10 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
+        assert_eq!(
+            err,
+            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t"
+        );
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =
@@ -1323,14 +1330,20 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected FULLTEXT OR INVERTED OR SKIPPING INDEX, found: 100");
+        assert_eq!(
+            err,
+            "Invalid SQL syntax: sql parser error: Expected FULLTEXT OR INVERTED OR SKIPPING INDEX, found: 100"
+        );
 
         let sql = "ALTER TABLE test_table MODIFY COLUMN a SET DEFAULT 100, b SET DEFAULT 200";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected: MODIFY, found: b at Line: 1, Column: 57");
+        assert_eq!(
+            err,
+            "Invalid SQL syntax: sql parser error: Expected: MODIFY, found: b at Line: 1, Column: 57"
+        );
 
         let sql = "ALTER TABLE test_table MODIFY COLUMN a SET DEFAULT 100, MODIFY COLUMN b DROP DEFAULT 200";
         let result =

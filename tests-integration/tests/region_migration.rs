@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_event_recorder::{
     DEFAULT_EVENTS_TABLE_NAME, DEFAULT_FLUSH_INTERVAL_SECONDS, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
@@ -58,7 +58,7 @@ use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{get_test_store_config, StorageType, PEER_PLACEHOLDER_ADDR};
+use tests_integration::test_util::{PEER_PLACEHOLDER_ADDR, StorageType, get_test_store_config};
 use uuid::Uuid;
 
 const TEST_TABLE_NAME: &str = "migration_target";

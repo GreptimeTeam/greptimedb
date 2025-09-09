@@ -15,22 +15,22 @@
 use std::collections::HashSet;
 
 use ahash::{HashMap, HashMapExt};
-use api::v1::flow::DirtyWindowRequest;
-use api::v1::region::{
-    bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
-};
 use api::v1::ArrowIpc;
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
+use api::v1::region::{
+    BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
+};
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
-use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
+use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
-use table::metadata::TableInfoRef;
 use table::TableRef;
+use table::metadata::TableInfoRef;
 
 use crate::insert::Inserter;
 use crate::{error, metrics};
@@ -302,9 +302,11 @@ impl Inserter {
                     if let Err(e) = node_manager
                         .flownode(&peer)
                         .await
-                        .handle_mark_window_dirty(DirtyWindowRequest {
-                            table_id,
-                            timestamps,
+                        .handle_mark_window_dirty(DirtyWindowRequests {
+                            requests: vec![DirtyWindowRequest {
+                                table_id,
+                                timestamps,
+                            }],
                         })
                         .await
                         .context(error::RequestInsertsSnafu)

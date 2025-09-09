@@ -18,10 +18,10 @@ use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
+use crate::ddl::DdlContext;
 use crate::ddl::drop_database::cursor::DropDatabaseCursor;
 use crate::ddl::drop_database::end::DropDatabaseEnd;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
-use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::schema_name::SchemaNameKey;
 
@@ -81,7 +81,7 @@ mod tests {
     use crate::ddl::drop_database::{DropDatabaseContext, State};
     use crate::error;
     use crate::key::schema_name::SchemaNameKey;
-    use crate::test_util::{new_ddl_context, MockDatanodeManager};
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
     #[tokio::test]
     async fn test_schema_not_exists_err() {

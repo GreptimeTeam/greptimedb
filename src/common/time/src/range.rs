@@ -17,9 +17,9 @@ use std::ops::{Bound, RangeBounds};
 
 use serde::{Deserialize, Serialize};
 
+use crate::Timestamp;
 use crate::timestamp::TimeUnit;
 use crate::timestamp_millis::TimestampMillis;
-use crate::Timestamp;
 
 /// A half-open time range.
 ///
@@ -241,10 +241,10 @@ impl TimestampRange {
     /// affect correctness.  
     pub fn new_inclusive(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
         // check for emptiness
-        if let (Some(start_ts), Some(end_ts)) = (start, end) {
-            if start_ts > end_ts {
-                return Self::empty();
-            }
+        if let (Some(start_ts), Some(end_ts)) = (start, end)
+            && start_ts > end_ts
+        {
+            return Self::empty();
         }
 
         let end = if let Some(end) = end {
@@ -446,9 +446,11 @@ mod tests {
         let empty_and_all = empty.and(&TimestampRange::min_to_max());
         assert!(empty_and_all.is_empty());
         assert!(empty.and(&empty).is_empty());
-        assert!(empty
-            .and(&TimestampRange::with_unit(0, 10, TimeUnit::Millisecond).unwrap())
-            .is_empty());
+        assert!(
+            empty
+                .and(&TimestampRange::with_unit(0, 10, TimeUnit::Millisecond).unwrap())
+                .is_empty()
+        );
 
         // AND TimestampRange with different unit
         let anded = TimestampRange::with_unit(0, 10, TimeUnit::Millisecond)

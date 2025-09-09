@@ -23,13 +23,13 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
+use crate::FlownodeId;
 use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::FlownodeId;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
 

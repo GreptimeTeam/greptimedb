@@ -272,8 +272,7 @@ impl Stream for Consumer {
                             .iter()
                             .map(|record| record.offset)
                             .collect::<Vec<_>>(),
-                        records_and_offsets
-                            .len()
+                        records_and_offsets.len()
                     );
                     this.buffer.extend(records_and_offsets);
                     continue;
@@ -295,8 +294,8 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
-    use futures::future::Fuse;
     use futures::TryStreamExt;
+    use futures::future::Fuse;
     use rskafka::record::{Record, RecordAndOffset};
 
     use super::*;

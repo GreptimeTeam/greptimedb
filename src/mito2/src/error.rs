@@ -20,16 +20,16 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
+use store_api::ManifestVersion;
 use store_api::logstore::provider::Provider;
 use store_api::storage::RegionId;
-use store_api::ManifestVersion;
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
@@ -959,7 +959,11 @@ pub enum Error {
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
-    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    #[snafu(display(
+        "Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}",
+        global,
+        region
+    ))]
     IncompatibleWalProviderChange { global: String, region: String },
 
     #[snafu(display("Expected mito manifest info"))]

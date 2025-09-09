@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 pub use bounded_stager::{BoundedStager, FsBlobGuard, FsDirGuard};
-use futures::future::BoxFuture;
 use futures::AsyncWrite;
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::puffin_manager::{BlobGuard, DirGuard};

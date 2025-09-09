@@ -31,11 +31,11 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use futures::{future, ready, Stream};
+use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -43,8 +43,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::{context_auth, FlightCompression, TonicResult};
+use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
+use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;

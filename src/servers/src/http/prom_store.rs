@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
+use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
-use axum::Extension;
 use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
@@ -27,17 +27,17 @@ use common_telemetry::tracing;
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
-use pipeline::util::to_pipeline_version;
 use pipeline::PipelineDefinition;
+use pipeline::util::to_pipeline_version;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
-use crate::http::extractor::PipelineInfo;
-use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::http::PromValidationMode;
+use crate::http::extractor::PipelineInfo;
+use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};

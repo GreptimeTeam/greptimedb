@@ -23,8 +23,8 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
-    build_delete_rows_for_key, build_rows_with_fields, delete_rows, delete_rows_schema,
-    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_delete_rows_for_key, build_rows_with_fields, delete_rows,
+    delete_rows_schema, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]

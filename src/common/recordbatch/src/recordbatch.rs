@@ -24,13 +24,13 @@ use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
+use crate::DfRecordBatch;
 use crate::error::{
     self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
     Result,
 };
-use crate::DfRecordBatch;
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
 #[derive(Clone, Debug, PartialEq)]

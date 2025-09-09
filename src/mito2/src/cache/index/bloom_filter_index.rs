@@ -22,7 +22,7 @@ use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::BloomFilterReader;
 use store_api::storage::ColumnId;
 
-use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
+use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 

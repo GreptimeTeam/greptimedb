@@ -23,7 +23,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use object_store::ObjectStore;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,

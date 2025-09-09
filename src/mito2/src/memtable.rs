@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use bulk::part::EncodedBulkPart;
+use bytes::Bytes;
 use common_time::Timestamp;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
@@ -35,11 +36,12 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
+use crate::read::Batch;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::SstInfo;
 
 mod builder;
 pub mod bulk;
@@ -199,6 +201,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ///
     /// A region must freeze the memtable before invoking this method.
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
+
+    /// Compacts the memtable.
+    ///
+    /// The `for_flush` is true when the flush job calls this method.
+    fn compact(&self, for_flush: bool) -> Result<()> {
+        let _ = for_flush;
+        Ok(())
+    }
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -260,15 +270,13 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
-        if let Some(write_buffer_manager) = &self.write_buffer_manager {
-            if self
+        if let Some(write_buffer_manager) = &self.write_buffer_manager
+            && self
                 .is_done_allocating
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-            {
-                write_buffer_manager
-                    .schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
-            }
+        {
+            write_buffer_manager.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
         }
     }
 
@@ -396,6 +404,14 @@ pub(crate) struct MemScanMetricsData {
     pub(crate) scan_cost: Duration,
 }
 
+/// Encoded range in the memtable.
+pub struct EncodedRange {
+    /// Encoded file data.
+    pub data: Bytes,
+    /// Metadata of the encoded range.
+    pub sst_info: SstInfo,
+}
+
 /// Builder to build an iterator to read the range.
 /// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
@@ -417,6 +433,11 @@ pub trait IterBuilder: Send + Sync {
             err_msg: "Record batch iterator is not supported by this memtable",
         }
         .fail()
+    }
+
+    /// Returns the [EncodedRange] if the range is already encoded into SST.
+    fn encoded_range(&self) -> Option<EncodedRange> {
+        None
     }
 }
 

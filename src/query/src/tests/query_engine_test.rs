@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use catalog::memory::MemoryCatalogManager;
 use catalog::RegisterTableRequest;
+use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_query::OutputData;
-use common_recordbatch::{util, RecordBatch};
+use common_recordbatch::{RecordBatch, util};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
 use datatypes::prelude::*;
@@ -29,14 +29,14 @@ use datatypes::vectors::UInt32Vector;
 use session::context::QueryContext;
 use snafu::ResultExt;
 use table::table::adapter::DfTableProviderAdapter;
-use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 use table::test_util::MemTable;
 
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::options::QueryOptions as QueryOptionsNew;
 use crate::parser::QueryLanguageParser;
-use crate::query_engine::options::QueryOptions;
 use crate::query_engine::QueryEngineFactory;
+use crate::query_engine::options::QueryOptions;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
@@ -147,21 +147,25 @@ async fn test_query_validate() -> Result<()> {
     let stmt =
         QueryLanguageParser::parse_sql("select number from public.numbers", &QueryContext::arc())
             .unwrap();
-    assert!(engine
-        .planner()
-        .plan(&stmt, QueryContext::arc())
-        .await
-        .is_ok());
+    assert!(
+        engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .is_ok()
+    );
 
     let stmt = QueryLanguageParser::parse_sql(
         "select number from wrongschema.numbers",
         &QueryContext::arc(),
     )
     .unwrap();
-    assert!(engine
-        .planner()
-        .plan(&stmt, QueryContext::arc())
-        .await
-        .is_err());
+    assert!(
+        engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .is_err()
+    );
     Ok(())
 }

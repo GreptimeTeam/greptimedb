@@ -36,22 +36,26 @@ use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME
 use common_error::ext::ErrorExt;
 use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
-use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::error::DataFusionError;
+use datafusion::logical_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
+use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
-use table::metadata::TableType;
 use table::TableRef;
+use table::metadata::TableType;
 pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
+use crate::CatalogManager;
 use crate::error::{Error, Result};
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
@@ -69,7 +73,6 @@ pub(crate) use crate::system_schema::predicate::Predicates;
 use crate::system_schema::{
     SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
 };
-use crate::CatalogManager;
 
 lazy_static! {
     // Memory tables in `information_schema`.
@@ -409,8 +412,43 @@ pub trait InformationExtension {
 
     /// Get the flow statistics. If no flownode is available, return `None`.
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error>;
+
+    /// Inspects the datanode.
+    async fn inspect_datanode(
+        &self,
+        request: DatanodeInspectRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, Self::Error>;
 }
 
+/// The request to inspect the datanode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatanodeInspectRequest {
+    /// Kind to fetch from datanode.
+    pub kind: DatanodeInspectKind,
+
+    /// Pushdown scan configuration (projection/predicate/limit) for the returned stream.
+    /// This allows server-side filtering to reduce I/O and network costs.
+    pub scan: ScanRequest,
+}
+
+/// The kind of the datanode inspect request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatanodeInspectKind {
+    /// List SST entries recorded in manifest
+    SstManifest,
+    /// List SST entries discovered in storage layer
+    SstStorage,
+}
+
+impl DatanodeInspectRequest {
+    /// Builds a logical plan for the datanode inspect request.
+    pub fn build_plan(self) -> std::result::Result<LogicalPlan, DataFusionError> {
+        match self.kind {
+            DatanodeInspectKind::SstManifest => ManifestSstEntry::build_plan(self.scan),
+            DatanodeInspectKind::SstStorage => StorageSstEntry::build_plan(self.scan),
+        }
+    }
+}
 pub struct NoopInformationExtension;
 
 #[async_trait::async_trait]
@@ -431,5 +469,12 @@ impl InformationExtension for NoopInformationExtension {
 
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
         Ok(None)
+    }
+
+    async fn inspect_datanode(
+        &self,
+        _request: DatanodeInspectRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+        Ok(common_recordbatch::RecordBatches::empty().as_stream())
     }
 }

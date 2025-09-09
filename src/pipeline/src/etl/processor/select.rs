@@ -16,14 +16,14 @@ use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
 use vrl::value::{KeyString, Value as VrlValue};
 
+use crate::Processor;
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME, TYPE_NAME,
+    FIELD_NAME, FIELDS_NAME, TYPE_NAME, yaml_new_field, yaml_new_fields, yaml_string,
 };
-use crate::Processor;
 
 pub(crate) const PROCESSOR_SELECT: &str = "select";
 const INCLUDE_KEY: &str = "include";
@@ -137,9 +137,9 @@ mod test {
     use vrl::prelude::Bytes;
     use vrl::value::{KeyString, Value as VrlValue};
 
+    use crate::Processor;
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::select::{SelectProcessor, SelectType};
-    use crate::Processor;
 
     #[test]
     fn test_select() {

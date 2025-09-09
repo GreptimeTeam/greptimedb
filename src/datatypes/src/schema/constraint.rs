@@ -14,9 +14,9 @@
 
 use std::fmt::{Display, Formatter};
 
-use common_time::{util, Timestamp};
+use common_time::{Timestamp, util};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
@@ -331,9 +331,11 @@ mod tests {
         constraint.validate(&data_type, false).unwrap();
         constraint.validate(&data_type, true).unwrap();
 
-        assert!(constraint
-            .validate(&ConcreteDataType::uint32_datatype(), true)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::uint32_datatype(), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -342,23 +344,29 @@ mod tests {
         constraint
             .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap();
-        assert!(constraint
-            .validate(&ConcreteDataType::boolean_datatype(), false)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::boolean_datatype(), false)
+                .is_err()
+        );
 
         let constraint = ColumnDefaultConstraint::Function("hello()".to_string());
-        assert!(constraint
-            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
-            .is_err());
+        assert!(
+            constraint
+                .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_create_default_vector_by_null() {
         let constraint = ColumnDefaultConstraint::null_value();
         let data_type = ConcreteDataType::int32_datatype();
-        assert!(constraint
-            .create_default_vector(&data_type, false, 10)
-            .is_err());
+        assert!(
+            constraint
+                .create_default_vector(&data_type, false, 10)
+                .is_err()
+        );
 
         let constraint = ColumnDefaultConstraint::null_value();
         let v = constraint
@@ -446,9 +454,11 @@ mod tests {
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
-        assert!(constraint
-            .create_default_vector(&data_type, false, 4)
-            .is_err());
+        assert!(
+            constraint
+                .create_default_vector(&data_type, false, 4)
+                .is_err()
+        );
         assert!(constraint.create_default(&data_type, false).is_err());
     }
 

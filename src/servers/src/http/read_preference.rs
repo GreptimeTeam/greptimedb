@@ -18,8 +18,8 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
-use session::context::QueryContext;
 use session::ReadPreference;
+use session::context::QueryContext;
 
 use crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE;
 

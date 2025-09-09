@@ -25,14 +25,15 @@ use common_function::handlers::{
 };
 use common_function::state::FunctionState;
 use common_telemetry::warn;
+use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
@@ -40,12 +41,14 @@ use datafusion_optimizer::analyzer::Analyzer;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
-use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
+use table::table::adapter::DfTableProviderAdapter;
 
+use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
 };
+use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -56,13 +59,11 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::optimizer::ExtensionAnalyzerRule;
 use crate::options::QueryOptions as QueryOptionsNew;
-use crate::query_engine::options::QueryOptions;
 use crate::query_engine::DefaultSerializer;
+use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
-use crate::QueryEngineContext;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -72,6 +73,7 @@ pub struct QueryEngineState {
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
+    table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -196,6 +198,7 @@ impl QueryEngineState {
                 flow_service_handler,
             }),
             aggr_functions: Arc::new(RwLock::new(HashMap::new())),
+            table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
@@ -265,6 +268,25 @@ impl QueryEngineState {
             .collect()
     }
 
+    /// Retrieve table function by name
+    pub fn table_function(&self, function_name: &str) -> Option<Arc<TableFunction>> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve table function names.
+    pub fn table_function_names(&self) -> Vec<String> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Register an scalar function.
     /// Will override if the function with same name is already registered.
     pub fn register_scalar_function(&self, func: ScalarFunctionFactory) {
@@ -299,6 +321,19 @@ impl QueryEngineState {
             x.is_none(),
             "Already registered aggregate function '{name}'"
         );
+    }
+
+    pub fn register_table_function(&self, func: Arc<TableFunction>) {
+        let name = func.name();
+        let x = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(name.to_string(), func.clone());
+
+        if x.is_some() {
+            warn!("Already registered table function '{name}");
+        }
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

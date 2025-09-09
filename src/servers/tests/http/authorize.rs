@@ -14,12 +14,12 @@
 
 use std::sync::Arc;
 
-use auth::tests::MockUserProvider;
 use auth::UserProvider;
+use auth::tests::MockUserProvider;
 use axum::http;
 use hyper::{Request, StatusCode};
-use servers::http::authorize::inner_auth;
 use servers::http::AUTHORIZATION_HEADER;
+use servers::http::authorize::inner_auth;
 use session::context::QueryContext;
 
 async fn check_http_auth(header_key: &str) {

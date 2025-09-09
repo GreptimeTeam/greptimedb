@@ -74,7 +74,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.18.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [workspace.lints]
@@ -146,7 +146,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "66eb089afa6baaa3ddfafabd0a4abbe317d012c3" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"

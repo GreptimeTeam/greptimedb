@@ -16,8 +16,8 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common_telemetry::{debug, error, info, trace};
 use snafu::ResultExt;
@@ -37,10 +37,10 @@ use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
+use crate::read::Source;
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Source;
 use crate::region::options::{IndexOptions, MergeMode};
 use crate::region::version::{VersionControlData, VersionControlRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -136,7 +136,10 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         if mutable_memtable_memory_usage > self.mutable_limit {
             debug!(
                 "Engine should flush (over mutable limit), mutable_usage: {}, memory_usage: {}, mutable_limit: {}, global_limit: {}",
-                mutable_memtable_memory_usage, self.memory_usage(), self.mutable_limit, self.global_write_buffer_size,
+                mutable_memtable_memory_usage,
+                self.memory_usage(),
+                self.mutable_limit,
+                self.global_write_buffer_size,
             );
             return true;
         }
@@ -148,18 +151,16 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         if memory_usage >= self.global_write_buffer_size {
             if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
                 debug!(
-                "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
+                    "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
-                memory_usage,
-                self.global_write_buffer_size,
-                mutable_memtable_memory_usage);
+                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
+                );
                 return true;
             } else {
                 trace!(
                     "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
-                    memory_usage,
-                    self.global_write_buffer_size,
-                    mutable_memtable_memory_usage);
+                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage
+                );
             }
         }
 
@@ -739,10 +740,11 @@ impl FlushScheduler {
 
     /// Schedules a new flush task when the scheduler can submit next task.
     pub(crate) fn schedule_next_flush(&mut self) -> Result<()> {
-        debug_assert!(self
-            .region_status
-            .values()
-            .all(|status| status.flushing || status.pending_task.is_some()));
+        debug_assert!(
+            self.region_status
+                .values()
+                .all(|status| status.flushing || status.pending_task.is_some())
+        );
 
         // Get the first region from status map.
         let Some(flush_status) = self
@@ -842,7 +844,7 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
-    use crate::test_util::version_util::{write_rows_to_version, VersionControlBuilder};
+    use crate::test_util::version_util::{VersionControlBuilder, write_rows_to_version};
 
     #[test]
     fn test_get_mutable_limit() {

@@ -14,13 +14,13 @@
 
 use common_error::ext::BoxedError;
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::rpc::router::{region_distribution, RegionRoute};
+use common_meta::rpc::router::{RegionRoute, region_distribution};
 use common_telemetry::{info, warn};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Result};
-use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::Context;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 
 impl UpdateMetadata {
     /// Returns new [Vec<RegionRoute>].
@@ -49,14 +49,18 @@ impl UpdateMetadata {
         let expected_old_leader = &ctx.persistent_ctx.from_peer;
 
         // Upgrades candidate to leader.
-        ensure!(region_route
+        ensure!(
+            region_route
                 .leader_peer
                 .take_if(|old_leader| old_leader.id == expected_old_leader.id)
                 .is_some(),
-                error::UnexpectedSnafu{
-                    violated: format!("Unexpected region leader: {:?} during the upgrading candidate metadata, expected: {:?}", region_route.leader_peer, expected_old_leader),
-                }
-            );
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Unexpected region leader: {:?} during the upgrading candidate metadata, expected: {:?}",
+                    region_route.leader_peer, expected_old_leader
+                ),
+            }
+        );
 
         region_route.leader_peer = Some(candidate.clone());
         info!(
@@ -72,8 +76,8 @@ impl UpdateMetadata {
 
         if removed.len() > 1 {
             warn!(
-                    "Removes duplicated regions: {removed:?} during the upgrading candidate metadata for region: {region_id}"
-                );
+                "Removes duplicated regions: {removed:?} during the upgrading candidate metadata for region: {region_id}"
+            );
         }
 
         Ok(region_routes)
@@ -108,7 +112,9 @@ impl UpdateMetadata {
             ensure!(
                 !region_route.is_leader_downgrading(),
                 error::UnexpectedSnafu {
-                    violated: format!("Unexpected intermediate state is found during the update metadata for upgrading region {region_id}"),
+                    violated: format!(
+                        "Unexpected intermediate state is found during the update metadata for upgrading region {region_id}"
+                    ),
                 }
             );
 
@@ -196,7 +202,7 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
-    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 

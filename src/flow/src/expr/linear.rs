@@ -24,12 +24,12 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper};
 use itertools::Itertools;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu, EvalError, InternalSnafu, TypeMismatchSnafu};
 use crate::expr::{Batch, InvalidArgumentSnafu, ScalarExpr};
-use crate::repr::{self, value_to_internal_ts, Diff, Row};
+use crate::repr::{self, Diff, Row, value_to_internal_ts};
 
 /// A compound operator that can be applied row-by-row.
 ///
@@ -968,9 +968,11 @@ mod test {
         let mfp = MapFilterProject::new(4);
         // append a expression to the mfp'input row that get the sum of the first 3 columns
         let mfp = mfp
-            .map(vec![ScalarExpr::Column(0)
-                .call_binary(ScalarExpr::Column(1), BinaryFunc::AddInt32)
-                .call_binary(ScalarExpr::Column(2), BinaryFunc::AddInt32)])
+            .map(vec![
+                ScalarExpr::Column(0)
+                    .call_binary(ScalarExpr::Column(1), BinaryFunc::AddInt32)
+                    .call_binary(ScalarExpr::Column(2), BinaryFunc::AddInt32),
+            ])
             .unwrap();
         // only retain sum result
         let mfp = mfp.project(vec![4]).unwrap();
@@ -1032,11 +1034,11 @@ mod test {
     fn test_permute() {
         let mfp = MapFilterProject::new(3)
             .map(vec![
-                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt)
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
             ])
             .unwrap()
             .filter(vec![
-                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt),
             ])
             .unwrap()
             .project(vec![0, 1])
@@ -1058,7 +1060,7 @@ mod test {
             ))])
             .unwrap()
             .filter(vec![
-                ScalarExpr::Column(3).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+                ScalarExpr::Column(3).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt),
             ])
             .unwrap()
             .project([0, 1, 2])
@@ -1129,11 +1131,11 @@ mod test {
             .project(vec![2, 1, 0])
             .unwrap()
             .filter(vec![
-                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt)
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Gt),
             ])
             .unwrap()
             .map(vec![
-                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt)
+                ScalarExpr::Column(0).call_binary(ScalarExpr::Column(1), BinaryFunc::Lt),
             ])
             .unwrap()
             .project(vec![3])

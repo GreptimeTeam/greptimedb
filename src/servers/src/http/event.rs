@@ -27,33 +27,38 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use axum_extra::TypedHeader;
-use common_error::ext::ErrorExt;
+use common_catalog::consts::default_engine;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use mime_guess::mime;
+use operator::expr_helper::{create_table_expr_by_column_schemas, expr_to_create};
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Map, Value as JsonValue};
+use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use simd_json::Buffers;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use strum::{EnumIter, IntoEnumIterator};
+use table::table_reference::TableReference;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    CatalogSnafu, Error, InvalidParameterSnafu, OtherSnafu, ParseJsonSnafu, PipelineSnafu, Result,
+    status_code_to_http_status,
 };
+use crate::http::HttpResponse;
 use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
 use crate::http::header::{
     CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
-use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
+use crate::http::result::greptime_manage_resp::{GreptimedbManageResponse, SqlOutput};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
-use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
@@ -64,6 +69,11 @@ use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_PIPELINE_SKIP_ERROR_KEY: &str = "skip_error";
+
+const CREATE_TABLE_SQL_SUFFIX_EXISTS: &str =
+    "the pipeline has dispatcher or table_suffix, the table name may not be fixed";
+const CREATE_TABLE_SQL_TABLE_EXISTS: &str =
+    "table already exists, the CREATE TABLE SQL may be different";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -192,6 +202,90 @@ pub async fn query_pipeline(
             .unwrap_or(pipeline_version.0.to_timezone_aware_string(None)),
         start.elapsed().as_millis() as u64,
         Some(pipeline),
+    ))
+}
+
+/// Generate DDL from pipeline definition.
+#[axum_macros::debug_handler]
+pub async fn query_pipeline_ddl(
+    State(state): State<LogState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required in path",
+        }
+    );
+    ensure!(
+        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
+        InvalidParameterSnafu {
+            reason: "built-in pipelines don't have fixed table schema",
+        }
+    );
+    let table_name = query_params.table.context(InvalidParameterSnafu {
+        reason: "table name is required",
+    })?;
+
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Log);
+    let query_ctx = Arc::new(query_ctx);
+
+    let pipeline = handler
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+        .await?;
+
+    let schemas_def = pipeline.schemas().context(InvalidParameterSnafu {
+        reason: "auto transform doesn't have fixed table schema",
+    })?;
+
+    let schema = query_ctx.current_schema();
+    let table_name_ref = TableReference {
+        catalog: query_ctx.current_catalog(),
+        schema: &schema,
+        table: &table_name,
+    };
+
+    let mut create_table_expr =
+        create_table_expr_by_column_schemas(&table_name_ref, schemas_def, default_engine(), None)
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
+
+    // manually set the append_mode to true
+    create_table_expr
+        .table_options
+        .insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+
+    let expr = expr_to_create(&create_table_expr, None)
+        .map_err(BoxedError::new)
+        .context(OtherSnafu)?;
+
+    let message = if handler
+        .get_table(&table_name, &query_ctx)
+        .await
+        .context(CatalogSnafu)?
+        .is_some()
+    {
+        Some(CREATE_TABLE_SQL_TABLE_EXISTS.to_string())
+    } else if pipeline.is_variant_table_name() {
+        Some(CREATE_TABLE_SQL_SUFFIX_EXISTS.to_string())
+    } else {
+        None
+    };
+
+    let sql = SqlOutput {
+        sql: format!("{:#}", expr),
+        message,
+    };
+
+    Ok(GreptimedbManageResponse::from_sql(
+        sql,
+        start.elapsed().as_millis() as u64,
     ))
 }
 
@@ -887,7 +981,7 @@ pub trait LogValidator: Send + Sync {
     /// validate payload by source before processing
     /// Return a `Some` result to indicate validation failure.
     async fn validate(&self, source: Option<&str>, payload: &Bytes)
-        -> Option<Result<HttpResponse>>;
+    -> Option<Result<HttpResponse>>;
 }
 
 pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;

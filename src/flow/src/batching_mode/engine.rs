@@ -18,13 +18,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::flow::{DirtyWindowRequests, FlowResponse};
+use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
-use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
@@ -34,17 +34,17 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
 use session::context::QueryContext;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
 use store_api::storage::{RegionId, TableId};
 use table::table_reference::TableReference;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 
+use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
-use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
+use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
@@ -94,7 +94,7 @@ impl BatchingEngine {
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
-    ) -> Result<FlowResponse, Error> {
+    ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
         let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
@@ -203,7 +203,7 @@ impl BatchingEngine {
             }
         }
 
-        Ok(Default::default())
+        Ok(())
     }
 
     pub async fn handle_inserts_inner(
@@ -237,8 +237,7 @@ impl BatchingEngine {
         if !missing_tids.is_empty() {
             warn!(
                 "Failed to get all the table info for table ids, expected table ids: {:?}, those table doesn't exist: {:?}",
-                tids,
-                missing_tids
+                tids, missing_tids
             );
         }
 
@@ -612,19 +611,16 @@ impl BatchingEngine {
                 let is_pk: bool = pk_idxs.contains(&&idx);
 
                 ensure!(
-                        col.data_type == ConcreteDataType::float64_datatype()
+                    col.data_type == ConcreteDataType::float64_datatype()
                         || col.data_type.is_timestamp()
                         || (col.data_type == ConcreteDataType::string_datatype() && is_pk),
-                        InvalidQuerySnafu {
-                            reason: format!(
-                                "TQL query only supports f64 value column, timestamp column and string tag columns, table `{}`(id={}) has column `{}` with type {:?} which is not supported",
-                                table_ref,
-                                table_id,
-                                col.name,
-                                col.data_type
-                            ),
-                        }
-                    );
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "TQL query only supports f64 value column, timestamp column and string tag columns, table `{}`(id={}) has column `{}` with type {:?} which is not supported",
+                            table_ref, table_id, col.name, col.data_type
+                        ),
+                    }
+                );
             }
         }
         Ok(())
@@ -642,7 +638,9 @@ impl BatchingEngine {
             .fail()?
         };
         if tx.send(()).is_err() {
-            warn!("Fail to shutdown flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?")
+            warn!(
+                "Fail to shutdown flow {flow_id} due to receiver already dropped, maybe flow {flow_id} is already dropped?"
+            )
         }
         Ok(())
     }
@@ -715,5 +713,11 @@ impl FlowEngine for BatchingEngine {
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
         self.handle_inserts_inner(request).await
+    }
+    async fn handle_mark_window_dirty(
+        &self,
+        req: api::v1::flow::DirtyWindowRequests,
+    ) -> Result<(), Error> {
+        self.handle_mark_dirty_time_window(req).await
     }
 }

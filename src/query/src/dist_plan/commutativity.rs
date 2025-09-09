@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, StateMergeHelper};
+use common_function::aggrs::aggr_wrapper::{StateMergeHelper, aggr_state_func_name};
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_telemetry::debug;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
@@ -23,9 +23,9 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
-use crate::dist_plan::analyzer::AliasMapping;
-use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::analyzer::AliasMapping;
+use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,

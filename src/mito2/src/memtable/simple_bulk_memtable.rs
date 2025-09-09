@@ -38,9 +38,9 @@ use crate::memtable::{
     MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
+use crate::read::Batch;
 use crate::read::dedup::LastNonNullIter;
 use crate::read::scan_region::PredicateGroup;
-use crate::read::Batch;
 use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
@@ -205,8 +205,8 @@ impl Memtable for SimpleBulkMemtable {
         self.update_stats(WriteMetrics {
             key_bytes: 0,
             value_bytes: part.estimated_size(),
-            min_ts: part.min_ts,
-            max_ts: part.max_ts,
+            min_ts: part.min_timestamp,
+            max_ts: part.max_timestamp,
             num_rows: part.num_rows(),
             max_sequence: sequence,
         });
@@ -717,8 +717,8 @@ mod tests {
         let part = BulkPart {
             batch: rb,
             sequence: 1,
-            min_ts: 1,
-            max_ts: 2,
+            min_timestamp: 1,
+            max_timestamp: 2,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -883,8 +883,8 @@ mod tests {
         memtable
             .write_bulk(BulkPart {
                 batch: rb_with_large_string(0, i32::MAX, &region_meta),
-                max_ts: 0,
-                min_ts: 0,
+                max_timestamp: 0,
+                min_timestamp: 0,
                 sequence: 0,
                 timestamp_index: 1,
                 raw_data: None,
@@ -895,8 +895,8 @@ mod tests {
         memtable
             .write_bulk(BulkPart {
                 batch: rb_with_large_string(1, 3, &region_meta),
-                max_ts: 1,
-                min_ts: 1,
+                max_timestamp: 1,
+                min_timestamp: 1,
                 sequence: 1,
                 timestamp_index: 1,
                 raw_data: None,

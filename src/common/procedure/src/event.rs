@@ -16,8 +16,8 @@ use std::any::Any;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType};
-use common_event_recorder::error::Result;
 use common_event_recorder::Event;
+use common_event_recorder::error::Result;
 use common_time::timestamp::{TimeUnit, Timestamp};
 
 use crate::{ProcedureId, ProcedureState};

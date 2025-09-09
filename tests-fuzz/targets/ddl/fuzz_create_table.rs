@@ -25,16 +25,16 @@ use snafu::ResultExt;
 use sqlx::{MySql, Pool};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
-    MappedGenerator, WordGenerator,
+    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    uppercase_and_keyword_backtick_map,
 };
-use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
+use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::ir::CreateTableExpr;
-use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
+use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::utils::{
-    get_gt_fuzz_input_max_columns, init_greptime_connections_via_env, Connections,
+    Connections, get_gt_fuzz_input_max_columns, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 

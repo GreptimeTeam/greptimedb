@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use lazy_static::lazy_static;
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{HistogramVec, register_histogram_vec};
 
 lazy_static! {
     pub static ref CONVERT_REGION_BULK_REQUEST: HistogramVec = register_histogram_vec!(

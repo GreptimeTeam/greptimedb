@@ -14,5 +14,5 @@
 
 mod table_flownode;
 pub use table_flownode::{
-    new_table_flownode_set_cache, TableFlownodeSetCache, TableFlownodeSetCacheRef,
+    TableFlownodeSetCache, TableFlownodeSetCacheRef, new_table_flownode_set_cache,
 };

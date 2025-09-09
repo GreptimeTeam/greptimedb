@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_array::{Array, ListArray};
-use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE;
 use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
 use common_telemetry::error;
@@ -28,13 +28,13 @@ use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timezone};
-use datafusion_common::scalar::ScalarStructBuilder;
 use datafusion_common::ScalarValue;
+use datafusion_common::scalar::ScalarStructBuilder;
 use greptime_proto::v1::value::ValueData;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Number, Value as JsonValue};
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFromValueSnafu};
 use crate::prelude::*;
@@ -394,7 +394,10 @@ impl Value {
         let output_type_id = output_type.logical_type_id();
         ensure!(
             // Json type leverage Value(Binary) for storage.
-            output_type_id == value_type_id || self.is_null() || (output_type_id == LogicalTypeId::Json && value_type_id == LogicalTypeId::Binary),
+            output_type_id == value_type_id
+                || self.is_null()
+                || (output_type_id == LogicalTypeId::Json
+                    && value_type_id == LogicalTypeId::Binary),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -1013,7 +1016,7 @@ impl TryFrom<ScalarValue> for Value {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
-                .fail()
+                .fail();
             }
         };
         Ok(v)

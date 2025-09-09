@@ -20,7 +20,7 @@ use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
-use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
+use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -28,18 +28,18 @@ use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{RegionId, SequenceNumber};
 
+use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
-use crate::cache::CacheManagerRef;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
+use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -311,7 +311,7 @@ impl AccessLayer {
     }
 
     /// Lists the SST entries from the storage layer in the table directory.
-    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
+    pub fn storage_sst_entries(&self) -> impl Stream<Item = Result<StorageSstEntry>> + use<> {
         let object_store = self.object_store.clone();
         let table_dir = self.table_dir.clone();
 

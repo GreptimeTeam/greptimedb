@@ -307,7 +307,7 @@ impl Inner {
                 return error::UnexpectedSequenceValueSnafu {
                     err_msg: format!("Not a valid u64 for '{}': {v:?}", self.name),
                 }
-                .fail()
+                .fail();
             }
         };
         Ok(u64::from_le_bytes(v))

@@ -17,7 +17,7 @@ use client::inserter::{Context, Inserter};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
-use common_event_recorder::{build_row_inserts_request, group_events_by_type, Event, EventHandler};
+use common_event_recorder::{Event, EventHandler, build_row_inserts_request, group_events_by_type};
 use snafu::ResultExt;
 
 pub mod region_migration_event;

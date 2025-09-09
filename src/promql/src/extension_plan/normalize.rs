@@ -34,13 +34,13 @@ use datafusion::physical_plan::{
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes

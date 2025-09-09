@@ -16,10 +16,10 @@ use core::str;
 
 use ahash::HashSet;
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use http::HeaderMap;
-use pipeline::{truthy, GreptimePipelineParams, SelectInfo};
+use pipeline::{GreptimePipelineParams, SelectInfo, truthy};
 
 use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,

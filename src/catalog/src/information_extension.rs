@@ -14,25 +14,34 @@
 
 use api::v1::meta::ProcedureStatus;
 use common_error::ext::BoxedError;
-use common_meta::cluster::{ClusterInfo, NodeInfo};
+use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
+use common_meta::node_manager::DatanodeManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::rpc::procedure;
 use common_procedure::{ProcedureInfo, ProcedureState};
+use common_query::request::QueryRequest;
+use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::util::ChainedRecordBatchStream;
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
 use crate::error;
-use crate::information_schema::InformationExtension;
+use crate::information_schema::{DatanodeInspectRequest, InformationExtension};
 
 pub struct DistributedInformationExtension {
     meta_client: MetaClientRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
 impl DistributedInformationExtension {
-    pub fn new(meta_client: MetaClientRef) -> Self {
-        Self { meta_client }
+    pub fn new(meta_client: MetaClientRef, datanode_manager: DatanodeManagerRef) -> Self {
+        Self {
+            meta_client,
+            datanode_manager,
+        }
     }
 }
 
@@ -97,5 +106,40 @@ impl InformationExtension for DistributedInformationExtension {
             .await
             .map_err(BoxedError::new)
             .context(crate::error::ListFlowStatsSnafu)
+    }
+
+    async fn inspect_datanode(
+        &self,
+        request: DatanodeInspectRequest,
+    ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+        // Aggregate results from all datanodes
+        let nodes = self
+            .meta_client
+            .list_nodes(Some(Role::Datanode))
+            .await
+            .map_err(BoxedError::new)
+            .context(crate::error::ListNodesSnafu)?;
+
+        let plan = request
+            .build_plan()
+            .context(crate::error::DatafusionSnafu)?;
+
+        let mut streams = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let client = self.datanode_manager.datanode(&node.peer).await;
+            let stream = client
+                .handle_query(QueryRequest {
+                    plan: plan.clone(),
+                    region_id: RegionId::default(),
+                    header: None,
+                })
+                .await
+                .context(crate::error::HandleQuerySnafu)?;
+            streams.push(stream);
+        }
+
+        let chained =
+            ChainedRecordBatchStream::new(streams).context(crate::error::CreateRecordBatchSnafu)?;
+        Ok(Box::pin(chained))
     }
 }

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -20,19 +22,20 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use either::Either;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
-use crate::compaction::compactor::{open_compaction_region, OpenCompactionRegionRequest};
+use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
 use crate::error;
+use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
@@ -238,17 +241,21 @@ async fn test_engine_region_open_with_custom_store() {
     // The region should not be opened with the default object store.
     let region = engine.get_region(region_id).unwrap();
     let object_store_manager = env.get_object_store_manager().unwrap();
-    assert!(!object_store_manager
-        .default_object_store()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
-    assert!(object_store_manager
-        .find("Gcs")
-        .unwrap()
-        .exists(&region.access_layer.build_region_dir(region_id))
-        .await
-        .unwrap());
+    assert!(
+        !object_store_manager
+            .default_object_store()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        object_store_manager
+            .find("Gcs")
+            .unwrap()
+            .exists(&region.access_layer.build_region_dir(region_id))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -498,4 +505,154 @@ async fn test_open_compaction_region() {
     .unwrap();
 
     assert_eq!(region_id, compaction_region.region_id);
+}
+
+/// Returns a dummy fetcher that returns the expr_json only once.
+fn new_dummy_fetcher(region_id: RegionId, expr_json: String) -> PartitionExprFetcherRef {
+    struct DummyFetcher {
+        region_id: RegionId,
+        expr_json: String,
+        fetch_count: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl PartitionExprFetcher for DummyFetcher {
+        async fn fetch_expr(&self, region_id: RegionId) -> Option<String> {
+            if region_id == self.region_id {
+                let count = self.fetch_count.fetch_add(1, Ordering::Relaxed);
+                (count == 0).then(|| self.expr_json.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    Arc::new(DummyFetcher {
+        region_id,
+        expr_json,
+        fetch_count: AtomicUsize::new(0),
+    })
+}
+
+#[tokio::test]
+async fn test_open_backfills_partition_expr_with_fetcher() {
+    let mut env = TestEnv::with_prefix("open-backfill-fetcher").await;
+
+    // prepare plugins with dummy fetcher
+    let region_id = RegionId::new(100, 1);
+    let expr_json = r#"{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"#.to_string();
+    let fetcher = new_dummy_fetcher(region_id, expr_json.clone());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, None, Some(fetcher))
+        .await;
+
+    // create region with partition_expr=None (legacy style)
+    let request = CreateRequestBuilder::new()
+        .table_dir("t")
+        .partition_expr_json(None)
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
+
+    // close and reopen to trigger backfill in opener
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // verify partition_expr is backfilled and persisted
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
+
+    // Set leader and trigger backfill
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    // reopen again to ensure no further changes and still Some
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(meta.partition_expr.as_deref(), Some(expr_json.as_str()));
+}
+
+#[tokio::test]
+async fn test_open_keeps_none_without_fetcher() {
+    let mut env = TestEnv::with_prefix("open-no-fetcher").await;
+    // engine without fetcher
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(200, 1);
+    let request = CreateRequestBuilder::new()
+        .table_dir("t2")
+        .partition_expr_json(None)
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let meta = engine.get_region(region_id).unwrap().metadata();
+    assert!(meta.partition_expr.is_none());
 }

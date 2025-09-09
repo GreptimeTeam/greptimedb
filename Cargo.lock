@@ -1462,6 +1462,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-version",
+ "common-workload",
  "dashmap",
  "datafusion",
  "datafusion-postgres",
@@ -1480,6 +1481,7 @@ dependencies = [
  "promql-parser",
  "rand 0.9.1",
  "rustc-hash 2.1.1",
+ "serde",
  "serde_json",
  "session",
  "snafu 0.8.6",
@@ -5351,7 +5353,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=66eb089afa6baaa3ddfafabd0a4abbe317d012c3#66eb089afa6baaa3ddfafabd0a4abbe317d012c3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36#f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -11627,6 +11629,7 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "opentelemetry-proto",
+ "operator",
  "otel-arrow-rust",
  "parking_lot 0.12.4",
  "permutation",

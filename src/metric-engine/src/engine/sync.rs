@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use common_telemetry::info;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, SyncManifestResponse};
 use store_api::storage::RegionId;
 
@@ -91,11 +91,11 @@ impl MetricEngineInner {
             .recover_states(data_region_id, physical_region_options)
             .await?;
         info!(
-                "Sync metadata region for physical region {}, cost: {:?}, new opened logical region ids: {:?}",
-                data_region_id,
-                now.elapsed(),
-                new_opened_logical_region_ids
-            );
+            "Sync metadata region for physical region {}, cost: {:?}, new opened logical region ids: {:?}",
+            data_region_id,
+            now.elapsed(),
+            new_opened_logical_region_ids
+        );
 
         Ok(SyncManifestResponse::Metric {
             metadata_synced,
