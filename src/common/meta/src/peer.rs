@@ -50,3 +50,20 @@ pub trait PeerDiscovery: Send + Sync {
 }
 
 pub type PeerDiscoveryRef = Arc<dyn PeerDiscovery>;
+
+/// [`PeerAllocator`] allocates [`Peer`]s for creating region or flow.
+#[async_trait::async_trait]
+pub trait PeerAllocator: Send + Sync {
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>, Error>;
+}
+
+pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
+
+pub struct NoopPeerAllocator;
+
+#[async_trait::async_trait]
+impl PeerAllocator for NoopPeerAllocator {
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>, Error> {
+        Ok(vec![Peer::default(); regions])
+    }
+}

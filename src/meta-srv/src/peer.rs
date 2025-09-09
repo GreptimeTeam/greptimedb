@@ -16,25 +16,36 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::ddl::table_meta::PeerAllocator;
 use common_meta::error::{ExternalSnafu, Result as MetaResult};
-use common_meta::peer::Peer;
+use common_meta::peer::{Peer, PeerAllocator};
 use snafu::{ResultExt, ensure};
-use store_api::storage::MAX_REGION_SEQ;
 
-use crate::error::{self, Result, TooManyPartitionsSnafu};
-use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
+use crate::error::{Result, TooManyPartitionsSnafu};
+use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::selector::SelectorOptions;
 
 pub struct MetasrvPeerAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
+    max_items: Option<u32>,
 }
 
 impl MetasrvPeerAllocator {
     /// Creates a new [`MetasrvPeerAllocator`] with the given [`SelectorContext`] and [`SelectorRef`].
     pub fn new(ctx: SelectorContext, selector: SelectorRef) -> Self {
-        Self { ctx, selector }
+        Self {
+            ctx,
+            selector,
+            max_items: None,
+        }
+    }
+
+    pub fn with_max_items(self, max_items: u32) -> Self {
+        Self {
+            ctx: self.ctx,
+            selector: self.selector,
+            max_items: Some(max_items),
+        }
     }
 
     /// Allocates a specified number (by `regions`) of [`Peer`] instances based on the number of
@@ -43,33 +54,24 @@ impl MetasrvPeerAllocator {
     /// This method is mainly a wrapper around the [`SelectorRef`]::`select` method. There is
     /// no guarantee that how the returned peers are used, like whether they are from the same
     /// table or not. So this method isn't idempotent.
-    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>> {
-        ensure!(regions <= MAX_REGION_SEQ as usize, TooManyPartitionsSnafu);
+    async fn alloc(&self, min_required_items: usize) -> Result<Vec<Peer>> {
+        if let Some(max_items) = self.max_items {
+            ensure!(
+                min_required_items <= max_items as usize,
+                TooManyPartitionsSnafu
+            );
+        }
 
-        let mut peers = self
-            .selector
+        self.selector
             .select(
                 &self.ctx,
                 SelectorOptions {
-                    min_required_items: regions,
+                    min_required_items,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                 },
             )
-            .await?;
-
-        ensure!(
-            peers.len() >= regions,
-            error::NoEnoughAvailableNodeSnafu {
-                required: regions,
-                available: peers.len(),
-                select_target: SelectTarget::Datanode
-            }
-        );
-
-        peers.truncate(regions);
-
-        Ok(peers)
+            .await
     }
 }
 

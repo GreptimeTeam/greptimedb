@@ -285,7 +285,7 @@ pub struct RegionSupervisor {
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
     runtime_switch_manager: RuntimeSwitchManagerRef,
-    /// Peer resover
+    /// Peer resolver
     peer_resolver: PeerResolverRef,
     /// The kv backend.
     kv_backend: KvBackendRef,

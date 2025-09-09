@@ -28,20 +28,19 @@ pub mod election;
 pub mod error;
 pub mod events;
 mod failure_detector;
-pub mod flow_meta_alloc;
 pub mod handler;
 pub mod key;
 pub mod metasrv;
 pub mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
+pub mod peer;
 pub mod procedure;
 pub mod pubsub;
 pub mod region;
 pub mod selector;
 pub mod service;
 pub mod state;
-pub mod table_meta_alloc;
 pub mod utils;
 
 pub use crate::error::Result;

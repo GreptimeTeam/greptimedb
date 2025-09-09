@@ -48,13 +48,13 @@ use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
+use store_api::storage::MAX_REGION_SEQ;
 
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -65,6 +65,7 @@ use crate::metasrv::{
     ElectionRef, FLOW_ID_SEQ, METASRV_DATA_DIR, Metasrv, MetasrvInfo, MetasrvOptions,
     RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
+use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::wal_prune::Context as WalPruneContext;
@@ -80,7 +81,6 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
-use crate::table_meta_alloc::MetasrvPeerAllocator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
@@ -251,10 +251,10 @@ impl MetasrvBuilder {
                     .step(10)
                     .build(),
             );
-            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
-                selector_ctx.clone(),
-                selector.clone(),
-            ));
+            let peer_allocator = Arc::new(
+                MetasrvPeerAllocator::new(selector_ctx.clone(), selector.clone())
+                    .with_max_items(MAX_REGION_SEQ),
+            );
             Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
@@ -269,7 +269,7 @@ impl MetasrvBuilder {
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
             let flow_selector_ctx = selector_ctx.clone();
-            let peer_allocator = Arc::new(FlowPeerAllocator::new(
+            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
                 flow_selector_ctx,
                 flow_selector.clone(),
             ));
