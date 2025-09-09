@@ -137,6 +137,14 @@ impl LocalGcWorker {
         Ok(zelf)
     }
 
+    /// Get tmp ref files for all current regions
+    ///
+    /// If `file_ref_manifest`'s region manifest version is older than current region manifest version, then it means some regions may have removed some files, so:
+    /// 1. if can get the files that got removed from old manifest to new manifest, then shouldn't delete those files even if they are not in tmp ref file, other files can be normally handled(deleted if not in use, otherwise keep)
+    ///    and report back allow next gc round to handle those files with newer tmp ref file sets.
+    /// 2. if can't get the files that got removed from old manifest to new manifest(possible if just did a checkpoint),
+    ///    then can do nothing as can't sure whether a file is truly unused or just tmp ref file sets haven't report it, so need to report back and try next gc round to handle those files with newer tmp ref file sets.
+    ///
     pub async fn read_tmp_ref_files(&self) -> Result<HashSet<FileId>> {
         for (region_id, region_mgr) in &self.manifest_mgrs {
             let current_version = region_mgr.manifest().manifest_version;
