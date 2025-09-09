@@ -258,6 +258,7 @@ mod tests {
             num_rows: 1024,
             num_row_groups: 1,
             sequence: NonZeroU64::new(4096),
+            partition_expr: None,
         };
 
         file_ref_mgr.add_file(&file_meta);
