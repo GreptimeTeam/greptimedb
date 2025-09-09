@@ -18,7 +18,6 @@ use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::Result as DfResult;
-use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_expr::Distribution;
 
 use crate::dist_plan::MergeScanExec;
@@ -56,26 +55,54 @@ impl PassDistribution {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let mut distribution_requirement = None;
-        let result = plan.transform_down(|plan| {
-            if let Some(distribution) = plan.required_input_distribution().first()
-                && !matches!(distribution, Distribution::UnspecifiedDistribution)
-                // incorrect workaround, doesn't fix the actual issue
-                && plan.name() != "HashJoinExec"
-            {
-                distribution_requirement = Some(distribution.clone());
-            }
+        // Start from root with no requirement
+        Self::rewrite_with_distribution(plan, None)
+    }
 
-            if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
-                && let Some(distribution) = distribution_requirement.as_ref()
+    /// Top-down rewrite that propagates distribution requirements to children.
+    fn rewrite_with_distribution(
+        plan: Arc<dyn ExecutionPlan>,
+        current_req: Option<Distribution>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        // If this is a MergeScanExec, try to apply the current requirement.
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+            if let Some(distribution) = current_req.as_ref()
                 && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
             {
-                Ok(Transformed::yes(Arc::new(new_plan) as _))
-            } else {
-                Ok(Transformed::no(plan))
+                // Leaf node; no children to process
+                return Ok(Arc::new(new_plan) as _);
             }
-        })?;
+        }
 
-        Ok(result.data)
+        // Compute per-child requirements from the current node.
+        let children = plan.children();
+        if children.is_empty() {
+            return Ok(plan);
+        }
+
+        let required = plan.required_input_distribution();
+        let mut new_children = Vec::with_capacity(children.len());
+        for (idx, child) in children.into_iter().enumerate() {
+            let child_req = match required.get(idx) {
+                // Some(Distribution::UnspecifiedDistribution) | None => current_req.clone(),
+                Some(Distribution::UnspecifiedDistribution) => None,
+                None => current_req.clone(),
+                Some(req) => Some(req.clone()),
+            };
+            let new_child = Self::rewrite_with_distribution(child.clone(), child_req)?;
+            new_children.push(new_child);
+        }
+
+        // Rebuild the node only if any child changed (pointer inequality)
+        let unchanged = plan
+            .children()
+            .into_iter()
+            .zip(new_children.iter())
+            .all(|(old, new)| Arc::ptr_eq(old, new));
+        if unchanged {
+            Ok(plan)
+        } else {
+            plan.with_new_children(new_children)
+        }
     }
 }
