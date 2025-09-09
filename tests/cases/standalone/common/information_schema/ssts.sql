@@ -27,6 +27,7 @@ ADMIN FLUSH_TABLE('sst_case');
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
 SELECT * FROM information_schema.ssts_manifest order by file_path;
 
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 SELECT * FROM information_schema.ssts_storage order by file_path;
@@ -45,6 +46,7 @@ ADMIN FLUSH_TABLE('sst_case');
 -- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
 SELECT * FROM information_schema.ssts_manifest order by file_path;
 
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
 -- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
 -- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
 SELECT * FROM information_schema.ssts_storage order by file_path;
