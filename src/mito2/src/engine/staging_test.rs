@@ -263,3 +263,115 @@ async fn test_staging_manifest_directory() {
         "Staging manifest directory should contain files"
     );
 }
+
+#[tokio::test]
+async fn test_staging_exit_success_with_manifests() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+
+    // Create region
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Enter staging mode
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    // Add some data and flush in staging mode to generate staging manifests
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 5),
+    };
+    put_rows(&engine, region_id, rows_data).await;
+
+    // Force flush to generate staging manifests
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Add more data and flush again to generate multiple staging manifests
+    let rows_data2 = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(5, 10),
+    };
+    put_rows(&engine, region_id, rows_data2).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Verify we're in staging mode and staging manifests exist
+    let data_home = env.data_home();
+    let region_dir = format!("{}/data/test/1024_0000000000", data_home.display());
+    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
+
+    let staging_files_before = fs::read_dir(&staging_manifest_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !staging_files_before.is_empty(),
+        "Staging manifest directory should contain files before exit"
+    );
+
+    // Count normal manifest files before exit
+    let normal_manifest_dir = format!("{}/manifest", region_dir);
+    let normal_files_before = fs::read_dir(&normal_manifest_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let normal_count_before = normal_files_before.len();
+
+    // Exit staging mode successfully
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+
+    // Verify we're back in normal mode
+    let workers = &engine.inner.workers;
+    let region = workers.get_region(region_id).unwrap();
+    assert!(
+        !region.is_staging(),
+        "Region should no longer be in staging mode"
+    );
+
+    // Verify staging manifests have been cleared
+    let staging_files_after = fs::read_dir(&staging_manifest_dir)
+        .map(|entries| entries.collect::<Result<Vec<_>, _>>().unwrap_or_default())
+        .unwrap_or_default();
+    assert!(
+        staging_files_after.is_empty(),
+        "Staging manifest directory should be empty after successful exit"
+    );
+
+    // Verify normal manifests contain the merged changes
+    let normal_files_after = fs::read_dir(&normal_manifest_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        normal_files_after.len() > normal_count_before,
+        "Normal manifest directory should contain more files after merge"
+    );
+}

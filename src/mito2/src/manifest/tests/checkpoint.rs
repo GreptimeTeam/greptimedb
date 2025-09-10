@@ -123,7 +123,7 @@ async fn manager_without_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -171,7 +171,7 @@ async fn manager_with_checkpoint_distance_1() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -427,7 +427,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
 
