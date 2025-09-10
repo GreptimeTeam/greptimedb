@@ -582,7 +582,7 @@ impl RegionFlushTask {
         max_sequence: u64,
         source: Either<Source, FlatSource>,
     ) -> SstWriteRequest {
-        let write_request = SstWriteRequest {
+        SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
             source,
@@ -593,8 +593,7 @@ impl RegionFlushTask {
             inverted_index_config: self.engine_config.inverted_index.clone(),
             fulltext_index_config: self.engine_config.fulltext_index.clone(),
             bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
-        };
-        write_request
+        }
     }
 
     /// Notify flush job status.
