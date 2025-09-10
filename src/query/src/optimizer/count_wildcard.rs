@@ -88,6 +88,10 @@ impl CountWildcardToTimeIndexRule {
         // check if the time index is a valid column as for current plan
         if let Some(col) = &col {
             let mut is_valid = false;
+            // if more than one input, we give up and just use `count(1)`
+            if plan.inputs().len() > 1 {
+                return None;
+            }
             for input in plan.inputs() {
                 if input.schema().has_column(col) {
                     is_valid = true;
@@ -169,6 +173,11 @@ impl TreeNodeVisitor<'_> for TimeIndexFinder {
                     return Ok(TreeNodeRecursion::Stop);
                 }
             }
+        }
+
+        if node.inputs().len() > 1 {
+            // if more than one input, we give up and just use `count(1)`
+            return Ok(TreeNodeRecursion::Stop);
         }
 
         Ok(TreeNodeRecursion::Continue)
