@@ -92,6 +92,8 @@ impl Filters {
     }
 }
 
+pub type AggFunc = (String, Vec<LogExpr>, Option<String>); // (function name, args, alias)
+
 /// Expression to calculate on log after filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogExpr {
@@ -103,13 +105,13 @@ pub enum LogExpr {
         args: Vec<LogExpr>,
         alias: Option<String>,
     },
+    /// Aggregation function with optional grouping.
     AggrFunc {
-        name: String,
-        args: Vec<LogExpr>,
+        /// Function name, arguments, and optional alias.
+        expr: Vec<AggFunc>,
         /// Optional range function parameter. Stands for the time range for both step and align.
         range: Option<String>,
         by: Vec<LogExpr>,
-        alias: Option<String>,
     },
     Decompose {
         expr: Box<LogExpr>,
