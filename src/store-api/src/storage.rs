@@ -26,4 +26,4 @@ pub use datatypes::schema::{
 
 pub use self::descriptors::*;
 pub use self::requests::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
-pub use self::types::SequenceNumber;
+pub use self::types::{SequenceNumber, SequenceRange};

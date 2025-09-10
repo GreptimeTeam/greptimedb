@@ -60,7 +60,7 @@ use futures::stream::BoxStream;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
@@ -361,17 +361,50 @@ impl Batch {
     }
 
     /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
-    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
-        let seq = match (sequence, self.last_sequence()) {
-            (None, _) | (_, None) => return Ok(()),
-            (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
-            (Some(sequence), Some(_)) => sequence,
+    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceRange>) -> Result<()> {
+        let seq_range = match sequence {
+            None => return Ok(()),
+            Some(seq_range) => {
+                let (Some(first), Some(last)) = (self.first_sequence(), self.last_sequence())
+                else {
+                    return Ok(());
+                };
+                let is_subset = match seq_range {
+                    SequenceRange::From { min } => min < first,
+                    SequenceRange::To { max } => max >= last,
+                    SequenceRange::Range { min, max } => min < first && max >= last,
+                };
+                if is_subset {
+                    return Ok(());
+                }
+                seq_range
+            }
         };
 
         let seqs = self.sequences.as_arrow();
-        let sequence = UInt64Array::new_scalar(seq);
-        let predicate = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &sequence)
-            .context(ComputeArrowSnafu)?;
+        let predicate = match seq_range {
+            SequenceRange::From { min } => {
+                let min = UInt64Array::new_scalar(min);
+                datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
+                    .context(ComputeArrowSnafu)?
+            }
+            SequenceRange::To { max } => {
+                let max = UInt64Array::new_scalar(max);
+                datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)
+                    .context(ComputeArrowSnafu)?
+            }
+            SequenceRange::Range { min, max } => {
+                let min = UInt64Array::new_scalar(min);
+                let max = UInt64Array::new_scalar(max);
+                let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
+                    .context(ComputeArrowSnafu)?;
+                let pred_max = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)
+                    .context(ComputeArrowSnafu)?;
+                datafusion_common::arrow::compute::kernels::boolean::and(&pred_min, &pred_max)
+                    .context(ComputeArrowSnafu)?
+            }
+        };
+
         let predicate = BooleanVector::from(predicate);
         self.filter(&predicate)?;
 
@@ -1292,7 +1325,9 @@ mod tests {
             &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
             &[21, 22, 23, 24],
         );
-        batch.filter_by_sequence(Some(13)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::To { max: 13 }))
+            .unwrap();
         let expect = new_batch(
             &[1, 2, 3],
             &[11, 12, 13],
@@ -1309,7 +1344,9 @@ mod tests {
             &[21, 22, 23, 24],
         );
 
-        batch.filter_by_sequence(Some(10)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::To { max: 10 }))
+            .unwrap();
         assert!(batch.is_empty());
 
         // None filter.
@@ -1325,7 +1362,9 @@ mod tests {
 
         // Filter a empty batch
         let mut batch = new_batch(&[], &[], &[], &[]);
-        batch.filter_by_sequence(Some(10)).unwrap();
+        batch
+            .filter_by_sequence(Some(SequenceRange::To { max: 10 }))
+            .unwrap();
         assert!(batch.is_empty());
 
         // Filter a empty batch with None
