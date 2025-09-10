@@ -27,7 +27,9 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::ColumnId;
+#[cfg(any(test, feature = "test"))]
+use store_api::storage::SequenceRange;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -218,7 +220,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build(None)?;
 
@@ -234,7 +236,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> error::Result<MemtableRanges> {
         let start_time = Instant::now();
@@ -833,7 +835,9 @@ mod tests {
             .unwrap();
 
         // Filter with sequence 0 should only return first write
-        let mut iter = memtable.iter(None, None, Some(0)).unwrap();
+        let mut iter = memtable
+            .iter(None, None, Some(SequenceRange::To { max: 0 }))
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
         assert_eq!(1.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap());

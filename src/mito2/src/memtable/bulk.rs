@@ -31,6 +31,8 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
+#[cfg(any(test, feature = "test"))]
+use store_api::storage::SequenceRange;
 use tokio::sync::Semaphore;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -323,7 +325,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        _sequence: Option<SequenceNumber>,
+        _sequence: Option<SequenceRange>,
     ) -> Result<crate::memtable::BoxedBatchIterator> {
         todo!()
     }
@@ -332,7 +334,7 @@ impl Memtable for BulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         for_flush: bool,
     ) -> Result<MemtableRanges> {
         let mut ranges = BTreeMap::new();
@@ -602,7 +604,7 @@ impl BulkMemtable {
 struct BulkRangeIterBuilder {
     part: BulkPart,
     context: Arc<BulkIterContext>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -641,7 +643,7 @@ struct EncodedBulkRangeIterBuilder {
     file_id: FileId,
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
@@ -1380,8 +1382,8 @@ mod tests {
 
         memtable.write_bulk(part).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let sequence_filter = Some(400u64); // Filters out rows with sequence > 400
+        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let sequence_filter = Some(SequenceRange::To { max: 400 }); // Filters out rows with sequence > 400
         let ranges = memtable
             .ranges(None, predicate_group, sequence_filter, false)
             .unwrap();

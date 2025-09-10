@@ -39,7 +39,7 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -272,7 +272,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -299,7 +299,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> Result<MemtableRanges> {
         let projection = if let Some(projection) = projection {
@@ -463,7 +463,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
@@ -531,7 +531,7 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     metrics: Metrics,
     mem_scan_metrics: Option<MemScanMetrics>,
 }
@@ -547,7 +547,7 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
         let predicate = predicate
@@ -1239,7 +1239,7 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     merge_mode: MergeMode,
 }
 

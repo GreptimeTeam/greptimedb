@@ -53,7 +53,8 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId, SequenceNumber};
+use store_api::storage::{FileId};
+use store_api::storage::{SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -564,7 +565,7 @@ impl EncodedBulkPart {
     pub(crate) fn read(
         &self,
         context: BulkIterContextRef,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         // use predicate to find row groups to read.
         let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);

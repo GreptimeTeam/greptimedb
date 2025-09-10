@@ -30,7 +30,7 @@ use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortFi
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::{ColumnId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::Result;
@@ -89,7 +89,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
-        _sequence: Option<SequenceNumber>,
+        _sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
     }
@@ -98,7 +98,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: PredicateGroup,
-        _sequence: Option<SequenceNumber>,
+        _sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> Result<MemtableRanges> {
         Ok(MemtableRanges::default())

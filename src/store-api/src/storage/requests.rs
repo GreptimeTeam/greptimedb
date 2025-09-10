@@ -58,6 +58,9 @@ pub struct ScanRequest {
     /// If set, only rows with a sequence number lesser or equal to this value
     /// will be returned.
     pub sequence: Option<SequenceNumber>,
+    /// Optional constraint on the minimal sequence number in the memtable.
+    /// If set, only the memtables that contain sequences greater than this value will be scanned
+    pub memtable_min_sequence: Option<SequenceNumber>,
     /// Optional constraint on the minimal sequence number in the SST files.
     /// If set, only the SST files that contain sequences greater than this value will be scanned.
     pub sst_min_sequence: Option<SequenceNumber>,
