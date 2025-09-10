@@ -810,13 +810,13 @@ impl FlatSeriesBatchDivider {
         let buffer_last_pk =
             primary_key_at(buffer_pk_array, buffer_pk_values, buffer_pk_array.len() - 1);
 
-        // If last primary key of the batch is the same as last primary key of the buffer
+        // If last primary key in the batch is the same as last primary key in the buffer.
         if batch_last_pk == buffer_last_pk {
             self.buffer.batches.push(batch);
             return None;
         }
-
-        // Finds the offset where the primary key changes.
+        // Otherwise, the batch must have a different primary key, we find the first offset of the
+        // changed primary key.
         let batch_pk_keys = batch_pk_array.keys();
         let pk_indices = batch_pk_keys.values();
         let mut change_offset = 0;
