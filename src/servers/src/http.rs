@@ -1028,6 +1028,10 @@ impl HttpServer {
                 routing::get(event::query_pipeline),
             )
             .route(
+                "/pipelines/{pipeline_name}/ddl",
+                routing::get(event::query_pipeline_ddl),
+            )
+            .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )

@@ -20,7 +20,6 @@ use std::fmt::Display;
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
 use datafusion_expr::{Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Vector;
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::vectors::{BinaryVector, MutableVector, UInt64VectorBuilder, VectorRef};
@@ -59,8 +58,8 @@ impl Function for HllCalcFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -126,10 +125,8 @@ mod tests {
         let function = HllCalcFunction;
         assert_eq!("hll_count", function.name());
         assert_eq!(
-            ConcreteDataType::uint64_datatype(),
-            function
-                .return_type(&[ConcreteDataType::uint64_datatype()])
-                .unwrap()
+            DataType::UInt64,
+            function.return_type(&[DataType::UInt64]).unwrap()
         );
 
         // Create a test HLL

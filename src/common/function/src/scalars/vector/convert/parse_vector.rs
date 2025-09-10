@@ -15,8 +15,8 @@
 use std::fmt::Display;
 
 use common_query::error::{InvalidFuncArgsSnafu, InvalidVectorStringSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::parse_string_to_vector_type_value;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
@@ -34,8 +34,8 @@ impl Function for ParseVectorFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::binary_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Binary)
     }
 
     fn signature(&self) -> Signature {

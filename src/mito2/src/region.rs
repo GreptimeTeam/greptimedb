@@ -42,7 +42,9 @@ use crate::error::{
     FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
     UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{
+    RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -302,13 +304,10 @@ impl MitoRegion {
     /// You should call this method in the worker loop.
     /// Transitions from Writable to Staging state.
     /// Cleans any existing staging manifests before entering staging mode.
-    pub(crate) async fn set_staging<'a, 'b>(
-        &'a self,
-        manager: RwLockWriteGuard<'b, RegionManifestManager>,
-    ) -> Result<()>
-    where
-        'a: 'b,
-    {
+    pub(crate) async fn set_staging(
+        &self,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+    ) -> Result<()> {
         manager.store().clear_staging_manifests().await?;
 
         self.compare_exchange_state(
@@ -333,7 +332,7 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
-        let manager = self.manifest_ctx.manifest_manager.write().await;
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -344,7 +343,7 @@ impl MitoRegion {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
                         // Use the success exit path that merges all staged manifests
-                        self.exit_staging_on_success(manager).await?;
+                        self.exit_staging_on_success(&mut manager).await?;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
@@ -368,7 +367,7 @@ impl MitoRegion {
                 match current_state {
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Entering staging mode for region {}", self.region_id);
-                        self.set_staging(manager).await?;
+                        self.set_staging(&mut manager).await?;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         // Already in desired state - no-op
@@ -435,6 +434,38 @@ impl MitoRegion {
                 }
             }
         }
+
+        // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
+        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
+            let manifest_meta = &manager.manifest().metadata;
+            let current_meta = &self.version().metadata;
+            if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
+                let action = RegionMetaAction::Change(RegionChange {
+                    metadata: current_meta.clone(),
+                });
+                let result = manager
+                    .update(
+                        RegionMetaActionList::with_action(action),
+                        RegionRoleState::Leader(RegionLeaderState::Writable),
+                    )
+                    .await;
+
+                match result {
+                    Ok(version) => {
+                        info!(
+                            "Successfully persisted backfilled metadata for region {}, version: {}",
+                            self.region_id, version
+                        );
+                    }
+                    Err(e) => {
+                        warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
+                    }
+                }
+            }
+        }
+
+        drop(manager);
 
         Ok(())
     }
@@ -524,7 +555,8 @@ impl MitoRegion {
             .flat_map(|level| {
                 level.files().map(|file| {
                     let meta = file.meta_ref();
-                    let region_id = meta.region_id;
+                    let region_id = self.region_id;
+                    let origin_region_id = meta.region_id;
                     let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
                         let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
                         (Some(index_file_path), Some(meta.index_file_size))
@@ -549,6 +581,8 @@ impl MitoRegion {
                         min_ts: meta.time_range.0,
                         max_ts: meta.time_range.1,
                         sequence: meta.sequence.map(|s| s.get()),
+                        origin_region_id,
+                        node_id: None,
                     }
                 })
             })
@@ -558,7 +592,7 @@ impl MitoRegion {
     /// Exit staging mode successfully by merging all staged manifests and making them visible.
     pub(crate) async fn exit_staging_on_success(
         &self,
-        mut manager: RwLockWriteGuard<'_, RegionManifestManager>,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Result<()> {
         let current_state = self.manifest_ctx.current_state();
         ensure!(
@@ -1290,8 +1324,9 @@ mod tests {
         assert!(!region.is_staging());
 
         // Test transition to staging
-        let manager = manifest_ctx.manifest_manager.write().await;
-        region.set_staging(manager).await.unwrap();
+        let mut manager = manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+        drop(manager);
         assert_eq!(
             region.state(),
             RegionRoleState::Leader(RegionLeaderState::Staging)
@@ -1329,8 +1364,9 @@ mod tests {
             drop(manager);
 
             // Enter staging mode - this should clean up the dirty files
-            let manager = manifest_ctx.manifest_manager.write().await;
-            region.set_staging(manager).await.unwrap();
+            let mut manager = manifest_ctx.manifest_manager.write().await;
+            region.set_staging(&mut manager).await.unwrap();
+            drop(manager);
 
             // Verify dirty files are cleaned up after entering staging
             let manager = manifest_ctx.manifest_manager.read().await;
@@ -1347,10 +1383,12 @@ mod tests {
         }
 
         // Test invalid transitions
-        let manager = manifest_ctx.manifest_manager.write().await;
-        assert!(region.set_staging(manager).await.is_ok()); // Writable -> Staging should work
-        let manager = manifest_ctx.manifest_manager.write().await;
-        assert!(region.set_staging(manager).await.is_err()); // Staging -> Staging should fail
+        let mut manager = manifest_ctx.manifest_manager.write().await;
+        assert!(region.set_staging(&mut manager).await.is_ok()); // Writable -> Staging should work
+        drop(manager);
+        let mut manager = manifest_ctx.manifest_manager.write().await;
+        assert!(region.set_staging(&mut manager).await.is_err()); // Staging -> Staging should fail
+        drop(manager);
         assert!(region.exit_staging().is_ok()); // Staging -> Writable should work
         assert!(region.exit_staging().is_err()); // Writable -> Writable should fail
     }

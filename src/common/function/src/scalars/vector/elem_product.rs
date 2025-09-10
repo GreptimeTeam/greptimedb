@@ -15,10 +15,10 @@
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::InvalidFuncArgsSnafu;
+use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
 use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
 use nalgebra::DVectorView;
@@ -50,11 +50,8 @@ impl Function for ElemProductFunction {
         NAME
     }
 
-    fn return_type(
-        &self,
-        _input_types: &[ConcreteDataType],
-    ) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float32_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float32)
     }
 
     fn signature(&self) -> Signature {

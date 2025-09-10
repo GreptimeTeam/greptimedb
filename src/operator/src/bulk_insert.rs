@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::ArrowIpc;
-use api::v1::flow::DirtyWindowRequest;
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
@@ -302,9 +302,11 @@ impl Inserter {
                     if let Err(e) = node_manager
                         .flownode(&peer)
                         .await
-                        .handle_mark_window_dirty(DirtyWindowRequest {
-                            table_id,
-                            timestamps,
+                        .handle_mark_window_dirty(DirtyWindowRequests {
+                            requests: vec![DirtyWindowRequest {
+                                table_id,
+                                timestamps,
+                            }],
                         })
                         .await
                         .context(error::RequestInsertsSnafu)

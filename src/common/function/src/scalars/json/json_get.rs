@@ -58,8 +58,8 @@ macro_rules! json_get {
                     stringify!([<$name:snake>])
                 }
 
-                fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                    Ok(ConcreteDataType::[<$type:snake _datatype>]())
+                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+                    Ok(DataType::[<$type>])
                 }
 
                 fn signature(&self) -> Signature {
@@ -159,8 +159,8 @@ impl Function for JsonGetString {
         "json_get_string"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -242,12 +242,9 @@ mod tests {
 
         assert_eq!("json_get_int", json_get_int.name());
         assert_eq!(
-            ConcreteDataType::int64_datatype(),
+            DataType::Int64,
             json_get_int
-                .return_type(&[
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype()
-                ])
+                .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
 
@@ -295,12 +292,9 @@ mod tests {
 
         assert_eq!("json_get_float", json_get_float.name());
         assert_eq!(
-            ConcreteDataType::float64_datatype(),
+            DataType::Float64,
             json_get_float
-                .return_type(&[
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype()
-                ])
+                .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
 
@@ -348,12 +342,9 @@ mod tests {
 
         assert_eq!("json_get_bool", json_get_bool.name());
         assert_eq!(
-            ConcreteDataType::boolean_datatype(),
+            DataType::Boolean,
             json_get_bool
-                .return_type(&[
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype()
-                ])
+                .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
 
@@ -401,12 +392,9 @@ mod tests {
 
         assert_eq!("json_get_string", json_get_string.name());
         assert_eq!(
-            ConcreteDataType::string_datatype(),
+            DataType::Utf8,
             json_get_string
-                .return_type(&[
-                    ConcreteDataType::json_datatype(),
-                    ConcreteDataType::string_datatype()
-                ])
+                .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
 

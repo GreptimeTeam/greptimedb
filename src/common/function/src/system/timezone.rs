@@ -16,8 +16,9 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{StringVector, VectorRef};
 
 use crate::function::{Function, FunctionContext};
@@ -33,8 +34,8 @@ impl Function for TimezoneFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -65,10 +66,7 @@ mod tests {
     fn test_build_function() {
         let build = TimezoneFunction;
         assert_eq!("timezone", build.name());
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            build.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Utf8, build.return_type(&[]).unwrap());
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default().build().into();
