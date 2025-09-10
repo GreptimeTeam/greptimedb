@@ -27,7 +27,7 @@ use object_store::{
 };
 use snafu::prelude::*;
 
-use crate::config::{DEFAULT_OBJECT_STORE_CACHE_SIZE, ObjectStoreConfig};
+use crate::config::ObjectStoreConfig;
 use crate::error::{self, CreateDirSnafu, Result};
 
 pub(crate) async fn new_object_store_without_cache(
@@ -79,52 +79,23 @@ async fn build_cache_layer(
     store_config: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
+    // No need to build cache layer if read cache is disabled.
     if !store_config.enable_read_cache() {
         return Ok(None);
     }
 
-    let (name, mut cache_path, cache_capacity) = match store_config {
-        ObjectStoreConfig::S3(s3_config) => {
-            let path = s3_config.cache.cache_path.clone();
-            let name = &s3_config.name;
-            let capacity = s3_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Oss(oss_config) => {
-            let path = oss_config.cache.cache_path.clone();
-            let name = &oss_config.name;
-            let capacity = oss_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Azblob(azblob_config) => {
-            let path = azblob_config.cache.cache_path.clone();
-            let name = &azblob_config.name;
-            let capacity = azblob_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Gcs(gcs_config) => {
-            let path = gcs_config.cache.cache_path.clone();
-            let name = &gcs_config.name;
-            let capacity = gcs_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        _ => unreachable!("Already checked above"),
+    let (name, mut cache_path, cache_capacity) = {
+        // It's safe to unwrap here because we already checked above.
+        let cache_config = store_config.cache_config().unwrap();
+        (
+            store_config.config_name(),
+            cache_config.cache_path.clone(),
+            cache_config.cache_capacity,
+        )
     };
 
-    // If `cache_path` is unset or an empty string, default to use `${data_home}` as the local read cache directory.
-    if cache_path.as_ref().is_none_or(|p| p.is_empty()) {
+    // If `cache_path` is unset, default to use `${data_home}` as the local read cache directory.
+    if cache_path.is_empty() {
         let read_cache_path = data_home.to_string();
         tokio::fs::create_dir_all(Path::new(&read_cache_path))
             .await
@@ -137,21 +108,19 @@ async fn build_cache_layer(
             name, &read_cache_path
         );
 
-        cache_path = Some(read_cache_path);
+        cache_path = read_cache_path;
     }
 
-    if let Some(path) = cache_path.as_ref()
-        && !path.trim().is_empty()
-    {
-        let atomic_temp_dir = join_dir(path, ATOMIC_WRITE_DIR);
+    if !cache_path.trim().is_empty() {
+        let atomic_temp_dir = join_dir(&cache_path, ATOMIC_WRITE_DIR);
         clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
         // Compatible code. Remove this after a major release.
-        let old_atomic_temp_dir = join_dir(path, OLD_ATOMIC_WRITE_DIR);
+        let old_atomic_temp_dir = join_dir(&cache_path, OLD_ATOMIC_WRITE_DIR);
         clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
         let cache_store = Fs::default()
-            .root(path)
+            .root(&cache_path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
             .context(error::BuildCacheStoreSnafu)?;
@@ -161,7 +130,7 @@ async fn build_cache_layer(
         cache_layer.recover_cache(false).await;
         info!(
             "Enabled local object storage cache, path: {}, capacity: {}.",
-            path, cache_capacity
+            cache_path, cache_capacity
         );
 
         Ok(Some(cache_layer))

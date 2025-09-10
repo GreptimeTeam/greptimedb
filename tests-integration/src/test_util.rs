@@ -211,10 +211,10 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let mut s3_config = s3_test_config();
 
             if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = Some("/tmp/greptimedb_cache".to_string());
+                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
             } else {
                 // An empty string means disabling.
-                s3_config.cache.cache_path = Some("".to_string());
+                s3_config.cache.cache_path = "".to_string();
             }
 
             let builder = S3::from(&s3_config.connection);
