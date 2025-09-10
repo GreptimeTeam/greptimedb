@@ -40,10 +40,10 @@ pub fn original_column_for(
         return Ok(HashMap::new());
     }
 
-    original_column_for_recursive(cur_aliases, &aliased_node, &original_node)
+    original_column_for_inner(cur_aliases, &aliased_node, &original_node)
 }
 
-fn original_column_for_recursive(
+fn original_column_for_inner(
     mut cur_aliases: HashMap<Column, Column>,
     node: &LogicalPlan,
     original_node: &Option<Arc<LogicalPlan>>,
@@ -111,10 +111,10 @@ pub fn aliased_columns_for(
         return Ok(HashMap::new());
     }
 
-    aliased_columns_for_recursive(initial_aliases, aliased_node, original_node)
+    aliased_columns_for_inner(initial_aliases, aliased_node, original_node)
 }
 
-fn aliased_columns_for_recursive(
+fn aliased_columns_for_inner(
     cur_aliases: HashMap<Column, HashSet<Column>>,
     node: &LogicalPlan,
     original_node: Option<&LogicalPlan>,
@@ -356,8 +356,6 @@ fn get_alias_original_column(alias: &Alias) -> Option<Column> {
 
 /// Mapping of original column in table to all the alias at current node
 pub type AliasMapping = BTreeMap<String, BTreeSet<Column>>;
-
-pub type HashableAliasMapping = BTreeMap<String, BTreeSet<Column>>;
 
 #[cfg(test)]
 mod tests {

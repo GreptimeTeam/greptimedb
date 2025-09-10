@@ -47,7 +47,7 @@ mod test;
 mod fallback;
 mod utils;
 
-pub(crate) use utils::{AliasMapping, HashableAliasMapping};
+pub(crate) use utils::AliasMapping;
 
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
@@ -508,7 +508,7 @@ impl PlanRewriter {
                                     })?;
                                     Ok((c.clone(), BTreeSet::from([column])))
                                 })
-                                .collect::<DfResult<HashableAliasMapping>>()?,
+                                .collect::<DfResult<AliasMapping>>()?,
                         );
             }
         }

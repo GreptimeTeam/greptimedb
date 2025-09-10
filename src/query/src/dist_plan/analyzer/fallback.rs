@@ -28,7 +28,7 @@ use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::MergeScanLogicalPlan;
-use crate::dist_plan::analyzer::HashableAliasMapping;
+use crate::dist_plan::analyzer::AliasMapping;
 
 /// FallbackPlanRewriter is a plan rewriter that will only push down table scan node
 /// This is used when `PlanRewriter` produce errors when trying to rewrite the plan
@@ -85,7 +85,7 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                                     })?;
                                     Ok((c.clone(), BTreeSet::from([column])))
                                 })
-                                .collect::<DfResult<HashableAliasMapping>>()?)
+                                .collect::<DfResult<AliasMapping>>()?)
                     } else {
                         None
                     }

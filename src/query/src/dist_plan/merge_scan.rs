@@ -52,7 +52,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
 
-use crate::dist_plan::analyzer::HashableAliasMapping;
+use crate::dist_plan::analyzer::AliasMapping;
 use crate::error::ConvertSchemaSnafu;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
@@ -63,7 +63,7 @@ pub struct MergeScanLogicalPlan {
     input: LogicalPlan,
     /// If this plan is a placeholder
     is_placeholder: bool,
-    partition_cols: HashableAliasMapping,
+    partition_cols: AliasMapping,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -104,11 +104,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(
-        input: LogicalPlan,
-        is_placeholder: bool,
-        partition_cols: HashableAliasMapping,
-    ) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
             input,
             is_placeholder,
@@ -135,7 +131,7 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 
-    pub fn partition_cols(&self) -> &HashableAliasMapping {
+    pub fn partition_cols(&self) -> &AliasMapping {
         &self.partition_cols
     }
 }
@@ -155,7 +151,7 @@ pub struct MergeScanExec {
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
-    partition_cols: HashableAliasMapping,
+    partition_cols: AliasMapping,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -180,7 +176,7 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
-        partition_cols: HashableAliasMapping,
+        partition_cols: AliasMapping,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
