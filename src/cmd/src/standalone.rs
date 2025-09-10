@@ -218,6 +218,7 @@ impl Into<FrontendOptions> for StandaloneOptions {
 }
 
 impl StandaloneOptions {
+    /// Returns the `FrontendOptions` for the standalone instance.
     pub fn frontend_options(&self) -> FrontendOptions {
         let cloned_opts = self.clone();
         FrontendOptions {
@@ -241,6 +242,7 @@ impl StandaloneOptions {
         }
     }
 
+    /// Returns the `DatanodeOptions` for the standalone instance.
     pub fn datanode_options(&self) -> DatanodeOptions {
         let cloned_opts = self.clone();
         DatanodeOptions {
@@ -254,6 +256,17 @@ impl StandaloneOptions {
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
             query: cloned_opts.query,
             ..Default::default()
+        }
+    }
+
+    /// Sanitize the `StandaloneOptions` to ensure the config is valid.
+    pub fn sanitize(&mut self) {
+        if self.storage.is_object_storage() {
+            self.storage
+                .store
+                .cache_config_mut()
+                .unwrap()
+                .sanitize(&self.storage.data_home);
         }
     }
 }
@@ -396,6 +409,7 @@ impl StartCommand {
         .context(error::LoadLayeredConfigSnafu)?;
 
         self.merge_with_cli_options(global_options, &mut opts.component)?;
+        opts.component.sanitize();
 
         Ok(opts)
     }
@@ -1146,5 +1160,23 @@ mod tests {
         assert_eq!(options.procedure, default_options.procedure);
         assert_eq!(options.logging, default_options.logging);
         assert_eq!(options.region_engine, default_options.region_engine);
+    }
+
+    #[test]
+    fn test_cache_config() {
+        let toml_str = r#"
+            [storage]
+            data_home = "test_data_home"
+            type = "S3"
+            [storage.cache_config]
+            enable_read_cache = true
+        "#;
+        let mut opts: StandaloneOptions = toml::from_str(toml_str).unwrap();
+        opts.sanitize();
+        assert!(opts.storage.store.cache_config().unwrap().enable_read_cache);
+        assert_eq!(
+            opts.storage.store.cache_config().unwrap().cache_path,
+            "test_data_home"
+        );
     }
 }
