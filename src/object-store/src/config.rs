@@ -18,6 +18,8 @@ use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
+
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -70,17 +72,26 @@ impl ObjectStoreConfig {
         name
     }
 
+    /// Returns the object storage cache configuration.
+    pub fn cache_config(&self) -> Option<&ObjectStorageCacheConfig> {
+        match self {
+            Self::File(_) => None,
+            Self::S3(s3) => Some(&s3.cache),
+            Self::Oss(oss) => Some(&oss.cache),
+            Self::Azblob(az) => Some(&az.cache),
+            Self::Gcs(gcs) => Some(&gcs.cache),
+        }
+    }
+
     /// Returns whether to enable read cache. If not set, the read cache will be enabled by default.
     pub fn enable_read_cache(&self) -> bool {
-        let enable_read_cache = match self {
-            Self::File(_) => Some(false),
+        match self {
+            Self::File(_) => false,
             Self::S3(s3) => s3.cache.enable_read_cache,
             Self::Oss(oss) => oss.cache.enable_read_cache,
             Self::Azblob(az) => az.cache.enable_read_cache,
             Self::Gcs(gcs) => gcs.cache.enable_read_cache,
-        };
-
-        enable_read_cache.unwrap_or(true)
+        }
     }
 }
 
@@ -314,15 +325,26 @@ impl Default for HttpClientConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ObjectStorageCacheConfig {
     /// Whether to enable read cache. If not set, the read cache will be enabled by default.
-    pub enable_read_cache: Option<bool>,
+    pub enable_read_cache: bool,
     /// The local file cache directory
-    pub cache_path: Option<String>,
+    pub cache_path: String,
     /// The cache capacity in bytes
-    pub cache_capacity: Option<ReadableSize>,
+    pub cache_capacity: ReadableSize,
+}
+
+impl Default for ObjectStorageCacheConfig {
+    fn default() -> Self {
+        Self {
+            enable_read_cache: true,
+            // The cache directory is set to the value of data_home in the build_cache_layer process.
+            cache_path: String::default(),
+            cache_capacity: DEFAULT_OBJECT_STORE_CACHE_SIZE,
+        }
+    }
 }
 
 #[cfg(test)]
