@@ -297,6 +297,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to handle query"))]
+    HandleQuery {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project schema"))]
+    ProjectSchema {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -369,6 +383,8 @@ impl ErrorExt for Error {
             Error::FrontendNotFound { .. } | Error::MetaClientMissing { .. } => {
                 StatusCode::Unexpected
             }
+            Error::HandleQuery { source, .. } => source.status_code(),
+            Error::ProjectSchema { source, .. } => source.status_code(),
         }
     }
 

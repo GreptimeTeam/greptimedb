@@ -189,8 +189,8 @@ pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option
     .context(error::NewRecordBatchSnafu)?;
     Ok(Some(BulkPart {
         batch,
-        max_ts,
-        min_ts,
+        max_timestamp: max_ts,
+        min_timestamp: min_ts,
         sequence: part.sequence,
         timestamp_index: part.timestamp_index,
         raw_data: None,
@@ -305,8 +305,8 @@ impl TimePartitions {
         let (matching_parts, missing_parts) = self.find_partitions_by_time_range(
             part.timestamps(),
             &parts,
-            time_type.create_timestamp(part.min_ts),
-            time_type.create_timestamp(part.max_ts),
+            time_type.create_timestamp(part.min_timestamp),
+            time_type.create_timestamp(part.max_timestamp),
         )?;
 
         if matching_parts.len() == 1 && missing_parts.is_empty() {
@@ -1195,8 +1195,8 @@ mod tests {
         let min_ts = ts.iter().min().copied().unwrap();
         BulkPart {
             batch,
-            max_ts,
-            min_ts,
+            max_timestamp: max_ts,
+            min_timestamp: min_ts,
             sequence,
             timestamp_index: 0,
             raw_data: None,
@@ -1308,8 +1308,8 @@ mod tests {
 
         let part = BulkPart {
             batch,
-            max_ts: 8000,
-            min_ts: 1000,
+            max_timestamp: 8000,
+            min_timestamp: 1000,
             sequence: 0,
             timestamp_index: 0,
             raw_data: None,
@@ -1319,16 +1319,16 @@ mod tests {
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 1);
-        assert_eq!(filtered.min_ts, 1000);
-        assert_eq!(filtered.max_ts, 1000);
+        assert_eq!(filtered.min_timestamp, 1000);
+        assert_eq!(filtered.max_timestamp, 1000);
 
         // Test splitting with range [3000, 6000)
         let result = filter_record_batch(&part, 3000, 6000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 1);
-        assert_eq!(filtered.min_ts, 5000);
-        assert_eq!(filtered.max_ts, 5000);
+        assert_eq!(filtered.min_timestamp, 5000);
+        assert_eq!(filtered.max_timestamp, 5000);
 
         // Test splitting with range that includes no points
         let result = filter_record_batch(&part, 3000, 4000).unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows(), 5);
-        assert_eq!(filtered.min_ts, 1000);
-        assert_eq!(filtered.max_ts, 8000);
+        assert_eq!(filtered.min_timestamp, 1000);
+        assert_eq!(filtered.max_timestamp, 8000);
     }
 }

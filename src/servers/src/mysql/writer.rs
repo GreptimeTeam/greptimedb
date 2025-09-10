@@ -23,6 +23,7 @@ use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use datatypes::types::json_type_value_to_string;
 use futures::StreamExt;
+use itertools::Itertools;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
@@ -30,7 +31,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, ConvertSqlValueSnafu, Error, Result};
+use crate::error::{self, ConvertSqlValueSnafu, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -232,14 +233,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         row_writer.write_col(v.to_iso8601_string())?
                     }
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
-                    Value::List(_) => {
-                        return Err(Error::Internal {
-                            err_msg: format!(
-                                "cannot write value {:?} in mysql protocol: unimplemented",
-                                &value
-                            ),
-                        });
-                    }
+                    Value::List(v) => row_writer.write_col(format!(
+                        "[{}]",
+                        v.items().iter().map(|x| x.to_string()).join(", ")
+                    ))?,
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
                     Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
@@ -295,6 +292,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
         ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_BLOB),
+        ConcreteDataType::List(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",
