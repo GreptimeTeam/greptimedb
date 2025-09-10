@@ -1,8 +1,8 @@
 -- Migrated from DuckDB test: test/sql/setops/test_setops.test
 
-SELECT 1 UNION ALL SELECT 2;
+SELECT 1 UNION ALL SELECT 2 ORDER BY 1;
 
-SELECT 1, 'a' UNION ALL SELECT 2, 'b';
+SELECT 1, 'a' UNION ALL SELECT 2, 'b' ORDER BY 1;
 
 SELECT 1, 'a' UNION ALL SELECT 2, 'b' UNION ALL SELECT 3, 'c' ORDER BY 1;
 
