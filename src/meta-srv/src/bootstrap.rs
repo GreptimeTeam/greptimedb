@@ -461,7 +461,7 @@ fn build_connection_options(tls_config: Option<&TlsOption>) -> Result<Option<Con
     if matches!(tls_config.mode, TlsMode::Disable) {
         return Ok(None);
     }
-    info!("Creating etcd client with TLS config: {:?}", tls_config);
+    info!("Creating etcd client with TLS mode: {:?}", tls_config.mode);
     let mut etcd_tls_opts = TlsOptions::new();
     // Set CA certificate if provided
     if !tls_config.ca_cert_path.is_empty() {
