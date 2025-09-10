@@ -27,10 +27,7 @@ use tokio_stream::StreamExt;
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
-#[cfg(not(windows))]
-pub const PROGRAM: &str = "./greptime";
-#[cfg(windows)]
-pub const PROGRAM: &str = "greptime.exe";
+pub const PROGRAM: &str = "greptime";
 
 fn http_proxy() -> Option<String> {
     for proxy in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
