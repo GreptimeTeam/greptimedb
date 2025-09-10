@@ -107,7 +107,7 @@ mod tests {
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
 
-    use crate::discovery::utils::{self, is_datanode_accept_ingest_workload};
+    use crate::discovery::utils::{self, datanode_can_accept_ingest_workload};
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::test_util::create_meta_peer_client;
 
@@ -219,7 +219,7 @@ mod tests {
         let peers = utils::alive_datanodes(
             client.as_ref(),
             Duration::from_secs(lease_secs),
-            Some(is_datanode_accept_ingest_workload),
+            Some(datanode_can_accept_ingest_workload),
         )
         .await
         .unwrap();

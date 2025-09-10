@@ -20,6 +20,7 @@ use common_meta::error::{ExternalSnafu, Result as MetaResult};
 use common_meta::peer::{Peer, PeerAllocator};
 use snafu::{ResultExt, ensure};
 
+use crate::discovery::utils::datanode_can_accept_ingest_workload;
 use crate::error::{Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::selector::SelectorOptions;
@@ -69,6 +70,7 @@ impl MetasrvPeerAllocator {
                     min_required_items,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
+                    workload_filter: Some(datanode_can_accept_ingest_workload),
                 },
             )
             .await

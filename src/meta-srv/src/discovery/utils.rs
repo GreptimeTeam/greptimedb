@@ -144,19 +144,22 @@ pub async fn alive_datanode(
     Ok(v)
 }
 
-/// Returns true if the datanode can accept ingest workload based on its workload types.
+/// Determines if a datanode is capable of accepting ingest workloads.
+/// Returns `true` if the datanode's workload types include ingest capability,
+/// or if the node is not of type [NodeWorkloads::Datanode].
 ///
 /// A datanode is considered to accept ingest workload if it supports either:
 /// - Hybrid workload (both ingest and query workloads)
 /// - Ingest workload (only ingest workload)
-pub fn is_datanode_accept_ingest_workload(datanode_workloads: &NodeWorkloads) -> bool {
+pub fn datanode_can_accept_ingest_workload(datanode_workloads: &NodeWorkloads) -> bool {
     match &datanode_workloads {
         NodeWorkloads::Datanode(workloads) => workloads
             .types
             .iter()
             .filter_map(|w| DatanodeWorkloadType::from_i32(*w))
             .any(|w| w.accept_ingest()),
-        _ => false,
+        // If the [NodeWorkloads] type is not [NodeWorkloads::Datanode], returns true.
+        _ => true,
     }
 }
 

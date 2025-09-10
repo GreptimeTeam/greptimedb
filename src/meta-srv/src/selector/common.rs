@@ -139,6 +139,7 @@ mod tests {
                 min_required_items: i,
                 allow_duplication: false,
                 exclude_peer_ids: HashSet::new(),
+                workload_filter: None,
             };
 
             let selected_peers: HashSet<_> =
@@ -154,6 +155,7 @@ mod tests {
             min_required_items: 6,
             allow_duplication: false,
             exclude_peer_ids: HashSet::new(),
+            workload_filter: None,
         };
 
         let selected_result =
@@ -165,6 +167,7 @@ mod tests {
                 min_required_items: i,
                 allow_duplication: true,
                 exclude_peer_ids: HashSet::new(),
+                workload_filter: None,
             };
 
             let selected_peers =
