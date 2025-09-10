@@ -431,20 +431,20 @@ impl MergeScanExec {
             return None;
         }
 
-        let partition_cols = self
+        let all_partition_col_aliases: HashSet<_> = self
             .partition_cols
-            .iter()
-            .map(|x| x.as_str())
-            .collect::<HashSet<_>>();
+            .values()
+            .flat_map(|aliases| aliases.iter().map(|c| c.name()))
+            .collect();
         let mut overlaps = vec![];
         for expr in &hash_exprs {
-            // TODO(ruihang): tracking aliases
             if let Some(col_expr) = expr.as_any().downcast_ref::<Column>()
-                && partition_cols.contains(col_expr.name())
+                && all_partition_col_aliases.contains(col_expr.name())
             {
                 overlaps.push(expr.clone());
             }
         }
+
         if overlaps.is_empty() {
             return None;
         }
