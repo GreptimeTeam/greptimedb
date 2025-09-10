@@ -410,10 +410,11 @@ impl RegionFlushTask {
                 }
                 for encoded in flat_sources.encoded {
                     let access_layer = self.access_layer.clone();
+                    let cache_manager = self.cache_manager.clone();
                     let region_id = version.metadata.region_id;
                     let task = common_runtime::spawn_global(async move {
                         let metrics = access_layer
-                            .put_sst(&encoded.data, region_id, &encoded.sst_info)
+                            .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                             .await?;
                         Ok((smallvec![encoded.sst_info], metrics))
                     });
