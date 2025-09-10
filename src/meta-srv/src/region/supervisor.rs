@@ -26,7 +26,7 @@ use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
-use common_meta::peer::{Peer, PeerLookupServiceRef};
+use common_meta::peer::{Peer, PeerResolverRef};
 use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::store::RangeRequest;
 use common_runtime::JoinHandle;
@@ -285,8 +285,8 @@ pub struct RegionSupervisor {
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
     runtime_switch_manager: RuntimeSwitchManagerRef,
-    /// Peer lookup service
-    peer_lookup: PeerLookupServiceRef,
+    /// Peer resolver
+    peer_resolver: PeerResolverRef,
     /// The kv backend.
     kv_backend: KvBackendRef,
 }
@@ -359,7 +359,7 @@ impl RegionSupervisor {
         selector: RegionSupervisorSelector,
         region_migration_manager: RegionMigrationManagerRef,
         runtime_switch_manager: RuntimeSwitchManagerRef,
-        peer_lookup: PeerLookupServiceRef,
+        peer_resolver: PeerResolverRef,
         kv_backend: KvBackendRef,
     ) -> Self {
         Self {
@@ -370,7 +370,7 @@ impl RegionSupervisor {
             selector,
             region_migration_manager,
             runtime_switch_manager,
-            peer_lookup,
+            peer_resolver,
             kv_backend,
         }
     }
@@ -633,7 +633,7 @@ impl RegionSupervisor {
     ) -> Result<Vec<(RegionMigrationProcedureTask, u32)>> {
         let mut tasks = Vec::with_capacity(regions.len());
         let from_peer = self
-            .peer_lookup
+            .peer_resolver
             .datanode(from_peer_id)
             .await
             .ok()
@@ -778,7 +778,7 @@ pub(crate) mod tests {
     use common_meta::key::{TableMetadataManager, runtime_switch};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_meta::test_util::NoopPeerLookupService;
+    use common_meta::test_util::NoopPeerResolver;
     use common_telemetry::info;
     use common_time::util::current_time_millis;
     use rand::Rng;
@@ -807,7 +807,7 @@ pub(crate) mod tests {
         ));
         let runtime_switch_manager =
             Arc::new(runtime_switch::RuntimeSwitchManager::new(env.kv_backend()));
-        let peer_lookup = Arc::new(NoopPeerLookupService);
+        let peer_resolver = Arc::new(NoopPeerResolver);
         let (tx, rx) = RegionSupervisor::channel();
         let kv_backend = env.kv_backend();
 
@@ -819,7 +819,7 @@ pub(crate) mod tests {
                 RegionSupervisorSelector::NaiveSelector(selector),
                 region_migration_manager,
                 runtime_switch_manager,
-                peer_lookup,
+                peer_resolver,
                 kv_backend,
             ),
             tx,

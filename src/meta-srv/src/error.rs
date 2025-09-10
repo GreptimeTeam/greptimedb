@@ -54,8 +54,22 @@ pub enum Error {
         peer_id: u64,
     },
 
-    #[snafu(display("Failed to lookup frontends"))]
-    LookupFrontends {
+    #[snafu(display("Failed to list active frontends"))]
+    ListActiveFrontends {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to list active datanodes"))]
+    ListActiveDatanodes {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to list active flownodes"))]
+    ListActiveFlownodes {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -796,6 +810,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid node info format"))]
+    InvalidNodeInfoFormat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -1055,7 +1076,8 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
-            | Error::InvalidDatanodeStatFormat { source, .. } => source.status_code(),
+            | Error::InvalidDatanodeStatFormat { source, .. }
+            | Error::InvalidNodeInfoFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. }
@@ -1085,7 +1107,9 @@ impl ErrorExt for Error {
             | Error::UnexpectedLogicalRouteTable { source, .. }
             | Error::UpdateTopicNameValue { source, .. }
             | Error::ParseWalOptions { source, .. } => source.status_code(),
-            Error::LookupFrontends { source, .. } => source.status_code(),
+            Error::ListActiveFrontends { source, .. }
+            | Error::ListActiveDatanodes { source, .. }
+            | Error::ListActiveFlownodes { source, .. } => source.status_code(),
             Error::NoAvailableFrontend { .. } => StatusCode::IllegalState,
 
             Error::InitMetadata { source, .. }

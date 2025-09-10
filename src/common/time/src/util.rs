@@ -52,6 +52,29 @@ pub fn find_tz_from_env() -> Option<Tz> {
         .and_then(|tz| Tz::from_str(&tz).ok())
 }
 
+/// A trait for types that provide the current system time.
+pub trait SystemTimer {
+    /// Returns the time duration since UNIX_EPOCH in milliseconds.
+    fn current_time_millis(&self) -> i64;
+
+    /// Returns the current time in rfc3339 format.
+    fn current_time_rfc3339(&self) -> String;
+}
+
+/// Default implementation of [`SystemTimer`]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DefaultSystemTimer;
+
+impl SystemTimer for DefaultSystemTimer {
+    fn current_time_millis(&self) -> i64 {
+        current_time_millis()
+    }
+
+    fn current_time_rfc3339(&self) -> String {
+        current_time_rfc3339()
+    }
+}
+
 /// Returns the time duration since UNIX_EPOCH in milliseconds.
 pub fn current_time_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()

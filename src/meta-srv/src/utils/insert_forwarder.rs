@@ -19,28 +19,28 @@ use client::error::{ExternalSnafu, Result as ClientResult};
 use client::inserter::{Context, InsertOptions, Inserter};
 use client::{Client, Database};
 use common_error::ext::BoxedError;
-use common_meta::peer::PeerLookupServiceRef;
+use common_meta::peer::PeerDiscoveryRef;
 use common_telemetry::{debug, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
 
-use crate::error::{LookupFrontendsSnafu, NoAvailableFrontendSnafu};
+use crate::error::{ListActiveFrontendsSnafu, NoAvailableFrontendSnafu};
 
 pub type InsertForwarderRef = Arc<InsertForwarder>;
 
 /// [`InsertForwarder`] is the inserter for the metasrv.
 /// It forwards insert requests to available frontend instances.
 pub struct InsertForwarder {
-    peer_lookup_service: PeerLookupServiceRef,
+    peer_discovery: PeerDiscoveryRef,
     client: RwLock<Option<Client>>,
     options: Option<InsertOptions>,
 }
 
 impl InsertForwarder {
     /// Creates a new InsertForwarder with the given peer lookup service.
-    pub fn new(peer_lookup_service: PeerLookupServiceRef, options: Option<InsertOptions>) -> Self {
+    pub fn new(peer_discovery: PeerDiscoveryRef, options: Option<InsertOptions>) -> Self {
         Self {
-            peer_lookup_service,
+            peer_discovery,
             client: RwLock::new(None),
             options,
         }
@@ -49,10 +49,10 @@ impl InsertForwarder {
     /// Builds a new client.
     async fn build_client(&self) -> crate::error::Result<Client> {
         let frontends = self
-            .peer_lookup_service
+            .peer_discovery
             .active_frontends()
             .await
-            .context(LookupFrontendsSnafu)?;
+            .context(ListActiveFrontendsSnafu)?;
 
         ensure!(!frontends.is_empty(), NoAvailableFrontendSnafu);
 
