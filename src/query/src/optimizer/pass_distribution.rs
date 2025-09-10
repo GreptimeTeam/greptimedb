@@ -83,7 +83,6 @@ impl PassDistribution {
         let mut new_children = Vec::with_capacity(children.len());
         for (idx, child) in children.into_iter().enumerate() {
             let child_req = match required.get(idx) {
-                // Some(Distribution::UnspecifiedDistribution) | None => current_req.clone(),
                 Some(Distribution::UnspecifiedDistribution) => None,
                 None => current_req.clone(),
                 Some(req) => Some(req.clone()),
