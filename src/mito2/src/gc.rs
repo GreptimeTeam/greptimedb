@@ -49,6 +49,14 @@ use crate::sst::file_ref::TableFileRefsManifest;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GcReport {
+    ///
+    pub deleted_files: HashMap<RegionId, Vec<FileId>>,
+    /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
+    pub need_retry_regions: HashSet<RegionId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileGcOption {
     /// Lingering time before deleting files.
     /// Should be long enough to allow long running queries to finish.
@@ -139,14 +147,11 @@ impl LocalGcWorker {
 
     /// Get tmp ref files for all current regions
     ///
-    /// If `file_ref_manifest`'s region manifest version is older than current region manifest version, then it means some regions may have removed some files, so:
-    /// 1. if can get the files that got removed from old manifest to new manifest, then shouldn't delete those files even if they are not in tmp ref file, other files can be normally handled(deleted if not in use, otherwise keep)
-    ///    and report back allow next gc round to handle those files with newer tmp ref file sets.
-    /// 2. if can't get the files that got removed from old manifest to new manifest(possible if just did a checkpoint),
-    ///    then can do nothing as can't sure whether a file is truly unused or just tmp ref file sets haven't report it, so need to report back and try next gc round to handle those files with newer tmp ref file sets.
-    ///
-    pub async fn read_tmp_ref_files(&self) -> Result<HashMap<RegionId, HashSet<FileId>>> {
-        let mut outdated_regions = HashSet::new();
+    /// Outdated regions are added to `outdated_regions` set
+    pub async fn read_tmp_ref_files(
+        &self,
+        outdated_regions: &mut HashSet<RegionId>,
+    ) -> Result<HashMap<RegionId, HashSet<FileId>>> {
         for (region_id, region_mgr) in &self.manifest_mgrs {
             let current_version = region_mgr.manifest().manifest_version;
             if &current_version
@@ -186,21 +191,28 @@ impl LocalGcWorker {
     /// may cause too many concurrent listing operations.
     ///
     /// TODO(discord9): consider instead running in parallel mode
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<GcReport> {
         info!("LocalGcWorker started");
 
-        let tmp_ref_files = self.read_tmp_ref_files().await?;
+        let mut outdated_regions = HashSet::new();
+        let mut deleted_files = HashMap::new();
+        let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
         for region_id in self.manifest_mgrs.keys() {
             info!("Doing gc for region {}", region_id);
             let tmp_ref_files = tmp_ref_files
                 .get(region_id)
                 .cloned()
                 .unwrap_or_else(HashSet::new);
-            self.do_region_gc(*region_id, &tmp_ref_files).await?;
+            let files = self.do_region_gc(*region_id, &tmp_ref_files).await?;
+            deleted_files.insert(*region_id, files);
             info!("Gc for region {} finished", region_id);
         }
         info!("LocalGcWorker finished");
-        Ok(())
+        let report = GcReport {
+            deleted_files,
+            need_retry_regions: outdated_regions.into_iter().collect(),
+        };
+        Ok(report)
     }
 }
 
@@ -221,7 +233,7 @@ impl LocalGcWorker {
         &self,
         region_id: RegionId,
         tmp_ref_files: &HashSet<FileId>,
-    ) -> Result<()> {
+    ) -> Result<Vec<FileId>> {
         info!("Doing gc for region {}", region_id);
         // TODO(discord9): impl gc worker
         let manifest = self
@@ -237,7 +249,6 @@ impl LocalGcWorker {
         if recently_removed_files.is_empty() {
             // no files to remove, skip
             info!("No recently removed files to gc for region {}", region_id);
-            return Ok(());
         }
 
         info!(
@@ -285,7 +296,7 @@ impl LocalGcWorker {
             unused_len, region_id
         );
 
-        Ok(())
+        Ok(unused_files)
     }
 
     async fn delete_files(&self, region_id: RegionId, file_ids: &[FileId]) -> Result<()> {
