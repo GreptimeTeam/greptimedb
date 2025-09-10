@@ -44,38 +44,43 @@ pub fn original_column_for(
 }
 
 fn original_column_for_recursive(
-    cur_aliases: HashMap<Column, Column>,
+    mut cur_aliases: HashMap<Column, Column>,
     node: &LogicalPlan,
     original_node: &Option<Arc<LogicalPlan>>,
 ) -> DfResult<HashMap<Column, Column>> {
-    // Base case: check if we've reached the target node
-    if let Some(original_node) = original_node {
-        if *node == **original_node {
+    let mut current_node = node;
+
+    loop {
+        // Base case: check if we've reached the target node
+        if let Some(original_node) = original_node {
+            if *current_node == **original_node {
+                return Ok(cur_aliases);
+            }
+        } else if current_node.inputs().is_empty() {
+            // leaf node reached
             return Ok(cur_aliases);
         }
-    } else if node.inputs().is_empty() {
-        // leaf node reached
-        return Ok(cur_aliases);
-    }
 
-    // Validate node has exactly one child
-    if node.inputs().len() != 1 {
-        return Err(datafusion::error::DataFusionError::Internal(
-            "only accept plan with at most one child".to_string(),
-        ));
-    }
-
-    // Get alias layer and update aliases
-    let layer = get_alias_layer_from_node(node)?;
-    let mut new_aliases = HashMap::new();
-    for (start_alias, cur_alias) in cur_aliases {
-        if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
-            new_aliases.insert(start_alias, old_column);
+        // Validate node has exactly one child
+        if current_node.inputs().len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "only accept plan with at most one child".to_string(),
+            ));
         }
-    }
 
-    // Recursive call with child node
-    original_column_for_recursive(new_aliases, node.inputs()[0], original_node)
+        // Get alias layer and update aliases
+        let layer = get_alias_layer_from_node(current_node)?;
+        let mut new_aliases = HashMap::new();
+        for (start_alias, cur_alias) in cur_aliases {
+            if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
+                new_aliases.insert(start_alias, old_column);
+            }
+        }
+
+        // Move to child node and continue iteration
+        cur_aliases = new_aliases;
+        current_node = current_node.inputs()[0];
+    }
 }
 
 /// Return all the aliased columns(at aliased node) for the given original columns(at original node)
@@ -114,40 +119,52 @@ fn aliased_columns_for_recursive(
     node: &LogicalPlan,
     original_node: Option<&LogicalPlan>,
 ) -> DfResult<HashMap<Column, HashSet<Column>>> {
-    // Base case: check if we've reached the target node
-    if let Some(original_node) = original_node {
-        if *node == *original_node {
-            return Ok(cur_aliases);
+    // First, collect the path from current node to the target node
+    let mut path = Vec::new();
+    let mut current_node = node;
+
+    // Descend to the target node, collecting nodes along the way
+    loop {
+        // Base case: check if we've reached the target node
+        if let Some(original_node) = original_node {
+            if *current_node == *original_node {
+                break;
+            }
+        } else if current_node.inputs().is_empty() {
+            // leaf node reached
+            break;
         }
-    } else if node.inputs().is_empty() {
-        // leaf node reached
-        return Ok(cur_aliases);
+
+        // Validate node has exactly one child
+        if current_node.inputs().len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "only accept plan with at most one child".to_string(),
+            ));
+        }
+
+        // Add current node to path and move to child
+        path.push(current_node);
+        current_node = current_node.inputs()[0];
     }
 
-    // Validate node has exactly one child
-    if node.inputs().len() != 1 {
-        return Err(datafusion::error::DataFusionError::Internal(
-            "only accept plan with at most one child".to_string(),
-        ));
+    // Now apply alias layers in reverse order (from original to aliased)
+    let mut result = cur_aliases;
+    for &node_in_path in path.iter().rev() {
+        let layer = get_alias_layer_from_node(node_in_path)?;
+        let mut new_aliases = HashMap::new();
+        for (original_column, cur_alias_set) in result {
+            let mut new_alias_set = HashSet::new();
+            for cur_alias in cur_alias_set {
+                new_alias_set.extend(layer.get_new_from_old(cur_alias.clone()));
+            }
+            if !new_alias_set.is_empty() {
+                new_aliases.insert(original_column, new_alias_set);
+            }
+        }
+        result = new_aliases;
     }
 
-    // Recursive call to child node first (descend to original node)
-    let child_result = aliased_columns_for_recursive(cur_aliases, node.inputs()[0], original_node)?;
-
-    // Apply alias layer on the way back up (from original to aliased)
-    let layer = get_alias_layer_from_node(node)?;
-    let mut new_aliases = HashMap::new();
-    for (original_column, cur_alias_set) in child_result {
-        let mut new_alias_set = HashSet::new();
-        for cur_alias in cur_alias_set {
-            new_alias_set.extend(layer.get_new_from_old(cur_alias.clone()));
-        }
-        if !new_alias_set.is_empty() {
-            new_aliases.insert(original_column, new_alias_set);
-        }
-    }
-
-    Ok(new_aliases)
+    Ok(result)
 }
 
 /// Return a mapping of original column to all the aliased columns in current node of the plan
@@ -284,7 +301,7 @@ impl AliasLayer {
         self.old_to_new
             .entry(old_column)
             .or_default()
-            .extend(new_columns.clone());
+            .extend(new_columns);
     }
 
     pub fn get_new_from_old(&self, old_column: Column) -> HashSet<Column> {
