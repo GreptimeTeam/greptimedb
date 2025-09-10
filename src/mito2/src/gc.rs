@@ -50,7 +50,7 @@ use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GcReport {
-    ///
+    /// deleted files per region
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
@@ -80,7 +80,7 @@ impl Default for FileGcOption {
     fn default() -> Self {
         Self {
             // expect long running queries to be finished within a reasonable time
-            lingering_time: Duration::from_secs(60 * 15),
+            lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
             max_concurrent_per_gc_job: 32,
