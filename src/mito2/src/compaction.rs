@@ -46,7 +46,7 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
-use crate::compaction::picker::{new_picker, CompactionTask};
+use crate::compaction::picker::{CompactionTask, new_picker};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -55,10 +55,10 @@ use crate::error::{
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
-use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
+use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};

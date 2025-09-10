@@ -139,9 +139,14 @@ impl WriteCache {
         .await
         .with_file_cleaner(cleaner);
 
-        let sst_info = writer
-            .write_all(write_request.source, write_request.max_sequence, write_opts)
-            .await?;
+        let sst_info = match write_request.source {
+            either::Left(source) => {
+                writer
+                    .write_all(source, write_request.max_sequence, write_opts)
+                    .await?
+            }
+            either::Right(flat_source) => writer.write_all_flat(flat_source, write_opts).await?,
+        };
         let mut metrics = writer.into_metrics();
 
         // Upload sst file to remote object store.
@@ -469,7 +474,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: Default::default(),
@@ -567,7 +572,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: cache_manager.clone(),
@@ -646,7 +651,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: cache_manager.clone(),

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use async_stream::try_stream;
 use common_time::Timestamp;
+use either::Either;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -34,7 +35,7 @@ use crate::cache::write_cache::SstUploadRequest;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
-use crate::read::Source;
+use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::IndexerBuilderImpl;
@@ -288,9 +289,16 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner);
-            let ssts = writer
-                .write_all(request.source, request.max_sequence, write_opts)
-                .await?;
+            let ssts = match request.source {
+                Either::Left(source) => {
+                    writer
+                        .write_all(source, request.max_sequence, write_opts)
+                        .await?
+                }
+                Either::Right(flat_source) => {
+                    writer.write_all_flat(flat_source, write_opts).await?
+                }
+            };
             let metrics = writer.into_metrics();
             (ssts, metrics)
         };
@@ -308,6 +316,40 @@ impl AccessLayer {
         }
 
         Ok((sst_info, metrics))
+    }
+
+    /// Put encoded SST file to the store directly.
+    pub(crate) async fn put_sst(
+        &self,
+        data: &bytes::Bytes,
+        region_id: RegionId,
+        sst_info: &SstInfo,
+    ) -> Result<Metrics> {
+        // TODO(yingwen): Support write cache.
+        let start = std::time::Instant::now();
+        let cleaner = TempFileCleaner::new(region_id, self.object_store.clone());
+        let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
+        let sst_file_path =
+            path_provider.build_sst_file_path(RegionFileId::new(region_id, sst_info.file_id));
+        common_telemetry::info!("Put sst, file_path: {}", sst_file_path);
+        let mut writer = self
+            .object_store
+            .writer_with(&sst_file_path)
+            .chunk(8 * 1024 * 1024) // Default write buffer size
+            .concurrent(8) // Default write concurrency
+            .await
+            .context(OpenDalSnafu)?;
+        if let Err(err) = writer.write(data.clone()).await.context(OpenDalSnafu) {
+            cleaner.clean_by_file_id(sst_info.file_id).await;
+            return Err(err);
+        }
+        if let Err(err) = writer.close().await.context(OpenDalSnafu) {
+            cleaner.clean_by_file_id(sst_info.file_id).await;
+            return Err(err);
+        }
+        let mut metrics = Metrics::new(WriteType::Flush);
+        metrics.write_batch = start.elapsed();
+        Ok(metrics)
     }
 
     /// Lists the SST entries from the storage layer in the table directory.
@@ -363,7 +405,7 @@ pub enum OperationType {
 pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
-    pub source: Source,
+    pub source: Either<Source, FlatSource>,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,

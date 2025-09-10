@@ -16,14 +16,15 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use common_telemetry::{debug, error, info, trace};
 use datatypes::arrow::datatypes::SchemaRef;
 use either::Either;
-use smallvec::{smallvec, SmallVec};
+use partition::expr::PartitionExpr;
+use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -33,18 +34,18 @@ use crate::access_layer::{AccessLayerRef, Metrics, OperationType, SstWriteReques
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    Error, FlushRegionSnafu, JoinSnafu, InvalidPartitionExprSnafu, RegionClosedSnafu, RegionDroppedSnafu,
-    RegionTruncatedSnafu, Result,
+    Error, FlushRegionSnafu, InvalidPartitionExprSnafu, JoinSnafu, RegionClosedSnafu,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::{EncodedRange, MemtableRanges};
+use crate::memtable::{EncodedRange, IterBuilder, MemtableRanges};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
-use crate::read::flat_dedup::{DedupIterator, FlatLastNonNull, FlatLastRow};
-use crate::read::flat_merge::MergeIterator;
+use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
+use crate::read::flat_merge::FlatMergeIterator;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::PredicateGroup;
 use crate::read::{FlatSource, Source};
@@ -57,8 +58,8 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
-use crate::sst::parquet::{SstInfo, WriteOptions, DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
-use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions};
+use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
@@ -444,7 +445,12 @@ impl RegionFlushTask {
 
                     file_metas.extend(ssts_written.into_iter().map(|sst_info| {
                         flushed_bytes += sst_info.file_size;
-                        Self::new_file_meta(self.region_id, max_sequence, sst_info)
+                        Self::new_file_meta(
+                            self.region_id,
+                            max_sequence,
+                            sst_info,
+                            partition_expr.clone(),
+                        )
                     }));
                 }
 
@@ -483,7 +489,12 @@ impl RegionFlushTask {
 
                 file_metas.extend(ssts_written.into_iter().map(|sst_info| {
                     flushed_bytes += sst_info.file_size;
-                    Self::new_file_meta(self.region_id, max_sequence, sst_info)
+                    Self::new_file_meta(
+                        self.region_id,
+                        max_sequence,
+                        sst_info,
+                        partition_expr.clone(),
+                    )
                 }));
             };
         }
@@ -543,8 +554,12 @@ impl RegionFlushTask {
         Ok(edit)
     }
 
-
-    fn new_file_meta(region_id: RegionId, max_sequence: u64, sst_info: SstInfo, partition_expr:  Option<PartitionExpr>) -> FileMeta {
+    fn new_file_meta(
+        region_id: RegionId,
+        max_sequence: u64,
+        sst_info: SstInfo,
+        partition_expr: Option<PartitionExpr>,
+    ) -> FileMeta {
         FileMeta {
             region_id,
             file_id: sst_info.file_id,
@@ -693,7 +708,7 @@ fn memtable_flat_sources(
 
             if last_iter_rows > min_flush_rows {
                 let merge_iter =
-                    MergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
+                    FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
                 input_iters = Vec::with_capacity(num_ranges);
                 let maybe_dedup = if options.append_mode {
                     // No dedup in append mode
@@ -702,9 +717,10 @@ fn memtable_flat_sources(
                     // Dedup according to merge mode.
                     match options.merge_mode() {
                         MergeMode::LastRow => {
-                            Box::new(DedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
+                            Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false)))
+                                as _
                         }
-                        MergeMode::LastNonNull => Box::new(DedupIterator::new(
+                        MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
                             merge_iter,
                             FlatLastNonNull::new(field_column_start, false),
                         )) as _,
@@ -719,7 +735,7 @@ fn memtable_flat_sources(
         // Handle remaining iters.
         if !input_iters.is_empty() {
             let merge_iter =
-                MergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
+                FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
             let maybe_dedup = if options.append_mode {
                 // No dedup in append mode
                 Box::new(merge_iter) as _
@@ -727,9 +743,9 @@ fn memtable_flat_sources(
                 // Dedup according to merge mode.
                 match options.merge_mode() {
                     MergeMode::LastRow => {
-                        Box::new(DedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
+                        Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
                     }
-                    MergeMode::LastNonNull => Box::new(DedupIterator::new(
+                    MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
                         merge_iter,
                         FlatLastNonNull::new(field_column_start, false),
                     )) as _,
