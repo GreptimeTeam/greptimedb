@@ -420,17 +420,22 @@ impl MergeScanExec {
             return None;
         }
 
-        let mut hash_cols = HashSet::default();
+        let partition_cols = self
+            .partition_cols
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<HashSet<_>>();
+        let mut overlaps = vec![];
         for expr in &hash_exprs {
-            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>() {
-                hash_cols.insert(col_expr.name());
+            // TODO(ruihang): tracking aliases
+            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>()
+                && partition_cols.contains(col_expr.name())
+            {
+                overlaps.push(expr.clone());
             }
         }
-        for col in &self.partition_cols {
-            if !hash_cols.contains(col.as_str()) {
-                // The partitioning columns are not the same
-                return None;
-            }
+        if overlaps.is_empty() {
+            return None;
         }
 
         Some(Self {
@@ -443,7 +448,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(hash_exprs, self.target_partition),
+                Partitioning::Hash(overlaps, self.target_partition),
                 self.properties.emission_type,
                 self.properties.boundedness,
             ),
