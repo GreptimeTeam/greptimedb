@@ -358,7 +358,9 @@ impl Env {
             "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
 
-        let mut process = Command::new(bins_dir.join(program))
+        let abs_bins_dir = bins_dir.canonicalize().expect("Failed to canonicalize bins_dir");
+
+        let mut process = Command::new(abs_bins_dir.join(program))
             .current_dir(bins_dir.clone())
             .env("TZ", "UTC")
             .args(args)
