@@ -1,9 +1,9 @@
 -- Migrated from DuckDB test: test/sql/join/natural/natural_join.test
 -- Tests NATURAL JOIN functionality
 
-CREATE TABLE emp_natural("id" INTEGER, "name" VARCHAR, dept_id INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE emp_natural("id" INTEGER, "name" VARCHAR, dept_id INTEGER, ts1 TIMESTAMP TIME INDEX);
 
-CREATE TABLE dept_natural(dept_id INTEGER, dept_name VARCHAR, ts TIMESTAMP TIME INDEX);
+CREATE TABLE dept_natural(dept_id INTEGER, dept_name VARCHAR, ts2 TIMESTAMP TIME INDEX);
 
 INSERT INTO emp_natural VALUES (1, 'Alice', 10, 1000), (2, 'Bob', 20, 2000), (3, 'Carol', 10, 3000);
 

@@ -7,7 +7,7 @@ CREATE TABLE user_profiles(user_id INTEGER, username VARCHAR, signup_date DATE, 
 
 Affected Rows: 0
 
-INSERT INTO log_entries VALUES 
+INSERT INTO log_entries VALUES
 (1, 1, 'login', 1700000000, 1000), (2, 1, 'view_page', 1700000060, 2000), (3, 2, 'login', 1700000120, 3000),
 (4, 2, 'purchase', 1700000180, 4000), (5, 3, 'login', 1700000240, 5000), (6, 1, 'logout', 1700000300, 6000),
 (7, 3, 'view_page', 1700000360, 7000), (8, 2, 'logout', 1700000420, 8000), (9, 3, 'purchase', 1700000480, 9000),
@@ -15,7 +15,7 @@ INSERT INTO log_entries VALUES
 
 Affected Rows: 12
 
-INSERT INTO user_profiles VALUES 
+INSERT INTO user_profiles VALUES
 (1, 'alice_user', '2022-01-15', 1000), (2, 'bob_user', '2022-03-20', 2000), (3, 'charlie_user', '2022-06-10', 3000);
 
 Affected Rows: 3
@@ -30,7 +30,7 @@ SELECT u.username, COUNT(l.log_id) as activity_count, COUNT(DISTINCT l.action) a
 | alice_user   | 4              | 3              |
 +--------------+----------------+----------------+
 
-SELECT l."action", COUNT(DISTINCT l.user_id) as unique_users, COUNT(*) as total_actions FROM log_entries l INNER JOIN user_profiles u ON l.user_id = u.user_id GROUP BY l."action" ORDER BY total_actions DESC;
+SELECT l."action", COUNT(DISTINCT l.user_id) as unique_users, COUNT(*) as total_actions FROM log_entries l INNER JOIN user_profiles u ON l.user_id = u.user_id GROUP BY l."action" ORDER BY total_actions DESC, l."action" ASC;
 
 +-----------+--------------+---------------+
 | action    | unique_users | total_actions |

@@ -15,23 +15,23 @@ INSERT INTO users_push VALUES (100, 'Alice', 'US', 1000), (200, 'Bob', 'EU', 200
 
 Affected Rows: 3
 
-SELECT e.event_type, u.region, COUNT(*) as event_count FROM events_push e INNER JOIN users_push u ON e.user_id = u.user_id WHERE u.region = 'US' GROUP BY e.event_type, u.region ORDER BY event_count DESC;
+SELECT e.event_type, u.region, COUNT(*) as event_count FROM events_push e INNER JOIN users_push u ON e.user_id = u.user_id WHERE u.region = 'US' GROUP BY e.event_type, u.region ORDER BY event_count DESC, e.event_type ASC;
 
 +------------+--------+-------------+
 | event_type | region | event_count |
 +------------+--------+-------------+
+| click      | US     | 1           |
 | purchase   | US     | 1           |
 | view       | US     | 1           |
-| click      | US     | 1           |
 +------------+--------+-------------+
 
-SELECT u.user_name, SUM(e."value") as total_value FROM users_push u INNER JOIN events_push e ON u.user_id = e.user_id WHERE e.event_type = 'click' GROUP BY u.user_id, u.user_name ORDER BY total_value DESC;
+SELECT u.user_name, SUM(e."value") as total_value FROM users_push u INNER JOIN events_push e ON u.user_id = e.user_id WHERE e.event_type = 'click' GROUP BY u.user_id, u.user_name ORDER BY total_value DESC, u.user_name ASC;
 
 +-----------+-------------+
 | user_name | total_value |
 +-----------+-------------+
-| Bob       | 1           |
 | Alice     | 1           |
+| Bob       | 1           |
 +-----------+-------------+
 
 DROP TABLE events_push;
