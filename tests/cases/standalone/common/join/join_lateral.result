@@ -24,8 +24,15 @@ INNER JOIN (
 ) top_earners ON d.dept_id = top_earners.dept_id AND top_earners.rn <= 2
 ORDER BY d.dept_id, top_earners.salary DESC;
 
-++
-++
++-------------+--------+--------+
+| dept_name   | emp_id | salary |
++-------------+--------+--------+
+| Engineering | 2      | 80000  |
+| Engineering | 1      | 75000  |
+| Sales       | 4      | 70000  |
+| Sales       | 3      | 65000  |
+| Marketing   | 5      | 60000  |
++-------------+--------+--------+
 
 DROP TABLE departments_lat;
 

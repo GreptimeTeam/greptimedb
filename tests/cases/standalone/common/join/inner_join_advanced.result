@@ -143,8 +143,15 @@ FROM customers c
 INNER JOIN orders o ON c.cust_id = o.cust_id
 ORDER BY c.cust_name, order_sequence;
 
-++
-++
++-----------+----------+--------+----------------+
+| cust_name | order_id | amount | order_sequence |
++-----------+----------+--------+----------------+
+| Alice     | 105      | 310.0  | 1              |
+| Bob       | 104      | 95.0   | 1              |
+| Jane      | 102      | 180.0  | 1              |
+| John      | 101      | 250.0  | 1              |
+| John      | 103      | 420.0  | 2              |
++-----------+----------+--------+----------------+
 
 DROP TABLE customers;
 

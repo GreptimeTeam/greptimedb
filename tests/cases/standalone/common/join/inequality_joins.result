@@ -142,8 +142,12 @@ INNER JOIN (
   AND latest_price.rn = 1
 ORDER BY o.order_id;
 
-++
-++
++----------+------------+-------+
+| order_id | order_date | price |
++----------+------------+-------+
+| 2        | 2023-01-20 | 110.0 |
+| 4        | 2023-01-25 | 55.0  |
++----------+------------+-------+
 
 DROP TABLE time_events;
 
