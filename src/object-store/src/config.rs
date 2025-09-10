@@ -86,14 +86,14 @@ impl ObjectStoreConfig {
         }
     }
 
-    /// Returns whether to enable read cache. If not set, the read cache will be enabled by default.
-    pub fn enable_read_cache(&self) -> bool {
+    /// Returns the mutable object storage cache configuration.
+    pub fn cache_config_mut(&mut self) -> Option<&mut ObjectStorageCacheConfig> {
         match self {
-            Self::File(_) => false,
-            Self::S3(s3) => s3.cache.enable_read_cache,
-            Self::Oss(oss) => oss.cache.enable_read_cache,
-            Self::Azblob(az) => az.cache.enable_read_cache,
-            Self::Gcs(gcs) => gcs.cache.enable_read_cache,
+            Self::File(_) => None,
+            Self::S3(s3) => Some(&mut s3.cache),
+            Self::Oss(oss) => Some(&mut oss.cache),
+            Self::Azblob(az) => Some(&mut az.cache),
+            Self::Gcs(gcs) => Some(&mut gcs.cache),
         }
     }
 }
@@ -321,6 +321,16 @@ impl Default for ObjectStorageCacheConfig {
             // The cache directory is set to the value of data_home in the build_cache_layer process.
             cache_path: String::default(),
             cache_capacity: DEFAULT_OBJECT_STORE_CACHE_SIZE,
+        }
+    }
+}
+
+impl ObjectStorageCacheConfig {
+    /// Sanitize the `ObjectStorageCacheConfig` to ensure the config is valid.
+    pub fn sanitize(&mut self, data_home: &str) {
+        // If `cache_path` is unset, default to use `${data_home}` as the local read cache directory.
+        if self.cache_path.is_empty() {
+            self.cache_path = data_home.to_string();
         }
     }
 }

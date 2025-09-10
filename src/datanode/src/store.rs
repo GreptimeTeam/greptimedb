@@ -14,10 +14,10 @@
 
 //! object storage utilities
 
-use std::path::Path;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use object_store::config::ObjectStorageCacheConfig;
 use object_store::factory::new_raw_object_store;
 use object_store::layers::LruCacheLayer;
 use object_store::services::Fs;
@@ -28,7 +28,7 @@ use object_store::{
 use snafu::prelude::*;
 
 use crate::config::ObjectStoreConfig;
-use crate::error::{self, CreateDirSnafu, Result};
+use crate::error::{self, Result};
 
 pub(crate) async fn new_object_store_without_cache(
     store: &ObjectStoreConfig,
@@ -58,11 +58,15 @@ pub(crate) async fn new_object_store(
         .context(error::ObjectStoreSnafu)?;
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if store.is_object_storage() {
-        let object_store = if let Some(cache_layer) = build_cache_layer(&store, data_home).await? {
-            // Adds cache layer
-            object_store.layer(cache_layer)
-        } else {
-            object_store
+        let object_store = {
+            // It's safe to unwrap here because we already checked above.
+            let cache_config = store.cache_config().unwrap();
+            if let Some(cache_layer) = build_cache_layer(cache_config).await? {
+                // Adds cache layer
+                object_store.layer(cache_layer)
+            } else {
+                object_store
+            }
         };
 
         // Adds retry layer
@@ -76,65 +80,37 @@ pub(crate) async fn new_object_store(
 }
 
 async fn build_cache_layer(
-    store_config: &ObjectStoreConfig,
-    data_home: &str,
+    cache_config: &ObjectStorageCacheConfig,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
     // No need to build cache layer if read cache is disabled.
-    if !store_config.enable_read_cache() {
+    if !cache_config.enable_read_cache {
         return Ok(None);
     }
 
-    let (name, mut cache_path, cache_capacity) = {
-        // It's safe to unwrap here because we already checked above.
-        let cache_config = store_config.cache_config().unwrap();
-        (
-            store_config.config_name(),
-            cache_config.cache_path.clone(),
-            cache_config.cache_capacity,
-        )
-    };
+    let atomic_temp_dir = join_dir(&cache_config.cache_path, ATOMIC_WRITE_DIR);
+    clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
-    // If `cache_path` is unset, default to use `${data_home}` as the local read cache directory.
-    if cache_path.is_empty() {
-        let read_cache_path = data_home.to_string();
-        tokio::fs::create_dir_all(Path::new(&read_cache_path))
-            .await
-            .context(CreateDirSnafu {
-                dir: &read_cache_path,
-            })?;
+    // Compatible code. Remove this after a major release.
+    let old_atomic_temp_dir = join_dir(&cache_config.cache_path, OLD_ATOMIC_WRITE_DIR);
+    clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
-        info!(
-            "The object storage cache path is not set for '{}', using the default path: '{}'",
-            name, &read_cache_path
-        );
+    let cache_store = Fs::default()
+        .root(&cache_config.cache_path)
+        .atomic_write_dir(&atomic_temp_dir)
+        .build()
+        .context(error::BuildCacheStoreSnafu)?;
 
-        cache_path = read_cache_path;
-    }
+    let cache_layer = LruCacheLayer::new(
+        Arc::new(cache_store),
+        cache_config.cache_capacity.0 as usize,
+    )
+    .context(error::BuildCacheStoreSnafu)?;
+    cache_layer.recover_cache(false).await;
 
-    if !cache_path.trim().is_empty() {
-        let atomic_temp_dir = join_dir(&cache_path, ATOMIC_WRITE_DIR);
-        clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
+    info!(
+        "Enabled local object storage cache, path: {}, capacity: {}.",
+        cache_config.cache_path, cache_config.cache_capacity
+    );
 
-        // Compatible code. Remove this after a major release.
-        let old_atomic_temp_dir = join_dir(&cache_path, OLD_ATOMIC_WRITE_DIR);
-        clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
-
-        let cache_store = Fs::default()
-            .root(&cache_path)
-            .atomic_write_dir(&atomic_temp_dir)
-            .build()
-            .context(error::BuildCacheStoreSnafu)?;
-
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
-            .context(error::BuildCacheStoreSnafu)?;
-        cache_layer.recover_cache(false).await;
-        info!(
-            "Enabled local object storage cache, path: {}, capacity: {}.",
-            cache_path, cache_capacity
-        );
-
-        Ok(Some(cache_layer))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(cache_layer))
 }
