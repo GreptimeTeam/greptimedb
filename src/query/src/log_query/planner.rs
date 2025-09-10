@@ -317,7 +317,13 @@ impl LogQueryPlanner {
     ) -> Result<(Vec<Expr>, Vec<Expr>)> {
         let aggr_expr = expr
             .iter()
-            .map(|(fn_name, args, alias)| {
+            .map(|agg_func| {
+                let AggFunc {
+                    name: fn_name,
+                    args,
+                    alias,
+                    range: _range,
+                } = agg_func;
                 let aggr_fn = self
                     .session_state
                     .aggregate_functions()
@@ -499,11 +505,7 @@ impl LogQueryPlanner {
         let mut plan_builder = plan_builder;
 
         match expr {
-            LogExpr::AggrFunc {
-                expr,
-                by,
-                range: _range,
-            } => {
+            LogExpr::AggrFunc { expr, by } => {
                 let schema = plan_builder.schema();
                 let (aggr_expr, group_exprs) = self.build_aggr_func(schema, expr, by)?;
 
@@ -921,13 +923,12 @@ mod tests {
             context: Context::None,
             columns: vec![],
             exprs: vec![LogExpr::AggrFunc {
-                expr: vec![(
+                expr: vec![AggFunc::new_without_range(
                     "count".to_string(),
                     vec![LogExpr::NamedIdent("message".to_string())],
                     Some("count_result".to_string()),
                 )],
                 by: vec![LogExpr::NamedIdent("host".to_string())],
-                range: None,
             }],
         };
 
@@ -1042,7 +1043,7 @@ mod tests {
                     alias: Some("2__date_histogram__time_bucket".to_string()),
                 },
                 LogExpr::AggrFunc {
-                    expr: vec![(
+                    expr: vec![AggFunc::new_without_range(
                         "count".to_string(),
                         vec![LogExpr::PositionalIdent(0)],
                         Some("count_result".to_string()),
@@ -1050,7 +1051,6 @@ mod tests {
                     by: vec![LogExpr::NamedIdent(
                         "2__date_histogram__time_bucket".to_string(),
                     )],
-                    range: None,
                 },
             ],
         };

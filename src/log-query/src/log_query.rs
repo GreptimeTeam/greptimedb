@@ -91,8 +91,42 @@ impl Filters {
         Filters::Single(filter)
     }
 }
+/// Aggregation function with optional range and alias.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggFunc {
+    /// Function name, e.g., "count", "sum", etc.
+    pub name: String,
+    /// Arguments to the function. e.g., column references or literals. LogExpr::NamedIdent("column1".to_string())
+    pub args: Vec<LogExpr>,
+    /// Optional range for the aggregation, e.g., "1m", "5m", etc.
+    pub range: Option<String>,
+    pub alias: Option<String>,
+}
 
-pub type AggFunc = (String, Vec<LogExpr>, Option<String>); // (function name, args, alias)
+impl AggFunc {
+    pub fn new(
+        name: String,
+        args: Vec<LogExpr>,
+        range: Option<String>,
+        alias: Option<String>,
+    ) -> Self {
+        Self {
+            name,
+            args,
+            range,
+            alias,
+        }
+    }
+
+    pub fn new_without_range(name: String, args: Vec<LogExpr>, alias: Option<String>) -> Self {
+        Self {
+            name,
+            args,
+            range: None,
+            alias,
+        }
+    }
+}
 
 /// Expression to calculate on log after filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,8 +143,6 @@ pub enum LogExpr {
     AggrFunc {
         /// Function name, arguments, and optional alias.
         expr: Vec<AggFunc>,
-        /// Optional range function parameter. Stands for the time range for both step and align.
-        range: Option<String>,
         by: Vec<LogExpr>,
     },
     Decompose {
