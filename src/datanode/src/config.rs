@@ -33,8 +33,6 @@ use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
-
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
