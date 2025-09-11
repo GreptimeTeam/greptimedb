@@ -437,12 +437,12 @@ impl SeriesDistributor {
         let mut divider = FlatSeriesBatchDivider::default();
         while let Some(record_batch) = reader.try_next().await? {
             metrics.scan_cost += fetch_start.elapsed();
-            fetch_start = Instant::now();
             metrics.num_batches += 1;
             metrics.num_rows += record_batch.num_rows();
 
             debug_assert!(record_batch.num_rows() > 0);
             if record_batch.num_rows() == 0 {
+                fetch_start = Instant::now();
                 continue;
             }
 
@@ -454,6 +454,7 @@ impl SeriesDistributor {
                     .await?;
                 metrics.yield_cost += yield_start.elapsed();
             }
+            fetch_start = Instant::now();
         }
 
         // Send any remaining batch in the divider
@@ -517,22 +518,24 @@ impl SeriesDistributor {
         let mut current_series = PrimaryKeySeriesBatch::default();
         while let Some(batch) = reader.next_batch().await? {
             metrics.scan_cost += fetch_start.elapsed();
-            fetch_start = Instant::now();
             metrics.num_batches += 1;
             metrics.num_rows += batch.num_rows();
 
             debug_assert!(!batch.is_empty());
             if batch.is_empty() {
+                fetch_start = Instant::now();
                 continue;
             }
 
             let Some(last_key) = current_series.current_key() else {
                 current_series.push(batch);
+                fetch_start = Instant::now();
                 continue;
             };
 
             if last_key == batch.primary_key() {
                 current_series.push(batch);
+                fetch_start = Instant::now();
                 continue;
             }
 
@@ -544,6 +547,7 @@ impl SeriesDistributor {
                 .send_batch(SeriesBatch::PrimaryKey(to_send))
                 .await?;
             metrics.yield_cost += yield_start.elapsed();
+            fetch_start = Instant::now();
         }
 
         if !current_series.is_empty() {
