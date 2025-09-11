@@ -45,7 +45,7 @@ GROUP BY i."warehouse" ORDER BY i."warehouse";
 | warehouse | items | avg_price |
 +-----------+-------+-----------+
 | WH1       | 2     | 512.5     |
-| WH2       | 0     |           |
+| WH2       | 1     |           |
 +-----------+-------+-----------+
 
 DROP TABLE inventory_right;

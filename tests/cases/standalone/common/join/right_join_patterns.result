@@ -74,8 +74,8 @@ ORDER BY total_qty_ordered DESC, po.item_id ASC;
 +-----------------+-------------------------+-------------------+
 | missing_item_id | orders_for_missing_item | total_qty_ordered |
 +-----------------+-------------------------+-------------------+
-| 5               | 0                       | 40                |
-| 4               | 0                       | 15                |
+| 5               | 1                       | 40                |
+| 4               | 1                       | 15                |
 +-----------------+-------------------------+-------------------+
 
 -- Right join with filtering and conditions
