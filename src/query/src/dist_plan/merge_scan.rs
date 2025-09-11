@@ -52,6 +52,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
 
+use crate::dist_plan::analyzer::AliasMapping;
 use crate::error::ConvertSchemaSnafu;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
@@ -62,7 +63,7 @@ pub struct MergeScanLogicalPlan {
     input: LogicalPlan,
     /// If this plan is a placeholder
     is_placeholder: bool,
-    partition_cols: Vec<String>,
+    partition_cols: AliasMapping,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -103,7 +104,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: Vec<String>) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
             input,
             is_placeholder,
@@ -130,7 +131,7 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 
-    pub fn partition_cols(&self) -> &[String] {
+    pub fn partition_cols(&self) -> &AliasMapping {
         &self.partition_cols
     }
 }
@@ -150,7 +151,7 @@ pub struct MergeScanExec {
     partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
-    partition_cols: Vec<String>,
+    partition_cols: AliasMapping,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -175,7 +176,7 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
-        partition_cols: Vec<String>,
+        partition_cols: AliasMapping,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
@@ -215,12 +216,18 @@ impl MergeScanExec {
         let partition_exprs = partition_cols
             .iter()
             .filter_map(|col| {
-                session_state
-                    .create_physical_expr(
-                        Expr::Column(ColumnExpr::new_unqualified(col)),
-                        plan.schema(),
-                    )
-                    .ok()
+                if let Some(first_alias) = col.1.first() {
+                    session_state
+                        .create_physical_expr(
+                            Expr::Column(ColumnExpr::new_unqualified(
+                                first_alias.name().to_string(),
+                            )),
+                            plan.schema(),
+                        )
+                        .ok()
+                } else {
+                    None
+                }
             })
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);
@@ -424,20 +431,20 @@ impl MergeScanExec {
             return None;
         }
 
-        let partition_cols = self
+        let all_partition_col_aliases: HashSet<_> = self
             .partition_cols
-            .iter()
-            .map(|x| x.as_str())
-            .collect::<HashSet<_>>();
+            .values()
+            .flat_map(|aliases| aliases.iter().map(|c| c.name()))
+            .collect();
         let mut overlaps = vec![];
         for expr in &hash_exprs {
-            // TODO(ruihang): tracking aliases
             if let Some(col_expr) = expr.as_any().downcast_ref::<Column>()
-                && partition_cols.contains(col_expr.name())
+                && all_partition_col_aliases.contains(col_expr.name())
             {
                 overlaps.push(expr.clone());
             }
         }
+
         if overlaps.is_empty() {
             return None;
         }
