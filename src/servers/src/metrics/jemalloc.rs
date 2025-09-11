@@ -71,8 +71,8 @@ impl JemallocCollector {
         let _ = self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
         let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
         let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
-        SYS_JEMALLOC_RESIDEN.set(allocated as i64);
-        SYS_JEMALLOC_ALLOCATED.set(resident as i64);
+        SYS_JEMALLOC_ALLOCATED.set(allocated as i64);
+        SYS_JEMALLOC_RESIDEN.set(resident as i64);
         Ok(())
     }
 }
