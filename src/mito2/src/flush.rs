@@ -431,7 +431,7 @@ impl RegionFlushTask {
                         continue;
                     }
 
-                    common_telemetry::info!(
+                    common_telemetry::debug!(
                         "Region flush one memtable {} {}/{}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, metrics: {:?}",
                         memtable_id,
                         source_idx,
@@ -455,7 +455,7 @@ impl RegionFlushTask {
                     }));
                 }
 
-                common_telemetry::info!(
+                common_telemetry::debug!(
                     "Region flush {} memtables for {}, flush_cost: {:?}, compact_cost: {:?}",
                     num_sources,
                     memtable_id,
@@ -479,7 +479,7 @@ impl RegionFlushTask {
                     continue;
                 }
 
-                common_telemetry::info!(
+                common_telemetry::debug!(
                     "Region flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
                     num_mem_ranges,
                     num_mem_rows,
