@@ -775,7 +775,7 @@ struct FlatSeriesBatchDivider {
 impl FlatSeriesBatchDivider {
     /// Pushes a record batch into the divider.
     ///
-    /// Returns a [FlatSeriesBatch] if the series in the buffer is exhausted.
+    /// Returns a [FlatSeriesBatch] if we ensure the batch contains all rows of the series in it.
     fn push(&mut self, batch: RecordBatch) -> Option<FlatSeriesBatch> {
         // If buffer is empty
         if self.buffer.batches.is_empty() {
