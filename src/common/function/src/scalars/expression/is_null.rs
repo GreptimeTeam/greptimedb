@@ -17,11 +17,11 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use common_query::error;
-use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu};
+use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu, Result};
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::compute::is_null;
+use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::Helper;
 use snafu::{ResultExt, ensure};
@@ -45,8 +45,8 @@ impl Function for IsNullFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[ConcreteDataType]) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -88,10 +88,7 @@ mod tests {
     fn test_is_null_function() {
         let is_null = IsNullFunction;
         assert_eq!("isnull", is_null.name());
-        assert_eq!(
-            ConcreteDataType::boolean_datatype(),
-            is_null.return_type(&[]).unwrap()
-        );
+        assert_eq!(DataType::Boolean, is_null.return_type(&[]).unwrap());
         assert_eq!(
             is_null.signature(),
             Signature {

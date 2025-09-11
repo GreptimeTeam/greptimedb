@@ -14,11 +14,9 @@
 
 use std::sync::Arc;
 
-use tonic::async_trait;
-
 use crate::error::Result;
 use crate::key::FlowId;
-use crate::peer::Peer;
+use crate::peer::{NoopPeerAllocator, Peer, PeerAllocatorRef};
 use crate::sequence::SequenceRef;
 
 /// The reference of [FlowMetadataAllocator].
@@ -30,25 +28,25 @@ pub type FlowMetadataAllocatorRef = Arc<FlowMetadataAllocator>;
 #[derive(Clone)]
 pub struct FlowMetadataAllocator {
     flow_id_sequence: SequenceRef,
-    partition_peer_allocator: PartitionPeerAllocatorRef,
+    peer_allocator: PeerAllocatorRef,
 }
 
 impl FlowMetadataAllocator {
-    /// Returns the [FlowMetadataAllocator] with [NoopPartitionPeerAllocator].
+    /// Returns the [FlowMetadataAllocator] with [NoopPeerAllocator].
     pub fn with_noop_peer_allocator(flow_id_sequence: SequenceRef) -> Self {
         Self {
             flow_id_sequence,
-            partition_peer_allocator: Arc::new(NoopPartitionPeerAllocator),
+            peer_allocator: Arc::new(NoopPeerAllocator),
         }
     }
 
     pub fn with_peer_allocator(
         flow_id_sequence: SequenceRef,
-        peer_allocator: Arc<dyn PartitionPeerAllocator>,
+        peer_allocator: PeerAllocatorRef,
     ) -> Self {
         Self {
             flow_id_sequence,
-            partition_peer_allocator: peer_allocator,
+            peer_allocator,
         }
     }
 
@@ -61,27 +59,8 @@ impl FlowMetadataAllocator {
     /// Allocates the [FlowId] and [Peer]s.
     pub async fn create(&self, partitions: usize) -> Result<(FlowId, Vec<Peer>)> {
         let flow_id = self.allocate_flow_id().await?;
-        let peers = self.partition_peer_allocator.alloc(partitions).await?;
+        let peers = self.peer_allocator.alloc(partitions).await?;
 
         Ok((flow_id, peers))
-    }
-}
-
-/// Allocates [Peer]s for partitions.
-#[async_trait]
-pub trait PartitionPeerAllocator: Send + Sync {
-    /// Allocates [Peer] nodes for storing partitions.
-    async fn alloc(&self, partitions: usize) -> Result<Vec<Peer>>;
-}
-
-/// [PartitionPeerAllocatorRef] allocates [Peer]s for partitions.
-pub type PartitionPeerAllocatorRef = Arc<dyn PartitionPeerAllocator>;
-
-struct NoopPartitionPeerAllocator;
-
-#[async_trait]
-impl PartitionPeerAllocator for NoopPartitionPeerAllocator {
-    async fn alloc(&self, partitions: usize) -> Result<Vec<Peer>> {
-        Ok(vec![Peer::default(); partitions])
     }
 }

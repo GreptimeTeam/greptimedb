@@ -20,9 +20,9 @@ use std::fmt;
 
 pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
 use common_query::error::{GeneralDataFusionSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 pub use rate::RateFunction;
 use snafu::ResultExt;
@@ -61,7 +61,7 @@ impl Function for RangeFunction {
     }
 
     // The first argument to range_fn is the expression to be evaluated
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
         input_types
             .first()
             .cloned()

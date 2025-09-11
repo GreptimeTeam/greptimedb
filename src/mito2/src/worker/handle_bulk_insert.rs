@@ -80,8 +80,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let part = BulkPart {
             batch,
-            max_ts,
-            min_ts,
+            max_timestamp: max_ts,
+            min_timestamp: min_ts,
             sequence: 0,
             timestamp_index: ts_index,
             raw_data: Some(request.raw_data),

@@ -17,10 +17,11 @@ use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion::arrow::array::{ArrayIter, PrimitiveArray};
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::Volatility;
 use datafusion_expr::Signature;
 use datafusion_expr::type_coercion::aggregates::NUMERICS;
-use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::data_type::DataType;
 use datatypes::prelude::VectorRef;
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::value::TryAsPrimitive;
@@ -67,7 +68,7 @@ impl Function for ClampFunction {
         CLAMP_NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         // Type check is done by `signature`
         Ok(input_types[0].clone())
     }
@@ -187,7 +188,7 @@ impl Function for ClampMinFunction {
         CLAMP_MIN_NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         Ok(input_types[0].clone())
     }
 
@@ -268,7 +269,7 @@ impl Function for ClampMaxFunction {
         CLAMP_MAX_NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         Ok(input_types[0].clone())
     }
 

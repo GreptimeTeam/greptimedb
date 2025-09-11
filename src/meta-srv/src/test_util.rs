@@ -24,7 +24,6 @@ use common_workload::DatanodeWorkloadType;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
-use crate::metasrv::SelectorContext;
 
 pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64) -> RegionRoute {
     let region = Region {
@@ -52,22 +51,6 @@ pub(crate) fn create_meta_peer_client() -> MetaPeerClientRef {
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
-}
-
-/// Builds and returns a [`SelectorContext`]. To access its inner state,
-/// use `memory_backend` on [`MetaPeerClientRef`].
-pub(crate) fn create_selector_context() -> SelectorContext {
-    let meta_peer_client = create_meta_peer_client();
-    let in_memory = meta_peer_client.memory_backend();
-
-    SelectorContext {
-        datanode_lease_secs: 10,
-        flownode_lease_secs: 10,
-        server_addr: "127.0.0.1:3002".to_string(),
-        kv_backend: in_memory,
-        meta_peer_client,
-        table_id: None,
-    }
 }
 
 pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanodes: Vec<Peer>) {

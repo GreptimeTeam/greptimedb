@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
 use datatypes::value::{ListValue, Value};
@@ -59,8 +59,8 @@ impl Function for H3LatLngToCell {
         "h3_latlng_to_cell"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -131,8 +131,8 @@ impl Function for H3LatLngToCellString {
         "h3_latlng_to_cell_string"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -200,8 +200,8 @@ impl Function for H3CellToString {
         "h3_cell_to_string"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -235,8 +235,8 @@ impl Function for H3StringToCell {
         "h3_string_to_cell"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -285,10 +285,12 @@ impl Function for H3CellCenterLatLng {
         "h3_cell_center_latlng"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::float64_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "x",
+            DataType::Float64,
+            false,
+        ))))
     }
 
     fn signature(&self) -> Signature {
@@ -332,8 +334,8 @@ impl Function for H3CellResolution {
         "h3_cell_resolution"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint8_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt8)
     }
 
     fn signature(&self) -> Signature {
@@ -368,8 +370,8 @@ impl Function for H3CellBase {
         "h3_cell_base"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint8_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt8)
     }
 
     fn signature(&self) -> Signature {
@@ -404,8 +406,8 @@ impl Function for H3CellIsPentagon {
         "h3_cell_is_pentagon"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -440,8 +442,8 @@ impl Function for H3CellCenterChild {
         "h3_cell_center_child"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -480,8 +482,8 @@ impl Function for H3CellParent {
         "h3_cell_parent"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -518,10 +520,12 @@ impl Function for H3CellToChildren {
         "h3_cell_to_children"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::uint64_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            true,
+        ))))
     }
 
     fn signature(&self) -> Signature {
@@ -569,8 +573,8 @@ impl Function for H3CellToChildrenSize {
         "h3_cell_to_children_size"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -606,8 +610,8 @@ impl Function for H3CellToChildPos {
         "h3_cell_to_child_pos"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -643,8 +647,8 @@ impl Function for H3ChildPosToCell {
         "h3_child_pos_to_cell"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -695,10 +699,12 @@ impl Function for H3GridDisk {
         "h3_grid_disk"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::uint64_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            true,
+        ))))
     }
 
     fn signature(&self) -> Signature {
@@ -748,10 +754,12 @@ impl Function for H3GridDiskDistances {
         "h3_grid_disk_distances"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::uint64_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            true,
+        ))))
     }
 
     fn signature(&self) -> Signature {
@@ -800,8 +808,8 @@ impl Function for H3GridDistance {
     fn name(&self) -> &str {
         "h3_grid_distance"
     }
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::int32_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Int32)
     }
 
     fn signature(&self) -> Signature {
@@ -854,10 +862,12 @@ impl Function for H3GridPathCells {
         "h3_grid_path_cells"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::list_datatype(
-            ConcreteDataType::uint64_datatype(),
-        ))
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            true,
+        ))))
     }
 
     fn signature(&self) -> Signature {
@@ -921,8 +931,8 @@ impl Function for H3CellContains {
         "h3_cells_contains"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
     }
 
     fn signature(&self) -> Signature {
@@ -992,8 +1002,8 @@ impl Function for H3CellDistanceSphereKm {
     fn name(&self) -> &str {
         "h3_distance_sphere_km"
     }
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {
@@ -1047,8 +1057,8 @@ impl Function for H3CellDistanceEuclideanDegree {
     fn name(&self) -> &str {
         "h3_distance_degree"
     }
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Float64)
     }
 
     fn signature(&self) -> Signature {

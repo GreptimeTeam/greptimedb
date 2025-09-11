@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
 
 use common_meta::peer::Peer;
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
 
-use crate::error::{NoEnoughAvailableNodeSnafu, Result};
-use crate::lease;
+use crate::error::{
+    ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
+};
 use crate::metasrv::{SelectTarget, SelectorContext};
-use crate::node_excluder::NodeExcluderRef;
 use crate::selector::{Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
@@ -36,7 +33,6 @@ use crate::selector::{Selector, SelectorOptions};
 pub struct RoundRobinSelector {
     select_target: SelectTarget,
     counter: AtomicUsize,
-    node_excluder: NodeExcluderRef,
 }
 
 impl Default for RoundRobinSelector {
@@ -44,16 +40,14 @@ impl Default for RoundRobinSelector {
         Self {
             select_target: SelectTarget::Datanode,
             counter: AtomicUsize::new(0),
-            node_excluder: Arc::new(Vec::new()),
         }
     }
 }
 
 impl RoundRobinSelector {
-    pub fn new(select_target: SelectTarget, node_excluder: NodeExcluderRef) -> Self {
+    pub fn new(select_target: SelectTarget) -> Self {
         Self {
             select_target,
-            node_excluder,
             ..Default::default()
         }
     }
@@ -62,41 +56,23 @@ impl RoundRobinSelector {
         let mut peers = match self.select_target {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
-                let lease_kvs = lease::alive_datanodes(
-                    &ctx.meta_peer_client,
-                    Duration::from_secs(ctx.datanode_lease_secs),
-                )
-                .with_condition(lease::is_datanode_accept_ingest_workload)
-                .await?;
+                let alive_datanodes = ctx
+                    .peer_discovery
+                    .active_datanodes(opts.workload_filter)
+                    .await
+                    .context(ListActiveDatanodesSnafu)?;
 
-                let mut exclude_peer_ids = self
-                    .node_excluder
-                    .excluded_datanode_ids()
-                    .iter()
-                    .cloned()
-                    .collect::<HashSet<_>>();
-                exclude_peer_ids.extend(opts.exclude_peer_ids.iter());
-                // 2. map into peers
-                lease_kvs
+                // 2. filter out excluded datanodes.
+                alive_datanodes
                     .into_iter()
-                    .filter(|(k, _)| !exclude_peer_ids.contains(&k.node_id))
-                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
+                    .filter(|p| !opts.exclude_peer_ids.contains(&p.id))
                     .collect::<Vec<_>>()
             }
-            SelectTarget::Flownode => {
-                // 1. get alive flownodes.
-                let lease_kvs = lease::alive_flownodes(
-                    &ctx.meta_peer_client,
-                    Duration::from_secs(ctx.flownode_lease_secs),
-                )
-                .await?;
-
-                // 2. map into peers
-                lease_kvs
-                    .into_iter()
-                    .map(|(k, v)| Peer::new(k.node_id, v.node_addr))
-                    .collect::<Vec<_>>()
-            }
+            SelectTarget::Flownode => ctx
+                .peer_discovery
+                .active_flownodes(opts.workload_filter)
+                .await
+                .context(ListActiveFlownodesSnafu)?,
         };
 
         ensure!(
@@ -141,12 +117,15 @@ mod test {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::test_util::{create_selector_context, put_datanodes};
+    use crate::test_util::{create_meta_peer_client, put_datanodes};
 
     #[tokio::test]
     async fn test_round_robin_selector() {
         let selector = RoundRobinSelector::default();
-        let ctx = create_selector_context();
+        let meta_peer_client = create_meta_peer_client();
+        let ctx = SelectorContext {
+            peer_discovery: meta_peer_client.clone(),
+        };
         // add three nodes
         let peer1 = Peer {
             id: 2,
@@ -161,7 +140,7 @@ mod test {
             addr: "node3".to_string(),
         };
         let peers = vec![peer1.clone(), peer2.clone(), peer3.clone()];
-        put_datanodes(&ctx.meta_peer_client, peers).await;
+        put_datanodes(&meta_peer_client, peers).await;
 
         let peers = selector
             .select(
@@ -170,6 +149,7 @@ mod test {
                     min_required_items: 4,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
+                    workload_filter: None,
                 },
             )
             .await
@@ -187,6 +167,7 @@ mod test {
                     min_required_items: 2,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
+                    workload_filter: None,
                 },
             )
             .await
@@ -197,8 +178,11 @@ mod test {
 
     #[tokio::test]
     async fn test_round_robin_selector_with_exclude_peer_ids() {
-        let selector = RoundRobinSelector::new(SelectTarget::Datanode, Arc::new(vec![5]));
-        let ctx = create_selector_context();
+        let selector = RoundRobinSelector::new(SelectTarget::Datanode);
+        let meta_peer_client = create_meta_peer_client();
+        let ctx = SelectorContext {
+            peer_discovery: meta_peer_client.clone(),
+        };
         // add three nodes
         let peer1 = Peer {
             id: 2,
@@ -213,7 +197,7 @@ mod test {
             addr: "node3".to_string(),
         };
         put_datanodes(
-            &ctx.meta_peer_client,
+            &meta_peer_client,
             vec![peer1.clone(), peer2.clone(), peer3.clone()],
         )
         .await;
@@ -224,7 +208,8 @@ mod test {
                 SelectorOptions {
                     min_required_items: 1,
                     allow_duplication: true,
-                    exclude_peer_ids: HashSet::from([2]),
+                    exclude_peer_ids: HashSet::from([2, 5]),
+                    workload_filter: None,
                 },
             )
             .await
