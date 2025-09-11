@@ -129,6 +129,7 @@ impl ParserContext<'_> {
             parser,
             sql,
             table_aliases: HashMap::new(),
+            scope_stack: vec![],
         }
         .intern_parse_table_name()
     }
