@@ -83,6 +83,20 @@ pub(crate) struct StoreConfig {
 }
 
 impl StoreConfig {
+    pub fn tls_config(&self) -> Option<TlsOption> {
+        if self.backend_tls_mode != TlsMode::Disable {
+            Some(TlsOption {
+                mode: self.backend_tls_mode.clone(),
+                cert_path: self.backend_tls_cert_path.clone(),
+                key_path: self.backend_tls_key_path.clone(),
+                ca_cert_path: self.backend_tls_ca_cert_path.clone(),
+                watch: self.backend_tls_watch,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Builds a [`KvBackendRef`] from the store configuration.
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
         let max_txn_ops = self.max_txn_ops;
@@ -92,17 +106,7 @@ impl StoreConfig {
         } else {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
-                    let tls_config = if self.backend_tls_mode != TlsMode::Disable {
-                        Some(TlsOption {
-                            mode: self.backend_tls_mode.clone(),
-                            cert_path: self.backend_tls_cert_path.clone(),
-                            key_path: self.backend_tls_key_path.clone(),
-                            ca_cert_path: self.backend_tls_ca_cert_path.clone(),
-                            watch: self.backend_tls_watch,
-                        })
-                    } else {
-                        None
-                    };
+                    let tls_config = self.tls_config();
                     let etcd_client = create_etcd_client_with_tls(store_addrs, tls_config.as_ref())
                         .await
                         .map_err(BoxedError::new)?;
@@ -111,7 +115,8 @@ impl StoreConfig {
                 #[cfg(feature = "pg_kvbackend")]
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
-                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, None)
+                    let tls_config = self.tls_config();
+                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, tls_config)
                         .await
                         .map_err(BoxedError::new)?;
                     let schema_name = self.meta_schema_name.as_deref();
