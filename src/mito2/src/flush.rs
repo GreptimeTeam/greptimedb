@@ -1012,14 +1012,14 @@ mod tests {
             .collect();
         // Assumes the flush job is finished.
         version_control.apply_edit(
-            RegionEdit {
+            Some(RegionEdit {
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
-            },
+            }),
             &[0],
             builder.file_purger(),
         );

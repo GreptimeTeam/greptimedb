@@ -17,11 +17,12 @@
 use std::fs;
 
 use api::v1::Rows;
+use common_recordbatch::RecordBatches;
 use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
 use store_api::region_request::{
     RegionAlterRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::region::{RegionLeaderState, RegionRoleState};
@@ -329,9 +330,10 @@ async fn test_staging_exit_success_with_manifests() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert!(
-        !staging_files_before.is_empty(),
-        "Staging manifest directory should contain files before exit"
+    assert_eq!(
+        staging_files_before.len(),
+        2,
+        "Staging manifest directory should contain two files before exit"
     );
 
     // Count normal manifest files before exit
@@ -341,6 +343,31 @@ async fn test_staging_exit_success_with_manifests() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let normal_count_before = normal_files_before.len();
+    assert_eq!(
+        normal_count_before, 1,
+        "Normal manifest directory should initially contain one file"
+    );
+
+    // Try read data before exiting staging, SST files should be invisible
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    assert_eq!(
+        scanner.num_files(),
+        0,
+        "No SST files should be scanned before exit"
+    );
+    assert_eq!(
+        scanner.num_memtables(),
+        0,
+        "Memtables should be removed in staging before exit"
+    );
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
+    assert_eq!(
+        total_rows, 0,
+        "No data should be readable before exit staging mode"
+    );
 
     // Exit staging mode successfully
     engine
@@ -374,4 +401,27 @@ async fn test_staging_exit_success_with_manifests() {
         normal_files_after.len() > normal_count_before,
         "Normal manifest directory should contain more files after merge"
     );
+
+    // Validate in-memory version reflects merged manifests (files visible in levels)
+    let version = region.version();
+    let levels = version.ssts.levels();
+    assert!(
+        !levels.is_empty() && !levels[0].files.is_empty(),
+        "SST levels should have files after exiting staging"
+    );
+
+    // Also ensure scanner behavior reflects 2 SSTs
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    assert_eq!(
+        scanner.num_files(),
+        2,
+        "SST files should be scanned after exit"
+    );
+
+    // Try reading data via scanner to ensure previous staged data is actually readable
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
+    assert_eq!(total_rows, 10, "Expected to read all staged rows");
 }
