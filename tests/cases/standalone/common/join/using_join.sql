@@ -22,9 +22,9 @@ SELECT * FROM users_join JOIN orders_join USING (user_id) WHERE amount > 100 ORD
 CREATE TABLE user_profiles(user_id INTEGER, age INTEGER, city VARCHAR, ts TIMESTAMP TIME INDEX);
 INSERT INTO user_profiles VALUES (1, 25, 'NYC', 6000), (2, 30, 'LA', 7000);
 
-SELECT * FROM users_join 
-JOIN orders_join USING (user_id) 
-JOIN user_profiles USING (user_id) 
+SELECT * FROM users_join
+JOIN orders_join USING (user_id)
+JOIN user_profiles USING (user_id)
 ORDER BY order_id;
 
 DROP TABLE user_profiles;

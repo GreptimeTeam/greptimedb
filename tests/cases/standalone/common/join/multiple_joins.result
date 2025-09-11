@@ -40,13 +40,13 @@ ORDER BY c."name", p."name";
 +-------+---------+--------+
 
 -- Multiple joins with aggregation
-SELECT 
+SELECT
   c.city,
   p.category,
   COUNT(*) as order_count,
   SUM(o.amount) as total_amount
 FROM customers_multi c
-JOIN orders_multi o ON c."id" = o.customer_id  
+JOIN orders_multi o ON c."id" = o.customer_id
 JOIN products_multi p ON o.product_id = p."id"
 GROUP BY c.city, p.category
 ORDER BY c.city, p.category;

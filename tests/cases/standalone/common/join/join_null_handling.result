@@ -8,13 +8,13 @@ CREATE TABLE lookup_table(category INTEGER, cat_name VARCHAR, priority INTEGER, 
 
 Affected Rows: 0
 
-INSERT INTO table_with_nulls VALUES 
+INSERT INTO table_with_nulls VALUES
 (1, 'item1', 1, 1000), (2, 'item2', NULL, 2000), (3, 'item3', 2, 3000),
 (4, 'item4', NULL, 4000), (5, 'item5', 3, 5000), (6, 'item6', 1, 6000);
 
 Affected Rows: 6
 
-INSERT INTO lookup_table VALUES 
+INSERT INTO lookup_table VALUES
 (1, 'Category A', 1, 1000), (2, 'Category B', 2, 2000), (3, 'Category C', 3, 3000), (NULL, 'Unknown', 0, 4000);
 
 Affected Rows: 4
@@ -52,9 +52,9 @@ ORDER BY t."id";
 +----+-------+----------+---------------+
 
 -- Join with explicit NULL handling
-SELECT 
+SELECT
   t."id", t."value",
-  CASE 
+  CASE
     WHEN t.category IS NULL THEN 'NULL Category'
     WHEN l.cat_name IS NULL THEN 'Missing Lookup'
     ELSE l.cat_name
@@ -92,7 +92,7 @@ ORDER BY t."id";
 +----+-------+------------+
 
 -- Aggregation with NULL join results
-SELECT 
+SELECT
   COALESCE(l.cat_name, 'Uncategorized') as category,
   COUNT(*) as item_count,
   COUNT(l.category) as matched_count,

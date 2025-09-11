@@ -58,7 +58,7 @@ LEFT JOIN (
   SELECT * FROM transactions WHERE ABS(amount) > 100.00
 ) large_txn ON a.acc_id = large_txn.acc_id
 GROUP BY a.acc_id, a.acc_name
-ORDER BY large_transaction_count DESC;
+ORDER BY large_transaction_count DESC, a.acc_name ASC;
 
 DROP TABLE accounts;
 

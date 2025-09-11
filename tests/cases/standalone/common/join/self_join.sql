@@ -9,7 +9,7 @@ CREATE TABLE employees_self(
   ts TIMESTAMP TIME INDEX
 );
 
-INSERT INTO employees_self VALUES 
+INSERT INTO employees_self VALUES
 (1, 'CEO', NULL, 100000, 1000),
 (2, 'Manager1', 1, 80000, 2000),
 (3, 'Manager2', 1, 75000, 3000),
@@ -38,7 +38,7 @@ JOIN employees_self m ON e1.manager_id = m."id"
 ORDER BY shared_manager, employee1;
 
 -- Hierarchical query using self join
-SELECT 
+SELECT
   e."name" as employee,
   e.salary,
   m."name" as manager,

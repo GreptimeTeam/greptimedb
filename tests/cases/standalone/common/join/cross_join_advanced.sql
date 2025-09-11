@@ -7,32 +7,32 @@ CREATE TABLE stores(store_id INTEGER, store_name VARCHAR, city VARCHAR, ts TIMES
 
 CREATE TABLE categories(cat_id INTEGER, cat_name VARCHAR, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO products VALUES 
+INSERT INTO products VALUES
 (1, 'Laptop', 999.99, 1000), (2, 'Mouse', 29.99, 2000), (3, 'Monitor', 299.99, 3000);
 
-INSERT INTO stores VALUES 
+INSERT INTO stores VALUES
 (1, 'TechStore', 'NYC', 1000), (2, 'GadgetShop', 'LA', 2000);
 
-INSERT INTO categories VALUES 
+INSERT INTO categories VALUES
 (1, 'Electronics', 1000), (2, 'Accessories', 2000);
 
 -- Basic cross join
-SELECT 
+SELECT
   p.prod_name, s.store_name, s.city
 FROM products p
 CROSS JOIN stores s
 ORDER BY p.prod_id, s.store_id;
 
 -- Cross join with filtering
-SELECT 
+SELECT
   p.prod_name, s.store_name, p.price
 FROM products p
-CROSS JOIN stores s  
+CROSS JOIN stores s
 WHERE p.price > 100.00
 ORDER BY p.price DESC, s.store_name;
 
--- Triple cross join  
-SELECT 
+-- Triple cross join
+SELECT
   p.prod_name, s.store_name, c.cat_name,
   CASE WHEN p.price > 500 THEN 'Premium' ELSE 'Standard' END as tier
 FROM products p
@@ -41,7 +41,7 @@ CROSS JOIN categories c
 ORDER BY p.prod_id, s.store_id, c.cat_id;
 
 -- Cross join with aggregation
-SELECT 
+SELECT
   s.city,
   COUNT(*) as product_store_combinations,
   AVG(p.price) as avg_price,
@@ -52,7 +52,7 @@ GROUP BY s.city
 ORDER BY s.city;
 
 -- Cross join for inventory matrix
-SELECT 
+SELECT
   p.prod_name,
   SUM(CASE WHEN s.city = 'NYC' THEN 1 ELSE 0 END) as nyc_availability,
   SUM(CASE WHEN s.city = 'LA' THEN 1 ELSE 0 END) as la_availability,
@@ -63,7 +63,7 @@ GROUP BY p.prod_name, p.prod_id
 ORDER BY p.prod_id;
 
 -- Cross join with conditions and calculations
-SELECT 
+SELECT
   p.prod_name,
   s.store_name,
   p.price,

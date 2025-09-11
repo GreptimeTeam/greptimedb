@@ -7,27 +7,27 @@ CREATE TABLE metadata_perf(metric_id INTEGER, unit VARCHAR, description VARCHAR,
 
 CREATE TABLE thresholds_perf(metric_id INTEGER, warning_level DOUBLE, critical_level DOUBLE, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO metrics_perf VALUES 
+INSERT INTO metrics_perf VALUES
 (1, 'cpu_usage', 65.2, 1700000000, 1000), (1, 'cpu_usage', 72.1, 1700000060, 2000),
 (2, 'memory_usage', 85.5, 1700000000, 3000), (2, 'memory_usage', 78.3, 1700000060, 4000),
 (3, 'disk_io', 120.7, 1700000000, 5000), (3, 'disk_io', 95.2, 1700000060, 6000);
 
-INSERT INTO metadata_perf VALUES 
+INSERT INTO metadata_perf VALUES
 (1, 'percent', 'CPU utilization percentage', 1000),
 (2, 'percent', 'Memory utilization percentage', 2000),
 (3, 'MB/s', 'Disk I/O throughput', 3000);
 
-INSERT INTO thresholds_perf VALUES 
+INSERT INTO thresholds_perf VALUES
 (1, 70.0, 90.0, 1000), (2, 80.0, 95.0, 2000), (3, 100.0, 150.0, 3000);
 
 -- Join for monitoring dashboard
-SELECT 
+SELECT
   m.metric_name,
   md.unit,
   m."value",
   t.warning_level,
   t.critical_level,
-  CASE 
+  CASE
     WHEN m."value" >= t.critical_level THEN 'CRITICAL'
     WHEN m."value" >= t.warning_level THEN 'WARNING'
     ELSE 'OK'
@@ -38,13 +38,13 @@ INNER JOIN thresholds_perf t ON m.metric_id = t.metric_id
 ORDER BY m.timestamp_val, m.metric_id;
 
 -- Time-series join with latest values
-SELECT 
+SELECT
   latest_metrics.metric_name,
   latest_metrics.latest_value,
   md.unit,
   t.warning_level
 FROM (
-  SELECT 
+  SELECT
     metric_id,
     metric_name,
     "value" as latest_value,
@@ -57,7 +57,7 @@ WHERE latest_metrics.rn = 1
 ORDER BY latest_metrics.metric_id;
 
 -- Historical analysis join
-SELECT 
+SELECT
   md.description,
   COUNT(*) as total_readings,
   AVG(m."value") as avg_value,

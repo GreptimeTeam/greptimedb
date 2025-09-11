@@ -38,7 +38,7 @@ SELECT * FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.produc
 
 -- RIGHT JOIN with aggregation
 SELECT i."warehouse", COUNT(*) as items, AVG(p.price) as avg_price
-FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.product_id 
+FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.product_id
 GROUP BY i."warehouse" ORDER BY i."warehouse";
 
 +-----------+-------+-----------+

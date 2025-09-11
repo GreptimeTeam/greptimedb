@@ -5,11 +5,11 @@ CREATE TABLE table_with_nulls("id" INTEGER, "value" VARCHAR, category INTEGER, t
 
 CREATE TABLE lookup_table(category INTEGER, cat_name VARCHAR, priority INTEGER, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO table_with_nulls VALUES 
+INSERT INTO table_with_nulls VALUES
 (1, 'item1', 1, 1000), (2, 'item2', NULL, 2000), (3, 'item3', 2, 3000),
 (4, 'item4', NULL, 4000), (5, 'item5', 3, 5000), (6, 'item6', 1, 6000);
 
-INSERT INTO lookup_table VALUES 
+INSERT INTO lookup_table VALUES
 (1, 'Category A', 1, 1000), (2, 'Category B', 2, 2000), (3, 'Category C', 3, 3000), (NULL, 'Unknown', 0, 4000);
 
 -- Inner join with NULLs (NULLs won't match)
@@ -25,9 +25,9 @@ LEFT JOIN lookup_table l ON t.category = l.category
 ORDER BY t."id";
 
 -- Join with explicit NULL handling
-SELECT 
+SELECT
   t."id", t."value",
-  CASE 
+  CASE
     WHEN t.category IS NULL THEN 'NULL Category'
     WHEN l.cat_name IS NULL THEN 'Missing Lookup'
     ELSE l.cat_name
@@ -43,7 +43,7 @@ INNER JOIN lookup_table l ON COALESCE(t.category, -1) = COALESCE(l.category, -1)
 ORDER BY t."id";
 
 -- Aggregation with NULL join results
-SELECT 
+SELECT
   COALESCE(l.cat_name, 'Uncategorized') as category,
   COUNT(*) as item_count,
   COUNT(l.category) as matched_count,

@@ -1,4 +1,4 @@
--- Tests join edge cases and special scenarios  
+-- Tests join edge cases and special scenarios
 CREATE TABLE empty_table("id" INTEGER, "value" VARCHAR, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0

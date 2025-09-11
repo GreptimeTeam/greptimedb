@@ -44,7 +44,7 @@ ORDER BY e."id";
 
 -- Join with overlap condition
 SELECT e."id", t.range_name
-FROM events e JOIN time_ranges t ON 
+FROM events e JOIN time_ranges t ON
   e.event_time < t.end_time AND (e.event_time + e.duration) > t.start_time
 ORDER BY e."id", t.start_time;
 
