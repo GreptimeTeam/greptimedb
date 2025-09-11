@@ -151,7 +151,7 @@ pub async fn alive_datanode(
 /// A datanode is considered to accept ingest workload if it supports either:
 /// - Hybrid workload (both ingest and query workloads)
 /// - Ingest workload (only ingest workload)
-pub fn datanode_can_accept_ingest_workload(datanode_workloads: &NodeWorkloads) -> bool {
+pub fn accept_ingest_workload(datanode_workloads: &NodeWorkloads) -> bool {
     match &datanode_workloads {
         NodeWorkloads::Datanode(workloads) => workloads
             .types
