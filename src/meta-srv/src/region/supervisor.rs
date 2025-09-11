@@ -40,6 +40,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{MissedTickBehavior, interval, interval_at};
 
+use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
@@ -584,6 +585,7 @@ impl RegionSupervisor {
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
+                    workload_filter: Some(accept_ingest_workload),
                 };
                 let peers = selector.select(&self.selector_context, opt).await?;
                 ensure!(
