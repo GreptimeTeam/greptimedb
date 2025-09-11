@@ -40,6 +40,7 @@ pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
     pub(crate) table_aliases: HashMap<String, ObjectName>,
+    pub(crate) scope_stack: Vec<HashMap<String, ObjectName>>,
 }
 
 impl ParserContext<'_> {
@@ -54,6 +55,7 @@ impl ParserContext<'_> {
             parser,
             sql,
             table_aliases: HashMap::new(),
+            scope_stack: vec![],
         })
     }
 
@@ -63,14 +65,25 @@ impl ParserContext<'_> {
     }
 
     pub(crate) fn add_table_alias(&mut self, alias: String, table_name: ObjectName) -> Result<()> {
-        if self.table_aliases.contains_key(&alias) {
-            return error::InvalidSqlSnafu {
-                msg: format!("Duplicate alias '{}'", alias),
+        if let Some(current_scope) = self.scope_stack.last_mut() {
+            if current_scope.contains_key(&alias) {
+                return error::InvalidSqlSnafu {
+                    msg: format!("Duplicate alias '{}' in current scope", alias),
+                }
+                .fail();
             }
-            .fail();
+            current_scope.insert(alias.clone(), table_name.clone());
         }
         self.table_aliases.insert(alias, table_name);
         Ok(())
+    }
+
+    pub(crate) fn enter_scope(&mut self) {
+        self.scope_stack.push(HashMap::new());
+    }
+
+    pub(crate) fn exit_scope(&mut self) {
+        self.scope_stack.pop();
     }
 
     /// Parses SQL with given dialect

@@ -24,10 +24,11 @@ impl ParserContext<'_> {
     /// Parses select and it's variants.
     pub(crate) fn parse_query(&mut self) -> Result<Statement> {
         self.table_aliases.clear();
+        self.enter_scope();
         let spquery = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
         self.process_query_table_aliases(&spquery)?;
-
+        self.exit_scope();
         Ok(Statement::Query(Box::new(Query::try_from(*spquery)?)))
     }
 
@@ -69,26 +70,31 @@ impl ParserContext<'_> {
 
     fn process_table_factor(&mut self, table_factor: &sqlparser::ast::TableFactor) -> Result<()> {
         match table_factor {
-            sqlparser::ast::TableFactor::Table { name, alias: Some(alias), .. } => {
+            sqlparser::ast::TableFactor::Table {
+                name,
+                alias: Some(alias),
+                ..
+            } => {
                 let alias_name = &alias.name;
                 let full_table_name = Self::convert_sql_object_name(name.clone());
                 self.add_table_alias(alias_name.to_string(), full_table_name.clone())?;
             }
-            sqlparser::ast::TableFactor::Table { alias: None, .. } => {
-            }
+            sqlparser::ast::TableFactor::Table { alias: None, .. } => {}
             sqlparser::ast::TableFactor::Derived {
-                alias: Some(alias), subquery, ..
+                alias: Some(alias),
+                subquery,
+                ..
             } => {
                 let alias_name = &alias.name;
-                let derived_name =
-                    ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
-                        sqlparser::ast::Ident::new(format!("derived_{}", alias_name)),
-                    )]);
+                let derived_name = ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    sqlparser::ast::Ident::new(format!("derived_{}", alias_name)),
+                )]);
                 self.add_table_alias(alias_name.to_string(), derived_name)?;
+                self.enter_scope();
                 self.process_set_expr_table_aliases(&subquery.body)?;
+                self.exit_scope();
             }
-            sqlparser::ast::TableFactor::Derived { alias: None, .. } => {
-            }
+            sqlparser::ast::TableFactor::Derived { alias: None, .. } => {}
             sqlparser::ast::TableFactor::NestedJoin { .. } => {}
             sqlparser::ast::TableFactor::TableFunction { .. } => {}
             _ => {}
@@ -142,7 +148,7 @@ mod tests {
 
     #[test]
     pub fn test_duplicate_alias_error() {
-        let sql = "SELECT * FROM users AS u, orders AS u";
+        let sql = "SELECT * FROM (SELECT i, j FROM (SELECT j AS i, i AS j FROM (SELECT j AS i, i AS j FROM test) AS a) AS a) AS a, (SELECT i+1 AS r,j FROM test) AS b, test WHERE a.i=b.r AND test.j=a.i ORDER BY 1;";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
