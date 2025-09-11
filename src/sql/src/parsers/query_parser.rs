@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     pub fn test_duplicate_alias_error() {
-        let sql = "SELECT * FROM (SELECT i, j FROM (SELECT j AS i, i AS j FROM (SELECT j AS i, i AS j FROM test) AS a) AS a) AS a, (SELECT i+1 AS r,j FROM test) AS b, test WHERE a.i=b.r AND test.j=a.i ORDER BY 1;";
+        let sql = "SELECT * FROM users AS u, orders AS u";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
