@@ -17,13 +17,17 @@
 //! This is a temporary solution, and will be removed once we have a more robust plan rewriter
 //!
 
+use std::collections::BTreeSet;
+
 use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
+use datafusion_common::Result as DfResult;
 use datafusion_expr::LogicalPlan;
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::MergeScanLogicalPlan;
 
 /// FallbackPlanRewriter is a plan rewriter that will only push down table scan node
@@ -38,9 +42,9 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
 
     fn f_down(
         &mut self,
-        node: Self::Node,
-    ) -> datafusion_common::Result<datafusion_common::tree_node::Transformed<Self::Node>> {
-        if let LogicalPlan::TableScan(table_scan) = &node {
+        plan: Self::Node,
+    ) -> DfResult<datafusion_common::tree_node::Transformed<Self::Node>> {
+        if let LogicalPlan::TableScan(table_scan) = &plan {
             let partition_cols = if let Some(source) = table_scan
                 .source
                 .as_any()
@@ -63,7 +67,25 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                             "FallbackPlanRewriter: table {} has partition columns: {:?}",
                             info.name, partition_cols
                         );
-                        Some(partition_cols)
+                        Some(partition_cols
+                                .into_iter()
+                                .map(|c| {
+                                    let index =
+                                        plan.schema().index_of_column_by_name(None, &c).ok_or_else(|| {
+                                            datafusion_common::DataFusionError::Internal(
+                                                format!(
+                                                    "PlanRewriter: maybe_set_partitions: column {c} not found in schema of plan: {plan}"
+                                                ),
+                                            )
+                                        })?;
+                                    let column = plan.schema().columns().get(index).cloned().ok_or_else(|| {
+                                        datafusion_common::DataFusionError::Internal(format!(
+                                            "PlanRewriter: maybe_set_partitions: column index {index} out of bounds in schema of plan: {plan}"
+                                        ))
+                                    })?;
+                                    Ok((c.clone(), BTreeSet::from([column])))
+                                })
+                                .collect::<DfResult<AliasMapping>>()?)
                     } else {
                         None
                     }
@@ -74,7 +96,7 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                 None
             };
             let node = MergeScanLogicalPlan::new(
-                node,
+                plan,
                 false,
                 // at this stage, the partition cols should be set
                 // treat it as non-partitioned if None
@@ -83,7 +105,7 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
             .into_logical_plan();
             Ok(Transformed::yes(node))
         } else {
-            Ok(Transformed::no(node))
+            Ok(Transformed::no(plan))
         }
     }
 }
