@@ -322,7 +322,6 @@ impl LogQueryPlanner {
                     name: fn_name,
                     args,
                     alias,
-                    range: _range,
                 } = agg_func;
                 let aggr_fn = self
                     .session_state
@@ -923,7 +922,7 @@ mod tests {
             context: Context::None,
             columns: vec![],
             exprs: vec![LogExpr::AggrFunc {
-                expr: vec![AggFunc::new_without_range(
+                expr: vec![AggFunc::new(
                     "count".to_string(),
                     vec![LogExpr::NamedIdent("message".to_string())],
                     Some("count_result".to_string()),
@@ -1043,7 +1042,7 @@ mod tests {
                     alias: Some("2__date_histogram__time_bucket".to_string()),
                 },
                 LogExpr::AggrFunc {
-                    expr: vec![AggFunc::new_without_range(
+                    expr: vec![AggFunc::new(
                         "count".to_string(),
                         vec![LogExpr::PositionalIdent(0)],
                         Some("count_result".to_string()),

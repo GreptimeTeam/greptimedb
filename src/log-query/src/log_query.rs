@@ -98,33 +98,12 @@ pub struct AggFunc {
     pub name: String,
     /// Arguments to the function. e.g., column references or literals. LogExpr::NamedIdent("column1".to_string())
     pub args: Vec<LogExpr>,
-    /// Optional range for the aggregation, e.g., "1m", "5m", etc.
-    pub range: Option<String>,
     pub alias: Option<String>,
 }
 
 impl AggFunc {
-    pub fn new(
-        name: String,
-        args: Vec<LogExpr>,
-        range: Option<String>,
-        alias: Option<String>,
-    ) -> Self {
-        Self {
-            name,
-            args,
-            range,
-            alias,
-        }
-    }
-
-    pub fn new_without_range(name: String, args: Vec<LogExpr>, alias: Option<String>) -> Self {
-        Self {
-            name,
-            args,
-            range: None,
-            alias,
-        }
+    pub fn new(name: String, args: Vec<LogExpr>, alias: Option<String>) -> Self {
+        Self { name, args, alias }
     }
 }
 
