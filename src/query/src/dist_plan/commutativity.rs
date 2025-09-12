@@ -187,7 +187,7 @@ impl Categorizer {
             LogicalPlan::TableScan(_) => Commutativity::Commutative,
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
-            LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
+            LogicalPlan::SubqueryAlias(_) => Commutativity::Commutative,
             LogicalPlan::Limit(limit) => {
                 // Only execute `fetch` on remote nodes.
                 // wait for https://github.com/apache/arrow-datafusion/pull/7669

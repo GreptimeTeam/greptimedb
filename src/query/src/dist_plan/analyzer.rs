@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use common_error::ext;
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
@@ -32,11 +33,12 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::utils::aliased_columns_for;
+use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
 use crate::dist_plan::commutativity::{
     Categorizer, Commutativity, partial_commutative_transformer,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -548,7 +550,7 @@ impl PlanRewriter {
 
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
-            on_node,
+            on_node.clone(),
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
@@ -557,7 +559,18 @@ impl PlanRewriter {
         .into_logical_plan();
 
         // expand stages
+        // TODO(discord9): tracking alias for stages
         for new_stage in self.stage.drain(..) {
+            // tracking alias for merge sort's sort exprs
+            let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
+                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
+            {
+                // TODO(discord9): change `on_node` to `node` once alias tracking is supported for merge scan
+                let new_stage = rewrite_merge_sort_exprs(merge_sort, &on_node)?;
+                new_stage
+            } else {
+                new_stage
+            };
             node = new_stage
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
@@ -599,6 +612,7 @@ struct EnforceDistRequirementRewriter {
     /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
     /// because the `Projection` node is not in the scope of the `Aggregate` node
     cur_level: usize,
+    plan_per_level: BTreeMap<usize, LogicalPlan>,
 }
 
 impl EnforceDistRequirementRewriter {
@@ -606,6 +620,7 @@ impl EnforceDistRequirementRewriter {
         Self {
             column_requirements,
             cur_level,
+            plan_per_level: BTreeMap::new(),
         }
     }
 }
@@ -621,6 +636,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                     .to_string(),
             ));
         }
+        self.plan_per_level.insert(self.cur_level, node.clone());
         self.cur_level += 1;
         Ok(Transformed::no(node))
     }
