@@ -621,6 +621,9 @@ impl EnforceDistRequirementRewriter {
         }
     }
 
+    /// Return a mapping from (original column, level) to aliased columns in current node of all
+    /// applicable column requirements
+    /// i.e. only column requirements with level >= `cur_level` will be considered
     fn get_current_applicable_column_requirements(
         &self,
         node: &LogicalPlan,
@@ -694,18 +697,18 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
         self.cur_level -= 1;
         // first get all applicable column requirements
 
-        let mut applicable_column_requirements =
-            self.get_current_applicable_column_requirements(&node)?;
-
-        debug!(
-            "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
-            self.cur_level,
-            applicable_column_requirements,
-            node.display()
-        );
-
         // make sure all projection applicable scope has the required columns
         if let LogicalPlan::Projection(ref projection) = node {
+            let mut applicable_column_requirements =
+                self.get_current_applicable_column_requirements(&node)?;
+
+            debug!(
+                "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
+                self.cur_level,
+                applicable_column_requirements,
+                node.display()
+            );
+
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
