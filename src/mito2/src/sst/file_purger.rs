@@ -15,14 +15,13 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_telemetry::{error, info};
+use common_telemetry::error;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 
 /// A worker to delete files in background.
@@ -125,62 +124,18 @@ impl LocalFilePurger {
     /// Deletes the file(and it's index, if any) from cache and storage.
     fn delete_file(&self, file_meta: FileMeta) {
         let sst_layer = self.sst_layer.clone();
-
-        // Remove meta of the file from cache.
-        if let Some(cache) = &self.cache_manager {
-            cache.remove_parquet_meta_data(file_meta.file_id());
-        }
-
         let cache_manager = self.cache_manager.clone();
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            if let Err(e) = sst_layer.delete_sst(&file_meta.file_id()).await {
-                error!(e; "Failed to delete SST file, file_id: {}, region: {}",
-                    file_meta.file_id, file_meta.region_id);
-            } else {
-                info!(
-                    "Successfully deleted SST file, file_id: {}, region: {}",
-                    file_meta.file_id, file_meta.region_id
-                );
-            }
-
-            if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache())
+            if let Err(e) = delete_files(
+                file_meta.region_id,
+                &[file_meta.file_id],
+                file_meta.exists_index(),
+                &sst_layer,
+                &cache_manager,
+            )
+            .await
             {
-                // Removes index file from the cache.
-                if file_meta.exists_index() {
-                    write_cache
-                        .remove(IndexKey::new(
-                            file_meta.region_id,
-                            file_meta.file_id,
-                            FileType::Puffin,
-                        ))
-                        .await;
-                }
-                // Remove the SST file from the cache.
-                write_cache
-                    .remove(IndexKey::new(
-                        file_meta.region_id,
-                        file_meta.file_id,
-                        FileType::Parquet,
-                    ))
-                    .await;
-            }
-
-            // Purges index content in the stager.
-            if let Err(e) = sst_layer
-                .puffin_manager_factory()
-                .purge_stager(file_meta.file_id())
-                .await
-            {
-                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_meta.file_id(), file_meta.region_id);
-            }
-            let file_id = file_meta.file_id();
-            if let Err(e) = sst_layer
-                .intermediate_manager()
-                .prune_sst_dir(&file_id.region_id(), &file_id.file_id())
-                .await
-            {
-                error!(e; "Failed to prune intermediate sst directory, region_id: {}, file_id: {}", file_id.region_id(), file_id.file_id());
+                error!(e; "Failed to delete file {:?} from storage", file_meta);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");

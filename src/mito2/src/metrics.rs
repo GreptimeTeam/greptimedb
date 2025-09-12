@@ -456,6 +456,13 @@ lazy_static! {
             exponential_buckets(0.001, 10.0, 8).unwrap(),
         )
         .unwrap();
+
+    /// Counter for the number of files deleted by the GC worker.
+    pub static ref GC_FILE_CNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_gc_file_count",
+            "mito gc deleted file count",
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.
