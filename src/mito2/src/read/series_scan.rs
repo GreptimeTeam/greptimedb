@@ -48,6 +48,7 @@ use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistr
 use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -515,7 +516,7 @@ impl SeriesDistributor {
         let mut metrics = SeriesDistributorMetrics::default();
         let mut fetch_start = Instant::now();
 
-        let mut current_series = PrimaryKeySeriesBatch::default();
+        let mut batches = PrimaryKeySeriesBatch::default();
         while let Some(batch) = reader.next_batch().await? {
             metrics.scan_cost += fetch_start.elapsed();
             metrics.num_batches += 1;
@@ -527,21 +528,30 @@ impl SeriesDistributor {
                 continue;
             }
 
-            let Some(last_key) = current_series.current_key() else {
-                current_series.push(batch);
+            let Some(last_key) = batches.last_key() else {
+                batches.push_last_series(batch);
                 fetch_start = Instant::now();
                 continue;
             };
 
             if last_key == batch.primary_key() {
-                current_series.push(batch);
+                batches.push_last_series(batch);
                 fetch_start = Instant::now();
                 continue;
             }
 
-            // We find a new series, send the current one.
-            let to_send =
-                std::mem::replace(&mut current_series, PrimaryKeySeriesBatch::single(batch));
+            // We find a new series.
+            // let series_batch =
+            //     std::mem::replace(&mut current_series, SingleSeriesBatch::single(batch));
+            // batches.push(series_batch);
+            if batches.num_rows < DEFAULT_READ_BATCH_SIZE {
+                batches.push_last_series(batch);
+                // We didn't collect enough rows to send.
+                fetch_start = Instant::now();
+                continue;
+            }
+            // We have enough rows.
+            let to_send = std::mem::take(&mut batches);
             let yield_start = Instant::now();
             self.senders
                 .send_batch(SeriesBatch::PrimaryKey(to_send))
@@ -550,10 +560,10 @@ impl SeriesDistributor {
             fetch_start = Instant::now();
         }
 
-        if !current_series.is_empty() {
+        if !batches.is_empty() {
             let yield_start = Instant::now();
             self.senders
-                .send_batch(SeriesBatch::PrimaryKey(current_series))
+                .send_batch(SeriesBatch::PrimaryKey(batches))
                 .await?;
             metrics.yield_cost += yield_start.elapsed();
         }
@@ -571,12 +581,13 @@ impl SeriesDistributor {
 
 /// Batches of the same series in primary key format.
 #[derive(Default, Debug)]
-pub struct PrimaryKeySeriesBatch {
+pub struct SingleSeriesBatch {
+    /// Batches of the same series.
     pub batches: SmallVec<[Batch; 4]>,
 }
 
-impl PrimaryKeySeriesBatch {
-    /// Creates a new [PrimaryKeySeriesBatch] from a single [Batch].
+impl SingleSeriesBatch {
+    /// Creates a new [SingleSeriesBatch] from a single [Batch].
     fn single(batch: Batch) -> Self {
         Self {
             batches: smallvec![batch],
@@ -590,10 +601,44 @@ impl PrimaryKeySeriesBatch {
     fn push(&mut self, batch: Batch) {
         self.batches.push(batch);
     }
+}
+
+/// Multiple [SingleSeriesBatch].
+#[derive(Default, Debug)]
+pub struct PrimaryKeySeriesBatch {
+    /// Batches with different series..
+    /// Must use `push_last_series()` to add a new batch in order to maintain the correct `num_rows`.
+    pub batches: SmallVec<[SingleSeriesBatch; 2]>,
+    /// Number of rows in all batches.
+    pub num_rows: usize,
+}
+
+impl PrimaryKeySeriesBatch {
+    fn push_last_series(&mut self, batch: Batch) {
+        if batch.is_empty() {
+            return;
+        }
+        self.num_rows += batch.num_rows();
+        if let Some(last) = self.batches.last_mut() {
+            last.push(batch);
+        } else {
+            self.batches.push(SingleSeriesBatch::single(batch));
+        }
+    }
+
+    /// Returns the series key of the last batch.
+    fn last_key(&self) -> Option<&[u8]> {
+        self.batches.last().and_then(|batch| batch.current_key())
+    }
 
     /// Returns true if there is no batch.
     fn is_empty(&self) -> bool {
-        self.batches.is_empty()
+        self.num_rows == 0
+    }
+
+    /// Returns number of rows in the batch.
+    fn num_rows(&self) -> usize {
+        self.num_rows
     }
 }
 
@@ -616,9 +661,7 @@ impl SeriesBatch {
     /// Returns the total number of rows across all batches.
     pub fn num_rows(&self) -> usize {
         match self {
-            SeriesBatch::PrimaryKey(primary_key_batch) => {
-                primary_key_batch.batches.iter().map(|x| x.num_rows()).sum()
-            }
+            SeriesBatch::PrimaryKey(primary_key_batch) => primary_key_batch.num_rows(),
             SeriesBatch::Flat(flat_batch) => flat_batch.batches.iter().map(|x| x.num_rows()).sum(),
         }
     }

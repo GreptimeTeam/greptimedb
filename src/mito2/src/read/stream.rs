@@ -86,9 +86,11 @@ impl ConvertBatchStream {
                         // Safety: Only primary key format returns this batch.
                         let mapper = self.projection_mapper.as_primary_key().unwrap();
 
-                        for batch in primary_key_batch.batches {
-                            let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
-                            self.buffer.push(record_batch.into_df_record_batch());
+                        for series in primary_key_batch.batches {
+                            for batch in series.batches {
+                                let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
+                                self.buffer.push(record_batch.into_df_record_batch());
+                            }
                         }
 
                         let output_schema = mapper.output_schema();
