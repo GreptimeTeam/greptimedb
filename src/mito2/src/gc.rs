@@ -21,12 +21,12 @@
 //! `unknown files`: files that are not recorded in the manifest, usually due to saved checkpoint which remove actions before the checkpoint.
 //!
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
-use object_store::Entry;
+use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
 use store_api::storage::{RegionId, TableId};
@@ -34,7 +34,6 @@ use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error::{
     DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
@@ -44,7 +43,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, Rem
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics::{GC_FILE_CNT_PER_TABLE, GC_TMP_REF_FILE_CNT_PER_TABLE};
 use crate::region::opener::new_manifest_dir;
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::{FileId, delete_files};
 use crate::sst::file_ref::TableFileRefsManifest;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
@@ -96,6 +95,10 @@ pub struct LocalGcWorker {
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
     pub(crate) mito_config: MitoConfig,
+    /// Tmp ref files manifest, used to determine which files are still in use by ongoing queries.
+    ///
+    /// Also contains manifest versions of regions when the tmp ref files are generated.
+    /// Used to determine whether the tmp ref files are outdated.
     pub(crate) file_ref_manifest: TableFileRefsManifest,
 }
 
@@ -106,7 +109,7 @@ impl LocalGcWorker {
     pub async fn try_new(
         access_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
-        regions_to_gc: Vec<RegionId>,
+        regions_to_gc: BTreeSet<RegionId>,
         opt: FileGcOption,
         mito_config: MitoConfig,
         file_ref_manifest: TableFileRefsManifest,
@@ -128,7 +131,7 @@ impl LocalGcWorker {
         };
 
         // dedup just in case
-        for region_id in regions_to_gc.into_iter().collect::<HashSet<_>>() {
+        for region_id in regions_to_gc {
             ensure!(
                 region_id.table_id() == table_id,
                 UnexpectedSnafu {
@@ -193,6 +196,7 @@ impl LocalGcWorker {
     /// TODO(discord9): consider instead running in parallel mode
     pub async fn run(self) -> Result<GcReport> {
         info!("LocalGcWorker started");
+        let now = std::time::Instant::now();
 
         let mut outdated_regions = HashSet::new();
         let mut deleted_files = HashMap::new();
@@ -207,7 +211,10 @@ impl LocalGcWorker {
             deleted_files.insert(*region_id, files);
             info!("Gc for region {} finished", region_id);
         }
-        info!("LocalGcWorker finished");
+        info!(
+            "LocalGcWorker finished after {} secs.",
+            now.elapsed().as_secs()
+        );
         let report = GcReport {
             deleted_files,
             need_retry_regions: outdated_regions.into_iter().collect(),
@@ -235,7 +242,6 @@ impl LocalGcWorker {
         tmp_ref_files: &HashSet<FileId>,
     ) -> Result<Vec<FileId>> {
         info!("Doing gc for region {}", region_id);
-        // TODO(discord9): impl gc worker
         let manifest = self
             .manifest_mgrs
             .get(&region_id)
@@ -300,64 +306,14 @@ impl LocalGcWorker {
     }
 
     async fn delete_files(&self, region_id: RegionId, file_ids: &[FileId]) -> Result<()> {
-        // Remove meta of the file from cache.
-        if let Some(cache) = &self.cache_manager {
-            for file_id in file_ids {
-                cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
-            }
-        }
-        let mut deleted_files = Vec::with_capacity(file_ids.len());
-
-        for file_id in file_ids {
-            let region_file_id = RegionFileId::new(region_id, *file_id);
-            match self.access_layer.delete_sst(&region_file_id).await {
-                Ok(_) => {
-                    deleted_files.push(*file_id);
-                }
-                Err(e) => {
-                    error!(e; "Failed to delete sst and index file for {}", region_file_id);
-                }
-            }
-        }
-
-        info!(
-            "Deleted {} files for region {}: {:?}",
-            deleted_files.len(),
+        delete_files(
             region_id,
-            deleted_files
-        );
-
-        for file_id in file_ids {
-            let region_file_id = RegionFileId::new(region_id, *file_id);
-
-            if let Some(write_cache) = self
-                .cache_manager
-                .as_ref()
-                .and_then(|cache| cache.write_cache())
-            {
-                // Removes index file from the cache.
-
-                write_cache
-                    .remove(IndexKey::new(region_id, *file_id, FileType::Puffin))
-                    .await;
-
-                // Remove the SST file from the cache.
-                write_cache
-                    .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
-                    .await;
-            }
-
-            // Purges index content in the stager.
-            if let Err(e) = self
-                .access_layer
-                .puffin_manager_factory()
-                .purge_stager(region_file_id)
-                .await
-            {
-                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_id, region_id);
-            }
-        }
+            file_ids,
+            true,
+            &self.access_layer,
+            &self.cache_manager,
+        )
+        .await?;
 
         GC_FILE_CNT_PER_TABLE
             .with_label_values(&[&self.table_id.to_string()])
@@ -421,6 +377,155 @@ impl LocalGcWorker {
         Ok(ret)
     }
 
+    /// Create partitioned listers for concurrent file listing based on concurrency level.
+    /// Returns a vector of (lister, end_boundary) pairs for parallel processing.
+    async fn partition_region_files(
+        &self,
+        region_id: RegionId,
+        concurrency: usize,
+    ) -> Result<Vec<(Lister, Option<String>)>> {
+        let region_dir = self.access_layer.build_region_dir(region_id);
+
+        let partitions = gen_partition_from_concurrency(concurrency);
+        let bounds = vec![None]
+            .into_iter()
+            .chain(partitions.iter().map(|p| Some(p.clone())))
+            .chain(vec![None])
+            .collect::<Vec<_>>();
+
+        let mut listers = vec![];
+        for part in bounds.windows(2) {
+            let start = part[0].clone();
+            let end = part[1].clone();
+            let mut lister = self.access_layer.object_store().lister_with(&region_dir);
+            if let Some(s) = start {
+                lister = lister.start_after(&s);
+            }
+
+            let lister = lister.await.context(OpenDalSnafu)?;
+            listers.push((lister, end));
+        }
+
+        Ok(listers)
+    }
+
+    /// Concurrently list all files in the region directory using the provided listers.
+    /// Returns a vector of all file entries found across all partitions.
+    async fn list_region_files_concurrent(
+        &self,
+        listers: Vec<(Lister, Option<String>)>,
+    ) -> Result<Vec<Entry>> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let mut handles = vec![];
+
+        for (lister, end) in listers {
+            let tx = tx.clone();
+            let handle = tokio::spawn(async move {
+                let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
+                    Ok(e) => {
+                        if let Some(end) = &end {
+                            // reach end, stop listing
+                            e.name() < end.as_str()
+                        } else {
+                            // no end, take all entries
+                            true
+                        }
+                    }
+                    // entry went wrong, log and skip it
+                    Err(err) => {
+                        warn!("Failed to list entry: {}", err);
+                        true
+                    }
+                });
+                let stream = stream
+                    .filter(|e| {
+                        if let Ok(e) = &e {
+                            // notice that we only care about files, skip dirs
+                            e.metadata().is_file()
+                        } else {
+                            // error entry, take for further logging
+                            true
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .await;
+                // ordering of files doesn't matter here, so we can send them directly
+                tx.send(stream).await.expect("Failed to send entries");
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all listers to finish
+        for handle in handles {
+            handle.await.context(JoinSnafu)?;
+        }
+
+        drop(tx); // Close the channel to stop receiving
+
+        // Collect all entries from the channel
+        let mut all_entries = vec![];
+        while let Some(stream) = rx.recv().await {
+            all_entries.extend(stream.into_iter().filter_map(Result::ok));
+        }
+
+        Ok(all_entries)
+    }
+
+    /// Filter files to determine which ones can be deleted based on usage status and lingering time.
+    /// Returns a vector of file IDs that are safe to delete.
+    fn filter_deletable_files(
+        &self,
+        entries: Vec<Entry>,
+        in_use_filenames: &HashSet<&FileId>,
+        may_linger_filenames: &HashSet<&FileId>,
+        all_files_appear_in_delta_manifests: &HashSet<&FileId>,
+        unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+    ) -> (Vec<FileId>, HashSet<FileId>) {
+        let mut all_unused_files_ready_for_delete = vec![];
+        let mut all_in_exist_linger_files = HashSet::new();
+
+        for entry in entries {
+            let file_id = match location::parse_file_id_from_path(entry.name()) {
+                Ok(file_id) => file_id,
+                Err(err) => {
+                    error!(err; "Failed to parse file id from path: {}", entry.name());
+                    // if we can't parse the file id, it means it's not a sst or index file
+                    // shouldn't delete it because we don't know what it is
+                    continue;
+                }
+            };
+
+            if may_linger_filenames.contains(&file_id) {
+                all_in_exist_linger_files.insert(file_id);
+            }
+
+            let should_delete = !in_use_filenames.contains(&file_id)
+                && !may_linger_filenames.contains(&file_id)
+                && {
+                    if !all_files_appear_in_delta_manifests.contains(&file_id) {
+                        // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
+                        // using it's last modified time
+                        // notice unknown files use a different lingering time
+                        entry
+                            .metadata()
+                            .last_modified()
+                            .map(|t| t < unknown_file_may_linger_until)
+                            .unwrap_or(false)
+                    } else {
+                        // if the file did appear in manifest delta(and passes previous predicate), we can delete it immediately
+                        true
+                    }
+                };
+
+            if should_delete {
+                all_unused_files_ready_for_delete.push(file_id);
+            }
+        }
+
+        (all_unused_files_ready_for_delete, all_in_exist_linger_files)
+    }
+
     /// Concurrently list unused files in the region dir
     /// because there may be a lot of files in the region dir
     /// and listing them may take a long time.
@@ -468,113 +573,21 @@ impl LocalGcWorker {
         // in use filenames, include sst and index files
         let in_use_filenames = in_used.iter().collect::<HashSet<_>>();
 
-        let region_dir = self.access_layer.build_region_dir(region_id);
+        // Step 1: Create partitioned listers for concurrent processing
+        let listers = self.partition_region_files(region_id, concurrency).await?;
 
-        let partitions = gen_partition_from_concurrency(concurrency);
-        let bounds = vec![None]
-            .into_iter()
-            .chain(partitions.iter().map(|p| Some(p.clone())))
-            .chain(vec![None])
-            .collect::<Vec<_>>();
-        let mut listers = vec![];
-        for part in bounds.windows(2) {
-            let start = part[0].clone();
-            let end = part[1].clone();
-            let mut lister = self.access_layer.object_store().lister_with(&region_dir);
-            if let Some(s) = start {
-                lister = lister.start_after(&s);
-            }
+        // Step 2: Concurrently list all files in the region directory
+        let all_entries = self.list_region_files_concurrent(listers).await?;
 
-            let lister = lister.await.context(OpenDalSnafu)?;
-
-            listers.push((lister, end));
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
-        let mut handles = vec![];
-        for (lister, end) in listers {
-            let tx = tx.clone();
-            let handle = tokio::spawn(async move {
-                let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
-                    Ok(e) => {
-                        if let Some(end) = &end {
-                            // reach end, stop listing
-                            e.name() < end.as_str()
-                        } else {
-                            // no end, take all entries
-                            true
-                        }
-                    }
-                    // entry went wrong, log and skip it
-                    Err(err) => {
-                        warn!("Failed to list entry: {}", err);
-                        true
-                    }
-                });
-                let stream = stream
-                    .filter(|e| {
-                        if let Ok(e) = &e {
-                            // notice that we only care about files, skip dirs
-                            e.metadata().is_file()
-                        } else {
-                            // error entry, take for further logging
-                            true
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .await;
-                // ordering of files doesn't matter here, so we can send them directly
-                tx.send(stream).await.expect("Failed to send entries");
-            });
-
-            handles.push(handle);
-        }
-        // Wait for all listers to finish
-        for handle in handles {
-            handle.await.context(JoinSnafu)?;
-        }
-
-        drop(tx); // Close the channel to stop receiving
-
-        // Collect all entries from the channel
-        let mut all_unused_files_ready_for_delete = vec![];
-        let mut all_in_exist_linger_files = HashSet::new();
-        while let Some(stream) = rx.recv().await {
-            all_unused_files_ready_for_delete.extend(
-                stream.into_iter().filter_map(Result::ok).filter_map(|e| {
-                    let file_id = match location::parse_file_id_from_path(e.name()) {
-                        Ok(file_id) => file_id,
-                        Err(err) => {
-                            error!(err; "Failed to parse file id from path: {}", e.name());
-                            // if we can't parse the file id, it means it's not a sst or index file
-                            // shouldn't delete it because we don't know what it is
-                            return None;
-                        }
-                    };
-                    if may_linger_filenames.contains(&file_id) {
-                        all_in_exist_linger_files.insert(file_id);
-                    }
-
-                    let should_delete = !in_use_filenames.contains(&file_id)
-                        && !may_linger_filenames.contains(&file_id)
-                        && {
-                            if !all_files_appear_in_delta_manifests.contains(&file_id) {
-                                // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
-                                // using it's last modified time
-                                // notice unknown files use a different lingering time
-                                e.metadata()
-                                    .last_modified()
-                                    .map(|t| t < unknown_file_may_linger_until)
-                                    .unwrap_or(false)
-                            } else {
-                                // if the file did appear in manifest delta(and passes previous predicate), we can delete it immediately
-                                true
-                            }
-                        };
-                    if should_delete { Some(file_id) } else { None }
-                }),
+        // Step 3: Filter files to determine which ones can be deleted
+        let (all_unused_files_ready_for_delete, all_in_exist_linger_files) = self
+            .filter_deletable_files(
+                all_entries,
+                &in_use_filenames,
+                &may_linger_filenames,
+                &all_files_appear_in_delta_manifests,
+                unknown_file_may_linger_until,
             );
-        }
 
         info!("All in exist linger files: {:?}", all_in_exist_linger_files);
 

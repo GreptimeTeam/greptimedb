@@ -47,7 +47,7 @@ pub const MAX_REGION_SEQ: u32 = REGION_SEQ_MASK;
 /// └────────────────────────────────────┴──────────┴──────────────────┘
 ///                                         Region Number(32)
 /// ```
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RegionId(u64);
 
 impl RegionId {
