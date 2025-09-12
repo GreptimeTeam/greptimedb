@@ -1,0 +1,151 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_aggregate_types.test
+-- Test MIN/MAX aggregate functions
+-- Test with strings
+CREATE TABLE strings(s STRING, g INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO strings VALUES ('hello', 0, 1000), ('world', 1, 2000), (NULL, 0, 3000), ('r', 1, 4000);
+
+Affected Rows: 4
+
+-- simple aggregates only
+SELECT COUNT(*), COUNT(s), MIN(s), MAX(s) FROM strings;
+
++----------+------------------+----------------+----------------+
+| count(*) | count(strings.s) | min(strings.s) | max(strings.s) |
++----------+------------------+----------------+----------------+
+| 4        | 3                | hello          | world          |
++----------+------------------+----------------+----------------+
+
+SELECT COUNT(*), COUNT(s), MIN(s), MAX(s) FROM strings WHERE s IS NULL;
+
++----------+------------------+----------------+----------------+
+| count(*) | count(strings.s) | min(strings.s) | max(strings.s) |
++----------+------------------+----------------+----------------+
+| 1        | 0                |                |                |
++----------+------------------+----------------+----------------+
+
+-- grouped aggregates
+SELECT g, COUNT(*), COUNT(s), MIN(s), MAX(s) FROM strings GROUP BY g ORDER BY g;
+
++---+----------+------------------+----------------+----------------+
+| g | count(*) | count(strings.s) | min(strings.s) | max(strings.s) |
++---+----------+------------------+----------------+----------------+
+| 0 | 2        | 1                | hello          | hello          |
+| 1 | 2        | 2                | r              | world          |
++---+----------+------------------+----------------+----------------+
+
+-- empty group
+SELECT g, COUNT(*), COUNT(s), MIN(s), MAX(s) FROM strings WHERE s IS NULL OR s <> 'hello' GROUP BY g ORDER BY g;
+
++---+----------+------------------+----------------+----------------+
+| g | count(*) | count(strings.s) | min(strings.s) | max(strings.s) |
++---+----------+------------------+----------------+----------------+
+| 0 | 1        | 0                |                |                |
+| 1 | 2        | 2                | r              | world          |
++---+----------+------------------+----------------+----------------+
+
+-- Test with integers
+CREATE TABLE integers(i INTEGER, g INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (1, 0, 1000), (5, 1, 2000), (NULL, 0, 3000), (3, 1, 4000), (2, 0, 5000);
+
+Affected Rows: 5
+
+SELECT MIN(i), MAX(i) FROM integers;
+
++-----------------+-----------------+
+| min(integers.i) | max(integers.i) |
++-----------------+-----------------+
+| 1               | 5               |
++-----------------+-----------------+
+
+SELECT g, MIN(i), MAX(i) FROM integers GROUP BY g ORDER BY g;
+
++---+-----------------+-----------------+
+| g | min(integers.i) | max(integers.i) |
++---+-----------------+-----------------+
+| 0 | 1               | 2               |
+| 1 | 3               | 5               |
++---+-----------------+-----------------+
+
+-- Test with doubles
+CREATE TABLE doubles(d DOUBLE, g INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO doubles VALUES (1.5, 0, 1000), (5.5, 1, 2000), (NULL, 0, 3000), (3.5, 1, 4000), (2.5, 0, 5000);
+
+Affected Rows: 5
+
+SELECT MIN(d), MAX(d) FROM doubles;
+
++----------------+----------------+
+| min(doubles.d) | max(doubles.d) |
++----------------+----------------+
+| 1.5            | 5.5            |
++----------------+----------------+
+
+SELECT g, MIN(d), MAX(d) FROM doubles GROUP BY g ORDER BY g;
+
++---+----------------+----------------+
+| g | min(doubles.d) | max(doubles.d) |
++---+----------------+----------------+
+| 0 | 1.5            | 2.5            |
+| 1 | 3.5            | 5.5            |
++---+----------------+----------------+
+
+-- Test with booleans
+CREATE TABLE booleans(b BOOLEAN, g INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO booleans VALUES (false, 0, 1000), (true, 1, 2000), (NULL, 0, 3000), (false, 1, 4000);
+
+Affected Rows: 4
+
+SELECT COUNT(*), COUNT(b), MIN(b), MAX(b) FROM booleans;
+
++----------+-------------------+-----------------+-----------------+
+| count(*) | count(booleans.b) | min(booleans.b) | max(booleans.b) |
++----------+-------------------+-----------------+-----------------+
+| 4        | 3                 | false           | true            |
++----------+-------------------+-----------------+-----------------+
+
+SELECT COUNT(*), COUNT(b), MIN(b), MAX(b) FROM booleans WHERE b IS NULL;
+
++----------+-------------------+-----------------+-----------------+
+| count(*) | count(booleans.b) | min(booleans.b) | max(booleans.b) |
++----------+-------------------+-----------------+-----------------+
+| 1        | 0                 |                 |                 |
++----------+-------------------+-----------------+-----------------+
+
+SELECT g, COUNT(*), COUNT(b), MIN(b), MAX(b) FROM booleans GROUP BY g ORDER BY g;
+
++---+----------+-------------------+-----------------+-----------------+
+| g | count(*) | count(booleans.b) | min(booleans.b) | max(booleans.b) |
++---+----------+-------------------+-----------------+-----------------+
+| 0 | 2        | 1                 | false           | false           |
+| 1 | 2        | 2                 | false           | true            |
++---+----------+-------------------+-----------------+-----------------+
+
+-- cleanup
+DROP TABLE strings;
+
+Affected Rows: 0
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
+DROP TABLE doubles;
+
+Affected Rows: 0
+
+DROP TABLE booleans;
+
+Affected Rows: 0
+
