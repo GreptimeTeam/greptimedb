@@ -621,6 +621,58 @@ impl EnforceDistRequirementRewriter {
             plan_per_level: BTreeMap::new(),
         }
     }
+
+    fn get_current_applicable_column_requirements(
+        &self,
+        node: &LogicalPlan,
+    ) -> DfResult<BTreeMap<(Column, usize), BTreeSet<Column>>> {
+        let col_req_per_level = self
+            .column_requirements
+            .iter()
+            .filter(|(_, level)| *level >= self.cur_level)
+            .collect::<Vec<_>>();
+
+        // track alias for columns and use aliased columns instead
+        // aliased col reqs at current level
+        let mut result_alias_mapping = BTreeMap::new();
+        let Some(child) = node.inputs().first().cloned() else {
+            return Ok(Default::default());
+        };
+        for (col_req, level) in col_req_per_level {
+            if let Some(original) = self.plan_per_level.get(level) {
+                // query for alias in current plan
+                let aliased_cols =
+                    aliased_columns_for(&col_req.iter().cloned().collect(), node, Some(original))?;
+                for original_col in col_req {
+                    let aliased_cols = aliased_cols.get(original_col).cloned();
+                    if let Some(cols) = aliased_cols
+                        && !cols.is_empty()
+                    {
+                        result_alias_mapping.insert((original_col.clone(), *level), cols);
+                    } else {
+                        // if no aliased column found in current node, there should be alias in child node as promised by enforce col reqs
+                        let aliases_in_child = aliased_columns_for(
+                            &[original_col.clone()].into(),
+                            child,
+                            Some(original),
+                        )?;
+                        let Some(aliases) = aliases_in_child
+                            .get(original_col)
+                            .cloned()
+                            .filter(|a| !a.is_empty())
+                        else {
+                            return Err(datafusion_common::DataFusionError::Internal(format!(
+                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
+                            )));
+                        };
+                        // TODO(discord9): fix the problem of it in first projection, but not found in second projection
+                        result_alias_mapping.insert((original_col.clone(), *level), aliases);
+                    }
+                }
+            }
+        }
+        Ok(result_alias_mapping)
+    }
 }
 
 impl TreeNodeRewriter for EnforceDistRequirementRewriter {
@@ -643,37 +695,8 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
         self.cur_level -= 1;
         // first get all applicable column requirements
 
-        let mut applicable_column_requirements = {
-            let col_req_per_level = self
-                .column_requirements
-                .iter()
-                .filter(|(_, level)| *level >= self.cur_level)
-                .collect::<Vec<_>>();
-            // track alias for columns and use aliased columns instead
-            // aliased col reqs at current level
-            let mut aliased_col_reqs = HashSet::new();
-            for (col_req, level) in col_req_per_level {
-                if let Some(original) = self.plan_per_level.get(level) {
-                    let aliased_cols = aliased_columns_for(
-                        &col_req.iter().cloned().collect(),
-                        &node,
-                        Some(original),
-                    )?;
-                    for original_col in col_req {
-                        let aliased_cols = aliased_cols.get(original_col).cloned();
-                        if let Some(cols) = aliased_cols
-                            && !cols.is_empty()
-                        {
-                            aliased_col_reqs.extend(cols.into_iter());
-                        } else {
-                            // if no aliased column found, use the original column
-                            aliased_col_reqs.insert(original_col.clone());
-                        }
-                    }
-                }
-            }
-            aliased_col_reqs
-        };
+        let mut applicable_column_requirements =
+            self.get_current_applicable_column_requirements(&node)?;
 
         debug!(
             "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
@@ -687,15 +710,25 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
-                applicable_column_requirements.remove(&column);
+                applicable_column_requirements.retain(|_col_level, alias_set| {
+                    // remove all columns that are already in the projection exprs
+                    !alias_set.contains(&column)
+                });
             }
             if applicable_column_requirements.is_empty() {
                 return Ok(Transformed::no(node));
             }
 
             let mut new_exprs = projection.expr.clone();
-            for col in &applicable_column_requirements {
-                new_exprs.push(Expr::Column(col.clone()));
+            for (col, alias_set) in &applicable_column_requirements {
+                // use the first alias in alias set as the column to add
+                new_exprs.push(Expr::Column(alias_set.first().cloned().ok_or_else(
+                    || {
+                        datafusion_common::DataFusionError::Internal(
+                            format!("EnforceDistRequirementRewriter: alias set is empty, for column {col:?} in node {node}"),
+                        )
+                    },
+                )?));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
@@ -703,6 +736,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 "EnforceDistRequirementRewriter: added missing columns {:?} to projection node from old node: \n{node}\n Making new node: \n{new_node}",
                 applicable_column_requirements
             );
+
+            // update plan for later use
+            self.plan_per_level.insert(self.cur_level, new_node.clone());
 
             // still need to continue for next projection if applicable
             return Ok(Transformed::yes(new_node));

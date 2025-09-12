@@ -122,10 +122,10 @@ fn original_column_for_inner(
 
     loop {
         // Base case: check if we've reached the target node
-        if let Some(original_node) = original_node {
-            if *current_node == **original_node {
-                return Ok(cur_aliases);
-            }
+        if let Some(original_node) = original_node
+            && *current_node == **original_node
+        {
+            return Ok(cur_aliases);
         } else if current_node.inputs().is_empty() {
             // leaf node reached
             return Ok(cur_aliases);
@@ -133,9 +133,10 @@ fn original_column_for_inner(
 
         // Validate node has exactly one child
         if current_node.inputs().len() != 1 {
-            return Err(datafusion::error::DataFusionError::Internal(
-                "only accept plan with at most one child".to_string(),
-            ));
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "only accept plan with at most one child, found: {}",
+                current_node
+            )));
         }
 
         // Get alias layer and update aliases
@@ -196,10 +197,10 @@ fn aliased_columns_for_inner(
     // Descend to the target node, collecting nodes along the way
     loop {
         // Base case: check if we've reached the target node
-        if let Some(original_node) = original_node {
-            if *current_node == *original_node {
-                break;
-            }
+        if let Some(original_node) = original_node
+            && *current_node == *original_node
+        {
+            break;
         } else if current_node.inputs().is_empty() {
             // leaf node reached
             break;
@@ -207,9 +208,10 @@ fn aliased_columns_for_inner(
 
         // Validate node has exactly one child
         if current_node.inputs().len() != 1 {
-            return Err(datafusion::error::DataFusionError::Internal(
-                "only accept plan with at most one child".to_string(),
-            ));
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "only accept plan with at most one child, found: {}",
+                current_node
+            )));
         }
 
         // Add current node to path and move to child
@@ -269,9 +271,10 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                 .inputs()
                 .first()
                 .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "only accept plan with at most one child".to_string(),
-                    )
+                    datafusion::error::DataFusionError::Internal(format!(
+                        "only accept plan with at most one child, found: {}",
+                        node
+                    ))
                 })?
                 .schema();
             let output_schema = node.schema();
