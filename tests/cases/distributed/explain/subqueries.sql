@@ -63,13 +63,13 @@ DROP TABLE integers;
 
 CREATE TABLE t(ts timestamp time index, a INT, b INT);
 
-INSERT INTO t(ts,a,b) VALUES (1,3,30),(2,1,10),(3,2,20);
-
 CREATE TABLE t1(ts timestamp time index, a INT);
 
-INSERT INTO t1(ts,a) VALUES (1,1),(2,3);
-
 CREATE TABLE t2(ts timestamp time index, a INT);
+
+INSERT INTO t(ts,a,b) VALUES (1,3,30),(2,1,10),(3,2,20);
+
+INSERT INTO t1(ts,a) VALUES (1,1),(2,3);
 
 INSERT INTO t2(ts,a) VALUES (1,2),(2,3);
 
@@ -113,3 +113,7 @@ SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
 
 SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 -- expected: 1,2
+
+DROP TABLE t;
+DROP TABLE t1;
+DROP TABLE t2;
