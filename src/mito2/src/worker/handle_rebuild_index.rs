@@ -181,7 +181,7 @@ impl<S> RegionWorkerLoop<S> {
                     "Successfully update manifest version to {version}, region: {region_id}, reason : index build"
                 );
                 region.version_control.apply_edit(
-                    request.edit.clone(),
+                    Some(request.edit.clone()),
                     &[],
                     region.file_purger.clone(),
                 );
