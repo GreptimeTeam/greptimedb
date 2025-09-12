@@ -17,37 +17,108 @@ use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
+use datafusion_common::tree_node::{Transformed, TreeNode as _};
 use datafusion_expr::expr::Alias;
-use datafusion_expr::{Expr, LogicalPlan};
+use datafusion_expr::{Expr, Extension, LogicalPlan};
+
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::plan::ExtractExpr as _;
+
+fn rewrite_column(
+    mapping: &BTreeMap<Column, BTreeSet<Column>>,
+    original_node: &LogicalPlan,
+    alias_node: &LogicalPlan,
+) -> impl Fn(Expr) -> DfResult<Transformed<Expr>> {
+    move |e: Expr| {
+        if let Expr::Column(col) = e {
+            if let Some(aliased_cols) = mapping.get(&col) {
+                // if multiple alias is available, just use first one
+                if let Some(aliased_col) = aliased_cols.iter().next() {
+                    return Ok(Transformed::yes(Expr::Column(aliased_col.clone())));
+                } else {
+                    return Err(datafusion_common::DataFusionError::Internal(format!(
+                        "PlanRewriter: expand: column {col} from {original_node} has empty alias set in plan: {alias_node}, but expect at least one alias",
+                    )));
+                }
+            } else {
+                Err(datafusion_common::DataFusionError::Internal(format!(
+                    "PlanRewriter: expand: column {col} from {original_node} has no alias in plan: {alias_node}",
+                )))
+            }
+        } else {
+            return Ok(Transformed::no(e));
+        }
+    }
+}
+
+/// Rewrite the expressions of the given merge sort plan from original columns(at merge sort's input plan) to aliased columns at the given aliased node
+pub fn rewrite_merge_sort_exprs(
+    merge_sort: &MergeSortLogicalPlan,
+    aliased_node: &LogicalPlan,
+) -> DfResult<LogicalPlan> {
+    let merge_sort = LogicalPlan::Extension(Extension {
+        node: Arc::new(merge_sort.clone()),
+    });
+
+    // tracking alias for sort exprs,
+    let sort_input = merge_sort.inputs().first().cloned().ok_or_else(|| {
+        datafusion_common::DataFusionError::Internal(format!(
+            "PlanRewriter: expand: merge sort stage has no input: {merge_sort}"
+        ))
+    })?;
+    let sort_exprs = merge_sort.expressions_consider_join();
+    let column_refs = sort_exprs
+        .iter()
+        .map(|e| e.column_refs().into_iter().cloned())
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let column_alias_mapping = aliased_columns_for(&column_refs, &aliased_node, Some(sort_input))?;
+    let aliased_sort_exprs = sort_exprs
+        .into_iter()
+        .map(|e| {
+            e.transform(rewrite_column(
+                &column_alias_mapping,
+                &merge_sort,
+                &aliased_node,
+            ))
+        })
+        .map(|e| e.map(|e| e.data))
+        .collect::<DfResult<Vec<_>>>()?;
+    let new_merge_sort = merge_sort.with_new_exprs(
+        aliased_sort_exprs,
+        merge_sort.inputs().into_iter().cloned().collect(),
+    )?;
+    Ok(new_merge_sort)
+}
 
 /// Return all the original columns(at original node) for the given aliased columns at the aliased node
 ///
 /// if `original_node` is None, it means original columns are from leaf node
 #[allow(unused)]
 pub fn original_column_for(
-    aliased_columns: &HashSet<Column>,
+    aliased_columns: &BTreeSet<Column>,
     aliased_node: LogicalPlan,
     original_node: Option<Arc<LogicalPlan>>,
-) -> DfResult<HashMap<Column, Column>> {
-    let schema_cols: HashSet<Column> = aliased_node.schema().columns().iter().cloned().collect();
-    let cur_aliases: HashMap<Column, Column> = aliased_columns
+) -> DfResult<BTreeMap<Column, Column>> {
+    let schema_cols: BTreeSet<Column> = aliased_node.schema().columns().iter().cloned().collect();
+    let cur_aliases: BTreeMap<Column, Column> = aliased_columns
         .iter()
         .filter(|c| schema_cols.contains(c))
         .map(|c| (c.clone(), c.clone()))
         .collect();
 
     if cur_aliases.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
 
     original_column_for_inner(cur_aliases, &aliased_node, &original_node)
 }
 
 fn original_column_for_inner(
-    mut cur_aliases: HashMap<Column, Column>,
+    mut cur_aliases: BTreeMap<Column, Column>,
     node: &LogicalPlan,
     original_node: &Option<Arc<LogicalPlan>>,
-) -> DfResult<HashMap<Column, Column>> {
+) -> DfResult<BTreeMap<Column, Column>> {
     let mut current_node = node;
 
     loop {
@@ -70,7 +141,7 @@ fn original_column_for_inner(
 
         // Get alias layer and update aliases
         let layer = get_alias_layer_from_node(current_node)?;
-        let mut new_aliases = HashMap::new();
+        let mut new_aliases = BTreeMap::new();
         for (start_alias, cur_alias) in cur_aliases {
             if let Some(old_column) = layer.get_old_from_new(cur_alias.clone()) {
                 new_aliases.insert(start_alias, old_column);
@@ -87,38 +158,38 @@ fn original_column_for_inner(
 ///
 /// if `original_node` is None, it means original columns are from leaf node
 pub fn aliased_columns_for(
-    original_columns: &HashSet<Column>,
+    original_columns: &BTreeSet<Column>,
     aliased_node: &LogicalPlan,
     original_node: Option<&LogicalPlan>,
-) -> DfResult<HashMap<Column, HashSet<Column>>> {
-    let initial_aliases: HashMap<Column, HashSet<Column>> = {
+) -> DfResult<BTreeMap<Column, BTreeSet<Column>>> {
+    let initial_aliases: BTreeMap<Column, BTreeSet<Column>> = {
         if let Some(original) = &original_node {
-            let schema_cols: HashSet<Column> = original.schema().columns().into_iter().collect();
+            let schema_cols: BTreeSet<Column> = original.schema().columns().into_iter().collect();
             original_columns
                 .iter()
                 .filter(|c| schema_cols.contains(c))
-                .map(|c| (c.clone(), HashSet::from([c.clone()])))
+                .map(|c| (c.clone(), [c.clone()].into()))
                 .collect()
         } else {
             original_columns
                 .iter()
-                .map(|c| (c.clone(), HashSet::from([c.clone()])))
+                .map(|c| (c.clone(), [c.clone()].into()))
                 .collect()
         }
     };
 
     if initial_aliases.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
 
     aliased_columns_for_inner(initial_aliases, aliased_node, original_node)
 }
 
 fn aliased_columns_for_inner(
-    cur_aliases: HashMap<Column, HashSet<Column>>,
+    cur_aliases: BTreeMap<Column, BTreeSet<Column>>,
     node: &LogicalPlan,
     original_node: Option<&LogicalPlan>,
-) -> DfResult<HashMap<Column, HashSet<Column>>> {
+) -> DfResult<BTreeMap<Column, BTreeSet<Column>>> {
     // First, collect the path from current node to the target node
     let mut path = Vec::new();
     let mut current_node = node;
@@ -151,9 +222,9 @@ fn aliased_columns_for_inner(
     let mut result = cur_aliases;
     for &node_in_path in path.iter().rev() {
         let layer = get_alias_layer_from_node(node_in_path)?;
-        let mut new_aliases = HashMap::new();
+        let mut new_aliases = BTreeMap::new();
         for (original_column, cur_alias_set) in result {
-            let mut new_alias_set = HashSet::new();
+            let mut new_alias_set = BTreeSet::new();
             for cur_alias in cur_alias_set {
                 new_alias_set.extend(layer.get_new_from_old(cur_alias.clone()));
             }
@@ -168,6 +239,7 @@ fn aliased_columns_for_inner(
 }
 
 /// Return a mapping of original column to all the aliased columns in current node of the plan
+/// TODO(discord9): also support merge scan node
 fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
     match node {
         LogicalPlan::Projection(proj) => Ok(get_alias_layer_from_exprs(&proj.expr)),
@@ -181,7 +253,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                     old_column.name().to_string(),
                 );
                 // mapping from old_column to new_column
-                layer.insert_alias(old_column, HashSet::from([new_column]));
+                layer.insert_alias(old_column, [new_column].into());
             }
             Ok(layer)
         }
@@ -189,7 +261,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
             let columns = scan.projected_schema.columns();
             let mut layer = AliasLayer::default();
             for col in columns {
-                layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                layer.insert_alias(col.clone(), [col.clone()].into());
             }
             Ok(layer)
         }
@@ -221,7 +293,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                         // all input is in output, so it's just adding some columns, we can do identity mapping for input columns
                         let mut layer = AliasLayer::default();
                         for col in input_columns {
-                            layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                            layer.insert_alias(col.clone(), [col.clone()].into());
                         }
                         Ok(layer)
                     } else {
@@ -242,7 +314,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
 
                         let mut layer = AliasLayer::default();
                         for col in &common_columns {
-                            layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                            layer.insert_alias(col.clone(), [col.clone()].into());
                         }
                         Ok(layer)
                     }
@@ -250,7 +322,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                     // identity mapping
                     let mut layer = AliasLayer::default();
                     for col in output_schema.columns() {
-                        layer.insert_alias(col.clone(), HashSet::from([col.clone()]));
+                        layer.insert_alias(col.clone(), [col.clone()].into());
                     }
                     Ok(layer)
                 }
@@ -403,71 +475,52 @@ mod tests {
         let child = plan.inputs()[0].clone();
 
         assert_eq!(
-            aliased_columns_for(
-                &HashSet::from([qcol("pk1"), qcol("pk2")]),
-                &plan,
-                Some(&child)
-            )
-            .unwrap(),
-            HashMap::from([
-                (qcol("pk1"), HashSet::from([qcol("pk5")])),
-                (qcol("pk2"), HashSet::from([qcol("pk4")]))
-            ])
+            aliased_columns_for(&[qcol("pk1"), qcol("pk2")].into(), &plan, Some(&child)).unwrap(),
+            [
+                (qcol("pk1"), [qcol("pk5")].into()),
+                (qcol("pk2"), [qcol("pk4")].into())
+            ]
+            .into()
         );
 
         // columns not in the plan should return empty mapping
         assert_eq!(
-            aliased_columns_for(
-                &HashSet::from([qcol("pk1"), qcol("pk2")]),
-                &plan,
-                Some(&plan)
-            )
-            .unwrap(),
-            HashMap::from([])
+            aliased_columns_for(&[qcol("pk1"), qcol("pk2")].into(), &plan, Some(&plan)).unwrap(),
+            [].into()
         );
 
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk3")]), &plan, Some(&child)).unwrap(),
-            HashMap::from([])
+            aliased_columns_for(&[qcol("t.pk3")].into(), &plan, Some(&child)).unwrap(),
+            [].into()
         );
 
         assert_eq!(
-            original_column_for(
-                &HashSet::from([qcol("pk5"), qcol("pk4")]),
-                plan.clone(),
-                None
-            )
-            .unwrap(),
-            HashMap::from([(qcol("pk5"), qcol("t.pk3")), (qcol("pk4"), qcol("t.pk3"))])
+            original_column_for(&[qcol("pk5"), qcol("pk4")].into(), plan.clone(), None).unwrap(),
+            [(qcol("pk5"), qcol("t.pk3")), (qcol("pk4"), qcol("t.pk3"))].into()
         );
 
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("pk3")]), &plan, None).unwrap(),
-            HashMap::from([(qcol("pk3"), HashSet::from([qcol("pk5"), qcol("pk4")]))])
+            aliased_columns_for(&[qcol("pk3")].into(), &plan, None).unwrap(),
+            [(qcol("pk3"), [qcol("pk5"), qcol("pk4")].into())].into()
         );
         assert_eq!(
-            original_column_for(
-                &HashSet::from([qcol("pk1"), qcol("pk2")]),
-                child.clone(),
-                None
-            )
-            .unwrap(),
-            HashMap::from([(qcol("pk1"), qcol("t.pk3")), (qcol("pk2"), qcol("t.pk3"))])
+            original_column_for(&[qcol("pk1"), qcol("pk2")].into(), child.clone(), None).unwrap(),
+            [(qcol("pk1"), qcol("t.pk3")), (qcol("pk2"), qcol("t.pk3"))].into()
         );
 
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("pk3")]), &child, None).unwrap(),
-            HashMap::from([(qcol("pk3"), HashSet::from([qcol("pk1"), qcol("pk2")]))])
+            aliased_columns_for(&[qcol("pk3")].into(), &child, None).unwrap(),
+            [(qcol("pk3"), [qcol("pk1"), qcol("pk2")].into())].into()
         );
 
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("pk4"), qcol("pk5")]),
+                &[qcol("pk4"), qcol("pk5")].into(),
                 plan.clone(),
                 Some(Arc::new(child.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("pk4"), qcol("pk2")), (qcol("pk5"), qcol("pk1"))])
+            [(qcol("pk4"), qcol("pk2")), (qcol("pk5"), qcol("pk1"))].into()
         );
     }
 
@@ -492,44 +545,42 @@ mod tests {
 
         // Test aliased_columns_for from scan to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.number")]), &plan, Some(&scan_plan))
-                .unwrap(),
-            HashMap::from([(qcol("t.number"), HashSet::from([qcol("a.number")]))])
+            aliased_columns_for(&[qcol("t.number")].into(), &plan, Some(&scan_plan)).unwrap(),
+            [(qcol("t.number"), [qcol("a.number")].into())].into()
         );
 
         // Test aliased_columns_for from sort to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.number")]), &plan, Some(&sort_plan))
-                .unwrap(),
-            HashMap::from([(qcol("t.number"), HashSet::from([qcol("a.number")]))])
+            aliased_columns_for(&[qcol("t.number")].into(), &plan, Some(&sort_plan)).unwrap(),
+            [(qcol("t.number"), [qcol("a.number")].into())].into()
         );
 
         // Test aliased_columns_for from leaf to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.number")]), &plan, None).unwrap(),
-            HashMap::from([(qcol("t.number"), HashSet::from([qcol("a.number")]))])
+            aliased_columns_for(&[qcol("t.number")].into(), &plan, None).unwrap(),
+            [(qcol("t.number"), [qcol("a.number")].into())].into()
         );
 
         // Test original_column_for from final plan to scan
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("a.number")]),
+                &[qcol("a.number")].into(),
                 plan.clone(),
                 Some(Arc::new(scan_plan.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("a.number"), qcol("t.number"))])
+            [(qcol("a.number"), qcol("t.number"))].into()
         );
 
         // Test original_column_for from final plan to sort
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("a.number")]),
+                &[qcol("a.number")].into(),
                 plan.clone(),
                 Some(Arc::new(sort_plan.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("a.number"), qcol("t.number"))])
+            [(qcol("a.number"), qcol("t.number"))].into()
         );
     }
 
@@ -564,63 +615,58 @@ mod tests {
         // Test original_column_for from final plan to scan
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("pk1")]),
+                &[qcol("pk1")].into(),
                 plan.clone(),
                 Some(Arc::new(scan_plan.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("pk1"), qcol("t.pk2"))])
+            [(qcol("pk1"), qcol("t.pk2"))].into()
         );
 
         // Test original_column_for from final plan to first projection
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("pk1")]),
+                &[qcol("pk1")].into(),
                 plan.clone(),
                 Some(Arc::new(first_proj.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("pk1"), qcol("pk3"))])
+            [(qcol("pk1"), qcol("pk3"))].into()
         );
 
         // Test original_column_for from final plan to leaf
         assert_eq!(
             original_column_for(
-                &HashSet::from([qcol("pk1")]),
+                &[qcol("pk1")].into(),
                 plan.clone(),
                 Some(Arc::new(plan.clone()))
             )
             .unwrap(),
-            HashMap::from([(qcol("pk1"), qcol("pk1"))])
+            [(qcol("pk1"), qcol("pk1"))].into()
         );
 
         // Test aliased_columns_for from scan to first projection
         assert_eq!(
-            aliased_columns_for(
-                &HashSet::from([qcol("t.pk2")]),
-                &first_proj,
-                Some(&scan_plan)
-            )
-            .unwrap(),
-            HashMap::from([(qcol("t.pk2"), HashSet::from([qcol("pk3")]))])
+            aliased_columns_for(&[qcol("t.pk2")].into(), &first_proj, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk2"), [qcol("pk3")].into())].into()
         );
 
         // Test aliased_columns_for from first projection to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("pk3")]), &plan, Some(&first_proj)).unwrap(),
-            HashMap::from([(qcol("pk3"), HashSet::from([qcol("pk1")]))])
+            aliased_columns_for(&[qcol("pk3")].into(), &plan, Some(&first_proj)).unwrap(),
+            [(qcol("pk3"), [qcol("pk1")].into())].into()
         );
 
         // Test aliased_columns_for from scan to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk2")]), &plan, Some(&scan_plan)).unwrap(),
-            HashMap::from([(qcol("t.pk2"), HashSet::from([qcol("pk1")]))])
+            aliased_columns_for(&[qcol("t.pk2")].into(), &plan, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk2"), [qcol("pk1")].into())].into()
         );
 
         // Test aliased_columns_for from leaf to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("pk2")]), &plan, None).unwrap(),
-            HashMap::from([(qcol("pk2"), HashSet::from([qcol("pk1")]))])
+            aliased_columns_for(&[qcol("pk2")].into(), &plan, None).unwrap(),
+            [(qcol("pk2"), [qcol("pk1")].into())].into()
         );
     }
 
@@ -647,8 +693,8 @@ mod tests {
 
         // Test aliased_columns_for from scan to projection
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk2")]), &plan, Some(&scan_plan)).unwrap(),
-            HashMap::from([(qcol("t.pk2"), HashSet::from([qcol("a.pk1")]))])
+            aliased_columns_for(&[qcol("t.pk2")].into(), &plan, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk2"), [qcol("a.pk1")].into())].into()
         );
     }
 
@@ -686,19 +732,14 @@ mod tests {
 
         // Test aliased_columns_for from scan to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk1")]), &plan, Some(&scan_plan)).unwrap(),
-            HashMap::from([(qcol("t.pk1"), HashSet::from([qcol("pk42")]))])
+            aliased_columns_for(&[qcol("t.pk1")].into(), &plan, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk1"), [qcol("pk42")].into())].into()
         );
 
         // Test aliased_columns_for from scan to first projection
         assert_eq!(
-            aliased_columns_for(
-                &HashSet::from([Column::from_name("pk1")]),
-                &first_proj,
-                None
-            )
-            .unwrap(),
-            HashMap::from([(Column::from_name("pk1"), HashSet::from([qcol("pk3")]))])
+            aliased_columns_for(&[Column::from_name("pk1")].into(), &first_proj, None).unwrap(),
+            [(Column::from_name("pk1"), [qcol("pk3")].into())].into()
         );
     }
 
@@ -728,31 +769,26 @@ mod tests {
 
         // Test aliased_columns_for from scan to final plan (identity mapping for aggregates)
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk1")]), &plan, Some(&scan_plan)).unwrap(),
-            HashMap::from([(qcol("t.pk1"), HashSet::from([qcol("t.pk1")]))])
+            aliased_columns_for(&[qcol("t.pk1")].into(), &plan, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk1"), [qcol("t.pk1")].into())].into()
         );
 
         // Test aliased_columns_for from scan to first aggregate
         assert_eq!(
-            aliased_columns_for(
-                &HashSet::from([qcol("t.pk1")]),
-                &first_aggr,
-                Some(&scan_plan)
-            )
-            .unwrap(),
-            HashMap::from([(qcol("t.pk1"), HashSet::from([qcol("t.pk1")]))])
+            aliased_columns_for(&[qcol("t.pk1")].into(), &first_aggr, Some(&scan_plan)).unwrap(),
+            [(qcol("t.pk1"), [qcol("t.pk1")].into())].into()
         );
 
         // Test aliased_columns_for from first aggregate to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([qcol("t.pk1")]), &plan, Some(&first_aggr)).unwrap(),
-            HashMap::from([(qcol("t.pk1"), HashSet::from([qcol("t.pk1")]))])
+            aliased_columns_for(&[qcol("t.pk1")].into(), &plan, Some(&first_aggr)).unwrap(),
+            [(qcol("t.pk1"), [qcol("t.pk1")].into())].into()
         );
 
         // Test aliased_columns_for from leaf to final plan
         assert_eq!(
-            aliased_columns_for(&HashSet::from([Column::from_name("pk1")]), &plan, None).unwrap(),
-            HashMap::from([(Column::from_name("pk1"), HashSet::from([qcol("t.pk1")]))])
+            aliased_columns_for(&[Column::from_name("pk1")].into(), &plan, None).unwrap(),
+            [(Column::from_name("pk1"), [qcol("t.pk1")].into())].into()
         );
     }
 
@@ -788,29 +824,31 @@ mod tests {
         // Test original_column_for from projection to second aggregate for aggr gen column
         assert_eq!(
             original_column_for(
-                &HashSet::from([Column::from_name("min_max_number")]),
+                &[Column::from_name("min_max_number")].into(),
                 plan.clone(),
                 Some(Arc::new(second_aggr.clone()))
             )
             .unwrap(),
-            HashMap::from([(
+            [(
                 Column::from_name("min_max_number"),
                 Column::from_name("min(max(t.number))")
-            )])
+            )]
+            .into()
         );
 
         // Test aliased_columns_for from second aggregate to projection
         assert_eq!(
             aliased_columns_for(
-                &HashSet::from([Column::from_name("min(max(t.number))")]),
+                &[Column::from_name("min(max(t.number))")].into(),
                 &plan,
                 Some(&second_aggr)
             )
             .unwrap(),
-            HashMap::from([(
+            [(
                 Column::from_name("min(max(t.number))"),
-                HashSet::from([Column::from_name("min_max_number")])
-            )])
+                [Column::from_name("min_max_number")].into()
+            )]
+            .into()
         );
     }
 }
