@@ -47,7 +47,7 @@ INSERT INTO weight_groups VALUES
 
 Affected Rows: 6
 
-SELECT grp, approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+SELECT grp, approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value")
 FROM weight_groups GROUP BY grp ORDER BY grp;
 
 +-----+-------------------------------------------------------------------------------------------------------------------------+
@@ -76,14 +76,30 @@ SELECT approx_percentile_cont_with_weight("weight", 0.5) WITHIN GROUP (ORDER BY 
 +-------------------------------------------------------------------------------------------------------------------------+
 
 -- Test edge cases
+-- min
+SELECT approx_percentile_cont_with_weight("weight", 0.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++-------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++-------------------------------------------------------------------------------------------------------------------+
+| 10                                                                                                                |
++-------------------------------------------------------------------------------------------------------------------+
+
+-- max
+SELECT approx_percentile_cont_with_weight("weight", 1.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++-------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(1)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++-------------------------------------------------------------------------------------------------------------------+
+| 50                                                                                                                |
++-------------------------------------------------------------------------------------------------------------------+
+
 -- Test with zero weights
-SELECT approx_percentile_cont_with_weight("weight", 0.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- min
-SELECT approx_percentile_cont_with_weight("weight", 1.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- max
 CREATE TABLE zero_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
 
-Error: 1001(Unsupported), Not supported: execute multiple statements in SQL query string through GRPC interface
+Affected Rows: 0
 
-INSERT INTO zero_weight VALUES 
+INSERT INTO zero_weight VALUES
     (10, 0, 1000), (20, 1, 2000), (30, 0, 3000), (40, 2, 4000);
 
 Affected Rows: 4
@@ -110,7 +126,7 @@ SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "v
 +---------------------------------------------------------------------------------------------------------------------+
 
 -- Test empty result
-SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value")
 FROM weight_test WHERE "value" > 1000;
 
 +---------------------------------------------------------------------------------------------------------------------+
@@ -146,7 +162,7 @@ INSERT INTO equal_weight VALUES
 
 Affected Rows: 4
 
-SELECT 
+SELECT
     approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value"),
     approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY "value")
 FROM equal_weight;

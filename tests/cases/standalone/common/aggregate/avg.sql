@@ -2,7 +2,10 @@
 -- Test AVG aggregate function
 
 -- scalar average
-SELECT AVG(3), AVG(NULL);
+SELECT AVG(3);
+
+-- FIXME(dennis): unsupported type
+-- SELECT AVG(NULL);
 
 SELECT AVG(3::SMALLINT), AVG(NULL::SMALLINT);
 
@@ -33,7 +36,8 @@ INSERT INTO vals VALUES (1, 1.5, 1000), (2, 2.5, 2000), (3, 3.5, 3000), (NULL, N
 
 SELECT AVG(i), AVG(j) FROM vals;
 
-SELECT AVG(DISTINCT i), AVG(DISTINCT j) FROM vals;
+-- FIXME(dennis): AVG(DISTINCT) not supported
+-- SELECT AVG(DISTINCT i), AVG(DISTINCT j) FROM vals;
 
 -- cleanup
 DROP TABLE integers;

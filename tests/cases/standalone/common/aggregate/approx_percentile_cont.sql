@@ -6,7 +6,7 @@ CREATE TABLE approx_test(i INTEGER, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO approx_test SELECT number, number * 1000 FROM numbers LIMIT 1000;
 
--- Test approx_percentile_cont with WITHIN GROUP syntax
+-- Test approx_percentile_cont
 -- median
 SELECT approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY i) FROM approx_test;
 
@@ -18,6 +18,19 @@ SELECT approx_percentile_cont(0.75) WITHIN GROUP (ORDER BY i) FROM approx_test;
 
 -- 95th percentile
 SELECT approx_percentile_cont(0.95) WITHIN GROUP (ORDER BY i) FROM approx_test;
+
+-- Test approx_percentile_cont DESC
+-- median
+SELECT approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
+
+-- first quartile
+SELECT approx_percentile_cont(0.25) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
+
+-- third quartile
+SELECT approx_percentile_cont(0.75) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
+
+-- 95th percentile
+SELECT approx_percentile_cont(0.95) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
 
 -- Test with different data types
 CREATE TABLE approx_double(d DOUBLE, ts TIMESTAMP TIME INDEX);
@@ -49,8 +62,12 @@ SELECT approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY i) FROM approx_test;
 -- should be close to min
 SELECT approx_percentile_cont(0.0) WITHIN GROUP (ORDER BY i) FROM approx_test;
 
+SELECT approx_percentile_cont(1.0) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
+
 -- should be close to max
 SELECT approx_percentile_cont(1.0) WITHIN GROUP (ORDER BY i) FROM approx_test;
+
+SELECT approx_percentile_cont(0.0) WITHIN GROUP (ORDER BY i DESC) FROM approx_test;
 
 DROP TABLE approx_test;
 

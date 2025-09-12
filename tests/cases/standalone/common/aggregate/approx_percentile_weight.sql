@@ -22,7 +22,7 @@ INSERT INTO weight_groups VALUES
     (1, 10, 2, 1000), (1, 20, 3, 2000), (1, 30, 1, 3000),
     (2, 100, 1, 4000), (2, 200, 4, 5000), (2, 300, 2, 6000);
 
-SELECT grp, approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+SELECT grp, approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value")
 FROM weight_groups GROUP BY grp ORDER BY grp;
 
 -- Test with double values and weights
@@ -34,14 +34,16 @@ INSERT INTO weight_double VALUES
 SELECT approx_percentile_cont_with_weight("weight", 0.5) WITHIN GROUP (ORDER BY "value") FROM weight_double;
 
 -- Test edge cases
-SELECT approx_percentile_cont_with_weight("weight", 0.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- min
+-- min
+SELECT approx_percentile_cont_with_weight("weight", 0.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;
 
-SELECT approx_percentile_cont_with_weight("weight", 1.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- max
+-- max
+SELECT approx_percentile_cont_with_weight("weight", 1.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;
 
 -- Test with zero weights
 CREATE TABLE zero_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO zero_weight VALUES 
+INSERT INTO zero_weight VALUES
     (10, 0, 1000), (20, 1, 2000), (30, 0, 3000), (40, 2, 4000);
 
 SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM zero_weight;
@@ -52,7 +54,7 @@ INSERT INTO weight_test VALUES (NULL, 1, 6000), (60, NULL, 7000);
 SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM weight_test;
 
 -- Test empty result
-SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value")
 FROM weight_test WHERE "value" > 1000;
 
 -- Test single weighted value
@@ -68,7 +70,7 @@ CREATE TABLE equal_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME IND
 INSERT INTO equal_weight VALUES
     (10, 1, 1000), (20, 1, 2000), (30, 1, 3000), (40, 1, 4000);
 
-SELECT 
+SELECT
     approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value"),
     approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY "value")
 FROM equal_weight;
