@@ -558,7 +558,6 @@ impl PlanRewriter {
         .into_logical_plan();
 
         // expand stages
-        // TODO(discord9): tracking alias for stages
         for new_stage in self.stage.drain(..) {
             // tracking alias for merge sort's sort exprs
             let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
