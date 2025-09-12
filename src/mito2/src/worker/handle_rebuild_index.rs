@@ -23,7 +23,6 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
 use crate::access_layer::OperationType;
-use crate::cache::write_cache;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
@@ -51,9 +50,9 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let intermediate_manager = if let Some(write_cache) = self.cache_manager.write_cache() {
-            write_cache.intermediate_manager()
+            write_cache.intermediate_manager().clone()
         } else {
-            access_layer.intermediate_manager()
+            access_layer.intermediate_manager().clone()
         };
 
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {

@@ -28,7 +28,7 @@ use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use statistics::{ByteCount, RowCount};
 use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
@@ -1124,32 +1124,35 @@ mod tests {
 
         if build_mode == IndexBuildMode::Async {
             // The index file should not exist before the task finishes.
-            assert!(!env
-                .access_layer
-                .object_store()
-                .exists(&puffin_path)
-                .await
-                .unwrap());
+            assert!(
+                !env.access_layer
+                    .object_store()
+                    .exists(&puffin_path)
+                    .await
+                    .unwrap()
+            );
         } else {
             // The index file should exist before the task finishes.
-            assert!(env
-                .access_layer
-                .object_store()
-                .exists(&puffin_path)
-                .await
-                .unwrap());
+            assert!(
+                env.access_layer
+                    .object_store()
+                    .exists(&puffin_path)
+                    .await
+                    .unwrap()
+            );
         }
 
         // The task should finish successfully.
         assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
 
         // The index file should exist after the task finishes.
-        assert!(env
-            .access_layer
-            .object_store()
-            .exists(&puffin_path)
-            .await
-            .unwrap());
+        assert!(
+            env.access_layer
+                .object_store()
+                .exists(&puffin_path)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1254,7 +1257,7 @@ mod tests {
         };
 
         // Create mock task.
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, mut _rx) = mpsc::channel(4);
         let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),

@@ -46,14 +46,14 @@ use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
+use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::{Batch, FlatSource, Source};
 use crate::sst::file::{FileId, RegionFileId};
-use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
-use crate::config::{IndexBuildMode, IndexConfig};
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
+use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};

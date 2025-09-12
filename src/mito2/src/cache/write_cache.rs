@@ -161,8 +161,8 @@ impl WriteCache {
     }
 
     /// Returns the intermediate manager of the write cache.
-    pub(crate) fn intermediate_manager(&self) -> IntermediateManager {
-        self.intermediate_manager.clone()
+    pub(crate) fn intermediate_manager(&self) -> &IntermediateManager {
+        &self.intermediate_manager
     }
 
     /// Writes SST to the cache and then uploads it to the remote object store.

@@ -114,8 +114,8 @@ mod tests {
         FilePathProvider, Metrics, OperationType, RegionFilePathFactory, WriteType,
     };
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::config::IndexConfig;
+    use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
