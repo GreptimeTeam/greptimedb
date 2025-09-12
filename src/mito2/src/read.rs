@@ -1371,6 +1371,86 @@ mod tests {
         let mut batch = new_batch(&[], &[], &[], &[]);
         batch.filter_by_sequence(None).unwrap();
         assert!(batch.is_empty());
+
+        // Test From variant - exclusive lower bound
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::From { min: 12 }))
+            .unwrap();
+        let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
+        assert_eq!(expect, batch);
+
+        // Test From variant with no matches
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::From { min: 20 }))
+            .unwrap();
+        assert!(batch.is_empty());
+
+        // Test Range variant - exclusive lower bound, inclusive upper bound
+        let mut batch = new_batch(
+            &[1, 2, 3, 4, 5],
+            &[11, 12, 13, 14, 15],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::Range { min: 12, max: 14 }))
+            .unwrap();
+        let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
+        assert_eq!(expect, batch);
+
+        // Test Range variant with mixed operations
+        let mut batch = new_batch(
+            &[1, 2, 3, 4, 5],
+            &[11, 12, 13, 14, 15],
+            &[
+                OpType::Put,
+                OpType::Delete,
+                OpType::Put,
+                OpType::Delete,
+                OpType::Put,
+            ],
+            &[21, 22, 23, 24, 25],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::Range { min: 11, max: 13 }))
+            .unwrap();
+        let expect = new_batch(
+            &[2, 3],
+            &[12, 13],
+            &[OpType::Delete, OpType::Put],
+            &[22, 23],
+        );
+        assert_eq!(expect, batch);
+
+        // Test Range variant with no matches
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch
+            .filter_by_sequence(Some(SequenceRange::Range { min: 20, max: 25 }))
+            .unwrap();
+        assert!(batch.is_empty());
     }
 
     #[test]
