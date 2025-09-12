@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use snafu::ResultExt;
@@ -38,6 +39,8 @@ pub struct ParseOptions {}
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
+    pub(crate) table_aliases: HashMap<String, ObjectName>,
+    pub(crate) scope_stack: Vec<HashMap<String, ObjectName>>,
 }
 
 impl ParserContext<'_> {
@@ -48,12 +51,39 @@ impl ParserContext<'_> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        Ok(ParserContext { parser, sql })
+        Ok(ParserContext {
+            parser,
+            sql,
+            table_aliases: HashMap::new(),
+            scope_stack: vec![],
+        })
     }
 
     /// Parses parser context to Query.
     pub fn parser_query(&mut self) -> Result<Box<Query>> {
         self.parser.parse_query().context(SyntaxSnafu)
+    }
+
+    pub(crate) fn add_table_alias(&mut self, alias: String, table_name: ObjectName) -> Result<()> {
+        if let Some(current_scope) = self.scope_stack.last_mut() {
+            if current_scope.contains_key(&alias) {
+                return error::InvalidSqlSnafu {
+                    msg: format!("Duplicate alias '{}' in current scope", alias),
+                }
+                .fail();
+            }
+            current_scope.insert(alias.clone(), table_name.clone());
+        }
+        self.table_aliases.insert(alias, table_name);
+        Ok(())
+    }
+
+    pub(crate) fn enter_scope(&mut self) {
+        self.scope_stack.push(HashMap::new());
+    }
+
+    pub(crate) fn exit_scope(&mut self) {
+        self.scope_stack.pop();
     }
 
     /// Parses SQL with given dialect
@@ -95,7 +125,13 @@ impl ParserContext<'_> {
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
-        ParserContext { parser, sql }.intern_parse_table_name()
+        ParserContext {
+            parser,
+            sql,
+            table_aliases: HashMap::new(),
+            scope_stack: vec![],
+        }
+        .intern_parse_table_name()
     }
 
     pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
