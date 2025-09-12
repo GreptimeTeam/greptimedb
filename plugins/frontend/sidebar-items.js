@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["setup_frontend_plugins","start_frontend_plugins"]};

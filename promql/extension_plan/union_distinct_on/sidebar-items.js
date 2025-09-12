@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["HashedDataFut"],"fn":["interleave_batches","take_batch"],"struct":["HashedData","UnionDistinctOn","UnionDistinctOnExec","UnionDistinctOnStream"]};

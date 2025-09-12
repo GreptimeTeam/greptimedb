@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VALUE"],"fn":["get_cpu_limit","get_memory_limit"],"mod":["cgroups"]};
