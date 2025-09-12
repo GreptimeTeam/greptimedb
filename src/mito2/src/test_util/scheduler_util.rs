@@ -43,7 +43,7 @@ use crate::worker::WorkerListener;
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
     #[allow(unused)]
-    path: TempDir,
+    pub(crate) path: TempDir,
     /// Mock access layer for test.
     pub(crate) access_layer: AccessLayerRef,
     scheduler: Option<SchedulerRef>,
@@ -52,7 +52,7 @@ pub(crate) struct SchedulerEnv {
 impl SchedulerEnv {
     /// Creates a new mocker.
     pub(crate) async fn new() -> SchedulerEnv {
-        let path = create_temp_dir("");
+        let path = create_temp_dir("114514");
         let path_str = path.path().display().to_string();
         let builder = Fs::default().root(&path_str);
 

@@ -23,6 +23,7 @@ use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
 use crate::access_layer::OperationType;
+use crate::cache::write_cache;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
@@ -49,6 +50,12 @@ impl<S> RegionWorkerLoop<S> {
             access_layer.build_puffin_manager()
         };
 
+        let intermediate_manager = if let Some(write_cache) = self.cache_manager.write_cache() {
+            write_cache.intermediate_manager()
+        } else {
+            access_layer.intermediate_manager()
+        };
+
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
             op_type: OperationType::Flush, //TODO(SNC123): Temporarily set to Flush, 4 BuildTypes will be introduced later.
             metadata: version.metadata.clone(),
@@ -57,7 +64,7 @@ impl<S> RegionWorkerLoop<S> {
             bloom_filter_index_config: self.config.bloom_filter_index.clone(),
             index_options: version.options.index_options.clone(),
             row_group_size: WriteOptions::default().row_group_size,
-            intermediate_manager: self.intermediate_manager.clone(),
+            intermediate_manager,
             puffin_manager,
         });
 
