@@ -20,8 +20,8 @@ use common_time::timestamp::TimeUnit;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, LogicalTableSource};
 use datatypes::arrow::array::{
-    ArrayRef, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt32Array,
-    UInt64Array,
+    ArrayRef, BooleanArray, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array,
+    UInt32Array, UInt64Array,
 };
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow_array::StringArray;
@@ -71,6 +71,8 @@ pub struct ManifestSstEntry {
     pub origin_region_id: RegionId,
     /// The node id fetched from the manifest.
     pub node_id: Option<u64>,
+    /// Whether this file is visible in current version.
+    pub visible: bool,
 }
 
 impl ManifestSstEntry {
@@ -97,6 +99,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
             ColumnSchema::new("origin_region_id", Ty::uint64_datatype(), false),
             ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
+            ColumnSchema::new("visible", Ty::boolean_datatype(), false),
         ]))
     }
 
@@ -130,6 +133,7 @@ impl ManifestSstEntry {
         let sequences = entries.iter().map(|e| e.sequence);
         let origin_region_ids = entries.iter().map(|e| e.origin_region_id.as_u64());
         let node_ids = entries.iter().map(|e| e.node_id);
+        let visible_flags = entries.iter().map(|e| Some(e.visible));
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(table_dirs)),
@@ -151,6 +155,7 @@ impl ManifestSstEntry {
             Arc::new(UInt64Array::from_iter(sequences)),
             Arc::new(UInt64Array::from_iter_values(origin_region_ids)),
             Arc::new(UInt64Array::from_iter(node_ids)),
+            Arc::new(BooleanArray::from_iter(visible_flags)),
         ];
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
@@ -316,6 +321,7 @@ mod tests {
                 sequence: None,
                 origin_region_id: region_id1,
                 node_id: Some(1),
+                visible: false,
             },
             ManifestSstEntry {
                 table_dir: "tdir2".to_string(),
@@ -337,6 +343,7 @@ mod tests {
                 sequence: Some(9),
                 origin_region_id: region_id2,
                 node_id: None,
+                visible: true,
             },
         ];
 
@@ -504,6 +511,14 @@ mod tests {
             .unwrap();
         assert_eq!(1, node_ids.value(0));
         assert!(node_ids.is_null(1));
+
+        let visible = batch
+            .column(19)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(!visible.value(0));
+        assert!(visible.value(1));
     }
 
     #[test]

@@ -414,16 +414,20 @@ impl MitoEngine {
     }
 
     /// Lists all SSTs from the manifest of all regions in the engine.
-    pub fn all_ssts_from_manifest(&self) -> impl Iterator<Item = ManifestSstEntry> + use<'_> {
+    pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
-        self.inner
-            .workers
-            .all_regions()
-            .flat_map(|region| region.manifest_sst_entries())
-            .map(move |mut entry| {
-                entry.node_id = node_id;
-                entry
-            })
+        let regions = self.inner.workers.all_regions();
+
+        let mut results = Vec::new();
+        for region in regions {
+            let mut entries = region.manifest_sst_entries().await;
+            for e in &mut entries {
+                e.node_id = node_id;
+            }
+            results.extend(entries);
+        }
+
+        results
     }
 
     /// Lists all SSTs from the storage layer of all regions in the engine.
