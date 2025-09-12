@@ -200,6 +200,53 @@ fn expand_proj_sort_proj() {
 }
 
 #[test]
+fn expand_proj_sort_partial_proj() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![col("number"), col("pk1"), col("pk2"), col("pk3")])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk1"),
+            col("pk3"),
+            col("pk1").eq(col("pk2")),
+        ])
+        .unwrap()
+        .sort(vec![col("t.pk1 = t.pk2").sort(true, true)])
+        .unwrap()
+        .project(vec![col("number"), col("t.pk1 = t.pk2").alias("eq_sorted")])
+        .unwrap()
+        .project(vec![col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.number",
+        "  MergeSort: eq_sorted ASC NULLS FIRST", // notice how `eq_sorted` is used here
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, eq_sorted", // notice how `eq_sorted` is added not `t.pk1 = t.pk2`
+        "  Projection: t.number, t.pk1 = t.pk2 AS eq_sorted",
+        "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
 fn expand_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
