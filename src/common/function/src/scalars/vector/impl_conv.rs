@@ -13,40 +13,27 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::value::ValueRef;
-use datatypes::vectors::Vector;
-
-/// Convert a constant string or binary literal to a vector literal.
-pub fn as_veclit_if_const(arg: &Arc<dyn Vector>) -> Result<Option<Cow<'_, [f32]>>> {
-    if !arg.is_const() {
-        return Ok(None);
-    }
-    if arg.data_type() != ConcreteDataType::string_datatype()
-        && arg.data_type() != ConcreteDataType::binary_datatype()
-    {
-        return Ok(None);
-    }
-    as_veclit(arg.get_ref(0))
-}
+use datafusion_common::ScalarValue;
 
 /// Convert a string or binary literal to a vector literal.
-pub fn as_veclit(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
-    match arg.data_type() {
-        ConcreteDataType::Binary(_) => arg
-            .as_binary()
-            .unwrap() // Safe: checked if it is a binary
-            .map(binlit_as_veclit)
-            .transpose(),
-        ConcreteDataType::String(_) => arg
-            .as_string()
-            .unwrap() // Safe: checked if it is a string
-            .map(|s| Ok(Cow::Owned(parse_veclit_from_strlit(s)?)))
-            .transpose(),
-        ConcreteDataType::Null(_) => Ok(None),
+pub fn as_veclit(arg: &ScalarValue) -> Result<Option<Cow<'_, [f32]>>> {
+    match arg {
+        ScalarValue::Binary(b) => {
+            if let Some(b) = b {
+                Ok(Some(binlit_as_veclit(b)?))
+            } else {
+                Ok(None)
+            }
+        }
+        ScalarValue::Utf8(s) => {
+            if let Some(s) = s {
+                Ok(Some(Cow::Owned(parse_veclit_from_strlit(s)?)))
+            } else {
+                Ok(None)
+            }
+        }
         _ => InvalidFuncArgsSnafu {
             err_msg: format!("Unsupported data type: {:?}", arg.data_type()),
         }

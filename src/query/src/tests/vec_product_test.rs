@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
-
-use common_function::scalars::vector::impl_conv::{
-    as_veclit, as_veclit_if_const, veclit_to_binlit,
-};
+use common_function::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
+use datafusion_common::ScalarValue;
 use datatypes::prelude::Value;
 use nalgebra::{Const, DVectorView, Dyn, OVector};
 
@@ -35,14 +32,10 @@ async fn test_vec_product_aggregator() -> Result<(), common_query::error::Error>
     let sql = "SELECT vector FROM vectors";
     let vectors = exec_selection(engine, sql).await;
 
-    let column = vectors[0].column(0);
-    let vector_const = as_veclit_if_const(column)?;
-
+    let column = vectors[0].column(0).to_arrow_array();
     for i in 0..column.len() {
-        let vector = match vector_const.as_ref() {
-            Some(vector) => Some(Cow::Borrowed(vector.as_ref())),
-            None => as_veclit(column.get_ref(i))?,
-        };
+        let v = ScalarValue::try_from_array(&column, i)?;
+        let vector = as_veclit(&v)?;
         let Some(vector) = vector else {
             expected_value = None;
             break;
