@@ -29,7 +29,7 @@ use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
@@ -41,7 +41,7 @@ use crate::error::{
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::metrics::{GC_FILE_CNT_PER_TABLE, GC_TMP_REF_FILE_CNT_PER_TABLE};
+use crate::metrics::GC_FILE_CNT;
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::{FileId, delete_files};
 use crate::sst::file_ref::TableFileRefsManifest;
@@ -88,7 +88,6 @@ impl Default for FileGcOption {
 }
 
 pub struct LocalGcWorker {
-    pub(crate) table_id: TableId,
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) cache_manager: Option<CacheManagerRef>,
     pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
@@ -121,7 +120,6 @@ impl LocalGcWorker {
             })?
             .table_id();
         let mut zelf = Self {
-            table_id,
             access_layer,
             cache_manager,
             manifest_mgrs: HashMap::new(),
@@ -280,10 +278,6 @@ impl LocalGcWorker {
 
         info!("True tmp ref files: {:?}", true_tmp_ref_files);
 
-        GC_TMP_REF_FILE_CNT_PER_TABLE
-            .with_label_values(&[&self.table_id.to_string()])
-            .set(true_tmp_ref_files.len() as i64);
-
         let unused_files = self
             .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
             .await?;
@@ -315,9 +309,7 @@ impl LocalGcWorker {
         )
         .await?;
 
-        GC_FILE_CNT_PER_TABLE
-            .with_label_values(&[&self.table_id.to_string()])
-            .add(file_ids.len() as i64);
+        GC_FILE_CNT.add(file_ids.len() as i64);
 
         Ok(())
     }
@@ -552,18 +544,10 @@ impl LocalGcWorker {
             )?;
 
         // files that may linger, which means they are not in use but may still be kept for a while
-        let may_linger_filenames = recently_removed_files
-            .iter()
-            .filter_map(|(ts, files)| {
-                if *ts < Timestamp::new_millisecond(may_linger_until.timestamp_millis()) {
-                    // if the expel time is before the may linger time, we can delete it
-                    return None;
-                }
-
-                Some(files)
-            })
-            .flatten()
-            .collect::<HashSet<_>>();
+        let threshold = Timestamp::new_millisecond(may_linger_until.timestamp_millis());
+        let mut recently_removed_files = recently_removed_files;
+        let may_linger_files = recently_removed_files.split_off(&threshold);
+        let may_linger_filenames = may_linger_files.values().flatten().collect::<HashSet<_>>();
 
         let all_files_appear_in_delta_manifests = recently_removed_files
             .values()
