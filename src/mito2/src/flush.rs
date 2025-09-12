@@ -38,7 +38,7 @@ use crate::error::{
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::{EncodedRange, IterBuilder, MemtableRanges};
+use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
@@ -707,25 +707,12 @@ fn memtable_flat_sources(
             last_iter_rows += range.num_rows();
 
             if last_iter_rows > min_flush_rows {
-                let merge_iter =
-                    FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
-                input_iters = Vec::with_capacity(num_ranges);
-                let maybe_dedup = if options.append_mode {
-                    // No dedup in append mode
-                    Box::new(merge_iter) as _
-                } else {
-                    // Dedup according to merge mode.
-                    match options.merge_mode() {
-                        MergeMode::LastRow => {
-                            Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false)))
-                                as _
-                        }
-                        MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
-                            merge_iter,
-                            FlatLastNonNull::new(field_column_start, false),
-                        )) as _,
-                    }
-                };
+                let maybe_dedup = merge_and_dedup(
+                    &schema,
+                    options,
+                    field_column_start,
+                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
+                )?;
 
                 flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
                 last_iter_rows = 0;
@@ -734,29 +721,38 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
-            let merge_iter =
-                FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
-            let maybe_dedup = if options.append_mode {
-                // No dedup in append mode
-                Box::new(merge_iter) as _
-            } else {
-                // Dedup according to merge mode.
-                match options.merge_mode() {
-                    MergeMode::LastRow => {
-                        Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
-                    }
-                    MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
-                        merge_iter,
-                        FlatLastNonNull::new(field_column_start, false),
-                    )) as _,
-                }
-            };
+            let maybe_dedup = merge_and_dedup(&schema, options, field_column_start, input_iters)?;
 
             flat_sources.sources.push(FlatSource::Iter(maybe_dedup));
         }
     }
 
     Ok(flat_sources)
+}
+
+fn merge_and_dedup(
+    schema: &SchemaRef,
+    options: &RegionOptions,
+    field_column_start: usize,
+    input_iters: Vec<BoxedRecordBatchIterator>,
+) -> Result<BoxedRecordBatchIterator> {
+    let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
+    let maybe_dedup = if options.append_mode {
+        // No dedup in append mode
+        Box::new(merge_iter) as _
+    } else {
+        // Dedup according to merge mode.
+        match options.merge_mode() {
+            MergeMode::LastRow => {
+                Box::new(FlatDedupIterator::new(merge_iter, FlatLastRow::new(false))) as _
+            }
+            MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
+                merge_iter,
+                FlatLastNonNull::new(field_column_start, false),
+            )) as _,
+        }
+    };
+    Ok(maybe_dedup)
 }
 
 /// Manages background flushes of a worker.

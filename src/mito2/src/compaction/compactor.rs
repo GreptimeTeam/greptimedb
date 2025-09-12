@@ -335,7 +335,7 @@ impl Compactor for DefaultCompactor {
             let region_id = compaction_region.region_id;
             let cache_manager = compaction_region.cache_manager.clone();
             let storage = compaction_region.region_options.storage.clone();
-            // TODO: Set flat_format from memtable config
+            // TODO: Set flat_format from mito config
             let flat_format = false;
             let index_options = compaction_region
                 .current_version
