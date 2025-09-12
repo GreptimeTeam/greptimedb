@@ -16,9 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::{
-    GeneralDataFusionSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result,
-};
+use common_query::error::{IntoVectorSnafu, InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
 use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
@@ -106,21 +104,16 @@ impl MatchesFunction {
         let input_schema = Self::input_schema();
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
-        let physical_expr = planner
-            .create_physical_expr(&like_expr, &input_schema, &session_state)
-            .context(GeneralDataFusionSnafu)?;
+        let physical_expr =
+            planner.create_physical_expr(&like_expr, &input_schema, &session_state)?;
 
         let data_array = data.to_arrow_array();
         let arrow_schema = Arc::new(input_schema.as_arrow().clone());
         let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array]).unwrap();
 
         let num_rows = input_record_batch.num_rows();
-        let result = physical_expr
-            .evaluate(&input_record_batch)
-            .context(GeneralDataFusionSnafu)?;
-        let result_array = result
-            .into_array(num_rows)
-            .context(GeneralDataFusionSnafu)?;
+        let result = physical_expr.evaluate(&input_record_batch)?;
+        let result_array = result.into_array(num_rows)?;
         let result_vector =
             BooleanVector::try_from_arrow_array(result_array).context(IntoVectorSnafu {
                 data_type: DataType::Boolean,
@@ -210,14 +203,12 @@ impl PatternAst {
     /// Transform this AST with preset rules to make it correct.
     fn transform_ast(self) -> Result<Self> {
         self.transform_up(Self::collapse_binary_branch_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)?
             .transform_up(Self::eliminate_optional_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)?
             .transform_down(Self::eliminate_single_child_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)
+            .map_err(Into::into)
     }
 
     /// Collapse binary branch with the same operator. I.e., this transformer

@@ -65,6 +65,14 @@ impl ScalarUDFImpl for ScalarUdf {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+        let result = self.function.invoke_with_args(args.clone());
+        if !matches!(
+            result,
+            Err(datafusion_common::DataFusionError::NotImplemented(_))
+        ) {
+            return result;
+        }
+
         let columns = args
             .args
             .iter()
