@@ -353,123 +353,12 @@ impl RegionFlushTask {
             write_opts.row_group_size = row_group_size;
         }
 
-        let memtables = version.memtables.immutables();
-        let mut file_metas = Vec::with_capacity(memtables.len());
-        let mut flushed_bytes = 0;
-        let mut series_count = 0;
-        let mut flush_metrics = Metrics::new(WriteType::Flush);
-        let region_id = version.metadata.region_id;
-        // Convert partition expression once outside the map
-        let partition_expr = match &version.metadata.partition_expr {
-            None => None,
-            Some(json_expr) if json_expr.is_empty() => None,
-            Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
-                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?,
-        };
-        for mem in memtables {
-            if mem.is_empty() {
-                // Skip empty memtables.
-                continue;
-            }
-
-            // Compact the memtable first, this waits the background compaction to finish.
-            let compact_start = std::time::Instant::now();
-            if let Err(e) = mem.compact(true) {
-                common_telemetry::error!(e; "Failed to compact memtable before flush");
-            }
-            let compact_cost = compact_start.elapsed();
-
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
-            let num_mem_ranges = mem_ranges.ranges.len();
-            let num_mem_rows = mem_ranges.stats.num_rows();
-            let memtable_id = mem.id();
-            if mem_ranges.is_record_batch() {
-                let flush_start = Instant::now();
-                let FlushFlatMemResult {
-                    num_encoded,
-                    max_sequence,
-                    num_sources,
-                    results,
-                } = self
-                    .flush_flat_mem_ranges(version, &write_opts, &mut series_count, mem_ranges)
-                    .await?;
-                for (source_idx, result) in results.into_iter().enumerate() {
-                    let (ssts_written, metrics) = result?;
-                    if ssts_written.is_empty() {
-                        // No data written.
-                        continue;
-                    }
-
-                    common_telemetry::debug!(
-                        "Region {} flush one memtable {} {}/{}, metrics: {:?}",
-                        region_id,
-                        memtable_id,
-                        source_idx,
-                        num_sources,
-                        metrics
-                    );
-
-                    flush_metrics = flush_metrics.merge(metrics);
-
-                    file_metas.extend(ssts_written.into_iter().map(|sst_info| {
-                        flushed_bytes += sst_info.file_size;
-                        Self::new_file_meta(
-                            self.region_id,
-                            max_sequence,
-                            sst_info,
-                            partition_expr.clone(),
-                        )
-                    }));
-                }
-
-                common_telemetry::debug!(
-                    "Region {} flush {} memtables for {}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, flush_cost: {:?}, compact_cost: {:?}",
-                    region_id,
-                    num_sources,
-                    memtable_id,
-                    num_mem_ranges,
-                    num_encoded,
-                    num_mem_rows,
-                    flush_start.elapsed(),
-                    compact_cost,
-                );
-            } else {
-                let (max_sequence, source) =
-                    memtable_source(mem_ranges, &version.options, &mut series_count).await?;
-
-                // Flush to level 0.
-                let source = Either::Left(source);
-                let write_request = self.new_write_request(version, max_sequence, source);
-
-                let (ssts_written, metrics) = self
-                    .access_layer
-                    .write_sst(write_request, &write_opts, WriteType::Flush)
-                    .await?;
-                if ssts_written.is_empty() {
-                    // No data written.
-                    continue;
-                }
-
-                common_telemetry::debug!(
-                    "Region flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
-                    num_mem_ranges,
-                    num_mem_rows,
-                    metrics
-                );
-
-                flush_metrics = flush_metrics.merge(metrics);
-
-                file_metas.extend(ssts_written.into_iter().map(|sst_info| {
-                    flushed_bytes += sst_info.file_size;
-                    Self::new_file_meta(
-                        self.region_id,
-                        max_sequence,
-                        sst_info,
-                        partition_expr.clone(),
-                    )
-                }));
-            };
-        }
+        let DoFlushMemtablesResult {
+            file_metas,
+            flushed_bytes,
+            series_count,
+            flush_metrics,
+        } = self.do_flush_memtables(version, write_opts).await?;
 
         if !file_metas.is_empty() {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
@@ -526,11 +415,145 @@ impl RegionFlushTask {
         Ok(edit)
     }
 
+    async fn do_flush_memtables(
+        &self,
+        version: &VersionRef,
+        write_opts: WriteOptions,
+    ) -> Result<DoFlushMemtablesResult> {
+        let memtables = version.memtables.immutables();
+        let mut file_metas = Vec::with_capacity(memtables.len());
+        let mut flushed_bytes = 0;
+        let mut series_count = 0;
+        // Convert partition expression once outside the map
+        let partition_expr = match &version.metadata.partition_expr {
+            None => None,
+            Some(json_expr) if json_expr.is_empty() => None,
+            Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?,
+        };
+        let mut flush_metrics = Metrics::new(WriteType::Flush);
+        for mem in memtables {
+            if mem.is_empty() {
+                // Skip empty memtables.
+                continue;
+            }
+
+            // Compact the memtable first, this waits the background compaction to finish.
+            let compact_start = std::time::Instant::now();
+            if let Err(e) = mem.compact(true) {
+                common_telemetry::error!(e; "Failed to compact memtable before flush");
+            }
+            let compact_cost = compact_start.elapsed();
+
+            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
+            let num_mem_ranges = mem_ranges.ranges.len();
+            let num_mem_rows = mem_ranges.stats.num_rows();
+            let memtable_id = mem.id();
+            // Increases series count for each mem range. We consider each mem range has different series so
+            // the counter may have more series than the actual series count.
+            series_count += mem_ranges.stats.series_count();
+
+            if mem_ranges.is_record_batch() {
+                let flush_start = Instant::now();
+                let FlushFlatMemResult {
+                    num_encoded,
+                    max_sequence,
+                    num_sources,
+                    results,
+                } = self
+                    .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
+                    .await?;
+                for (source_idx, result) in results.into_iter().enumerate() {
+                    let (ssts_written, metrics) = result?;
+                    if ssts_written.is_empty() {
+                        // No data written.
+                        continue;
+                    }
+
+                    common_telemetry::debug!(
+                        "Region {} flush one memtable {} {}/{}, metrics: {:?}",
+                        self.region_id,
+                        memtable_id,
+                        source_idx,
+                        num_sources,
+                        metrics
+                    );
+
+                    flush_metrics = flush_metrics.merge(metrics);
+
+                    file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+                        flushed_bytes += sst_info.file_size;
+                        Self::new_file_meta(
+                            self.region_id,
+                            max_sequence,
+                            sst_info,
+                            partition_expr.clone(),
+                        )
+                    }));
+                }
+
+                common_telemetry::debug!(
+                    "Region {} flush {} memtables for {}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, flush_cost: {:?}, compact_cost: {:?}",
+                    self.region_id,
+                    num_sources,
+                    memtable_id,
+                    num_mem_ranges,
+                    num_encoded,
+                    num_mem_rows,
+                    flush_start.elapsed(),
+                    compact_cost,
+                );
+            } else {
+                let max_sequence = mem_ranges.stats.max_sequence();
+                let source = memtable_source(mem_ranges, &version.options).await?;
+
+                // Flush to level 0.
+                let source = Either::Left(source);
+                let write_request = self.new_write_request(version, max_sequence, source);
+
+                let (ssts_written, metrics) = self
+                    .access_layer
+                    .write_sst(write_request, &write_opts, WriteType::Flush)
+                    .await?;
+                if ssts_written.is_empty() {
+                    // No data written.
+                    continue;
+                }
+
+                common_telemetry::debug!(
+                    "Region {} flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
+                    self.region_id,
+                    num_mem_ranges,
+                    num_mem_rows,
+                    metrics
+                );
+
+                flush_metrics = flush_metrics.merge(metrics);
+
+                file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+                    flushed_bytes += sst_info.file_size;
+                    Self::new_file_meta(
+                        self.region_id,
+                        max_sequence,
+                        sst_info,
+                        partition_expr.clone(),
+                    )
+                }));
+            };
+        }
+
+        Ok(DoFlushMemtablesResult {
+            file_metas,
+            flushed_bytes,
+            series_count,
+            flush_metrics,
+        })
+    }
+
     async fn flush_flat_mem_ranges(
         &self,
         version: &VersionRef,
         write_opts: &WriteOptions,
-        series_count: &mut usize,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
         let batch_schema =
@@ -540,7 +563,6 @@ impl RegionFlushTask {
             mem_ranges,
             &version.options,
             version.metadata.primary_key.len(),
-            series_count,
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
@@ -651,23 +673,23 @@ struct FlushFlatMemResult {
     results: Vec<Result<(SstInfoArray, Metrics)>>,
 }
 
-/// Returns a [Source] for the given memtable.
-async fn memtable_source(
-    mem_ranges: MemtableRanges,
-    options: &RegionOptions,
-    series_count: &mut usize,
-) -> Result<(u64, Source)> {
-    let MemtableRanges { ranges, stats } = mem_ranges;
-    let max_sequence = stats.max_sequence();
-    *series_count += stats.series_count();
+struct DoFlushMemtablesResult {
+    file_metas: Vec<FileMeta>,
+    flushed_bytes: u64,
+    series_count: usize,
+    flush_metrics: Metrics,
+}
 
-    let source = if ranges.len() == 1 {
-        let only_range = ranges.into_values().next().unwrap();
+/// Returns a [Source] for the given memtable.
+async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) -> Result<Source> {
+    let source = if mem_ranges.ranges.len() == 1 {
+        let only_range = mem_ranges.ranges.into_values().next().unwrap();
         let iter = only_range.build_iter()?;
         Source::Iter(iter)
     } else {
         // todo(hl): a workaround since sync version of MergeReader is wip.
-        let sources = ranges
+        let sources = mem_ranges
+            .ranges
             .into_values()
             .map(|r| r.build_iter().map(Source::Iter))
             .collect::<Result<Vec<_>>>()?;
@@ -688,7 +710,7 @@ async fn memtable_source(
         };
         Source::Reader(maybe_dedup)
     };
-    Ok((max_sequence, source))
+    Ok(source)
 }
 
 struct FlatSources {
@@ -704,11 +726,9 @@ fn memtable_flat_sources(
     mem_ranges: MemtableRanges,
     options: &RegionOptions,
     field_column_start: usize,
-    series_count: &mut usize,
 ) -> Result<FlatSources> {
     let MemtableRanges { ranges, stats } = mem_ranges;
     let max_sequence = stats.max_sequence();
-    *series_count += stats.series_count();
     let mut flat_sources = FlatSources {
         max_sequence,
         sources: SmallVec::new(),
