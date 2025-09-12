@@ -263,7 +263,7 @@ fn expand_sort_alias_limit() {
         "    MergeSort: something ASC NULLS LAST",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Projection: t.pk1 AS something, t.pk1",
+        "  Projection: t.pk1 AS something",
         "    Sort: t.pk1 ASC NULLS LAST",
         "      TableScan: t",
         "]]",

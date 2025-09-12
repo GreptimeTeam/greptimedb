@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use common_error::ext;
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
@@ -566,8 +565,7 @@ impl PlanRewriter {
                 && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
             {
                 // TODO(discord9): change `on_node` to `node` once alias tracking is supported for merge scan
-                let new_stage = rewrite_merge_sort_exprs(merge_sort, &on_node)?;
-                new_stage
+                rewrite_merge_sort_exprs(merge_sort, &on_node)?
             } else {
                 new_stage
             };
@@ -644,16 +642,38 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         self.cur_level -= 1;
         // first get all applicable column requirements
-        let mut applicable_column_requirements = self
-            .column_requirements
-            .iter()
-            .filter(|(_, level)| *level >= self.cur_level)
-            .map(|(cols, _)| cols.clone())
-            .reduce(|mut acc, cols| {
-                acc.extend(cols);
-                acc
-            })
-            .unwrap_or_default();
+
+        let mut applicable_column_requirements = {
+            let col_req_per_level = self
+                .column_requirements
+                .iter()
+                .filter(|(_, level)| *level >= self.cur_level)
+                .collect::<Vec<_>>();
+            // track alias for columns and use aliased columns instead
+            // aliased col reqs at current level
+            let mut aliased_col_reqs = HashSet::new();
+            for (col_req, level) in col_req_per_level {
+                if let Some(original) = self.plan_per_level.get(level) {
+                    let aliased_cols = aliased_columns_for(
+                        &col_req.iter().cloned().collect(),
+                        &node,
+                        Some(original),
+                    )?;
+                    for original_col in col_req {
+                        let aliased_cols = aliased_cols.get(original_col).cloned();
+                        if let Some(cols) = aliased_cols
+                            && !cols.is_empty()
+                        {
+                            aliased_col_reqs.extend(cols.into_iter());
+                        } else {
+                            // if no aliased column found, use the original column
+                            aliased_col_reqs.insert(original_col.clone());
+                        }
+                    }
+                }
+            }
+            aliased_col_reqs
+        };
 
         debug!(
             "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
