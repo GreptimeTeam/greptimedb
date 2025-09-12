@@ -53,7 +53,7 @@ use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Timeout to send a batch to a sender.
-const SEND_TIMEOUT: Duration = Duration::from_millis(10);
+const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// List of receivers.
 type ReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
