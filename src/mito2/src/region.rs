@@ -621,12 +621,17 @@ impl MitoRegion {
         // Submit merged actions using the manifest manager's update method
         // Pass the target state (Writable) so it saves to normal directory, not staging
         let target_state = RegionRoleState::Leader(RegionLeaderState::Writable);
-        let new_version = manager.update(merged_actions, target_state).await?;
+        let new_version = manager.update(merged_actions.clone(), target_state).await?;
 
         info!(
             "Successfully submitted merged staged manifests for region {}, new version: {}",
             self.region_id, new_version
         );
+
+        // Apply the merged changes to in-memory version control
+        let merged_edit = merged_actions.into_region_edit();
+        self.version_control
+            .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
 
         // Clear all staging manifests and transit state
         manager.store().clear_staging_manifests().await?;
@@ -782,7 +787,7 @@ impl ManifestContext {
 
     /// Sets the [`RegionRole`].
     ///
-    /// ```
+    /// ```text
     ///     +------------------------------------------+
     ///     |                      +-----------------+ |
     ///     |                      |                 | |

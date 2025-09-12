@@ -262,9 +262,11 @@ impl<S> RegionWorkerLoop<S> {
 
         if edit_result.result.is_ok() {
             // Applies the edit to the region.
-            region
-                .version_control
-                .apply_edit(edit_result.edit, &[], region.file_purger.clone());
+            region.version_control.apply_edit(
+                Some(edit_result.edit),
+                &[],
+                region.file_purger.clone(),
+            );
         }
 
         // Sets the region as writable.

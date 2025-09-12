@@ -368,6 +368,38 @@ impl RegionMetaActionList {
     pub fn new(actions: Vec<RegionMetaAction>) -> Self {
         Self { actions }
     }
+
+    pub fn into_region_edit(self) -> RegionEdit {
+        let mut edit = RegionEdit {
+            files_to_add: Vec::new(),
+            files_to_remove: Vec::new(),
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+
+        for action in self.actions {
+            if let RegionMetaAction::Edit(region_edit) = action {
+                // Merge file adds/removes
+                edit.files_to_add.extend(region_edit.files_to_add);
+                edit.files_to_remove.extend(region_edit.files_to_remove);
+                // Max of flushed entry id / sequence
+                if let Some(eid) = region_edit.flushed_entry_id {
+                    edit.flushed_entry_id = Some(edit.flushed_entry_id.map_or(eid, |v| v.max(eid)));
+                }
+                if let Some(seq) = region_edit.flushed_sequence {
+                    edit.flushed_sequence = Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                }
+                // Prefer the latest non-none time window
+                if region_edit.compaction_time_window.is_some() {
+                    edit.compaction_time_window = region_edit.compaction_time_window;
+                }
+            }
+        }
+
+        edit
+    }
 }
 
 impl RegionMetaActionList {

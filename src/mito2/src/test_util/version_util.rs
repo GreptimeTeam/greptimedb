@@ -204,14 +204,14 @@ pub(crate) fn apply_edit(
         .collect();
 
     version_control.apply_edit(
-        RegionEdit {
+        Some(RegionEdit {
             files_to_add,
             files_to_remove: files_to_remove.to_vec(),
             timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
-        },
+        }),
         &[],
         purger,
     );
