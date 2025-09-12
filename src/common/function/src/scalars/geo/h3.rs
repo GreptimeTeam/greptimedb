@@ -19,11 +19,13 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion::arrow::array::{
-    Array, ArrayRef, AsArray, BooleanBuilder, Float64Array, Float64Builder, Int32Builder,
-    ListBuilder, StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
+    Array, ArrayRef, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder,
+    StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
 };
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{ArrowPrimitiveType, Int64Type, UInt8Type, UInt64Type};
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, Float64Type, Int64Type, UInt8Type, UInt64Type,
+};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::{DataFusionError, ScalarValue, utils};
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
@@ -86,8 +88,11 @@ impl Function for H3LatLngToCell {
     ) -> datafusion_common::Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
-        let lat_vec = datafusion_common::downcast_value!(lat_vec, Float64Array);
-        let lon_vec = datafusion_common::downcast_value!(lon_vec, Float64Array);
+
+        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
         let resolutions = cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
@@ -165,8 +170,11 @@ impl Function for H3LatLngToCellString {
     ) -> datafusion_common::Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
-        let lat_vec = datafusion_common::downcast_value!(lat_vec, Float64Array);
-        let lon_vec = datafusion_common::downcast_value!(lon_vec, Float64Array);
+
+        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
         let resolutions = cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
