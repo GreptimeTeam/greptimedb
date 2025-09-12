@@ -30,7 +30,9 @@ use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::{mpsc, watch};
 
-use crate::access_layer::{AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType};
+use crate::access_layer::{
+    AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
+};
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -356,6 +358,7 @@ impl RegionFlushTask {
         let mut flushed_bytes = 0;
         let mut series_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
+        let region_id = version.metadata.region_id;
         // Convert partition expression once outside the map
         let partition_expr = match &version.metadata.partition_expr {
             None => None,
@@ -382,48 +385,14 @@ impl RegionFlushTask {
             let memtable_id = mem.id();
             if mem_ranges.is_record_batch() {
                 let flush_start = Instant::now();
-                let batch_schema =
-                    to_flat_sst_arrow_schema(&version.metadata, &FlatSchemaOptions::default());
-                let flat_sources = memtable_flat_sources(
-                    batch_schema,
-                    mem_ranges,
-                    &version.options,
-                    version.metadata.primary_key.len(),
-                    &mut series_count,
-                )?;
-
-                let mut tasks =
-                    Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
-                let num_encoded = flat_sources.encoded.len();
-                let max_sequence = flat_sources.max_sequence;
-                for source in flat_sources.sources {
-                    let source = Either::Right(source);
-                    let write_request = self.new_write_request(version, max_sequence, source);
-                    let access_layer = self.access_layer.clone();
-                    let write_opts = write_opts.clone();
-                    let task = common_runtime::spawn_global(async move {
-                        access_layer
-                            .write_sst(write_request, &write_opts, WriteType::Flush)
-                            .await
-                    });
-                    tasks.push(task);
-                }
-                for encoded in flat_sources.encoded {
-                    let access_layer = self.access_layer.clone();
-                    let cache_manager = self.cache_manager.clone();
-                    let region_id = version.metadata.region_id;
-                    let task = common_runtime::spawn_global(async move {
-                        let metrics = access_layer
-                            .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
-                            .await?;
-                        Ok((smallvec![encoded.sst_info], metrics))
-                    });
-                    tasks.push(task);
-                }
-                let num_sources = tasks.len();
-                let results = futures::future::try_join_all(tasks)
-                    .await
-                    .context(JoinSnafu)?;
+                let FlushFlatMemResult {
+                    num_encoded,
+                    max_sequence,
+                    num_sources,
+                    results,
+                } = self
+                    .flush_flat_mem_ranges(version, &write_opts, &mut series_count, mem_ranges)
+                    .await?;
                 for (source_idx, result) in results.into_iter().enumerate() {
                     let (ssts_written, metrics) = result?;
                     if ssts_written.is_empty() {
@@ -432,13 +401,11 @@ impl RegionFlushTask {
                     }
 
                     common_telemetry::debug!(
-                        "Region flush one memtable {} {}/{}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, metrics: {:?}",
+                        "Region {} flush one memtable {} {}/{}, metrics: {:?}",
+                        region_id,
                         memtable_id,
                         source_idx,
                         num_sources,
-                        num_mem_ranges,
-                        num_encoded,
-                        num_mem_rows,
                         metrics
                     );
 
@@ -456,9 +423,13 @@ impl RegionFlushTask {
                 }
 
                 common_telemetry::debug!(
-                    "Region flush {} memtables for {}, flush_cost: {:?}, compact_cost: {:?}",
+                    "Region {} flush {} memtables for {}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, flush_cost: {:?}, compact_cost: {:?}",
+                    region_id,
                     num_sources,
                     memtable_id,
+                    num_mem_ranges,
+                    num_encoded,
+                    num_mem_rows,
                     flush_start.elapsed(),
                     compact_cost,
                 );
@@ -555,6 +526,61 @@ impl RegionFlushTask {
         Ok(edit)
     }
 
+    async fn flush_flat_mem_ranges(
+        &self,
+        version: &VersionRef,
+        write_opts: &WriteOptions,
+        series_count: &mut usize,
+        mem_ranges: MemtableRanges,
+    ) -> Result<FlushFlatMemResult> {
+        let batch_schema =
+            to_flat_sst_arrow_schema(&version.metadata, &FlatSchemaOptions::default());
+        let flat_sources = memtable_flat_sources(
+            batch_schema,
+            mem_ranges,
+            &version.options,
+            version.metadata.primary_key.len(),
+            series_count,
+        )?;
+        let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
+        let num_encoded = flat_sources.encoded.len();
+        let max_sequence = flat_sources.max_sequence;
+        for source in flat_sources.sources {
+            let source = Either::Right(source);
+            let write_request = self.new_write_request(version, max_sequence, source);
+            let access_layer = self.access_layer.clone();
+            let write_opts = write_opts.clone();
+            let task = common_runtime::spawn_global(async move {
+                access_layer
+                    .write_sst(write_request, &write_opts, WriteType::Flush)
+                    .await
+            });
+            tasks.push(task);
+        }
+        for encoded in flat_sources.encoded {
+            let access_layer = self.access_layer.clone();
+            let cache_manager = self.cache_manager.clone();
+            let region_id = version.metadata.region_id;
+            let task = common_runtime::spawn_global(async move {
+                let metrics = access_layer
+                    .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
+                    .await?;
+                Ok((smallvec![encoded.sst_info], metrics))
+            });
+            tasks.push(task);
+        }
+        let num_sources = tasks.len();
+        let results = futures::future::try_join_all(tasks)
+            .await
+            .context(JoinSnafu)?;
+        Ok(FlushFlatMemResult {
+            num_encoded,
+            max_sequence,
+            num_sources,
+            results,
+        })
+    }
+
     fn new_file_meta(
         region_id: RegionId,
         max_sequence: u64,
@@ -616,6 +642,13 @@ impl RegionFlushTask {
         // Now we only merge senders. They share the same flush reason.
         self.senders.append(&mut other.senders);
     }
+}
+
+struct FlushFlatMemResult {
+    num_encoded: usize,
+    max_sequence: u64,
+    num_sources: usize,
+    results: Vec<Result<(SstInfoArray, Metrics)>>,
 }
 
 /// Returns a [Source] for the given memtable.
