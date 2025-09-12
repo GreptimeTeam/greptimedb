@@ -34,19 +34,19 @@ fn rewrite_column(
             if let Some(aliased_cols) = mapping.get(&col) {
                 // if multiple alias is available, just use first one
                 if let Some(aliased_col) = aliased_cols.iter().next() {
-                    return Ok(Transformed::yes(Expr::Column(aliased_col.clone())));
+                    Ok(Transformed::yes(Expr::Column(aliased_col.clone())))
                 } else {
-                    return Err(datafusion_common::DataFusionError::Internal(format!(
-                        "PlanRewriter: expand: column {col} from {original_node} has empty alias set in plan: {alias_node}, but expect at least one alias",
-                    )));
+                    Err(datafusion_common::DataFusionError::Internal(format!(
+                        "PlanRewriter: expand: column {col} from {original_node}\n has empty alias set in plan: {alias_node}\n but expect at least one alias",
+                    )))
                 }
             } else {
                 Err(datafusion_common::DataFusionError::Internal(format!(
-                    "PlanRewriter: expand: column {col} from {original_node} has no alias in plan: {alias_node}",
+                    "PlanRewriter: expand: column {col} from {original_node}\n has no alias in plan: {alias_node}",
                 )))
             }
         } else {
-            return Ok(Transformed::no(e));
+            Ok(Transformed::no(e))
         }
     }
 }
@@ -69,17 +69,16 @@ pub fn rewrite_merge_sort_exprs(
     let sort_exprs = merge_sort.expressions_consider_join();
     let column_refs = sort_exprs
         .iter()
-        .map(|e| e.column_refs().into_iter().cloned())
-        .flatten()
+        .flat_map(|e| e.column_refs().into_iter().cloned())
         .collect::<BTreeSet<_>>();
-    let column_alias_mapping = aliased_columns_for(&column_refs, &aliased_node, Some(sort_input))?;
+    let column_alias_mapping = aliased_columns_for(&column_refs, aliased_node, Some(sort_input))?;
     let aliased_sort_exprs = sort_exprs
         .into_iter()
         .map(|e| {
             e.transform(rewrite_column(
                 &column_alias_mapping,
                 &merge_sort,
-                &aliased_node,
+                aliased_node,
             ))
         })
         .map(|e| e.map(|e| e.data))
