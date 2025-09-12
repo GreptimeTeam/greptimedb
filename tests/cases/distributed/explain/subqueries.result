@@ -49,9 +49,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 +-+-+
 | logical_plan_| Sort: i1.i ASC NULLS LAST_|
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
-|_|_SubqueryAlias: i1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
 |_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: integers.i_|
@@ -154,4 +154,226 @@ Affected Rows: 0
 drop table integers;
 
 Affected Rows: 0
+
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (i) (
+  i < 1000,
+  i >= 1000 AND i < 2000,
+  i >= 2000
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: i1.i ASC NULLS LAST_|
+|_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
+|_| ]]_|
+|_|_SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: integers.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: i1.i ASC NULLS LAST_|
+|_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
+|_| ]]_|
+|_|_SubqueryAlias: __correlated_sq_1_|
+|_|_Aggregate: groupBy=[[integers.i]], aggr=[[]]_|
+|_|_Projection: integers.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_AggregateExec: mode=SinglePartitioned, gby=[i@0 as i], aggr=[]_|
+|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
+CREATE TABLE t(ts timestamp time index, a INT, b INT);
+
+Affected Rows: 0
+
+INSERT INTO t(ts,a,b) VALUES (1,3,30),(2,1,10),(3,2,20);
+
+Affected Rows: 3
+
+CREATE TABLE t1(ts timestamp time index, a INT);
+
+Affected Rows: 0
+
+INSERT INTO t1(ts,a) VALUES (1,1),(2,3);
+
+Affected Rows: 2
+
+CREATE TABLE t2(ts timestamp time index, a INT);
+
+Affected Rows: 0
+
+INSERT INTO t2(ts,a) VALUES (1,2),(2,3);
+
+Affected Rows: 2
+
+SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
+
++---+---+
+| x | c |
++---+---+
+| 1 | 1 |
+| 2 | 1 |
+| 3 | 1 |
++---+---+
+
+-- expected:
+-- x | c
+-- 1 | 1
+-- 2 | 1
+-- 3 | 1
+SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expecetd: 1,2,3
+SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER BY y;
+
++---+
+| y |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+---+
+| x | y |
++---+---+
+| 1 | 2 |
+| 2 | 3 |
+| 3 | 4 |
++---+---+
+
+-- expected:
+-- (x,y)
+-- (1,2)
+-- (2,3)
+-- (3,4)
+SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER BY a;
+
++---+
+| a |
++---+
+| 1 |
+| 2 |
+| 3 |
+| 3 |
++---+
+
+-- expected: 1,2,3,3
+SELECT u1.a
+FROM (SELECT a FROM t1) u1
+JOIN (SELECT a FROM t2) u2 ON u1.a = u2.a
+ORDER BY u1.a;
+
++---+
+| a |
++---+
+| 3 |
++---+
+
+-- expected: 3
+SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
++---+
+
+-- expected: 1,2
+SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
++---+
 
