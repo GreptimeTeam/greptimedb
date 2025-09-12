@@ -20,8 +20,8 @@ SELECT g, array_agg(i ORDER BY i DESC) FROM integers GROUP BY g ORDER BY g;
 -- Test with strings
 CREATE TABLE strings(s VARCHAR, g INTEGER, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO strings VALUES 
-    ('apple', 1, 1000), ('banana', 1, 2000), ('cherry', 2, 3000), 
+INSERT INTO strings VALUES
+    ('apple', 1, 1000), ('banana', 1, 2000), ('cherry', 2, 3000),
     ('date', 2, 4000), ('elderberry', 1, 5000);
 
 SELECT array_agg(s) FROM strings;

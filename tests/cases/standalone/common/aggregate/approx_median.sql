@@ -30,7 +30,7 @@ SELECT grp, approx_median(val) FROM large_test GROUP BY grp ORDER BY grp;
 -- Test with doubles
 CREATE TABLE double_test(d DOUBLE, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO double_test VALUES 
+INSERT INTO double_test VALUES
     (1.1, 1000), (2.2, 2000), (3.3, 3000), (4.4, 4000), (5.5, 5000);
 
 SELECT approx_median(d) FROM double_test;
@@ -43,8 +43,8 @@ SELECT approx_median(d) FROM double_test;
 -- Test with duplicate values
 CREATE TABLE dup_test(val INTEGER, ts TIMESTAMP TIME INDEX);
 
-INSERT INTO dup_test VALUES 
-    (1, 1000), (1, 2000), (2, 3000), (2, 4000), 
+INSERT INTO dup_test VALUES
+    (1, 1000), (1, 2000), (2, 3000), (2, 4000),
     (3, 5000), (3, 6000), (4, 7000), (4, 8000);
 
 SELECT approx_median(val) FROM dup_test;

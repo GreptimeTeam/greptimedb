@@ -14,13 +14,13 @@ INSERT INTO bool_test VALUES
 SELECT bool_and(b) FROM bool_test WHERE g = 1;
 
 -- Should be false
-SELECT bool_and(b) FROM bool_test WHERE g = 2;  
+SELECT bool_and(b) FROM bool_test WHERE g = 2;
 
  -- Should be true (NULL ignored)
 SELECT bool_and(b) FROM bool_test WHERE g = 3;
 
  -- Should be true
-SELECT bool_or(b) FROM bool_test WHERE g = 1; 
+SELECT bool_or(b) FROM bool_test WHERE g = 1;
 
 -- Should be true
 SELECT bool_or(b) FROM bool_test WHERE g = 2;
@@ -38,7 +38,7 @@ INSERT INTO all_true VALUES (true, 1000), (true, 2000), (true, 3000);
 
 SELECT bool_and(b), bool_or(b) FROM all_true;
 
--- Test all false values  
+-- Test all false values
 CREATE TABLE all_false(b BOOLEAN, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO all_false VALUES (false, 1000), (false, 2000), (false, 3000);
