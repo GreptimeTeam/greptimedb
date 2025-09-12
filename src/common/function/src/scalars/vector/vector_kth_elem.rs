@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::fmt::Display;
+use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::Signature;
+use datafusion::arrow::array::{Array, AsArray, Float32Array};
+use datafusion::arrow::datatypes::Int64Type;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::{ScalarValue, utils};
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
 use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
+use crate::scalars::vector::impl_conv::as_veclit;
 
 const NAME: &str = "vec_kth_elem";
 
@@ -63,41 +65,31 @@ impl Function for VectorKthElemFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-
-        let arg0 = &columns[0];
-        let arg1 = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let arg1 = arg1.as_primitive::<Int64Type>();
 
         let len = arg0.len();
-        let mut result = Float32VectorBuilder::with_capacity(len);
+        let mut builder = Float32Array::builder(len);
         if len == 0 {
-            return Ok(result.to_vector());
+            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
         };
 
-        let arg0_const = as_veclit_if_const(arg0)?;
-
         for i in 0..len {
-            let arg0 = match arg0_const.as_ref() {
-                Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
-                None => as_veclit(arg0.get_ref(i))?,
-            };
+            let v = ScalarValue::try_from_array(&arg0, i)?;
+            let arg0 = as_veclit(&v)?;
             let Some(arg0) = arg0 else {
-                result.push_null();
+                builder.append_null();
                 continue;
             };
 
-            let arg1 = arg1.get(i).as_f64_lossy();
+            let arg1 = arg1.is_valid(i).then(|| arg1.value(i) as f64);
             let Some(arg1) = arg1 else {
-                result.push_null();
+                builder.append_null();
                 continue;
             };
 
@@ -126,9 +118,9 @@ impl Function for VectorKthElemFunction {
 
             let value = arg0[k];
 
-            result.push(Some(value));
+            builder.append_value(value);
         }
-        Ok(result.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -142,8 +134,10 @@ impl Display for VectorKthElemFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::error;
-    use datatypes::vectors::{Int64Vector, StringVector};
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{ArrayRef, Int64Array, StringViewArray};
+    use datafusion::arrow::datatypes::Float32Type;
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -151,55 +145,61 @@ mod tests {
     fn test_vec_kth_elem() {
         let func = VectorKthElemFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
             None,
         ]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(0), Some(2), None, Some(1)]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(0), Some(2), None, Some(1)]));
 
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
         let result = func
-            .eval(&FunctionContext::default(), &[input0, input1])
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
             .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_primitive::<Float32Type>();
         assert_eq!(result.len(), 4);
-        assert_eq!(result.get_ref(0).as_f32().unwrap(), Some(1.0));
-        assert_eq!(result.get_ref(1).as_f32().unwrap(), Some(6.0));
-        assert!(result.get_ref(2).is_null());
-        assert!(result.get_ref(3).is_null());
+        assert_eq!(result.value(0), 1.0);
+        assert_eq!(result.value(1), 6.0);
+        assert!(result.is_null(2));
+        assert!(result.is_null(3));
 
-        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(3)]));
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![Some(
+            "[1.0,2.0,3.0]".to_string(),
+        )]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
 
-        let err = func
-            .eval(&FunctionContext::default(), &[input0, input1])
-            .unwrap_err();
-        match err {
-            error::Error::InvalidFuncArgs { err_msg, .. } => {
-                assert_eq!(
-                    err_msg,
-                    format!("Out of range: k must be in the range [0, 2], but got k = 3.")
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(e.to_string().starts_with("External error: Invalid function args: Out of range: k must be in the range [0, 2], but got k = 3."));
 
-        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(-1)]));
+        let input0: ArrayRef = Arc::new(StringViewArray::from(vec![Some(
+            "[1.0,2.0,3.0]".to_string(),
+        )]));
+        let input1: ArrayRef = Arc::new(Int64Array::from(vec![Some(-1)]));
 
-        let err = func
-            .eval(&FunctionContext::default(), &[input0, input1])
-            .unwrap_err();
-        match err {
-            error::Error::InvalidFuncArgs { err_msg, .. } => {
-                assert_eq!(
-                    err_msg,
-                    format!("Invalid argument: k must be a non-negative integer, but got k = -1.")
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Float32, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(e.to_string().starts_with("External error: Invalid function args: Invalid argument: k must be a non-negative integer, but got k = -1."));
     }
 }

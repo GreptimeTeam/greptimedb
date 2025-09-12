@@ -19,13 +19,11 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion::arrow::array::{
-    Array, ArrayRef, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder,
-    StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
+    Array, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringViewArray,
+    StringViewBuilder, UInt8Builder, UInt64Builder,
 };
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, Float64Type, Int64Type, UInt8Type, UInt64Type,
-};
+use datafusion::arrow::datatypes::{Float64Type, Int64Type, UInt8Type, UInt64Type};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::{DataFusionError, ScalarValue, utils};
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
@@ -36,6 +34,7 @@ use h3o::{CellIndex, LatLng, Resolution};
 use snafu::prelude::*;
 
 use crate::function::Function;
+use crate::scalars::geo::helpers;
 
 static CELL_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Int64, DataType::UInt64, DataType::Utf8]);
@@ -89,11 +88,11 @@ impl Function for H3LatLngToCell {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
 
-        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
         let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
@@ -171,11 +170,11 @@ impl Function for H3LatLngToCellString {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
 
-        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
         let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
@@ -547,7 +546,7 @@ impl Function for H3CellToChildren {
     ) -> datafusion_common::Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
-        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&res_vec)?;
         let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = cell_vec.len();
@@ -641,7 +640,7 @@ where
 {
     let args = ColumnarValue::values_to_arrays(&args.args)?;
     let [cells, resolutions] = utils::take_function_args(name, args)?;
-    let resolutions = cast::<UInt8Type>(&resolutions)?;
+    let resolutions = helpers::cast::<UInt8Type>(&resolutions)?;
     let resolutions = resolutions.as_primitive::<UInt8Type>();
 
     let mut builder = UInt64Builder::with_capacity(cells.len());
@@ -698,7 +697,7 @@ impl Function for H3ChildPosToCell {
     ) -> datafusion_common::Result<ColumnarValue> {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let [pos_vec, cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
-        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&res_vec)?;
         let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = cell_vec.len();
@@ -720,18 +719,6 @@ impl Function for H3ChildPosToCell {
 
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
-}
-
-fn cast<T: ArrowPrimitiveType>(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
-    let x = compute::cast_with_options(
-        array.as_ref(),
-        &T::DATA_TYPE,
-        &compute::CastOptions {
-            safe: false,
-            ..Default::default()
-        },
-    )?;
-    Ok(x)
 }
 
 /// Function that returns cells with k distances of given cell

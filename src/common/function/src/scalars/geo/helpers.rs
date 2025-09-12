@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datafusion::arrow::array::{ArrayRef, ArrowPrimitiveType};
+use datafusion::arrow::compute;
+
 macro_rules! ensure_columns_len {
     ($columns:ident) => {
         snafu::ensure!(
@@ -73,3 +76,15 @@ macro_rules! ensure_and_coerce {
 }
 
 pub(crate) use ensure_and_coerce;
+
+pub(crate) fn cast<T: ArrowPrimitiveType>(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
+    let x = compute::cast_with_options(
+        array.as_ref(),
+        &T::DATA_TYPE,
+        &compute::CastOptions {
+            safe: false,
+            ..Default::default()
+        },
+    )?;
+    Ok(x)
+}

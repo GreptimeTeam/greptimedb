@@ -244,7 +244,7 @@ Error: 3001(EngineExecuteQuery), Invalid geohash resolution 100, expect value: [
 
 SELECT geohash(37.76938, -122.3889, -1);
 
-Error: 3001(EngineExecuteQuery), Invalid geohash resolution -1, expect value: [1, 12]
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -1 to type UInt8
 
 SELECT geohash(37.76938, -122.3889, 11::Int8);
 

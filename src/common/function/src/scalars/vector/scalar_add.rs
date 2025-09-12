@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::fmt::Display;
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::Signature;
-use datatypes::arrow::datatypes::DataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
+use common_query::error::Result;
+use datafusion::arrow::array::{Array, AsArray, BinaryViewBuilder};
+use datafusion::arrow::datatypes::{DataType, Float64Type};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::{ScalarValue, utils};
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use nalgebra::DVectorView;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, veclit_to_binlit};
+use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
 
 const NAME: &str = "vec_scalar_add";
 
@@ -60,7 +60,7 @@ impl Function for ScalarAddFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+        Ok(DataType::BinaryView)
     }
 
     fn signature(&self) -> Signature {
@@ -70,40 +70,31 @@ impl Function for ScalarAddFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let arg0 = &columns[0];
-        let arg1 = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let arg0 = arg0.as_primitive::<Float64Type>();
 
         let len = arg0.len();
-        let mut result = BinaryVectorBuilder::with_capacity(len);
+        let mut builder = BinaryViewBuilder::with_capacity(len);
         if len == 0 {
-            return Ok(result.to_vector());
+            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
         }
 
-        let arg1_const = as_veclit_if_const(arg1)?;
-
         for i in 0..len {
-            let arg0 = arg0.get(i).as_f64_lossy();
+            let arg0 = arg0.is_valid(i).then(|| arg0.value(i));
             let Some(arg0) = arg0 else {
-                result.push_null();
+                builder.append_null();
                 continue;
             };
 
-            let arg1 = match arg1_const.as_ref() {
-                Some(arg1) => Some(Cow::Borrowed(arg1.as_ref())),
-                None => as_veclit(arg1.get_ref(i))?,
-            };
+            let v = ScalarValue::try_from_array(&arg1, i)?;
+            let arg1 = as_veclit(&v)?;
             let Some(arg1) = arg1 else {
-                result.push_null();
+                builder.append_null();
                 continue;
             };
 
@@ -112,10 +103,10 @@ impl Function for ScalarAddFunction {
 
             let veclit = vec_res.as_slice();
             let binlit = veclit_to_binlit(veclit);
-            result.push(Some(&binlit));
+            builder.append_value(&binlit);
         }
 
-        Ok(result.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -129,7 +120,9 @@ impl Display for ScalarAddFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{Float32Vector, StringVector};
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, AsArray, Float64Array, StringViewArray};
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -137,34 +130,42 @@ mod tests {
     fn test_scalar_add() {
         let func = ScalarAddFunction;
 
-        let input0 = Arc::new(Float32Vector::from(vec![
+        let input0 = Arc::new(Float64Array::from(vec![
             Some(1.0),
             Some(-1.0),
             None,
             Some(3.0),
         ]));
-        let input1 = Arc::new(StringVector::from(vec![
+        let input1 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
             None,
         ]));
 
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
         let result = func
-            .eval(&FunctionContext::default(), &[input0, input1])
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
             .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_binary_view();
         assert_eq!(result.len(), 4);
         assert_eq!(
-            result.get_ref(0).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[2.0, 3.0, 4.0]).as_slice())
+            result.value(0),
+            veclit_to_binlit(&[2.0, 3.0, 4.0]).as_slice()
         );
         assert_eq!(
-            result.get_ref(1).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[3.0, 4.0, 5.0]).as_slice())
+            result.value(1),
+            veclit_to_binlit(&[3.0, 4.0, 5.0]).as_slice()
         );
-        assert!(result.get_ref(2).is_null());
-        assert!(result.get_ref(3).is_null());
+        assert!(result.is_null(2));
+        assert!(result.is_null(3));
     }
 }

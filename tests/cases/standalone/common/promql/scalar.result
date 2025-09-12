@@ -375,17 +375,7 @@ TQL EVAL (0, 15, '5s') clamp(host, 6 - 6, 6 + 6);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') clamp(host, 12, 0);
 
-Error: 3001(EngineExecuteQuery), Invalid function args: The second arg should be less than or equal to the third arg, have: PrimitiveVector { array: PrimitiveArray<Float64>
-[
-  12.0,
-  0.0,
-  0.0,
-  0.0,
-  12.0,
-  12.0,
-[
-] }, PrimitiveVector { array: PrimitiveArray<Float64>
-] }
+Error: 3001(EngineExecuteQuery), Execution error: min '12' > max '0'
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') clamp(host{host="host1"}, -1, 6);

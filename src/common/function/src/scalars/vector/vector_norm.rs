@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::fmt::Display;
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::Result;
+use datafusion::arrow::array::BinaryViewBuilder;
 use datafusion::arrow::datatypes::DataType;
+use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
+use datafusion_common::{ScalarValue, utils};
+use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use nalgebra::DVectorView;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, veclit_to_binlit};
+use crate::function::Function;
+use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
 
 const NAME: &str = "vec_norm";
 
@@ -53,7 +53,7 @@ impl Function for VectorNormFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+        Ok(DataType::BinaryView)
     }
 
     fn signature(&self) -> Signature {
@@ -66,37 +66,24 @@ impl Function for VectorNormFunction {
         )
     }
 
-    fn eval(
+    fn invoke_with_args(
         &self,
-        _func_ctx: &FunctionContext,
-        columns: &[VectorRef],
-    ) -> common_query::error::Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                )
-            }
-        );
-        let arg0 = &columns[0];
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0] = utils::take_function_args(self.name(), args)?;
 
         let len = arg0.len();
-        let mut result = BinaryVectorBuilder::with_capacity(len);
+        let mut builder = BinaryViewBuilder::with_capacity(len);
         if len == 0 {
-            return Ok(result.to_vector());
+            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
         }
 
-        let arg0_const = as_veclit_if_const(arg0)?;
-
         for i in 0..len {
-            let arg0 = match arg0_const.as_ref() {
-                Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
-                None => as_veclit(arg0.get_ref(i))?,
-            };
+            let v = ScalarValue::try_from_array(&arg0, i)?;
+            let arg0 = as_veclit(&v)?;
             let Some(arg0) = arg0 else {
-                result.push_null();
+                builder.append_null();
                 continue;
             };
 
@@ -111,10 +98,10 @@ impl Function for VectorNormFunction {
 
             let veclit = vec_res.as_slice();
             let binlit = veclit_to_binlit(veclit);
-            result.push(Some(&binlit));
+            builder.append_value(&binlit);
         }
 
-        Ok(result.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -128,7 +115,9 @@ impl Display for VectorNormFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::StringVector;
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, AsArray, StringViewArray};
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -136,7 +125,7 @@ mod tests {
     fn test_vec_norm() {
         let func = VectorNormFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0 = Arc::new(StringViewArray::from(vec![
             Some("[0.0,2.0,3.0]".to_string()),
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
@@ -144,26 +133,36 @@ mod tests {
             None,
         ]));
 
-        let result = func.eval(&FunctionContext::default(), &[input0]).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0)],
+            arg_fields: vec![],
+            number_rows: 5,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let result = func
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(5))
+            .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_binary_view();
         assert_eq!(result.len(), 5);
         assert_eq!(
-            result.get_ref(0).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[0.0, 0.5547002, 0.8320503]).as_slice())
+            result.value(0),
+            veclit_to_binlit(&[0.0, 0.5547002, 0.8320503]).as_slice()
         );
         assert_eq!(
-            result.get_ref(1).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[0.26726124, 0.5345225, 0.8017837]).as_slice())
+            result.value(1),
+            veclit_to_binlit(&[0.26726124, 0.5345225, 0.8017837]).as_slice()
         );
         assert_eq!(
-            result.get_ref(2).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[0.5025707, 0.5743665, 0.64616233]).as_slice())
+            result.value(2),
+            veclit_to_binlit(&[0.5025707, 0.5743665, 0.64616233]).as_slice()
         );
         assert_eq!(
-            result.get_ref(3).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[0.5025707, -0.5743665, 0.64616233]).as_slice())
+            result.value(3),
+            veclit_to_binlit(&[0.5025707, -0.5743665, 0.64616233]).as_slice()
         );
-        assert!(result.get_ref(4).is_null());
+        assert!(result.is_null(4));
     }
 }
