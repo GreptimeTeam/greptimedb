@@ -78,7 +78,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("General DataFusion error"))]
+    #[snafu(transparent)]
     GeneralDataFusion {
         #[snafu(source)]
         error: DataFusionError,

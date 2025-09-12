@@ -18,22 +18,24 @@ use std::sync::{Arc, LazyLock};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use datafusion_expr::type_coercion::aggregates::INTEGERS;
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::{DataType, Field};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::{Scalar, ScalarVectorBuilder};
-use datatypes::value::{ListValue, Value};
-use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, Int32VectorBuilder, ListVectorBuilder,
-    MutableVector, StringVectorBuilder, UInt8VectorBuilder, UInt64VectorBuilder, VectorRef,
+use datafusion::arrow::array::{
+    Array, ArrayRef, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder,
+    StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
 };
+use datafusion::arrow::compute;
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, Float64Type, Int64Type, UInt8Type, UInt64Type,
+};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::{DataFusionError, ScalarValue, utils};
+use datafusion_expr::type_coercion::aggregates::INTEGERS;
+use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
+use datatypes::arrow::datatypes::{DataType, Field};
 use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
-use snafu::ResultExt;
+use snafu::prelude::*;
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
+use crate::function::Function;
 
 static CELL_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Int64, DataType::UInt64, DataType::Utf8]);
@@ -80,23 +82,33 @@ impl Function for H3LatLngToCell {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 3);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
 
-        let lat_vec = &columns[0];
-        let lon_vec = &columns[1];
-        let resolution_vec = &columns[2];
+        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
+        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lon = lon_vec.get(i).as_f64_lossy();
-            let r = value_to_resolution(resolution_vec.get(i))?;
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
+            let r = resolution_vec
+                .is_valid(i)
+                .then(|| value_to_resolution(resolution_vec.value(i)))
+                .transpose()?;
 
-            let result = match (lat, lon) {
-                (Some(lat), Some(lon)) => {
+            let result = match (lat, lon, r) {
+                (Some(lat), Some(lon), Some(r)) => {
                     let coord = LatLng::new(lat, lon)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
@@ -111,10 +123,10 @@ impl Function for H3LatLngToCell {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -132,7 +144,7 @@ impl Function for H3LatLngToCellString {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
@@ -152,23 +164,33 @@ impl Function for H3LatLngToCellString {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 3);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
 
-        let lat_vec = &columns[0];
-        let lon_vec = &columns[1];
-        let resolution_vec = &columns[2];
+        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = lat_vec.as_primitive::<Float64Type>();
+        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = lon_vec.as_primitive::<Float64Type>();
+        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lon = lon_vec.get(i).as_f64_lossy();
-            let r = value_to_resolution(resolution_vec.get(i))?;
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
+            let r = resolution_vec
+                .is_valid(i)
+                .then(|| value_to_resolution(resolution_vec.value(i)))
+                .transpose()?;
 
-            let result = match (lat, lon) {
-                (Some(lat), Some(lon)) => {
+            let result = match (lat, lon, r) {
+                (Some(lat), Some(lon), Some(r)) => {
                     let coord = LatLng::new(lat, lon)
                         .map_err(|e| {
                             BoxedError::new(PlainError::new(
@@ -183,10 +205,10 @@ impl Function for H3LatLngToCellString {
                 _ => None,
             };
 
-            results.push(result.as_deref());
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -201,27 +223,31 @@ impl Function for H3CellToString {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell_id_string = cell_from_value(cell_vec.get(i))?.map(|c| c.to_string());
-
-            results.push(cell_id_string.as_deref());
+            let v = ScalarValue::try_from_array(&cell_vec, i)
+                .and_then(cell_from_value)?
+                .map(|x| x.to_string());
+            builder.append_option(v);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -243,35 +269,32 @@ impl Function for H3StringToCell {
         Signature::string(1, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [string_vec] = utils::take_function_args(self.name(), args)?;
+        let string_vec = compute::cast(string_vec.as_ref(), &DataType::Utf8View)?;
+        let string_vec = datafusion_common::downcast_value!(string_vec, StringViewArray);
 
-        let string_vec = &columns[0];
         let size = string_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let cell = string_vec.get(i);
+            let cell_id = string_vec
+                .is_valid(i)
+                .then(|| {
+                    CellIndex::from_str(string_vec.value(i))
+                        .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
+                        .map(Into::into)
+                })
+                .transpose()?;
 
-            let cell_id = match cell {
-                Value::String(v) => Some(
-                    CellIndex::from_str(v.as_utf8())
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e),
-                                StatusCode::EngineExecuteQuery,
-                            ))
-                        })
-                        .context(error::ExecuteSnafu)?
-                        .into(),
-                ),
-                _ => None,
-            };
-
-            results.push(cell_id);
+            builder.append_option(cell_id);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -297,30 +320,30 @@ impl Function for H3CellCenterLatLng {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::float64_datatype(), size);
+        let mut builder = ListBuilder::new(Float64Builder::new());
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
             let latlng = cell.map(LatLng::from);
 
             if let Some(latlng) = latlng {
-                let result = ListValue::new(
-                    vec![latlng.lat().into(), latlng.lng().into()],
-                    ConcreteDataType::float64_datatype(),
-                );
-                results.push(Some(result.as_scalar_ref()));
+                builder.values().append_value(latlng.lat());
+                builder.values().append_value(latlng.lng());
+                builder.append(true);
             } else {
-                results.push(None);
+                builder.append_null();
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -342,21 +365,23 @@ impl Function for H3CellResolution {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = UInt8VectorBuilder::with_capacity(size);
+        let mut builder = UInt8Builder::with_capacity(cell_vec.len());
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
             let res = cell.map(|cell| cell.resolution().into());
-
-            results.push(res);
+            builder.append_option(res);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -378,21 +403,24 @@ impl Function for H3CellBase {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = UInt8VectorBuilder::with_capacity(size);
+        let mut builder = UInt8Builder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
             let res = cell.map(|cell| cell.base_cell().into());
 
-            results.push(res);
+            builder.append_option(res);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -414,21 +442,24 @@ impl Function for H3CellIsPentagon {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
         let size = cell_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
             let res = cell.map(|cell| cell.is_pentagon());
 
-            results.push(res);
+            builder.append_option(res);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -450,25 +481,13 @@ impl Function for H3CellCenterChild {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let cell_vec = &columns[0];
-        let res_vec = &columns[1];
-        let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell
-                .and_then(|cell| cell.center_child(res))
-                .map(|c| c.into());
-
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        calculate_cell_child_property(self.name(), args, |cell, resolution| {
+            cell.center_child(resolution).map(Into::into)
+        })
     }
 }
 
@@ -490,23 +509,13 @@ impl Function for H3CellParent {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let cell_vec = &columns[0];
-        let res_vec = &columns[1];
-        let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.and_then(|cell| cell.parent(res)).map(|c| c.into());
-
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        calculate_cell_child_property(self.name(), args, |cell, resolution| {
+            cell.parent(resolution).map(Into::into)
+        })
     }
 }
 
@@ -532,34 +541,37 @@ impl Function for H3CellToChildren {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
+        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let resolutions = resolutions.as_primitive::<UInt8Type>();
 
-        let cell_vec = &columns[0];
-        let res_vec = &columns[1];
         let size = cell_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+        let mut builder = ListBuilder::new(UInt64Builder::new());
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.map(|cell| {
-                let children: Vec<Value> = cell
-                    .children(res)
-                    .map(|child| Value::from(u64::from(child)))
-                    .collect();
-                ListValue::new(children, ConcreteDataType::uint64_datatype())
-            });
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
+            let resolution = resolutions
+                .is_valid(i)
+                .then(|| value_to_resolution(resolutions.value(i)))
+                .transpose()?;
 
-            if let Some(list_value) = result {
-                results.push(Some(list_value.as_scalar_ref()));
-            } else {
-                results.push(None);
+            match (cell, resolution) {
+                (Some(c), Some(r)) => {
+                    for x in c.children(r) {
+                        builder.values().append_value(u64::from(x));
+                    }
+                    builder.append(true);
+                }
+                _ => builder.append_null(),
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -581,22 +593,13 @@ impl Function for H3CellToChildrenSize {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let cell_vec = &columns[0];
-        let res_vec = &columns[1];
-        let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.map(|cell| cell.children_count(res));
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        calculate_cell_child_property(self.name(), args, |cell, resolution| {
+            Some(cell.children_count(resolution))
+        })
     }
 }
 
@@ -618,23 +621,44 @@ impl Function for H3CellToChildPos {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let cell_vec = &columns[0];
-        let res_vec = &columns[1];
-        let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.and_then(|cell| cell.child_position(res));
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        calculate_cell_child_property(self.name(), args, |cell, resolution| {
+            cell.child_position(resolution)
+        })
     }
+}
+
+fn calculate_cell_child_property<F>(
+    name: &str,
+    args: ScalarFunctionArgs,
+    calculator: F,
+) -> datafusion_common::Result<ColumnarValue>
+where
+    F: Fn(CellIndex, Resolution) -> Option<u64>,
+{
+    let args = ColumnarValue::values_to_arrays(&args.args)?;
+    let [cells, resolutions] = utils::take_function_args(name, args)?;
+    let resolutions = cast::<UInt8Type>(&resolutions)?;
+    let resolutions = resolutions.as_primitive::<UInt8Type>();
+
+    let mut builder = UInt64Builder::with_capacity(cells.len());
+    for i in 0..cells.len() {
+        let cell = ScalarValue::try_from_array(&cells, i).and_then(cell_from_value)?;
+        let resolution = resolutions
+            .is_valid(i)
+            .then(|| value_to_resolution(resolutions.value(i)))
+            .transpose()?;
+        let v = match (cell, resolution) {
+            (Some(c), Some(r)) => calculator(c, r),
+            _ => None,
+        };
+        builder.append_option(v);
+    }
+
+    Ok(ColumnarValue::Array(Arc::new(builder.finish())))
 }
 
 /// Function that returns the cell at given position of the parent at given resolution
@@ -668,25 +692,46 @@ impl Function for H3ChildPosToCell {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 3);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [pos_vec, cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
+        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let resolutions = resolutions.as_primitive::<UInt8Type>();
 
-        let pos_vec = &columns[0];
-        let cell_vec = &columns[1];
-        let res_vec = &columns[2];
         let size = cell_vec.len();
-        let mut results = UInt64VectorBuilder::with_capacity(size);
+        let mut builder = UInt64Builder::with_capacity(size);
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let pos = value_to_position(pos_vec.get(i))?;
-            let res = value_to_resolution(res_vec.get(i))?;
-            let result = cell.and_then(|cell| cell.child_at(pos, res).map(u64::from));
-            results.push(result);
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
+            let pos = ScalarValue::try_from_array(&pos_vec, i).and_then(value_to_position)?;
+            let resolution = resolutions
+                .is_valid(i)
+                .then(|| value_to_resolution(resolutions.value(i)))
+                .transpose()?;
+            let result = match (cell, resolution) {
+                (Some(c), Some(r)) => c.child_at(pos, r).map(u64::from),
+                _ => None,
+            };
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
+}
+
+fn cast<T: ArrowPrimitiveType>(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
+    let x = compute::cast_with_options(
+        array.as_ref(),
+        &T::DATA_TYPE,
+        &compute::CastOptions {
+            safe: false,
+            ..Default::default()
+        },
+    )?;
+    Ok(x)
 }
 
 /// Function that returns cells with k distances of given cell
@@ -711,36 +756,31 @@ impl Function for H3GridDisk {
         signature_of_cell_and_distance()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec, k_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
-        let k_vec = &columns[1];
         let size = cell_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+        let mut builder = ListBuilder::new(UInt64Builder::new());
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let k = value_to_distance(k_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
+            let k = ScalarValue::try_from_array(&k_vec, i).and_then(value_to_distance)?;
 
-            let result = cell.map(|cell| {
-                let children: Vec<Value> = cell
-                    .grid_disk::<Vec<_>>(k)
-                    .into_iter()
-                    .map(|child| Value::from(u64::from(child)))
-                    .collect();
-                ListValue::new(children, ConcreteDataType::uint64_datatype())
-            });
-
-            if let Some(list_value) = result {
-                results.push(Some(list_value.as_scalar_ref()));
+            if let Some(cell) = cell {
+                for x in cell.grid_disk::<Vec<_>>(k) {
+                    builder.values().append_value(u64::from(x));
+                }
+                builder.append(true);
             } else {
-                results.push(None);
+                builder.append_null();
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -766,36 +806,31 @@ impl Function for H3GridDiskDistances {
         signature_of_cell_and_distance()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_vec, k_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_vec = &columns[0];
-        let k_vec = &columns[1];
         let size = cell_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+        let mut builder = ListBuilder::new(UInt64Builder::new());
 
         for i in 0..size {
-            let cell = cell_from_value(cell_vec.get(i))?;
-            let k = value_to_distance(k_vec.get(i))?;
+            let cell = ScalarValue::try_from_array(&cell_vec, i).and_then(cell_from_value)?;
+            let k = ScalarValue::try_from_array(&k_vec, i).and_then(value_to_distance)?;
 
-            let result = cell.map(|cell| {
-                let children: Vec<Value> = cell
-                    .grid_disk_distances::<Vec<_>>(k)
-                    .into_iter()
-                    .map(|(child, _distance)| Value::from(u64::from(child)))
-                    .collect();
-                ListValue::new(children, ConcreteDataType::uint64_datatype())
-            });
-
-            if let Some(list_value) = result {
-                results.push(Some(list_value.as_scalar_ref()));
+            if let Some(cell) = cell {
+                for (x, _) in cell.grid_disk_distances::<Vec<_>>(k) {
+                    builder.values().append_value(u64::from(x));
+                }
+                builder.append(true);
             } else {
-                results.push(None);
+                builder.append_null();
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -816,20 +851,22 @@ impl Function for H3GridDistance {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_this_vec = &columns[0];
-        let cell_that_vec = &columns[1];
         let size = cell_this_vec.len();
-
-        let mut results = Int32VectorBuilder::with_capacity(size);
+        let mut builder = Int32Builder::with_capacity(size);
 
         for i in 0..size {
-            let result = match (
-                cell_from_value(cell_this_vec.get(i))?,
-                cell_from_value(cell_that_vec.get(i))?,
-            ) {
+            let cell_this =
+                ScalarValue::try_from_array(&cell_this_vec, i).and_then(cell_from_value)?;
+            let cell_that =
+                ScalarValue::try_from_array(&cell_that_vec, i).and_then(cell_from_value)?;
+            let result = match (cell_this, cell_that) {
                 (Some(cell_this), Some(cell_that)) => {
                     let dist = cell_this
                         .grid_distance(cell_that)
@@ -845,10 +882,10 @@ impl Function for H3GridDistance {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -874,50 +911,38 @@ impl Function for H3GridPathCells {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_this_vec = &columns[0];
-        let cell_that_vec = &columns[1];
         let size = cell_this_vec.len();
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::uint64_datatype(), size);
+        let mut builder = ListBuilder::new(UInt64Builder::new());
 
         for i in 0..size {
-            let result = match (
-                cell_from_value(cell_this_vec.get(i))?,
-                cell_from_value(cell_that_vec.get(i))?,
-            ) {
+            let cell_this =
+                ScalarValue::try_from_array(&cell_this_vec, i).and_then(cell_from_value)?;
+            let cell_that =
+                ScalarValue::try_from_array(&cell_that_vec, i).and_then(cell_from_value)?;
+            match (cell_this, cell_that) {
                 (Some(cell_this), Some(cell_that)) => {
                     let cells = cell_this
                         .grid_path_cells(cell_that)
-                        .and_then(|x| x.collect::<std::result::Result<Vec<CellIndex>, _>>())
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e),
-                                StatusCode::EngineExecuteQuery,
-                            ))
-                        })
-                        .context(error::ExecuteSnafu)?;
-                    Some(ListValue::new(
-                        cells
-                            .into_iter()
-                            .map(|c| Value::from(u64::from(c)))
-                            .collect(),
-                        ConcreteDataType::uint64_datatype(),
-                    ))
+                        .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))?;
+                    for cell in cells {
+                        let cell = cell
+                            .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))?;
+                        builder.values().append_value(u64::from(cell));
+                    }
+                    builder.append(true);
                 }
-                _ => None,
+                _ => builder.append_null(),
             };
-
-            if let Some(list_value) = result {
-                results.push(Some(list_value.as_scalar_ref()));
-            } else {
-                results.push(None);
-            }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -956,21 +981,22 @@ impl Function for H3CellContains {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let cells_vec = &columns[0];
-        let cell_this_vec = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cells_vec, cell_this_vec] = utils::take_function_args(self.name(), args)?;
 
         let size = cell_this_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
+            let cells = ScalarValue::try_from_array(&cells_vec, i).and_then(cells_from_value)?;
+            let cell_this =
+                ScalarValue::try_from_array(&cell_this_vec, i).and_then(cell_from_value)?;
             let mut result = None;
-            if let (cells, Some(cell_this)) = (
-                cells_from_value(cells_vec.get(i))?,
-                cell_from_value(cell_this_vec.get(i))?,
-            ) {
+            if let (cells, Some(cell_this)) = (cells, cell_this) {
                 result = Some(false);
 
                 for cell_that in cells.iter() {
@@ -986,10 +1012,10 @@ impl Function for H3CellContains {
                 }
             }
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -1010,20 +1036,22 @@ impl Function for H3CellDistanceSphereKm {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_this_vec = &columns[0];
-        let cell_that_vec = &columns[1];
         let size = cell_this_vec.len();
-
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut builder = Float64Builder::with_capacity(size);
 
         for i in 0..size {
-            let result = match (
-                cell_from_value(cell_this_vec.get(i))?,
-                cell_from_value(cell_that_vec.get(i))?,
-            ) {
+            let cell_this =
+                ScalarValue::try_from_array(&cell_this_vec, i).and_then(cell_from_value)?;
+            let cell_that =
+                ScalarValue::try_from_array(&cell_that_vec, i).and_then(cell_from_value)?;
+            let result = match (cell_this, cell_that) {
                 (Some(cell_this), Some(cell_that)) => {
                     let centroid_this = LatLng::from(cell_this);
                     let centroid_that = LatLng::from(cell_that);
@@ -1033,10 +1061,10 @@ impl Function for H3CellDistanceSphereKm {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -1065,20 +1093,22 @@ impl Function for H3CellDistanceEuclideanDegree {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
 
-        let cell_this_vec = &columns[0];
-        let cell_that_vec = &columns[1];
         let size = cell_this_vec.len();
-
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut builder = Float64Builder::with_capacity(size);
 
         for i in 0..size {
-            let result = match (
-                cell_from_value(cell_this_vec.get(i))?,
-                cell_from_value(cell_that_vec.get(i))?,
-            ) {
+            let cell_this =
+                ScalarValue::try_from_array(&cell_this_vec, i).and_then(cell_from_value)?;
+            let cell_that =
+                ScalarValue::try_from_array(&cell_that_vec, i).and_then(cell_from_value)?;
+            let result = match (cell_this, cell_that) {
                 (Some(cell_this), Some(cell_that)) => {
                     let centroid_this = LatLng::from(cell_this);
                     let centroid_that = LatLng::from(cell_that);
@@ -1089,59 +1119,52 @@ impl Function for H3CellDistanceEuclideanDegree {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
-fn value_to_resolution(v: Value) -> Result<Resolution> {
-    let r = match v {
-        Value::Int8(v) => v as u8,
-        Value::Int16(v) => v as u8,
-        Value::Int32(v) => v as u8,
-        Value::Int64(v) => v as u8,
-        Value::UInt8(v) => v,
-        Value::UInt16(v) => v as u8,
-        Value::UInt32(v) => v as u8,
-        Value::UInt64(v) => v as u8,
-        _ => unreachable!(),
-    };
-    Resolution::try_from(r)
-        .map_err(|e| {
-            BoxedError::new(PlainError::new(
-                format!("H3 error: {}", e),
-                StatusCode::EngineExecuteQuery,
-            ))
-        })
-        .context(error::ExecuteSnafu)
+fn value_to_resolution(r: u8) -> datafusion_common::Result<Resolution> {
+    Resolution::try_from(r).map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
 }
 
-fn value_to_position(v: Value) -> Result<u64> {
+macro_rules! ensure_then_coerce {
+    ($compare:expr, $coerce:expr) => {{
+        if !$compare {
+            return Err(datafusion_common::DataFusionError::Execution(
+                "Argument was outside of acceptable range".to_string(),
+            ));
+        }
+        Ok($coerce)
+    }};
+}
+
+fn value_to_position(v: ScalarValue) -> datafusion_common::Result<u64> {
     match v {
-        Value::Int8(v) => ensure_and_coerce!(v >= 0, v as u64),
-        Value::Int16(v) => ensure_and_coerce!(v >= 0, v as u64),
-        Value::Int32(v) => ensure_and_coerce!(v >= 0, v as u64),
-        Value::Int64(v) => ensure_and_coerce!(v >= 0, v as u64),
-        Value::UInt8(v) => Ok(v as u64),
-        Value::UInt16(v) => Ok(v as u64),
-        Value::UInt32(v) => Ok(v as u64),
-        Value::UInt64(v) => Ok(v),
+        ScalarValue::Int8(Some(v)) => ensure_then_coerce!(v >= 0, v as u64),
+        ScalarValue::Int16(Some(v)) => ensure_then_coerce!(v >= 0, v as u64),
+        ScalarValue::Int32(Some(v)) => ensure_then_coerce!(v >= 0, v as u64),
+        ScalarValue::Int64(Some(v)) => ensure_then_coerce!(v >= 0, v as u64),
+        ScalarValue::UInt8(Some(v)) => Ok(v as u64),
+        ScalarValue::UInt16(Some(v)) => Ok(v as u64),
+        ScalarValue::UInt32(Some(v)) => Ok(v as u64),
+        ScalarValue::UInt64(Some(v)) => Ok(v),
         _ => unreachable!(),
     }
 }
 
-fn value_to_distance(v: Value) -> Result<u32> {
+fn value_to_distance(v: ScalarValue) -> datafusion_common::Result<u32> {
     match v {
-        Value::Int8(v) => ensure_and_coerce!(v >= 0, v as u32),
-        Value::Int16(v) => ensure_and_coerce!(v >= 0, v as u32),
-        Value::Int32(v) => ensure_and_coerce!(v >= 0, v as u32),
-        Value::Int64(v) => ensure_and_coerce!(v >= 0, v as u32),
-        Value::UInt8(v) => Ok(v as u32),
-        Value::UInt16(v) => Ok(v as u32),
-        Value::UInt32(v) => Ok(v),
-        Value::UInt64(v) => Ok(v as u32),
+        ScalarValue::Int8(Some(v)) => ensure_then_coerce!(v >= 0, v as u32),
+        ScalarValue::Int16(Some(v)) => ensure_then_coerce!(v >= 0, v as u32),
+        ScalarValue::Int32(Some(v)) => ensure_then_coerce!(v >= 0, v as u32),
+        ScalarValue::Int64(Some(v)) => ensure_then_coerce!(v >= 0, v as u32),
+        ScalarValue::UInt8(Some(v)) => Ok(v as u32),
+        ScalarValue::UInt16(Some(v)) => Ok(v as u32),
+        ScalarValue::UInt32(Some(v)) => Ok(v),
+        ScalarValue::UInt64(Some(v)) => Ok(v as u32),
         _ => unreachable!(),
     }
 }
@@ -1195,41 +1218,15 @@ fn signature_of_cell_and_distance() -> Signature {
     Signature::one_of(signatures, Volatility::Stable)
 }
 
-fn cell_from_value(v: Value) -> Result<Option<CellIndex>> {
-    let cell = match v {
-        Value::Int64(v) => Some(
-            CellIndex::try_from(v as u64)
-                .map_err(|e| {
-                    BoxedError::new(PlainError::new(
-                        format!("H3 error: {}", e),
-                        StatusCode::EngineExecuteQuery,
-                    ))
-                })
-                .context(error::ExecuteSnafu)?,
-        ),
-        Value::UInt64(v) => Some(
-            CellIndex::try_from(v)
-                .map_err(|e| {
-                    BoxedError::new(PlainError::new(
-                        format!("H3 error: {}", e),
-                        StatusCode::EngineExecuteQuery,
-                    ))
-                })
-                .context(error::ExecuteSnafu)?,
-        ),
-        Value::String(s) => Some(
-            CellIndex::from_str(s.as_utf8())
-                .map_err(|e| {
-                    BoxedError::new(PlainError::new(
-                        format!("H3 error: {}", e),
-                        StatusCode::EngineExecuteQuery,
-                    ))
-                })
-                .context(error::ExecuteSnafu)?,
-        ),
+fn cell_from_value(v: ScalarValue) -> datafusion_common::Result<Option<CellIndex>> {
+    match v {
+        ScalarValue::Int64(Some(v)) => Some(CellIndex::try_from(v as u64)),
+        ScalarValue::UInt64(Some(v)) => Some(CellIndex::try_from(v)),
+        ScalarValue::Utf8(Some(s)) => Some(CellIndex::from_str(&s)),
         _ => None,
-    };
-    Ok(cell)
+    }
+    .transpose()
+    .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
 }
 
 /// extract cell array from all possible types including:
@@ -1237,91 +1234,64 @@ fn cell_from_value(v: Value) -> Result<Option<CellIndex>> {
 /// - uint64 list
 /// - string list
 /// - comma-separated string
-fn cells_from_value(v: Value) -> Result<Vec<CellIndex>> {
+fn cells_from_value(v: ScalarValue) -> datafusion_common::Result<Vec<CellIndex>> {
     match v {
-        Value::List(list) => match list.datatype() {
-            ConcreteDataType::Int64(_) => list
-                .items()
+        ScalarValue::List(list) => match list.value_type() {
+            DataType::Int64 => list
+                .values()
+                .as_primitive::<Int64Type>()
                 .iter()
                 .map(|v| {
-                    if let Value::Int64(v) = v {
-                        CellIndex::try_from(*v as u64)
-                            .map_err(|e| {
-                                BoxedError::new(PlainError::new(
-                                    format!("H3 error: {}", e),
-                                    StatusCode::EngineExecuteQuery,
-                                ))
-                            })
-                            .context(error::ExecuteSnafu)
+                    if let Some(v) = v {
+                        CellIndex::try_from(v as u64)
+                            .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
                     } else {
-                        Err(BoxedError::new(PlainError::new(
+                        Err(DataFusionError::Execution(
                             "Invalid data type in array".to_string(),
-                            StatusCode::EngineExecuteQuery,
-                        )))
-                        .context(error::ExecuteSnafu)
+                        ))
                     }
                 })
-                .collect::<Result<Vec<CellIndex>>>(),
-            ConcreteDataType::UInt64(_) => list
-                .items()
+                .collect::<datafusion_common::Result<Vec<CellIndex>>>(),
+            DataType::UInt64 => list
+                .values()
+                .as_primitive::<UInt64Type>()
                 .iter()
                 .map(|v| {
-                    if let Value::UInt64(v) = v {
-                        CellIndex::try_from(*v)
-                            .map_err(|e| {
-                                BoxedError::new(PlainError::new(
-                                    format!("H3 error: {}", e),
-                                    StatusCode::EngineExecuteQuery,
-                                ))
-                            })
-                            .context(error::ExecuteSnafu)
+                    if let Some(v) = v {
+                        CellIndex::try_from(v)
+                            .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
                     } else {
-                        Err(BoxedError::new(PlainError::new(
+                        Err(DataFusionError::Execution(
                             "Invalid data type in array".to_string(),
-                            StatusCode::EngineExecuteQuery,
-                        )))
-                        .context(error::ExecuteSnafu)
+                        ))
                     }
                 })
-                .collect::<Result<Vec<CellIndex>>>(),
-            ConcreteDataType::String(_) => list
-                .items()
+                .collect::<datafusion_common::Result<Vec<CellIndex>>>(),
+            DataType::Utf8 => list
+                .values()
+                .as_string::<i32>()
                 .iter()
                 .map(|v| {
-                    if let Value::String(v) = v {
-                        CellIndex::from_str(v.as_utf8().trim())
-                            .map_err(|e| {
-                                BoxedError::new(PlainError::new(
-                                    format!("H3 error: {}", e),
-                                    StatusCode::EngineExecuteQuery,
-                                ))
-                            })
-                            .context(error::ExecuteSnafu)
+                    if let Some(v) = v {
+                        CellIndex::from_str(v)
+                            .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
                     } else {
-                        Err(BoxedError::new(PlainError::new(
+                        Err(DataFusionError::Execution(
                             "Invalid data type in array".to_string(),
-                            StatusCode::EngineExecuteQuery,
-                        )))
-                        .context(error::ExecuteSnafu)
+                        ))
                     }
                 })
-                .collect::<Result<Vec<CellIndex>>>(),
+                .collect::<datafusion_common::Result<Vec<CellIndex>>>(),
             _ => Ok(vec![]),
         },
-        Value::String(csv) => {
-            let str_seq = csv.as_utf8().split(',');
+        ScalarValue::Utf8(Some(csv)) => {
+            let str_seq = csv.split(',');
             str_seq
                 .map(|v| {
                     CellIndex::from_str(v.trim())
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("H3 error: {}", e),
-                                StatusCode::EngineExecuteQuery,
-                            ))
-                        })
-                        .context(error::ExecuteSnafu)
+                        .map_err(|e| DataFusionError::Execution(format!("H3 error: {}", e)))
                 })
-                .collect::<Result<Vec<CellIndex>>>()
+                .collect::<datafusion_common::Result<Vec<CellIndex>>>()
         }
         _ => Ok(vec![]),
     }

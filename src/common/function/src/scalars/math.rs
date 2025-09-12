@@ -19,13 +19,12 @@ mod rate;
 use std::fmt;
 
 pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
-use common_query::error::{GeneralDataFusionSnafu, Result};
+use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
 use datafusion_expr::{Signature, Volatility};
 use datatypes::vectors::VectorRef;
 pub use rate::RateFunction;
-use snafu::ResultExt;
 
 use crate::function::{Function, FunctionContext};
 use crate::function_registry::FunctionRegistry;
@@ -68,7 +67,7 @@ impl Function for RangeFunction {
             .ok_or(DataFusionError::Internal(
                 "No expr found in range_fn".into(),
             ))
-            .context(GeneralDataFusionSnafu)
+            .map_err(Into::into)
     }
 
     /// `range_fn` will never been used. As long as a legal signature is returned, the specific content of the signature does not matter.
@@ -80,7 +79,7 @@ impl Function for RangeFunction {
     fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         Err(DataFusionError::Internal(
             "range_fn just a empty function used in range select, It should not be eval!".into(),
-        ))
-        .context(GeneralDataFusionSnafu)
+        )
+        .into())
     }
 }

@@ -20,7 +20,6 @@ use common_telemetry::debug;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::discovery::utils::is_datanode_accept_ingest_workload;
 use crate::error::{ListActiveDatanodesSnafu, Result};
 use crate::metasrv::SelectorContext;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
@@ -54,7 +53,7 @@ where
         // 1. get alive datanodes.
         let alive_datanodes = ctx
             .peer_discovery
-            .active_datanodes(Some(is_datanode_accept_ingest_workload))
+            .active_datanodes(opts.workload_filter)
             .await
             .context(ListActiveDatanodesSnafu)?;
 

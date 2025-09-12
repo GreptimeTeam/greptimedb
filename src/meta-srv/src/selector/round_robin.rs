@@ -17,7 +17,6 @@ use std::sync::atomic::AtomicUsize;
 use common_meta::peer::Peer;
 use snafu::{ResultExt, ensure};
 
-use crate::discovery::utils::is_datanode_accept_ingest_workload;
 use crate::error::{
     ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
 };
@@ -59,7 +58,7 @@ impl RoundRobinSelector {
                 // 1. get alive datanodes.
                 let alive_datanodes = ctx
                     .peer_discovery
-                    .active_datanodes(Some(is_datanode_accept_ingest_workload))
+                    .active_datanodes(opts.workload_filter)
                     .await
                     .context(ListActiveDatanodesSnafu)?;
 
@@ -71,7 +70,7 @@ impl RoundRobinSelector {
             }
             SelectTarget::Flownode => ctx
                 .peer_discovery
-                .active_flownodes(None)
+                .active_flownodes(opts.workload_filter)
                 .await
                 .context(ListActiveFlownodesSnafu)?,
         };
@@ -150,6 +149,7 @@ mod test {
                     min_required_items: 4,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
+                    workload_filter: None,
                 },
             )
             .await
@@ -167,6 +167,7 @@ mod test {
                     min_required_items: 2,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
+                    workload_filter: None,
                 },
             )
             .await
@@ -208,6 +209,7 @@ mod test {
                     min_required_items: 1,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::from([2, 5]),
+                    workload_filter: None,
                 },
             )
             .await

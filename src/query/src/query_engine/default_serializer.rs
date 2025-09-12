@@ -175,7 +175,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         if optimize {
             self.session_state
                 .optimize(&logical_plan)
-                .context(common_query::error::GeneralDataFusionSnafu)
+                .map_err(Into::into)
         } else {
             Ok(logical_plan)
         }
