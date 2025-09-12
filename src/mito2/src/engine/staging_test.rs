@@ -369,6 +369,11 @@ async fn test_staging_exit_success_with_manifests() {
         "No data should be readable before exit staging mode"
     );
 
+    // Inspect SSTs from manifest
+    let sst_entries = engine.all_ssts_from_manifest().await;
+    assert_eq!(sst_entries.len(), 2);
+    assert!(sst_entries.iter().all(|e| !e.visible));
+
     // Exit staging mode successfully
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
@@ -424,4 +429,9 @@ async fn test_staging_exit_success_with_manifests() {
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
     assert_eq!(total_rows, 10, "Expected to read all staged rows");
+
+    // Inspect SSTs from manifest
+    let sst_entries = engine.all_ssts_from_manifest().await;
+    assert_eq!(sst_entries.len(), 2);
+    assert!(sst_entries.iter().all(|e| e.visible));
 }

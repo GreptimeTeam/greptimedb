@@ -72,7 +72,7 @@ impl RegionServer {
             })?
         };
 
-        let entries = mito.all_ssts_from_manifest().collect::<Vec<_>>();
+        let entries = mito.all_ssts_from_manifest().await;
         let schema = ManifestSstEntry::schema().arrow_schema().clone();
         let batch = ManifestSstEntry::to_record_batch(&entries)
             .map_err(DataFusionError::from)
