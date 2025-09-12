@@ -37,8 +37,8 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// A cache for uploading files to remote object stores.
@@ -101,6 +101,66 @@ impl WriteCache {
         self.file_cache.clone()
     }
 
+    /// Put encoded SST data to the cache and upload to the remote object store.
+    pub(crate) async fn put_and_upload_sst(
+        &self,
+        data: &bytes::Bytes,
+        region_id: RegionId,
+        sst_info: &SstInfo,
+        upload_request: SstUploadRequest,
+    ) -> Result<Metrics> {
+        let file_id = sst_info.file_id;
+        let mut metrics = Metrics::new(WriteType::Flush);
+
+        // Create index key for the SST file
+        let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
+
+        // Write to cache first
+        let cache_start = Instant::now();
+        let cache_path = self.file_cache.cache_file_path(parquet_key);
+        let mut cache_writer = self
+            .file_cache
+            .local_store()
+            .writer(&cache_path)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+
+        cache_writer
+            .write(data.clone())
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+        cache_writer
+            .close()
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+
+        // Register in file cache
+        let index_value = IndexValue {
+            file_size: data.len() as u32,
+        };
+        self.file_cache.put(parquet_key, index_value).await;
+        metrics.write_batch = cache_start.elapsed();
+
+        // Upload to remote store
+        let upload_start = Instant::now();
+        let region_file_id = RegionFileId::new(region_id, file_id);
+        let remote_path = upload_request
+            .dest_path_provider
+            .build_sst_file_path(region_file_id);
+
+        if let Err(e) = self
+            .upload(parquet_key, &remote_path, &upload_request.remote_store)
+            .await
+        {
+            // Clean up cache on failure
+            self.remove(parquet_key).await;
+            return Err(e);
+        }
+
+        metrics.upload_parquet = upload_start.elapsed();
+        Ok(metrics)
+    }
+
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub(crate) async fn write_and_upload_sst(
         &self,
@@ -139,9 +199,14 @@ impl WriteCache {
         .await
         .with_file_cleaner(cleaner);
 
-        let sst_info = writer
-            .write_all(write_request.source, write_request.max_sequence, write_opts)
-            .await?;
+        let sst_info = match write_request.source {
+            either::Left(source) => {
+                writer
+                    .write_all(source, write_request.max_sequence, write_opts)
+                    .await?
+            }
+            either::Right(flat_source) => writer.write_all_flat(flat_source, write_opts).await?,
+        };
         let mut metrics = writer.into_metrics();
 
         // Upload sst file to remote object store.
@@ -469,7 +534,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: Default::default(),
@@ -567,7 +632,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: cache_manager.clone(),
@@ -646,7 +711,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: cache_manager.clone(),

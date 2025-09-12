@@ -151,6 +151,19 @@ pub struct MemtableRanges {
     pub stats: MemtableStats,
 }
 
+impl IterBuilder for MemtableRanges {
+    fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+        UnsupportedOperationSnafu {
+            err_msg: "MemtableRanges does not support build iterator",
+        }
+        .fail()
+    }
+
+    fn is_record_batch(&self) -> bool {
+        self.ranges.values().all(|range| range.is_record_batch())
+    }
+}
+
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
@@ -527,6 +540,11 @@ impl MemtableRange {
 
     pub fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the encoded range if available.
+    pub fn encoded(&self) -> Option<EncodedRange> {
+        self.context.builder.encoded_range()
     }
 }
 
