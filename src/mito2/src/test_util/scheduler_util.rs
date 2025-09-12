@@ -35,6 +35,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
+use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::worker::WorkerListener;
@@ -42,7 +43,7 @@ use crate::worker::WorkerListener;
 /// Scheduler mocker.
 pub(crate) struct SchedulerEnv {
     #[allow(unused)]
-    path: TempDir,
+    pub(crate) path: TempDir,
     /// Mock access layer for test.
     pub(crate) access_layer: AccessLayerRef,
     scheduler: Option<SchedulerRef>,
@@ -51,7 +52,7 @@ pub(crate) struct SchedulerEnv {
 impl SchedulerEnv {
     /// Creates a new mocker.
     pub(crate) async fn new() -> SchedulerEnv {
-        let path = create_temp_dir("");
+        let path = create_temp_dir("114514");
         let path_str = path.path().display().to_string();
         let builder = Fs::default().root(&path_str);
 
@@ -106,6 +107,13 @@ impl SchedulerEnv {
         let scheduler = self.get_scheduler();
 
         FlushScheduler::new(scheduler)
+    }
+
+    /// Creates a new index build scheduler.
+    pub(crate) fn mock_index_build_scheduler(&self) -> IndexBuildScheduler {
+        let scheduler = self.get_scheduler();
+
+        IndexBuildScheduler::new(scheduler)
     }
 
     /// Creates a new manifest context.

@@ -362,6 +362,10 @@ impl FileHandle {
         &self.inner.meta
     }
 
+    pub fn file_purger(&self) -> FilePurgerRef {
+        self.inner.file_purger.clone()
+    }
+
     pub fn size(&self) -> u64 {
         self.inner.meta.file_size
     }
@@ -376,6 +380,10 @@ impl FileHandle {
 
     pub fn level(&self) -> Level {
         self.inner.meta.level
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.inner.deleted.load(Ordering::Relaxed)
     }
 }
 

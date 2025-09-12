@@ -1448,6 +1448,7 @@ min_compaction_interval = "0s"
 aux_path = ""
 staging_size = "2GiB"
 staging_ttl = "7days"
+build_mode = "sync"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -1531,6 +1532,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "result_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_index_builds =",
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",

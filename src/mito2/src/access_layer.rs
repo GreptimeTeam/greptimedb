@@ -31,7 +31,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
-use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
@@ -39,7 +39,7 @@ use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, RegionFileId};
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -194,6 +194,14 @@ impl AccessLayer {
         &self.intermediate_manager
     }
 
+    /// Build the puffin manager.
+    pub(crate) fn build_puffin_manager(&self) -> SstPuffinManager {
+        let store = self.object_store.clone();
+        let path_provider =
+            RegionFilePathFactory::new(self.table_dir().to_string(), self.path_type());
+        self.puffin_manager_factory.build(store, path_provider)
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, region_file_id: &RegionFileId) -> Result<()> {
         let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
@@ -282,6 +290,7 @@ impl AccessLayer {
             let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 request.metadata,
+                request.index_config,
                 indexer_builder,
                 path_provider,
                 Metrics::new(write_type),
@@ -371,6 +380,7 @@ pub struct SstWriteRequest {
 
     /// Configs for index
     pub index_options: IndexOptions,
+    pub index_config: IndexConfig,
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,

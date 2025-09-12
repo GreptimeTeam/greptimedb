@@ -397,6 +397,7 @@ impl RegionFlushTask {
                 storage: version.options.storage.clone(),
                 max_sequence: Some(max_sequence),
                 index_options: self.index_options.clone(),
+                index_config: self.engine_config.index.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),

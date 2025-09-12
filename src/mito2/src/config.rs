@@ -80,6 +80,8 @@ pub struct MitoConfig {
     pub compress_manifest: bool,
 
     // Background job configs:
+    /// Max number of running background index build jobs (default: 1/8 of cpu cores).
+    pub max_background_index_builds: usize,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -153,6 +155,7 @@ impl Default for MitoConfig {
             experimental_manifest_keep_removed_file_count: 256,
             experimental_manifest_keep_removed_file_ttl: Duration::from_secs(60 * 60),
             compress_manifest: false,
+            max_background_index_builds: divide_num_cpus(8),
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
             max_background_purges: common_config::utils::get_cpus(),
@@ -303,6 +306,17 @@ impl MitoConfig {
     }
 }
 
+/// Index build mode.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexBuildMode {
+    /// Build index synchronously.
+    #[default]
+    Sync,
+    /// Build index asynchronously.
+    Async,
+}
+
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -326,6 +340,9 @@ pub struct IndexConfig {
     #[serde(with = "humantime_serde")]
     pub staging_ttl: Option<Duration>,
 
+    /// Index Build Mode
+    pub build_mode: IndexBuildMode,
+
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
 
@@ -345,6 +362,7 @@ impl Default for IndexConfig {
             aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
             staging_ttl: Some(Duration::from_secs(7 * 24 * 60 * 60)),
+            build_mode: IndexBuildMode::default(),
             write_buffer_size: ReadableSize::mb(8),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),

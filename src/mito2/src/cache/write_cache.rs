@@ -36,7 +36,7 @@ use crate::metrics::{
 use crate::sst::file::RegionFileId;
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
@@ -101,6 +101,18 @@ impl WriteCache {
         self.file_cache.clone()
     }
 
+    /// Build the puffin manager
+    pub(crate) fn build_puffin_manager(&self) -> SstPuffinManager {
+        let store = self.file_cache.local_store();
+        let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
+        self.puffin_manager_factory.build(store, path_provider)
+    }
+
+    /// Returns the intermediate manager of the write cache.
+    pub(crate) fn intermediate_manager(&self) -> &IntermediateManager {
+        &self.intermediate_manager
+    }
+
     /// Writes SST to the cache and then uploads it to the remote object store.
     pub(crate) async fn write_and_upload_sst(
         &self,
@@ -132,6 +144,7 @@ impl WriteCache {
         let mut writer = ParquetWriter::new_with_object_store(
             store.clone(),
             write_request.metadata,
+            write_request.index_config,
             indexer,
             path_provider.clone(),
             Metrics::new(write_type),
@@ -287,7 +300,7 @@ impl WriteCache {
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
-    async fn upload(
+    pub(crate) async fn upload(
         &self,
         index_key: IndexKey,
         upload_path: &str,
@@ -368,7 +381,7 @@ pub struct SstUploadRequest {
 }
 
 /// A structs to track files to upload and clean them if upload failed.
-struct UploadTracker {
+pub(crate) struct UploadTracker {
     /// Id of the region to track.
     region_id: RegionId,
     /// Paths of files uploaded successfully.
@@ -377,7 +390,7 @@ struct UploadTracker {
 
 impl UploadTracker {
     /// Creates a new instance of `UploadTracker` for a given region.
-    fn new(region_id: RegionId) -> Self {
+    pub(crate) fn new(region_id: RegionId) -> Self {
         Self {
             region_id,
             files_uploaded: Vec::new(),
@@ -385,12 +398,12 @@ impl UploadTracker {
     }
 
     /// Add a file path to the list of uploaded files.
-    fn push_uploaded_file(&mut self, path: String) {
+    pub(crate) fn push_uploaded_file(&mut self, path: String) {
         self.files_uploaded.push(path);
     }
 
     /// Cleans uploaded files and files in the file cache at best effort.
-    async fn clean(
+    pub(crate) async fn clean(
         &self,
         sst_info: &SstInfoArray,
         file_cache: &FileCacheRef,
@@ -474,6 +487,7 @@ mod tests {
             max_sequence: None,
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
+            index_config: Default::default(),
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
@@ -572,6 +586,7 @@ mod tests {
             max_sequence: None,
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
+            index_config: Default::default(),
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
@@ -651,6 +666,7 @@ mod tests {
             max_sequence: None,
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
+            index_config: Default::default(),
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),

@@ -342,6 +342,7 @@ impl Compactor for DefaultCompactor {
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
+            let index_config = compaction_region.engine_config.index.clone();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             let bloom_filter_index_config =
@@ -381,6 +382,7 @@ impl Compactor for DefaultCompactor {
                             storage,
                             max_sequence: max_sequence.map(NonZero::get),
                             index_options,
+                            index_config,
                             inverted_index_config,
                             fulltext_index_config,
                             bloom_filter_index_config,
