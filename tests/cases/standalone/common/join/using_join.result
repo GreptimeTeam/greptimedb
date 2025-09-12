@@ -1,0 +1,84 @@
+-- Migrated from DuckDB test: test/sql/join/inner/test_using_join.test
+-- Tests JOIN USING clause
+CREATE TABLE users_join(user_id INTEGER, username VARCHAR, email VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE orders_join(order_id INTEGER, user_id INTEGER, amount DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO users_join VALUES (1, 'alice', 'alice@test.com', 1000), (2, 'bob', 'bob@test.com', 2000);
+
+Affected Rows: 2
+
+INSERT INTO orders_join VALUES (101, 1, 150.0, 3000), (102, 1, 200.0, 4000), (103, 2, 75.0, 5000);
+
+Affected Rows: 3
+
+-- JOIN USING (automatically joins on common column)
+SELECT * FROM users_join JOIN orders_join USING (user_id) ORDER BY order_id;
+
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| username | email          | ts                  | order_id | user_id | amount | ts                  |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 101      | 1       | 150.0  | 1970-01-01T00:00:03 |
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 102      | 1       | 200.0  | 1970-01-01T00:00:04 |
+| bob      | bob@test.com   | 1970-01-01T00:00:02 | 103      | 2       | 75.0   | 1970-01-01T00:00:05 |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+
+-- LEFT JOIN USING
+SELECT * FROM users_join LEFT JOIN orders_join USING (user_id) ORDER BY user_id, order_id NULLS LAST;
+
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| username | email          | ts                  | order_id | user_id | amount | ts                  |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 101      | 1       | 150.0  | 1970-01-01T00:00:03 |
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 102      | 1       | 200.0  | 1970-01-01T00:00:04 |
+| bob      | bob@test.com   | 1970-01-01T00:00:02 | 103      | 2       | 75.0   | 1970-01-01T00:00:05 |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+
+-- JOIN USING with WHERE
+SELECT * FROM users_join JOIN orders_join USING (user_id) WHERE amount > 100 ORDER BY amount;
+
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| username | email          | ts                  | order_id | user_id | amount | ts                  |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 101      | 1       | 150.0  | 1970-01-01T00:00:03 |
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 102      | 1       | 200.0  | 1970-01-01T00:00:04 |
++----------+----------------+---------------------+----------+---------+--------+---------------------+
+
+-- Multiple table JOIN USING
+CREATE TABLE user_profiles(user_id INTEGER, age INTEGER, city VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO user_profiles VALUES (1, 25, 'NYC', 6000), (2, 30, 'LA', 7000);
+
+Affected Rows: 2
+
+SELECT * FROM users_join
+JOIN orders_join USING (user_id)
+JOIN user_profiles USING (user_id)
+ORDER BY order_id;
+
++----------+----------------+---------------------+----------+---------+--------+---------------------+---------+-----+------+---------------------+
+| username | email          | ts                  | order_id | user_id | amount | ts                  | user_id | age | city | ts                  |
++----------+----------------+---------------------+----------+---------+--------+---------------------+---------+-----+------+---------------------+
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 101      | 1       | 150.0  | 1970-01-01T00:00:03 | 1       | 25  | NYC  | 1970-01-01T00:00:06 |
+| alice    | alice@test.com | 1970-01-01T00:00:01 | 102      | 1       | 200.0  | 1970-01-01T00:00:04 | 1       | 25  | NYC  | 1970-01-01T00:00:06 |
+| bob      | bob@test.com   | 1970-01-01T00:00:02 | 103      | 2       | 75.0   | 1970-01-01T00:00:05 | 2       | 30  | LA   | 1970-01-01T00:00:07 |
++----------+----------------+---------------------+----------+---------+--------+---------------------+---------+-----+------+---------------------+
+
+DROP TABLE user_profiles;
+
+Affected Rows: 0
+
+DROP TABLE orders_join;
+
+Affected Rows: 0
+
+DROP TABLE users_join;
+
+Affected Rows: 0
+

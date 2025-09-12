@@ -1,0 +1,22 @@
+-- Tests joins with larger data sets
+
+CREATE TABLE log_entries(log_id INTEGER, user_id INTEGER, "action" VARCHAR, timestamp_val BIGINT, ts TIMESTAMP TIME INDEX);
+
+CREATE TABLE user_profiles(user_id INTEGER, username VARCHAR, signup_date DATE, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO log_entries VALUES
+(1, 1, 'login', 1700000000, 1000), (2, 1, 'view_page', 1700000060, 2000), (3, 2, 'login', 1700000120, 3000),
+(4, 2, 'purchase', 1700000180, 4000), (5, 3, 'login', 1700000240, 5000), (6, 1, 'logout', 1700000300, 6000),
+(7, 3, 'view_page', 1700000360, 7000), (8, 2, 'logout', 1700000420, 8000), (9, 3, 'purchase', 1700000480, 9000),
+(10, 1, 'view_page', 1700000540, 10000), (11, 2, 'view_page', 1700000600, 11000), (12, 3, 'logout', 1700000660, 12000);
+
+INSERT INTO user_profiles VALUES
+(1, 'alice_user', '2022-01-15', 1000), (2, 'bob_user', '2022-03-20', 2000), (3, 'charlie_user', '2022-06-10', 3000);
+
+SELECT u.username, COUNT(l.log_id) as activity_count, COUNT(DISTINCT l.action) as unique_actions FROM user_profiles u LEFT JOIN log_entries l ON u.user_id = l.user_id GROUP BY u.user_id, u.username ORDER BY activity_count DESC, u.username DESC;
+
+SELECT l."action", COUNT(DISTINCT l.user_id) as unique_users, COUNT(*) as total_actions FROM log_entries l INNER JOIN user_profiles u ON l.user_id = u.user_id GROUP BY l."action" ORDER BY total_actions DESC, l."action" ASC;
+
+DROP TABLE log_entries;
+
+DROP TABLE user_profiles;
