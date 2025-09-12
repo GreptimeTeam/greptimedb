@@ -1,0 +1,118 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_approximate_distinct_count.test
+-- Test approx_count_distinct operator
+-- Basic tests
+SELECT APPROX_DISTINCT(1);
+
++---------------------------+
+| approx_distinct(Int64(1)) |
++---------------------------+
+| 1                         |
++---------------------------+
+
+SELECT APPROX_DISTINCT(NULL);
+
+Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Support for 'approx_distinct' for data type Null is not implemented
+
+SELECT APPROX_DISTINCT('hello');
+
++--------------------------------+
+| approx_distinct(Utf8("hello")) |
++--------------------------------+
+| 1                              |
++--------------------------------+
+
+-- Test with range data
+SELECT APPROX_DISTINCT(10), APPROX_DISTINCT('hello') FROM numbers LIMIT 100;
+
++----------------------------+--------------------------------+
+| approx_distinct(Int64(10)) | approx_distinct(Utf8("hello")) |
++----------------------------+--------------------------------+
+| 1                          | 1                              |
++----------------------------+--------------------------------+
+
+SELECT APPROX_DISTINCT(number) FROM numbers LIMIT 100 WHERE 1 = 0;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: WHERE
+
+-- Test with different data types
+CREATE TABLE dates_test(t DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO dates_test VALUES
+    ('2008-01-01', 1000), (NULL, 2000), ('2007-01-01', 3000),
+    ('2008-02-01', 4000), ('2008-01-02', 5000), ('2008-01-01', 6000),
+    ('2008-01-01', 7000), ('2008-01-01', 8000);
+
+Affected Rows: 8
+
+SELECT APPROX_DISTINCT(t) FROM dates_test;
+
+Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Support for 'approx_distinct' for data type Date32 is not implemented
+
+DROP TABLE dates_test;
+
+Affected Rows: 0
+
+CREATE TABLE names_test(t VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO names_test VALUES
+    ('Pedro', 1000), (NULL, 2000), ('Pedro', 3000), ('Pedro', 4000),
+    ('Mark', 5000), ('Mark', 6000), ('Mark', 7000),
+    ('Hannes-Muehleisen', 8000), ('Hannes-Muehleisen', 9000);
+
+Affected Rows: 9
+
+SELECT APPROX_DISTINCT(t) FROM names_test;
+
++-------------------------------+
+| approx_distinct(names_test.t) |
++-------------------------------+
+| 3                             |
++-------------------------------+
+
+DROP TABLE names_test;
+
+Affected Rows: 0
+
+-- Test with large dataset
+CREATE TABLE large_test(a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO large_test SELECT number, number % 10, number * 1000 FROM numbers LIMIT 2000;
+
+Affected Rows: 2000
+
+SELECT APPROX_DISTINCT(a), APPROX_DISTINCT(b) FROM large_test;
+
++-------------------------------+-------------------------------+
+| approx_distinct(large_test.a) | approx_distinct(large_test.b) |
++-------------------------------+-------------------------------+
+| 2000                          | 10                            |
++-------------------------------+-------------------------------+
+
+-- Test with groups
+SELECT b, APPROX_DISTINCT(a) FROM large_test GROUP BY b ORDER BY b;
+
++---+-------------------------------+
+| b | approx_distinct(large_test.a) |
++---+-------------------------------+
+| 0 | 200                           |
+| 1 | 201                           |
+| 2 | 201                           |
+| 3 | 200                           |
+| 4 | 199                           |
+| 5 | 200                           |
+| 6 | 199                           |
+| 7 | 200                           |
+| 8 | 200                           |
+| 9 | 200                           |
++---+-------------------------------+
+
+DROP TABLE large_test;
+
+Affected Rows: 0
+
