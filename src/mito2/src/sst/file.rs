@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::{error, info};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,9 @@ use smallvec::SmallVec;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
+use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 
@@ -357,6 +361,71 @@ impl FileHandleInner {
             file_purger,
         }
     }
+}
+
+/// Delete
+pub async fn delete_files(
+    region_id: RegionId,
+    file_ids: &[FileId],
+    delete_index: bool,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    // Remove meta of the file from cache.
+    if let Some(cache) = &cache_manager {
+        for file_id in file_ids {
+            cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
+        }
+    }
+    let mut deleted_files = Vec::with_capacity(file_ids.len());
+
+    for file_id in file_ids {
+        let region_file_id = RegionFileId::new(region_id, *file_id);
+        match access_layer.delete_sst(&region_file_id).await {
+            Ok(_) => {
+                deleted_files.push(*file_id);
+            }
+            Err(e) => {
+                error!(e; "Failed to delete sst and index file for {}", region_file_id);
+            }
+        }
+    }
+
+    info!(
+        "Deleted {} files for region {}: {:?}",
+        deleted_files.len(),
+        region_id,
+        deleted_files
+    );
+
+    for file_id in file_ids {
+        let region_file_id = RegionFileId::new(region_id, *file_id);
+
+        if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
+            // Removes index file from the cache.
+            if delete_index {
+                write_cache
+                    .remove(IndexKey::new(region_id, *file_id, FileType::Puffin))
+                    .await;
+            }
+
+            // Remove the SST file from the cache.
+            write_cache
+                .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+                .await;
+        }
+
+        // Purges index content in the stager.
+        if let Err(e) = access_layer
+            .puffin_manager_factory()
+            .purge_stager(region_file_id)
+            .await
+        {
+            error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
+                    file_id, region_id);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
