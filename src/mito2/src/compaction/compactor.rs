@@ -335,8 +335,6 @@ impl Compactor for DefaultCompactor {
             let region_id = compaction_region.region_id;
             let cache_manager = compaction_region.cache_manager.clone();
             let storage = compaction_region.region_options.storage.clone();
-            // TODO: Set flat_format from mito config
-            let flat_format = false;
             let index_options = compaction_region
                 .current_version
                 .options
@@ -344,6 +342,9 @@ impl Compactor for DefaultCompactor {
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
+            let flat_format = compaction_region
+                .engine_config
+                .enable_experimental_flat_format;
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             let bloom_filter_index_config =

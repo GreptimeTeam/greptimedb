@@ -33,6 +33,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::BulkMemtableBuilder;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
@@ -344,6 +345,18 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
+        if self.config.enable_experimental_flat_format {
+            common_telemetry::info!(
+                "Overriding memtable config, use BulkMemtable under flat format"
+            );
+
+            return Arc::new(BulkMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+                !dedup, // append_mode: true if not dedup, false if dedup
+                merge_mode,
+            ));
+        }
+
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -367,6 +380,14 @@ impl MemtableBuilderProvider {
     }
 
     fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
+        if self.config.enable_experimental_flat_format {
+            return Arc::new(BulkMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+                !dedup, // append_mode: true if not dedup, false if dedup
+                merge_mode,
+            ));
+        }
+
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
