@@ -1,0 +1,184 @@
+-- Migrated from DuckDB test style: test weighted approximate percentile
+-- Test APPROX_PERCENTILE_CONT_WITH_WEIGHT function
+-- Test basic weighted percentile
+CREATE TABLE weight_test("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO weight_test VALUES
+    (10, 1, 1000), (20, 2, 2000), (30, 3, 3000), (40, 4, 4000), (50, 1, 5000);
+
+Affected Rows: 5
+
+-- Test 50th percentile (median) with weights
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++---------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0.5)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++---------------------------------------------------------------------------------------------------------------------+
+| 22                                                                                                                  |
++---------------------------------------------------------------------------------------------------------------------+
+
+-- Test different percentiles
+SELECT approx_percentile_cont_with_weight(weight, 0.25) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++----------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0.25)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++----------------------------------------------------------------------------------------------------------------------+
+| 16                                                                                                                   |
++----------------------------------------------------------------------------------------------------------------------+
+
+SELECT approx_percentile_cont_with_weight(weight, 0.75) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++----------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0.75)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++----------------------------------------------------------------------------------------------------------------------+
+| 44                                                                                                                   |
++----------------------------------------------------------------------------------------------------------------------+
+
+-- Test with groups
+CREATE TABLE weight_groups(grp INTEGER, "value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO weight_groups VALUES
+    (1, 10, 2, 1000), (1, 20, 3, 2000), (1, 30, 1, 3000),
+    (2, 100, 1, 4000), (2, 200, 4, 5000), (2, 300, 2, 6000);
+
+Affected Rows: 6
+
+SELECT grp, approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+FROM weight_groups GROUP BY grp ORDER BY grp;
+
++-----+-------------------------------------------------------------------------------------------------------------------------+
+| grp | approx_percentile_cont_with_weight(weight_groups.weight,Float64(0.5)) WITHIN GROUP [weight_groups.value ASC NULLS LAST] |
++-----+-------------------------------------------------------------------------------------------------------------------------+
+| 1   | 12                                                                                                                      |
+| 2   | 162                                                                                                                     |
++-----+-------------------------------------------------------------------------------------------------------------------------+
+
+-- Test with double values and weights
+CREATE TABLE weight_double("value" DOUBLE, "weight" DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO weight_double VALUES
+    (1.5, 0.5, 1000), (2.5, 1.0, 2000), (3.5, 1.5, 3000), (4.5, 2.0, 4000);
+
+Affected Rows: 4
+
+SELECT approx_percentile_cont_with_weight("weight", 0.5) WITHIN GROUP (ORDER BY "value") FROM weight_double;
+
++-------------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_double.weight,Float64(0.5)) WITHIN GROUP [weight_double.value ASC NULLS LAST] |
++-------------------------------------------------------------------------------------------------------------------------+
+| 3.3333333333333335                                                                                                      |
++-------------------------------------------------------------------------------------------------------------------------+
+
+-- Test edge cases
+-- Test with zero weights
+SELECT approx_percentile_cont_with_weight("weight", 0.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- min
+SELECT approx_percentile_cont_with_weight("weight", 1.0) WITHIN GROUP (ORDER BY "value") FROM weight_test;  -- max
+CREATE TABLE zero_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
+
+Error: 1001(Unsupported), Not supported: execute multiple statements in SQL query string through GRPC interface
+
+INSERT INTO zero_weight VALUES 
+    (10, 0, 1000), (20, 1, 2000), (30, 0, 3000), (40, 2, 4000);
+
+Affected Rows: 4
+
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM zero_weight;
+
++---------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(zero_weight.weight,Float64(0.5)) WITHIN GROUP [zero_weight.value ASC NULLS LAST] |
++---------------------------------------------------------------------------------------------------------------------+
+| 0                                                                                                                   |
++---------------------------------------------------------------------------------------------------------------------+
+
+-- Test with NULL values
+INSERT INTO weight_test VALUES (NULL, 1, 6000), (60, NULL, 7000);
+
+Affected Rows: 2
+
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM weight_test;
+
++---------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0.5)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++---------------------------------------------------------------------------------------------------------------------+
+| 22                                                                                                                  |
++---------------------------------------------------------------------------------------------------------------------+
+
+-- Test empty result
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") 
+FROM weight_test WHERE "value" > 1000;
+
++---------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(weight_test.weight,Float64(0.5)) WITHIN GROUP [weight_test.value ASC NULLS LAST] |
++---------------------------------------------------------------------------------------------------------------------+
+|                                                                                                                     |
++---------------------------------------------------------------------------------------------------------------------+
+
+-- Test single weighted value
+CREATE TABLE single_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO single_weight VALUES (42, 5, 1000);
+
+Affected Rows: 1
+
+SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM single_weight;
+
++-------------------------------------------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(single_weight.weight,Float64(0.5)) WITHIN GROUP [single_weight.value ASC NULLS LAST] |
++-------------------------------------------------------------------------------------------------------------------------+
+| 42                                                                                                                      |
++-------------------------------------------------------------------------------------------------------------------------+
+
+-- Test equal weights (should behave like regular percentile)
+CREATE TABLE equal_weight("value" INTEGER, weight INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO equal_weight VALUES
+    (10, 1, 1000), (20, 1, 2000), (30, 1, 3000), (40, 1, 4000);
+
+Affected Rows: 4
+
+SELECT 
+    approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value"),
+    approx_percentile_cont(0.5) WITHIN GROUP (ORDER BY "value")
+FROM equal_weight;
+
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+
+| approx_percentile_cont_with_weight(equal_weight.weight,Float64(0.5)) WITHIN GROUP [equal_weight.value ASC NULLS LAST] | approx_percentile_cont(Float64(0.5)) WITHIN GROUP [equal_weight.value ASC NULLS LAST] |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+
+| 25                                                                                                                    | 25                                                                                    |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+
+
+-- cleanup
+DROP TABLE weight_test;
+
+Affected Rows: 0
+
+DROP TABLE weight_groups;
+
+Affected Rows: 0
+
+DROP TABLE weight_double;
+
+Affected Rows: 0
+
+DROP TABLE zero_weight;
+
+Affected Rows: 0
+
+DROP TABLE single_weight;
+
+Affected Rows: 0
+
+DROP TABLE equal_weight;
+
+Affected Rows: 0
+
