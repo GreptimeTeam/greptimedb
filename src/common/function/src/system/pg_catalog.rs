@@ -19,9 +19,10 @@ mod version;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::catalog::TableFunction;
 use datafusion_expr::{Signature, Volatility};
 use datafusion_postgres::pg_catalog::{
-    create_format_type_udf, create_pg_get_partkeydef_udf, has_privilege_udf,
+    create_format_type_udf, create_pg_get_partkeydef_udf, has_privilege_udf, PgCatalogStaticTables,
 };
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
@@ -142,6 +143,9 @@ pub(super) struct PGCatalogFunction;
 
 impl PGCatalogFunction {
     pub fn register(registry: &FunctionRegistry) {
+        let static_tables =
+            Arc::new(PgCatalogStaticTables::try_new().expect("load postgres static tables"));
+
         registry.register_scalar(PGTableIsVisibleFunction);
         registry.register_scalar(PGGetUserByIdFunction);
         registry.register_scalar(PGVersionFunction);
@@ -167,6 +171,10 @@ impl PGCatalogFunction {
         ));
         registry.register(has_privilege_udf::create_has_privilege_udf(
             "pg_catalog.has_any_column_privilege",
+        ));
+        registry.register_table_function(TableFunction::new(
+            "pg_get_keywords".to_string(),
+            static_tables.pg_get_keywords.clone(),
         ));
     }
 }
