@@ -1,0 +1,58 @@
+-- Migrated from DuckDB test: test/sql/join/right_outer/test_right_outer.test
+-- Tests RIGHT OUTER JOIN scenarios
+CREATE TABLE products_right("id" INTEGER, "name" VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE inventory_right(product_id INTEGER, stock INTEGER, "warehouse" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO products_right VALUES (1, 'Laptop', 1000.0, 1000), (2, 'Mouse', 25.0, 2000);
+
+Affected Rows: 2
+
+INSERT INTO inventory_right VALUES (1, 5, 'WH1', 3000), (2, 10, 'WH1', 4000), (3, 15, 'WH2', 5000);
+
+Affected Rows: 3
+
+-- Basic RIGHT JOIN
+SELECT * FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.product_id ORDER BY i.product_id;
+
++----+--------+--------+---------------------+------------+-------+-----------+---------------------+
+| id | name   | price  | ts                  | product_id | stock | warehouse | ts                  |
++----+--------+--------+---------------------+------------+-------+-----------+---------------------+
+| 1  | Laptop | 1000.0 | 1970-01-01T00:00:01 | 1          | 5     | WH1       | 1970-01-01T00:00:03 |
+| 2  | Mouse  | 25.0   | 1970-01-01T00:00:02 | 2          | 10    | WH1       | 1970-01-01T00:00:04 |
+|    |        |        |                     | 3          | 15    | WH2       | 1970-01-01T00:00:05 |
++----+--------+--------+---------------------+------------+-------+-----------+---------------------+
+
+-- RIGHT JOIN with WHERE on left table
+SELECT * FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.product_id WHERE p.price IS NULL ORDER BY i.product_id;
+
++----+------+-------+----+------------+-------+-----------+---------------------+
+| id | name | price | ts | product_id | stock | warehouse | ts                  |
++----+------+-------+----+------------+-------+-----------+---------------------+
+|    |      |       |    | 3          | 15    | WH2       | 1970-01-01T00:00:05 |
++----+------+-------+----+------------+-------+-----------+---------------------+
+
+-- RIGHT JOIN with aggregation
+SELECT i."warehouse", COUNT(*) as items, AVG(p.price) as avg_price
+FROM products_right p RIGHT JOIN inventory_right i ON p."id" = i.product_id
+GROUP BY i."warehouse" ORDER BY i."warehouse";
+
++-----------+-------+-----------+
+| warehouse | items | avg_price |
++-----------+-------+-----------+
+| WH1       | 2     | 512.5     |
+| WH2       | 1     |           |
++-----------+-------+-----------+
+
+DROP TABLE inventory_right;
+
+Affected Rows: 0
+
+DROP TABLE products_right;
+
+Affected Rows: 0
+

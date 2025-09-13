@@ -1,0 +1,61 @@
+-- Migrated from DuckDB test: test/sql/join/full_outer/test_full_outer_join.test
+-- Tests FULL OUTER JOIN scenarios
+CREATE TABLE left_full("id" INTEGER, "name" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE right_full("id" INTEGER, "value" INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO left_full VALUES (1, 'Alice', 1000), (2, 'Bob', 2000), (3, 'Carol', 3000);
+
+Affected Rows: 3
+
+INSERT INTO right_full VALUES (2, 200, 4000), (3, 300, 5000), (4, 400, 6000);
+
+Affected Rows: 3
+
+-- Basic FULL OUTER JOIN
+SELECT * FROM left_full l FULL OUTER JOIN right_full r ON l."id" = r."id" ORDER BY l."id" NULLS LAST, r."id" NULLS LAST;
+
++----+-------+---------------------+----+-------+---------------------+
+| id | name  | ts                  | id | value | ts                  |
++----+-------+---------------------+----+-------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 |    |       |                     |
+| 2  | Bob   | 1970-01-01T00:00:02 | 2  | 200   | 1970-01-01T00:00:04 |
+| 3  | Carol | 1970-01-01T00:00:03 | 3  | 300   | 1970-01-01T00:00:05 |
+|    |       |                     | 4  | 400   | 1970-01-01T00:00:06 |
++----+-------+---------------------+----+-------+---------------------+
+
+-- FULL OUTER JOIN with WHERE on result
+SELECT * FROM left_full l FULL OUTER JOIN right_full r ON l."id" = r."id" WHERE l."name" IS NULL OR r."value" IS NULL ORDER BY l."id" NULLS LAST, r."id" NULLS LAST;
+
++----+-------+---------------------+----+-------+---------------------+
+| id | name  | ts                  | id | value | ts                  |
++----+-------+---------------------+----+-------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 |    |       |                     |
+|    |       |                     | 4  | 400   | 1970-01-01T00:00:06 |
++----+-------+---------------------+----+-------+---------------------+
+
+-- FULL OUTER JOIN with complex conditions
+SELECT * FROM left_full l FULL OUTER JOIN right_full r ON l."id" = r."id" AND r."value" > 250 ORDER BY l."id" NULLS LAST, r."id" NULLS LAST;
+
++----+-------+---------------------+----+-------+---------------------+
+| id | name  | ts                  | id | value | ts                  |
++----+-------+---------------------+----+-------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 |    |       |                     |
+| 2  | Bob   | 1970-01-01T00:00:02 |    |       |                     |
+| 3  | Carol | 1970-01-01T00:00:03 | 3  | 300   | 1970-01-01T00:00:05 |
+|    |       |                     | 2  | 200   | 1970-01-01T00:00:04 |
+|    |       |                     | 4  | 400   | 1970-01-01T00:00:06 |
++----+-------+---------------------+----+-------+---------------------+
+
+DROP TABLE right_full;
+
+Affected Rows: 0
+
+DROP TABLE left_full;
+
+Affected Rows: 0
+

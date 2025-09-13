@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{Instant, sleep};
 
+use crate::discovery::utils::find_datanode_lease_value;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::lease::find_datanode_lease_value;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::procedure::region_migration::{Context, State};
@@ -241,7 +241,7 @@ impl DowngradeLeaderRegion {
     async fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
         let leader = &ctx.persistent_ctx.from_peer;
 
-        let last_connection_at = match find_datanode_lease_value(leader.id, &ctx.in_memory).await {
+        let last_connection_at = match find_datanode_lease_value(&ctx.in_memory, leader.id).await {
             Ok(lease_value) => lease_value.map(|lease_value| lease_value.timestamp_millis),
             Err(err) => {
                 error!(err; "Failed to find datanode lease value for datanode: {}, during region migration, region: {}", leader, ctx.persistent_ctx.region_id);

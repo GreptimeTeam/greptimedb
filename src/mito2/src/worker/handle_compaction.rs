@@ -74,9 +74,11 @@ impl<S> RegionWorkerLoop<S> {
         };
         region.update_compaction_millis();
 
-        region
-            .version_control
-            .apply_edit(request.edit.clone(), &[], region.file_purger.clone());
+        region.version_control.apply_edit(
+            Some(request.edit.clone()),
+            &[],
+            region.file_purger.clone(),
+        );
 
         // compaction finished.
         request.on_success();

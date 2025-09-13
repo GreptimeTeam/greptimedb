@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -23,9 +22,9 @@ use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::lease::{LeaseValueAccessor, LeaseValueType};
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
-use crate::lease;
 use crate::service::admin::HttpHandler;
 use crate::service::admin::util::ErrorHandler;
 
@@ -36,12 +35,17 @@ pub struct NodeLeaseHandler {
 
 impl NodeLeaseHandler {
     async fn get_node_lease(&self) -> Result<LeaseValues> {
-        let leases =
-            lease::alive_datanodes(&self.meta_peer_client, Duration::from_secs(u64::MAX)).await?;
+        let leases = self
+            .meta_peer_client
+            .lease_values(LeaseValueType::Datanode)
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
         let leases = leases
             .into_iter()
             .map(|(k, v)| HumanLease {
-                name: k,
+                name: DatanodeLeaseKey { node_id: k },
                 human_time: common_time::Timestamp::new_millisecond(v.timestamp_millis)
                     .to_local_string(),
                 lease: v,

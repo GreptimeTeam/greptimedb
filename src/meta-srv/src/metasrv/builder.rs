@@ -48,23 +48,24 @@ use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
+use store_api::storage::MAX_REGION_SEQ;
 
+use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
-use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
-use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, FLOW_ID_SEQ, METASRV_DATA_DIR, Metasrv, MetasrvInfo, MetasrvOptions,
     RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
+use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::wal_prune::Context as WalPruneContext;
@@ -80,7 +81,6 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
-use crate::table_meta_alloc::MetasrvPeerAllocator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
@@ -203,10 +203,9 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
-            peer_lookup_service.clone(),
+            meta_peer_client.clone(),
             Some(InsertOptions {
                 ttl: options.event_recorder.ttl,
                 append_mode: true,
@@ -218,7 +217,7 @@ impl MetasrvBuilder {
             event_inserter,
         ))));
 
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
@@ -237,12 +236,7 @@ impl MetasrvBuilder {
         ));
 
         let selector_ctx = SelectorContext {
-            server_addr: options.grpc.server_addr.clone(),
-            datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
-            flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
-            kv_backend: kv_backend.clone(),
-            meta_peer_client: meta_peer_client.clone(),
-            table_id: None,
+            peer_discovery: meta_peer_client.clone(),
         };
 
         let wal_options_allocator = build_wal_options_allocator(&options.wal, kv_backend.clone())
@@ -257,10 +251,10 @@ impl MetasrvBuilder {
                     .step(10)
                     .build(),
             );
-            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
-                selector_ctx.clone(),
-                selector.clone(),
-            ));
+            let peer_allocator = Arc::new(
+                MetasrvPeerAllocator::new(selector_ctx.clone(), selector.clone())
+                    .with_max_items(MAX_REGION_SEQ),
+            );
             Arc::new(TableMetadataAllocator::with_peer_allocator(
                 sequence,
                 wal_options_allocator.clone(),
@@ -269,15 +263,13 @@ impl MetasrvBuilder {
         });
         let table_id_sequence = table_metadata_allocator.table_id_sequence();
 
-        let flow_selector = Arc::new(RoundRobinSelector::new(
-            SelectTarget::Flownode,
-            Arc::new(Vec::new()),
-        )) as SelectorRef;
+        let flow_selector =
+            Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)) as SelectorRef;
 
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
             let flow_selector_ctx = selector_ctx.clone();
-            let peer_allocator = Arc::new(FlowPeerAllocator::new(
+            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
                 flow_selector_ctx,
                 flow_selector.clone(),
             ));
@@ -378,7 +370,7 @@ impl MetasrvBuilder {
                 supervisor_selector,
                 region_migration_manager.clone(),
                 runtime_switch_manager.clone(),
-                peer_lookup_service.clone(),
+                meta_peer_client.clone(),
                 leader_cached_kv_backend.clone(),
             );
 
@@ -470,7 +462,7 @@ impl MetasrvBuilder {
 
         let persist_region_stats_handler = if !options.stats_persistence.ttl.is_zero() {
             let inserter = Box::new(InsertForwarder::new(
-                peer_lookup_service.clone(),
+                meta_peer_client.clone(),
                 Some(InsertOptions {
                     ttl: options.stats_persistence.ttl,
                     append_mode: true,
@@ -567,19 +559,6 @@ impl MetasrvBuilder {
             resource_spec: Default::default(),
         })
     }
-}
-
-fn build_default_meta_peer_client(
-    election: &Option<ElectionRef>,
-    in_memory: &ResettableKvBackendRef,
-) -> MetaPeerClientRef {
-    MetaPeerClientBuilder::default()
-        .election(election.clone())
-        .in_memory(in_memory.clone())
-        .build()
-        .map(Arc::new)
-        // Safety: all required fields set at initialization
-        .unwrap()
 }
 
 fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {

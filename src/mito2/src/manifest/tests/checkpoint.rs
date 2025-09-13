@@ -123,7 +123,7 @@ async fn manager_without_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -171,7 +171,7 @@ async fn manager_with_checkpoint_distance_1() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
     paths.sort_unstable();
@@ -267,6 +267,7 @@ async fn checkpoint_with_different_compression_types() {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
@@ -330,6 +331,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
@@ -425,7 +427,7 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     expected.sort_unstable();
     let mut paths = manager
         .store()
-        .get_paths(|e| Some(e.name().to_string()))
+        .get_paths(|e| Some(e.name().to_string()), false)
         .await
         .unwrap();
 

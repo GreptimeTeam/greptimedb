@@ -36,8 +36,7 @@ use common_telemetry::warn;
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::error;
-use crate::error::{Result, match_for_io_error};
+use crate::error::{self, Result, match_for_io_error};
 use crate::metasrv::ElectionRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;

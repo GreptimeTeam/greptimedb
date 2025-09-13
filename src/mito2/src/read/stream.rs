@@ -23,10 +23,10 @@ use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::compute;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::cache::CacheStrategy;
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::read::Batch;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_util::PartitionMetrics;
@@ -67,17 +67,11 @@ impl ConvertBatchStream {
     }
 
     fn convert(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
-        let mapper = self
-            .projection_mapper
-            .as_primary_key()
-            .context(UnexpectedSnafu {
-                reason: "Unexpected format",
-            })
-            .map_err(|e| BoxedError::new(e) as _)
-            .context(ExternalSnafu)?;
-
         match batch {
             ScanBatch::Normal(batch) => {
+                // Safety: Only primary key format returns this batch.
+                let mapper = self.projection_mapper.as_primary_key().unwrap();
+
                 if batch.is_empty() {
                     Ok(mapper.empty_record_batch())
                 } else {
@@ -85,20 +79,39 @@ impl ConvertBatchStream {
                 }
             }
             ScanBatch::Series(series) => {
-                self.buffer.clear();
-                self.buffer.reserve(series.batches.len());
+                match series {
+                    SeriesBatch::PrimaryKey(primary_key_batch) => {
+                        self.buffer.clear();
+                        self.buffer.reserve(primary_key_batch.batches.len());
+                        // Safety: Only primary key format returns this batch.
+                        let mapper = self.projection_mapper.as_primary_key().unwrap();
 
-                for batch in series.batches {
-                    let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
-                    self.buffer.push(record_batch.into_df_record_batch());
-                }
+                        for batch in primary_key_batch.batches {
+                            let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
+                            self.buffer.push(record_batch.into_df_record_batch());
+                        }
 
-                let output_schema = mapper.output_schema();
-                let record_batch =
-                    compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
+                        let output_schema = mapper.output_schema();
+                        let record_batch =
+                            compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
+                                .context(ArrowComputeSnafu)?;
+
+                        RecordBatch::try_from_df_record_batch(output_schema, record_batch)
+                    }
+                    SeriesBatch::Flat(flat_batch) => {
+                        // Safety: Only flat format returns this batch.
+                        let mapper = self.projection_mapper.as_flat().unwrap();
+
+                        let output_schema = mapper.output_schema();
+                        let record_batch = compute::concat_batches(
+                            output_schema.arrow_schema(),
+                            &flat_batch.batches,
+                        )
                         .context(ArrowComputeSnafu)?;
 
-                RecordBatch::try_from_df_record_batch(output_schema, record_batch)
+                        mapper.convert(&record_batch)
+                    }
+                }
             }
             ScanBatch::RecordBatch(df_record_batch) => {
                 // Safety: Only flat format returns this batch.

@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_meta::distributed_time_constants::{FLOWNODE_LEASE_SECS, REGION_LEASE_SECS};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use rand::prelude::SliceRandom;
@@ -35,12 +34,7 @@ pub fn new_test_selector_context() -> SelectorContext {
         .unwrap();
 
     SelectorContext {
-        server_addr: "127.0.0.1:3002".to_string(),
-        datanode_lease_secs: REGION_LEASE_SECS,
-        flownode_lease_secs: FLOWNODE_LEASE_SECS,
-        kv_backend,
-        meta_peer_client,
-        table_id: None,
+        peer_discovery: meta_peer_client,
     }
 }
 

@@ -29,7 +29,8 @@ use crate::access_layer::{AccessLayerRef, Metrics, OperationType, SstWriteReques
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    Error, FlushRegionSnafu, InvalidPartitionExprSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::MemtableRanges;
@@ -411,6 +412,14 @@ impl RegionFlushTask {
             }
             flush_metrics = flush_metrics.merge(metrics);
 
+            // Convert partition expression once outside the map
+            let partition_expr = match &version.metadata.partition_expr {
+                None => None,
+                Some(json_expr) if json_expr.is_empty() => None,
+                Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                    .with_context(|_| InvalidPartitionExprSnafu { expr: json_str })?,
+            };
+
             file_metas.extend(ssts_written.into_iter().map(|sst_info| {
                 flushed_bytes += sst_info.file_size;
                 FileMeta {
@@ -424,6 +433,7 @@ impl RegionFlushTask {
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
                     sequence: NonZeroU64::new(max_sequence),
+                    partition_expr: partition_expr.clone(),
                 }
             }));
         }
@@ -1002,14 +1012,14 @@ mod tests {
             .collect();
         // Assumes the flush job is finished.
         version_control.apply_edit(
-            RegionEdit {
+            Some(RegionEdit {
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
                 timestamp_ms: None,
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
-            },
+            }),
             &[0],
             builder.file_purger(),
         );
