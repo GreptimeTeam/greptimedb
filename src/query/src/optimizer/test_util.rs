@@ -86,11 +86,8 @@ impl RegionEngine for MetaRegionEngine {
         None
     }
 
-    async fn get_last_seq_num(
-        &self,
-        _region_id: RegionId,
-    ) -> Result<Option<SequenceNumber>, BoxedError> {
-        Ok(None)
+    async fn get_last_seq_num(&self, _region_id: RegionId) -> Result<SequenceNumber, BoxedError> {
+        Ok(SequenceNumber::default())
     }
 
     async fn stop(&self) -> Result<(), BoxedError> {
