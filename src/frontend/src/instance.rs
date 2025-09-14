@@ -376,33 +376,35 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> server_error::Result<bool> {
         let db_string = ctx.get_db_string();
-        let cache = self
-            .otlp_metrics_table_legacy_cache
-            .entry(db_string)
-            .or_default();
+        // fast cache check
+        {
+            let cache = self
+                .otlp_metrics_table_legacy_cache
+                .entry(db_string.clone())
+                .or_default();
 
-        // check cache
-        let hit_cache = names
-            .iter()
-            .filter_map(|name| cache.get(*name))
-            .collect::<Vec<_>>();
-        if !hit_cache.is_empty() {
-            let hit_legacy = hit_cache.iter().any(|en| *en.value());
-            let hit_prom = hit_cache.iter().any(|en| !*en.value());
+            let hit_cache = names
+                .iter()
+                .filter_map(|name| cache.get(*name))
+                .collect::<Vec<_>>();
+            if !hit_cache.is_empty() {
+                let hit_legacy = hit_cache.iter().any(|en| *en.value());
+                let hit_prom = hit_cache.iter().any(|en| !*en.value());
 
-            // hit but have true and false, means both legacy and new mode are used
-            // we cannot handle this case, so return error
-            // add doc links in err msg later
-            ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
+                // hit but have true and false, means both legacy and new mode are used
+                // we cannot handle this case, so return error
+                // add doc links in err msg later
+                ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
-            let flag = hit_legacy;
-            // set cache for all names
-            names.iter().for_each(|name| {
-                if !cache.contains_key(*name) {
-                    cache.insert(name.to_string(), flag);
-                }
-            });
-            return Ok(flag);
+                let flag = hit_legacy;
+                // set cache for all names
+                names.iter().for_each(|name| {
+                    if !cache.contains_key(*name) {
+                        cache.insert(name.to_string(), flag);
+                    }
+                });
+                return Ok(flag);
+            }
         }
 
         let catalog = ctx.current_catalog();
@@ -430,7 +432,10 @@ impl Instance {
 
         // means no existing table is found, use new mode
         if table_ids.is_empty() {
-            // set cache
+            let cache = self
+                .otlp_metrics_table_legacy_cache
+                .entry(db_string)
+                .or_default();
             names.iter().for_each(|name| {
                 cache.insert(name.to_string(), false);
             });
@@ -455,6 +460,10 @@ impl Instance {
                     .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
             })
             .collect::<Vec<_>>();
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(db_string)
+            .or_default();
         if !options.is_empty() {
             // check value consistency
             let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
