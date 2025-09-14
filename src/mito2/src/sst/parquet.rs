@@ -43,7 +43,7 @@ pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
 
 /// Parquet write options.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Buffer size for async writer.
     pub write_buffer_size: ReadableSize,

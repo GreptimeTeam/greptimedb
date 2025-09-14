@@ -55,10 +55,10 @@ use crate::error::{
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
-use crate::read::BoxedBatchReader;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
+use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -660,6 +660,32 @@ impl CompactionSstReaderBuilder<'_> {
 
         SeqScan::new(scan_input, true)
             .build_reader_for_compaction()
+            .await
+    }
+
+    /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
+    async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
+        let mut scan_input =
+            ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata, true)?)
+                .with_files(self.inputs.to_vec())
+                .with_append_mode(self.append_mode)
+                // We use special cache strategy for compaction.
+                .with_cache(CacheStrategy::Compaction(self.cache))
+                .with_filter_deleted(self.filter_deleted)
+                // We ignore file not found error during compaction.
+                .with_ignore_file_not_found(true)
+                .with_merge_mode(self.merge_mode)
+                .with_flat_format(true);
+
+        // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
+        // by converting time ranges into predicate.
+        if let Some(time_range) = self.time_range {
+            scan_input =
+                scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
+        }
+
+        SeqScan::new(scan_input, true)
+            .build_flat_reader_for_compaction()
             .await
     }
 }
