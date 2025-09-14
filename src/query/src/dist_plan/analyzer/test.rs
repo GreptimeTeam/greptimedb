@@ -156,7 +156,7 @@ impl Stream for EmptyStream {
 fn expand_proj_sort_proj() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -203,7 +203,7 @@ fn expand_proj_sort_proj() {
 fn expand_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -237,7 +237,7 @@ fn expand_sort_limit() {
 fn expand_sort_alias_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -276,7 +276,7 @@ fn expand_sort_alias_limit() {
 fn expand_sort_alias_conflict_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -318,7 +318,7 @@ fn expand_sort_alias_conflict_limit() {
 fn expand_sort_alias_conflict_but_not_really_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -358,7 +358,7 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
 fn expand_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -391,7 +391,7 @@ fn expand_limit_sort() {
 fn expand_sort_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -438,7 +438,7 @@ fn expand_sort_limit_sort() {
 fn expand_proj_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -473,7 +473,7 @@ fn expand_proj_step_aggr() {
 fn expand_proj_alias_fake_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -517,7 +517,7 @@ fn expand_proj_alias_fake_part_col_aggr() {
 fn expand_proj_alias_aliased_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -563,7 +563,7 @@ fn expand_proj_alias_aliased_part_col_aggr() {
 fn expand_part_col_aggr_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -596,7 +596,7 @@ fn expand_part_col_aggr_step_aggr() {
 fn expand_step_aggr_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -629,7 +629,7 @@ fn expand_step_aggr_step_aggr() {
 fn expand_part_col_aggr_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -673,7 +673,7 @@ fn expand_part_col_aggr_part_col_aggr() {
 fn expand_step_aggr_proj() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -709,7 +709,7 @@ fn expand_step_aggr_proj() {
 fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -750,7 +750,7 @@ fn expand_proj_sort_step_aggr_limit() {
 fn expand_proj_sort_limit_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -792,7 +792,7 @@ fn expand_proj_sort_limit_step_aggr() {
 fn expand_proj_limit_step_aggr_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -833,7 +833,7 @@ fn expand_proj_limit_step_aggr_sort() {
 fn expand_proj_sort_part_col_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -875,7 +875,7 @@ fn expand_proj_sort_part_col_aggr_limit() {
 fn expand_proj_sort_limit_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -917,7 +917,7 @@ fn expand_proj_sort_limit_part_col_aggr() {
 fn expand_proj_part_col_aggr_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -959,7 +959,7 @@ fn expand_proj_part_col_aggr_limit_sort() {
 fn expand_proj_part_col_aggr_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1002,7 +1002,7 @@ fn expand_proj_part_col_aggr_sort_limit() {
 fn expand_proj_limit_part_col_aggr_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1044,7 +1044,7 @@ fn expand_proj_limit_part_col_aggr_sort() {
 fn expand_proj_limit_sort_part_col_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1087,7 +1087,7 @@ fn expand_proj_limit_sort_part_col_aggr() {
 fn expand_step_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1120,7 +1120,7 @@ fn expand_step_aggr_limit() {
 fn expand_step_aggr_avg_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));
@@ -1153,7 +1153,7 @@ fn expand_step_aggr_avg_limit() {
 fn expand_part_col_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let test_table = TestTable::table_with_name(0, "t".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
     )));

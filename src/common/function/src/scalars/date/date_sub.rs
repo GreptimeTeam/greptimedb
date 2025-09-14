@@ -18,7 +18,6 @@ use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSna
 use datafusion_expr::Signature;
 use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
-use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ResultExt, ensure};
 
@@ -38,7 +37,7 @@ impl Function for DateSubFunction {
         NAME
     }
 
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
         Ok(input_types[0].clone())
     }
 
@@ -93,7 +92,6 @@ mod tests {
 
     use datafusion_expr::{TypeSignature, Volatility};
     use datatypes::arrow::datatypes::IntervalDayTime;
-    use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
         DateVector, IntervalDayTimeVector, IntervalYearMonthVector, TimestampSecondVector,
@@ -106,18 +104,18 @@ mod tests {
         let f = DateSubFunction;
         assert_eq!("date_sub", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_microsecond_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_microsecond_datatype()])
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            f.return_type(&[DataType::Timestamp(TimeUnit::Microsecond, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::timestamp_second_datatype(),
-            f.return_type(&[ConcreteDataType::timestamp_second_datatype()])
+            DataType::Timestamp(TimeUnit::Second, None),
+            f.return_type(&[DataType::Timestamp(TimeUnit::Second, None)])
                 .unwrap()
         );
         assert_eq!(
-            ConcreteDataType::date_datatype(),
-            f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
+            DataType::Date32,
+            f.return_type(&[DataType::Date32]).unwrap()
         );
         assert!(
             matches!(f.signature(),

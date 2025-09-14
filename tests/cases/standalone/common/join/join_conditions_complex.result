@@ -1,0 +1,162 @@
+-- Migrated from DuckDB test: test/sql/join/ complex condition tests
+-- Tests complex join conditions and predicates
+CREATE TABLE sales_reps(rep_id INTEGER, "name" VARCHAR, region VARCHAR, quota INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customer_accounts(account_id INTEGER, account_name VARCHAR, region VARCHAR, rep_id INTEGER, revenue INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO sales_reps VALUES
+(1, 'Tom', 'North', 100000, 1000), (2, 'Sarah', 'South', 150000, 2000),
+(3, 'Mike', 'East', 120000, 3000), (4, 'Lisa', 'West', 180000, 4000);
+
+Affected Rows: 4
+
+INSERT INTO customer_accounts VALUES
+(101, 'TechCorp', 'North', 1, 85000, 1000), (102, 'DataInc', 'South', 2, 195000, 2000),
+(103, 'CloudSys', 'North', 1, 110000, 3000), (104, 'NetSoft', 'East', 3, 75000, 4000),
+(105, 'WebCo', 'West', 4, 225000, 5000), (106, 'AppDev', 'South', 2, 140000, 6000);
+
+Affected Rows: 6
+
+-- Join with multiple conditions
+SELECT
+  sr."name" as rep_name, ca.account_name, ca.revenue
+FROM sales_reps sr
+INNER JOIN customer_accounts ca
+  ON sr.rep_id = ca.rep_id AND sr.region = ca.region
+ORDER BY sr.rep_id, ca.revenue DESC;
+
++----------+--------------+---------+
+| rep_name | account_name | revenue |
++----------+--------------+---------+
+| Tom      | CloudSys     | 110000  |
+| Tom      | TechCorp     | 85000   |
+| Sarah    | DataInc      | 195000  |
+| Sarah    | AppDev       | 140000  |
+| Mike     | NetSoft      | 75000   |
+| Lisa     | WebCo        | 225000  |
++----------+--------------+---------+
+
+-- Join with inequality conditions
+SELECT
+  sr."name", sr.quota, ca.account_name, ca.revenue
+FROM sales_reps sr
+INNER JOIN customer_accounts ca
+  ON sr.rep_id = ca.rep_id AND ca.revenue < sr.quota
+ORDER BY sr.rep_id, ca.revenue;
+
++-------+--------+--------------+---------+
+| name  | quota  | account_name | revenue |
++-------+--------+--------------+---------+
+| Tom   | 100000 | TechCorp     | 85000   |
+| Sarah | 150000 | AppDev       | 140000  |
+| Mike  | 120000 | NetSoft      | 75000   |
++-------+--------+--------------+---------+
+
+-- Join with range conditions
+SELECT
+  sr."name", ca.account_name, ca.revenue, sr.quota
+FROM sales_reps sr
+INNER JOIN customer_accounts ca
+  ON sr.rep_id = ca.rep_id
+  AND ca.revenue BETWEEN sr.quota * 0.5 AND sr.quota * 1.5
+ORDER BY sr.rep_id, ca.revenue;
+
++-------+--------------+---------+--------+
+| name  | account_name | revenue | quota  |
++-------+--------------+---------+--------+
+| Tom   | TechCorp     | 85000   | 100000 |
+| Tom   | CloudSys     | 110000  | 100000 |
+| Sarah | AppDev       | 140000  | 150000 |
+| Sarah | DataInc      | 195000  | 150000 |
+| Mike  | NetSoft      | 75000   | 120000 |
+| Lisa  | WebCo        | 225000  | 180000 |
++-------+--------------+---------+--------+
+
+-- Join with CASE in conditions
+SELECT
+  sr."name", ca.account_name, ca.revenue,
+  CASE WHEN ca.revenue >= sr.quota THEN 'Met Quota' ELSE 'Below Quota' END as performance
+FROM sales_reps sr
+INNER JOIN customer_accounts ca ON sr.rep_id = ca.rep_id
+ORDER BY sr.rep_id, ca.revenue DESC;
+
++-------+--------------+---------+-------------+
+| name  | account_name | revenue | performance |
++-------+--------------+---------+-------------+
+| Tom   | CloudSys     | 110000  | Met Quota   |
+| Tom   | TechCorp     | 85000   | Below Quota |
+| Sarah | DataInc      | 195000  | Met Quota   |
+| Sarah | AppDev       | 140000  | Below Quota |
+| Mike  | NetSoft      | 75000   | Below Quota |
+| Lisa  | WebCo        | 225000  | Met Quota   |
++-------+--------------+---------+-------------+
+
+-- Join with expression conditions
+SELECT
+  sr."name", ca.account_name,
+  ca.revenue, sr.quota,
+  ca.revenue - sr.quota as quota_diff
+FROM sales_reps sr
+INNER JOIN customer_accounts ca
+  ON sr.rep_id = ca.rep_id
+  AND UPPER(sr.region) = UPPER(ca.region)
+ORDER BY quota_diff DESC, sr."name" ASC;
+
++-------+--------------+---------+--------+------------+
+| name  | account_name | revenue | quota  | quota_diff |
++-------+--------------+---------+--------+------------+
+| Lisa  | WebCo        | 225000  | 180000 | 45000      |
+| Sarah | DataInc      | 195000  | 150000 | 45000      |
+| Tom   | CloudSys     | 110000  | 100000 | 10000      |
+| Sarah | AppDev       | 140000  | 150000 | -10000     |
+| Tom   | TechCorp     | 85000   | 100000 | -15000     |
+| Mike  | NetSoft      | 75000   | 120000 | -45000     |
++-------+--------------+---------+--------+------------+
+
+-- Join with string pattern conditions
+SELECT
+  sr."name", ca.account_name
+FROM sales_reps sr
+INNER JOIN customer_accounts ca
+  ON sr.rep_id = ca.rep_id
+  AND ca.account_name LIKE '%Corp%'
+ORDER BY sr."name";
+
++------+--------------+
+| name | account_name |
++------+--------------+
+| Tom  | TechCorp     |
++------+--------------+
+
+-- Complex nested join conditions
+SELECT
+  sr."name", ca.account_name, ca.revenue
+FROM sales_reps sr
+INNER JOIN customer_accounts ca ON (
+  sr.rep_id = ca.rep_id
+  AND (ca.revenue > 100000 OR sr.quota < 130000)
+  AND sr.region IN ('North', 'South')
+)
+ORDER BY ca.revenue DESC;
+
++-------+--------------+---------+
+| name  | account_name | revenue |
++-------+--------------+---------+
+| Sarah | DataInc      | 195000  |
+| Sarah | AppDev       | 140000  |
+| Tom   | CloudSys     | 110000  |
+| Tom   | TechCorp     | 85000   |
++-------+--------------+---------+
+
+DROP TABLE sales_reps;
+
+Affected Rows: 0
+
+DROP TABLE customer_accounts;
+
+Affected Rows: 0
+

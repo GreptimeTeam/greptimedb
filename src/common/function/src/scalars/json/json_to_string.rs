@@ -36,8 +36,8 @@ impl Function for JsonToStringFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -122,10 +122,8 @@ mod tests {
 
         assert_eq!("json_to_string", json_to_string.name());
         assert_eq!(
-            ConcreteDataType::string_datatype(),
-            json_to_string
-                .return_type(&[ConcreteDataType::json_datatype()])
-                .unwrap()
+            DataType::Utf8,
+            json_to_string.return_type(&[DataType::Binary]).unwrap()
         );
 
         assert!(matches!(json_to_string.signature(),

@@ -36,7 +36,7 @@ use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
 use common_meta::node_expiry_listener::NodeExpiryListener;
-use common_meta::peer::Peer;
+use common_meta::peer::{Peer, PeerDiscoveryRef};
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
@@ -56,10 +56,10 @@ use servers::http::HttpOptions;
 use servers::tls::TlsOption;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
@@ -67,7 +67,6 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
-use crate::lease::lookup_datanode_peer;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -409,12 +408,7 @@ impl Display for SelectTarget {
 
 #[derive(Clone)]
 pub struct SelectorContext {
-    pub server_addr: String,
-    pub datanode_lease_secs: u64,
-    pub flownode_lease_secs: u64,
-    pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
-    pub table_id: Option<TableId>,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
@@ -703,9 +697,9 @@ impl Metasrv {
     /// Looks up a datanode peer by peer_id, returning it only when it's alive.
     /// A datanode is considered alive when it's still within the lease period.
     pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
-        lookup_datanode_peer(
+        discovery::utils::alive_datanode(
+            self.meta_peer_client.as_ref(),
             peer_id,
-            &self.meta_peer_client,
             Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS),
         )
         .await

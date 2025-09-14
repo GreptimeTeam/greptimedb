@@ -55,6 +55,13 @@ impl GreptimedbManageResponse {
         }
     }
 
+    pub fn from_sql(sql: SqlOutput, execution_time_ms: u64) -> Self {
+        GreptimedbManageResponse {
+            manage_result: ManageResult::Sql { sql },
+            execution_time_ms,
+        }
+    }
+
     pub fn with_execution_time(mut self, execution_time: u64) -> Self {
         self.execution_time_ms = execution_time;
         self
@@ -69,8 +76,7 @@ impl GreptimedbManageResponse {
 #[serde(untagged)]
 pub enum ManageResult {
     Pipelines { pipelines: Vec<PipelineOutput> },
-    // todo(shuiyisong): refactor scripts api
-    Scripts(),
+    Sql { sql: SqlOutput },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,6 +85,13 @@ pub struct PipelineOutput {
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pipeline: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SqlOutput {
+    pub(crate) sql: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
 }
 
 impl IntoResponse for GreptimedbManageResponse {

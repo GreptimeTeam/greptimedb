@@ -1,0 +1,121 @@
+-- Migrated from DuckDB test: test/sql/join/ NULL handling tests
+-- Tests join behavior with NULL values
+CREATE TABLE table_with_nulls("id" INTEGER, "value" VARCHAR, category INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE lookup_table(category INTEGER, cat_name VARCHAR, priority INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO table_with_nulls VALUES
+(1, 'item1', 1, 1000), (2, 'item2', NULL, 2000), (3, 'item3', 2, 3000),
+(4, 'item4', NULL, 4000), (5, 'item5', 3, 5000), (6, 'item6', 1, 6000);
+
+Affected Rows: 6
+
+INSERT INTO lookup_table VALUES
+(1, 'Category A', 1, 1000), (2, 'Category B', 2, 2000), (3, 'Category C', 3, 3000), (NULL, 'Unknown', 0, 4000);
+
+Affected Rows: 4
+
+-- Inner join with NULLs (NULLs won't match)
+SELECT t."id", t."value", l.cat_name
+FROM table_with_nulls t
+INNER JOIN lookup_table l ON t.category = l.category
+ORDER BY t."id";
+
++----+-------+------------+
+| id | value | cat_name   |
++----+-------+------------+
+| 1  | item1 | Category A |
+| 3  | item3 | Category B |
+| 5  | item5 | Category C |
+| 6  | item6 | Category A |
++----+-------+------------+
+
+-- Left join with NULLs
+SELECT t."id", t."value", t.category, COALESCE(l.cat_name, 'No Category') as category_name
+FROM table_with_nulls t
+LEFT JOIN lookup_table l ON t.category = l.category
+ORDER BY t."id";
+
++----+-------+----------+---------------+
+| id | value | category | category_name |
++----+-------+----------+---------------+
+| 1  | item1 | 1        | Category A    |
+| 2  | item2 |          | No Category   |
+| 3  | item3 | 2        | Category B    |
+| 4  | item4 |          | No Category   |
+| 5  | item5 | 3        | Category C    |
+| 6  | item6 | 1        | Category A    |
++----+-------+----------+---------------+
+
+-- Join with explicit NULL handling
+SELECT
+  t."id", t."value",
+  CASE
+    WHEN t.category IS NULL THEN 'NULL Category'
+    WHEN l.cat_name IS NULL THEN 'Missing Lookup'
+    ELSE l.cat_name
+  END as resolved_category
+FROM table_with_nulls t
+LEFT JOIN lookup_table l ON t.category = l.category
+ORDER BY t."id";
+
++----+-------+-------------------+
+| id | value | resolved_category |
++----+-------+-------------------+
+| 1  | item1 | Category A        |
+| 2  | item2 | NULL Category     |
+| 3  | item3 | Category B        |
+| 4  | item4 | NULL Category     |
+| 5  | item5 | Category C        |
+| 6  | item6 | Category A        |
++----+-------+-------------------+
+
+-- NULL-safe join using COALESCE
+SELECT t."id", t."value", l.cat_name
+FROM table_with_nulls t
+INNER JOIN lookup_table l ON COALESCE(t.category, -1) = COALESCE(l.category, -1)
+ORDER BY t."id";
+
++----+-------+------------+
+| id | value | cat_name   |
++----+-------+------------+
+| 1  | item1 | Category A |
+| 2  | item2 | Unknown    |
+| 3  | item3 | Category B |
+| 4  | item4 | Unknown    |
+| 5  | item5 | Category C |
+| 6  | item6 | Category A |
++----+-------+------------+
+
+-- Aggregation with NULL join results
+SELECT
+  COALESCE(l.cat_name, 'Uncategorized') as category,
+  COUNT(*) as item_count,
+  COUNT(l.category) as matched_count,
+  COUNT(*) - COUNT(l.category) as unmatched_count
+FROM table_with_nulls t
+LEFT JOIN lookup_table l ON t.category = l.category
+GROUP BY l.cat_name
+ORDER BY item_count DESC, category DESC;
+
++---------------+------------+---------------+-----------------+
+| category      | item_count | matched_count | unmatched_count |
++---------------+------------+---------------+-----------------+
+| Uncategorized | 2          | 0             | 2               |
+| Category A    | 2          | 2             | 0               |
+| Category C    | 1          | 1             | 0               |
+| Category B    | 1          | 1             | 0               |
++---------------+------------+---------------+-----------------+
+
+DROP TABLE table_with_nulls;
+
+Affected Rows: 0
+
+DROP TABLE lookup_table;
+
+Affected Rows: 0
+

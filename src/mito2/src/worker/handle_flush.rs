@@ -215,9 +215,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 "Skipping region metadata update for region {} in staging mode",
                 region_id
             );
+            region.version_control.apply_edit(
+                None,
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
         } else {
             region.version_control.apply_edit(
-                request.edit.clone(),
+                Some(request.edit.clone()),
                 &request.memtables_to_remove,
                 region.file_purger.clone(),
             );

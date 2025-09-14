@@ -342,6 +342,12 @@ impl Pipeline {
             TransformerMode::AutoTransform(_, _) => None,
         }
     }
+
+    pub fn is_variant_table_name(&self) -> bool {
+        // even if the pipeline doesn't have dispatcher or table_suffix,
+        // it can still be a variant because of VRL processor and hint
+        self.dispatcher.is_some() || self.tablesuffix.is_some()
+    }
 }
 
 pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str) -> Result<usize> {

@@ -17,10 +17,9 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use common_query::prelude::ColumnarValue;
+use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use datafusion_expr::ScalarUDF;
-use datatypes::data_type::DataType;
-use datatypes::prelude::*;
 use session::context::QueryContextRef;
 
 use crate::function::{FunctionContext, FunctionRef};
@@ -58,22 +57,22 @@ impl ScalarUDFImpl for ScalarUdf {
         &self.signature
     }
 
-    fn return_type(
-        &self,
-        arg_types: &[datatypes::arrow::datatypes::DataType],
-    ) -> datafusion_common::Result<datatypes::arrow::datatypes::DataType> {
-        let arg_types = arg_types
-            .iter()
-            .map(ConcreteDataType::from_arrow_type)
-            .collect::<Vec<_>>();
-        let t = self.function.return_type(&arg_types)?;
-        Ok(t.as_arrow_type())
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        self.function.return_type(arg_types).map_err(Into::into)
     }
 
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+        let result = self.function.invoke_with_args(args.clone());
+        if !matches!(
+            result,
+            Err(datafusion_common::DataFusionError::NotImplemented(_))
+        ) {
+            return result;
+        }
+
         let columns = args
             .args
             .iter()
@@ -110,8 +109,9 @@ mod tests {
     use datafusion::arrow::array::BooleanArray;
     use datafusion_common::config::ConfigOptions;
     use datatypes::arrow::datatypes::Field;
-    use datatypes::data_type::ConcreteDataType;
+    use datatypes::data_type::{ConcreteDataType, DataType};
     use datatypes::prelude::VectorRef;
+    use datatypes::value::Value;
     use datatypes::vectors::{BooleanVector, ConstantVector};
     use session::context::QueryContextBuilder;
 

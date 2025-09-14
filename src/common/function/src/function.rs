@@ -15,11 +15,15 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::Result;
-use datafusion_expr::Signature;
-use datatypes::data_type::ConcreteDataType;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
+use common_query::error::{ExecuteSnafu, Result};
+use datafusion::arrow::datatypes::DataType;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
+use snafu::ResultExt;
 
 use crate::state::FunctionState;
 
@@ -63,13 +67,31 @@ pub trait Function: fmt::Display + Sync + Send {
     fn name(&self) -> &str;
 
     /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
+    fn return_type(&self, input_types: &[DataType]) -> Result<DataType>;
 
     /// The signature of function.
     fn signature(&self) -> Signature;
 
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        // TODO(LFC): Remove default implementation once all UDFs have implemented this function.
+        let _ = args;
+        Err(datafusion_common::DataFusionError::NotImplemented(
+            "invoke_with_args".to_string(),
+        ))
+    }
+
     /// Evaluate the function, e.g. run/execute the function.
-    fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef>;
+    /// TODO(LFC): Remove `eval` when all UDFs are rewritten to `invoke_with_args`
+    fn eval(&self, _: &FunctionContext, _: &[VectorRef]) -> Result<VectorRef> {
+        Err(BoxedError::new(PlainError::new(
+            "unsupported".to_string(),
+            StatusCode::Unsupported,
+        )))
+        .context(ExecuteSnafu)
+    }
 
     fn aliases(&self) -> &[String] {
         &[]

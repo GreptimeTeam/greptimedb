@@ -224,15 +224,22 @@ impl ContextProvider for DfContextProviderAdapter {
         name: &str,
         args: Vec<datafusion_expr::Expr>,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let tbl_func = self
-            .session_state
-            .table_functions()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| DataFusionError::Plan(format!("table function '{name}' not found")))?;
-        let provider = tbl_func.create_table_provider(&args)?;
+        if let Some(tbl_func) = self.engine_state.table_function(name) {
+            let provider = tbl_func.create_table_provider(&args)?;
+            Ok(provider_as_source(provider))
+        } else {
+            let tbl_func = self
+                .session_state
+                .table_functions()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!("table function '{name}' not found"))
+                })?;
+            let provider = tbl_func.create_table_provider(&args)?;
 
-        Ok(provider_as_source(provider))
+            Ok(provider_as_source(provider))
+        }
     }
 
     fn create_cte_work_table(

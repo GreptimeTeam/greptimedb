@@ -1,0 +1,113 @@
+-- Migrated from DuckDB test: test/sql/join/natural/ advanced tests
+-- Tests advanced natural join patterns
+CREATE TABLE employees_nat(emp_id INTEGER, "name" VARCHAR, dept_id INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE departments_nat(dept_id INTEGER, dept_name VARCHAR, budget INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE dept_locations(dept_id INTEGER, "location" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO employees_nat VALUES
+(1, 'Alice', 10, 1000), (2, 'Bob', 20, 2000), (3, 'Charlie', 10, 3000),
+(4, 'Diana', 30, 4000), (5, 'Eve', 20, 5000);
+
+Affected Rows: 5
+
+INSERT INTO departments_nat VALUES
+(10, 'Engineering', 500000, 1000), (20, 'Marketing', 300000, 2000), (30, 'Sales', 200000, 3000);
+
+Affected Rows: 3
+
+INSERT INTO dept_locations VALUES
+(10, 'Building A', 1000), (20, 'Building B', 2000), (30, 'Building C', 3000);
+
+Affected Rows: 3
+
+-- Basic natural join
+SELECT * FROM employees_nat NATURAL JOIN departments_nat ORDER BY emp_id;
+
++--------+-------+---------+-------------+--------+---------------------+
+| emp_id | name  | dept_id | dept_name   | budget | ts                  |
++--------+-------+---------+-------------+--------+---------------------+
+| 1      | Alice | 10      | Engineering | 500000 | 1970-01-01T00:00:01 |
+| 2      | Bob   | 20      | Marketing   | 300000 | 1970-01-01T00:00:02 |
++--------+-------+---------+-------------+--------+---------------------+
+
+-- Natural join with filtering
+SELECT * FROM employees_nat NATURAL JOIN departments_nat
+WHERE budget > 250000 ORDER BY emp_id;
+
++--------+-------+---------+-------------+--------+---------------------+
+| emp_id | name  | dept_id | dept_name   | budget | ts                  |
++--------+-------+---------+-------------+--------+---------------------+
+| 1      | Alice | 10      | Engineering | 500000 | 1970-01-01T00:00:01 |
+| 2      | Bob   | 20      | Marketing   | 300000 | 1970-01-01T00:00:02 |
++--------+-------+---------+-------------+--------+---------------------+
+
+-- Multi-table natural join
+SELECT
+  emp_id, "name", dept_name, "location", budget
+FROM employees_nat
+NATURAL JOIN departments_nat
+NATURAL JOIN dept_locations
+ORDER BY emp_id;
+
++--------+-------+-------------+------------+--------+
+| emp_id | name  | dept_name   | location   | budget |
++--------+-------+-------------+------------+--------+
+| 1      | Alice | Engineering | Building A | 500000 |
+| 2      | Bob   | Marketing   | Building B | 300000 |
++--------+-------+-------------+------------+--------+
+
+-- Natural join with aggregation
+SELECT
+  dept_name,
+  COUNT(emp_id) as employee_count,
+  AVG(budget) as avg_budget,
+  "location"
+FROM employees_nat
+NATURAL JOIN departments_nat
+NATURAL JOIN dept_locations
+GROUP BY dept_name, "location", budget
+ORDER BY employee_count DESC, dept_name ASC;
+
++-------------+----------------+------------+------------+
+| dept_name   | employee_count | avg_budget | location   |
++-------------+----------------+------------+------------+
+| Engineering | 1              | 500000.0   | Building A |
+| Marketing   | 1              | 300000.0   | Building B |
++-------------+----------------+------------+------------+
+
+-- Natural join with expressions
+SELECT
+  "name",
+  dept_name,
+  budget,
+  CASE WHEN budget > 400000 THEN 'High Budget' ELSE 'Normal Budget' END as budget_tier
+FROM employees_nat NATURAL JOIN departments_nat
+ORDER BY budget DESC, "name";
+
++-------+-------------+--------+---------------+
+| name  | dept_name   | budget | budget_tier   |
++-------+-------------+--------+---------------+
+| Alice | Engineering | 500000 | High Budget   |
+| Bob   | Marketing   | 300000 | Normal Budget |
++-------+-------------+--------+---------------+
+
+DROP TABLE employees_nat;
+
+Affected Rows: 0
+
+DROP TABLE departments_nat;
+
+Affected Rows: 0
+
+DROP TABLE dept_locations;
+
+Affected Rows: 0
+

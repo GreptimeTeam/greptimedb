@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::flow::{DirtyWindowRequest, FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
@@ -35,7 +35,7 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::node_manager::{
     Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
-use crate::peer::{Peer, PeerLookupService};
+use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
@@ -71,7 +71,7 @@ pub trait MockFlownodeHandler: Sync + Send + Clone {
     async fn handle_mark_window_dirty(
         &self,
         _peer: &Peer,
-        _req: DirtyWindowRequest,
+        _req: DirtyWindowRequests,
     ) -> Result<FlowResponse> {
         unimplemented!()
     }
@@ -146,7 +146,7 @@ impl<T: MockFlownodeHandler> Flownode for MockNode<T> {
         self.handler.handle_inserts(&self.peer, requests).await
     }
 
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse> {
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> Result<FlowResponse> {
         self.handler.handle_mark_window_dirty(&self.peer, req).await
     }
 }
@@ -208,20 +208,16 @@ pub fn new_ddl_context_with_kv_backend(
     }
 }
 
-pub struct NoopPeerLookupService;
+pub struct NoopPeerResolver;
 
 #[async_trait::async_trait]
-impl PeerLookupService for NoopPeerLookupService {
+impl PeerResolver for NoopPeerResolver {
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
-    }
-
-    async fn active_frontends(&self) -> Result<Vec<Peer>> {
-        Ok(vec![])
     }
 }
 

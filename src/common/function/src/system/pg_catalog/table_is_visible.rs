@@ -16,8 +16,9 @@ use std::fmt::{self};
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
+use datatypes::prelude::{DataType, VectorRef};
 use datatypes::types::LogicalPrimitiveType;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
@@ -41,8 +42,8 @@ impl Function for PGTableIsVisibleFunction {
         NAME
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::boolean_datatype())
+    fn return_type(&self, _: &[ArrowDataType]) -> Result<ArrowDataType> {
+        Ok(ArrowDataType::Boolean)
     }
 
     fn signature(&self) -> Signature {

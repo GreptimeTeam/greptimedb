@@ -62,6 +62,7 @@ use tokio_postgres::NoTls;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
+use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
@@ -70,8 +71,9 @@ use crate::election::rds::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::rds::postgres::PgElection;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
-use crate::node_excluder::NodeExcluderRef;
+use crate::metasrv::{
+    BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+};
 use crate::selector::SelectorType;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -395,10 +397,8 @@ pub async fn metasrv_builder(
     }
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
+    let meta_peer_client = build_default_meta_peer_client(&election, &in_memory);
 
-    let node_excluder = plugins
-        .get::<NodeExcluderRef>()
-        .unwrap_or_else(|| Arc::new(Vec::new()) as NodeExcluderRef);
     let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
         info!("Using selector from plugins");
         selector
@@ -406,15 +406,12 @@ pub async fn metasrv_builder(
         let selector = match opts.selector {
             SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
                 RegionNumsBasedWeightCompute,
-                node_excluder,
+                meta_peer_client.clone(),
             )) as SelectorRef,
-            SelectorType::LeaseBased => {
-                Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef
+            SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+            SelectorType::RoundRobin => {
+                Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)) as SelectorRef
             }
-            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
-                SelectTarget::Datanode,
-                node_excluder,
-            )) as SelectorRef,
         };
         info!(
             "Using selector from options, selector type: {}",
@@ -429,7 +426,21 @@ pub async fn metasrv_builder(
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
+        .meta_peer_client(meta_peer_client)
         .plugins(plugins))
+}
+
+pub(crate) fn build_default_meta_peer_client(
+    election: &Option<ElectionRef>,
+    in_memory: &ResettableKvBackendRef,
+) -> MetaPeerClientRef {
+    MetaPeerClientBuilder::default()
+        .election(election.clone())
+        .in_memory(in_memory.clone())
+        .build()
+        .map(Arc::new)
+        // Safety: all required fields set at initialization
+        .unwrap()
 }
 
 pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
@@ -451,6 +462,7 @@ fn build_connection_options(tls_config: Option<&TlsOption>) -> Result<Option<Con
     if matches!(tls_config.mode, TlsMode::Disable) {
         return Ok(None);
     }
+    info!("Creating etcd client with TLS mode: {:?}", tls_config.mode);
     let mut etcd_tls_opts = TlsOptions::new();
     // Set CA certificate if provided
     if !tls_config.ca_cert_path.is_empty() {

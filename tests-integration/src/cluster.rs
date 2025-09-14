@@ -56,6 +56,7 @@ use frontend::server::Services;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
+use meta_srv::discovery;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
@@ -316,11 +317,14 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..100 {
-            let alive_datanodes =
-                meta_srv::lease::alive_datanodes(meta_peer_client, Duration::from_secs(u64::MAX))
-                    .await
-                    .unwrap()
-                    .len();
+            let alive_datanodes = discovery::utils::alive_datanodes(
+                meta_peer_client.as_ref(),
+                Duration::from_secs(u64::MAX),
+                None,
+            )
+            .await
+            .unwrap()
+            .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -389,8 +393,10 @@ impl GreptimeDbClusterBuilder {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            datanode_clients.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),

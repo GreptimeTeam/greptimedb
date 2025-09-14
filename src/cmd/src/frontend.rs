@@ -377,8 +377,24 @@ impl StartCommand {
             .build(),
         );
 
-        let information_extension =
-            Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+        // frontend to datanode need not timeout.
+        // Some queries are expected to take long time.
+        let mut channel_config = ChannelConfig {
+            timeout: None,
+            tcp_nodelay: opts.datanode.client.tcp_nodelay,
+            connect_timeout: Some(opts.datanode.client.connect_timeout),
+            ..Default::default()
+        };
+        if opts.grpc.flight_compression.transport_compression() {
+            channel_config.accept_compression = true;
+            channel_config.send_compression = true;
+        }
+        let client = Arc::new(NodeClients::new(channel_config));
+
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            client.clone(),
+        ));
 
         let process_manager = Arc::new(ProcessManager::new(
             addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
@@ -412,26 +428,12 @@ impl StartCommand {
         );
         let heartbeat_task = Some(heartbeat_task);
 
-        // frontend to datanode need not timeout.
-        // Some queries are expected to take long time.
-        let mut channel_config = ChannelConfig {
-            timeout: None,
-            tcp_nodelay: opts.datanode.client.tcp_nodelay,
-            connect_timeout: Some(opts.datanode.client.connect_timeout),
-            ..Default::default()
-        };
-        if opts.grpc.flight_compression.transport_compression() {
-            channel_config.accept_compression = true;
-            channel_config.send_compression = true;
-        }
-        let client = NodeClients::new(channel_config);
-
         let instance = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
-            Arc::new(client),
+            client,
             meta_client,
             process_manager,
         )

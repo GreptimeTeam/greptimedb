@@ -1,0 +1,115 @@
+-- Migrated from DuckDB test: test/sql/join/left_outer/ pattern tests
+-- Tests common left join patterns
+CREATE TABLE accounts(acc_id INTEGER, acc_name VARCHAR, balance DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE transactions(txn_id INTEGER, acc_id INTEGER, amount DOUBLE, txn_type VARCHAR, txn_date DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO accounts VALUES
+(1, 'Checking', 1500.00, 1000), (2, 'Savings', 5000.00, 2000),
+(3, 'Credit', -250.00, 3000), (4, 'Investment', 10000.00, 4000);
+
+Affected Rows: 4
+
+INSERT INTO transactions VALUES
+(1, 1, -100.00, 'withdrawal', '2023-01-01', 1000),
+(2, 1, 500.00, 'deposit', '2023-01-02', 2000),
+(3, 2, 1000.00, 'deposit', '2023-01-01', 3000),
+(4, 3, -50.00, 'purchase', '2023-01-03', 4000),
+(5, 1, -25.00, 'fee', '2023-01-04', 5000);
+
+Affected Rows: 5
+
+-- Left join to find accounts with/without transactions
+SELECT
+  a.acc_name, a.balance,
+  COUNT(t.txn_id) as transaction_count,
+  COALESCE(SUM(t.amount), 0) as total_activity
+FROM accounts a
+LEFT JOIN transactions t ON a.acc_id = t.acc_id
+GROUP BY a.acc_id, a.acc_name, a.balance
+ORDER BY transaction_count DESC;
+
++------------+---------+-------------------+----------------+
+| acc_name   | balance | transaction_count | total_activity |
++------------+---------+-------------------+----------------+
+| Checking   | 1500.0  | 3                 | 375.0          |
+| Savings    | 5000.0  | 1                 | 1000.0         |
+| Credit     | -250.0  | 1                 | -50.0          |
+| Investment | 10000.0 | 0                 | 0.0            |
++------------+---------+-------------------+----------------+
+
+-- Left join with date filtering
+SELECT
+  a.acc_name,
+  COUNT(t.txn_id) as recent_transactions,
+  SUM(CASE WHEN t.amount > 0 THEN t.amount ELSE 0 END) as deposits,
+  SUM(CASE WHEN t.amount < 0 THEN t.amount ELSE 0 END) as withdrawals
+FROM accounts a
+LEFT JOIN transactions t ON a.acc_id = t.acc_id AND t.txn_date >= '2023-01-02'
+GROUP BY a.acc_id, a.acc_name
+ORDER BY recent_transactions DESC, a.acc_name ASC;
+
++------------+---------------------+----------+-------------+
+| acc_name   | recent_transactions | deposits | withdrawals |
++------------+---------------------+----------+-------------+
+| Checking   | 2                   | 500.0    | -25.0       |
+| Credit     | 1                   | 0.0      | -50.0       |
+| Investment | 0                   | 0.0      | 0.0         |
+| Savings    | 0                   | 0.0      | 0.0         |
++------------+---------------------+----------+-------------+
+
+-- Left join NULL handling
+SELECT
+  a.acc_name,
+  a.balance,
+  t.txn_id,
+  COALESCE(t.amount, 0) as transaction_amount,
+  CASE WHEN t.txn_id IS NULL THEN 'No Activity' ELSE 'Has Activity' END as status
+FROM accounts a
+LEFT JOIN transactions t ON a.acc_id = t.acc_id
+ORDER BY a.acc_id, t.txn_date;
+
++------------+---------+--------+--------------------+--------------+
+| acc_name   | balance | txn_id | transaction_amount | status       |
++------------+---------+--------+--------------------+--------------+
+| Checking   | 1500.0  | 1      | -100.0             | Has Activity |
+| Checking   | 1500.0  | 2      | 500.0              | Has Activity |
+| Checking   | 1500.0  | 5      | -25.0              | Has Activity |
+| Savings    | 5000.0  | 3      | 1000.0             | Has Activity |
+| Credit     | -250.0  | 4      | -50.0              | Has Activity |
+| Investment | 10000.0 |        | 0.0                | No Activity  |
++------------+---------+--------+--------------------+--------------+
+
+-- Left join with complex conditions
+SELECT
+  a.acc_name,
+  COUNT(large_txn.txn_id) as large_transaction_count,
+  AVG(large_txn.amount) as avg_large_amount
+FROM accounts a
+LEFT JOIN (
+  SELECT * FROM transactions WHERE ABS(amount) > 100.00
+) large_txn ON a.acc_id = large_txn.acc_id
+GROUP BY a.acc_id, a.acc_name
+ORDER BY large_transaction_count DESC, a.acc_name ASC;
+
++------------+-------------------------+------------------+
+| acc_name   | large_transaction_count | avg_large_amount |
++------------+-------------------------+------------------+
+| Checking   | 1                       | 500.0            |
+| Savings    | 1                       | 1000.0           |
+| Credit     | 0                       |                  |
+| Investment | 0                       |                  |
++------------+-------------------------+------------------+
+
+DROP TABLE accounts;
+
+Affected Rows: 0
+
+DROP TABLE transactions;
+
+Affected Rows: 0
+

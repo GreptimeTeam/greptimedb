@@ -127,19 +127,22 @@ impl VersionControl {
     }
 
     /// Apply edit to current version.
+    ///
+    /// If `edit` is None, only removes the specified memtables.
     pub(crate) fn apply_edit(
         &self,
-        edit: RegionEdit,
+        edit: Option<RegionEdit>,
         memtables_to_remove: &[MemtableId],
         purger: FilePurgerRef,
     ) {
         let version = self.current().version;
-        let new_version = Arc::new(
-            VersionBuilder::from_version(version)
-                .apply_edit(edit, purger)
-                .remove_memtables(memtables_to_remove)
-                .build(),
-        );
+        let builder = VersionBuilder::from_version(version);
+        let builder = if let Some(edit) = edit {
+            builder.apply_edit(edit, purger)
+        } else {
+            builder
+        };
+        let new_version = Arc::new(builder.remove_memtables(memtables_to_remove).build());
 
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;

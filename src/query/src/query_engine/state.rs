@@ -25,6 +25,7 @@ use common_function::handlers::{
 };
 use common_function::state::FunctionState;
 use common_telemetry::warn;
+use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionStateBuilder;
@@ -72,6 +73,7 @@ pub struct QueryEngineState {
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
+    table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -196,6 +198,7 @@ impl QueryEngineState {
                 flow_service_handler,
             }),
             aggr_functions: Arc::new(RwLock::new(HashMap::new())),
+            table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
@@ -265,6 +268,25 @@ impl QueryEngineState {
             .collect()
     }
 
+    /// Retrieve table function by name
+    pub fn table_function(&self, function_name: &str) -> Option<Arc<TableFunction>> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .get(function_name)
+            .cloned()
+    }
+
+    /// Retrieve table function names.
+    pub fn table_function_names(&self) -> Vec<String> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Register an scalar function.
     /// Will override if the function with same name is already registered.
     pub fn register_scalar_function(&self, func: ScalarFunctionFactory) {
@@ -299,6 +321,19 @@ impl QueryEngineState {
             x.is_none(),
             "Already registered aggregate function '{name}'"
         );
+    }
+
+    pub fn register_table_function(&self, func: Arc<TableFunction>) {
+        let name = func.name();
+        let x = self
+            .table_functions
+            .write()
+            .unwrap()
+            .insert(name.to_string(), func.clone());
+
+        if x.is_some() {
+            warn!("Already registered table function '{name}");
+        }
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

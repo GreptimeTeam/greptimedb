@@ -39,6 +39,7 @@ use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
+use mito2::region::opener::PartitionExprFetcherRef;
 use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
@@ -47,7 +48,9 @@ use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::path_utils::WAL_DIR;
-use store_api::region_engine::{RegionEngineRef, RegionRole};
+use store_api::region_engine::{
+    RegionEngineRef, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -63,6 +66,7 @@ use crate::event_listener::{
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
+use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store::{self, new_object_store_without_cache};
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
@@ -437,12 +441,15 @@ impl DatanodeBuilder {
             }
         }
 
+        // Build a fetcher to backfill partition_expr on open.
+        let fetcher = Arc::new(MetaPartitionExprFetcher::new(self.kv_backend.clone()));
         let mito_engine = self
             .build_mito_engine(
                 object_store_manager.clone(),
                 mito_engine_config,
                 schema_metadata_manager.clone(),
                 file_ref_manager.clone(),
+                fetcher.clone(),
                 plugins.clone(),
             )
             .await?;
@@ -469,6 +476,7 @@ impl DatanodeBuilder {
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
         file_ref_manager: FileReferenceManagerRef,
+        partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         let opts = &self.opts;
@@ -491,6 +499,7 @@ impl DatanodeBuilder {
                     object_store_manager,
                     schema_metadata_manager,
                     file_ref_manager,
+                    partition_expr_fetcher.clone(),
                     plugins,
                 );
 
@@ -532,6 +541,7 @@ impl DatanodeBuilder {
                     object_store_manager,
                     schema_metadata_manager,
                     file_ref_manager,
+                    partition_expr_fetcher,
                     plugins,
                 );
 
@@ -644,12 +654,25 @@ async fn open_all_regions(
     }
 
     for region_id in open_regions {
-        if open_with_writable
-            && let Err(e) = region_server.set_region_role(region_id, RegionRole::Leader)
-        {
-            error!(
-                e; "failed to convert region {region_id} to leader"
-            );
+        if open_with_writable {
+            let res = region_server.set_region_role(region_id, RegionRole::Leader);
+            match res {
+                Ok(_) => {
+                    // Finalize leadership: persist backfilled metadata.
+                    if let SetRegionRoleStateResponse::InvalidTransition(err) = region_server
+                        .set_region_role_state_gracefully(
+                            region_id,
+                            SettableRegionRoleState::Leader,
+                        )
+                        .await?
+                    {
+                        error!(err; "failed to convert region {region_id} to leader");
+                    }
+                }
+                Err(e) => {
+                    error!(e; "failed to convert region {region_id} to leader");
+                }
+            }
         }
     }
 

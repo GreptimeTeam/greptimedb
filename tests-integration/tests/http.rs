@@ -124,6 +124,7 @@ macro_rules! http_tests {
                 test_pipeline_2,
                 test_pipeline_skip_error,
                 test_pipeline_filter,
+                test_pipeline_create_table,
 
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
@@ -2497,6 +2498,98 @@ transform:
         "[[\"Jane\",1716668197328000000]]",
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_create_table(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_create_table").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+- dissect:
+    fields:
+      - message
+    patterns:
+      - '%{ip_address} - %{username} [%{timestamp}] "%{http_method} %{request_line} %{protocol}" %{status_code} %{response_size}'
+    ignore_missing: true
+- date:
+    fields:
+      - timestamp
+    formats:
+      - "%d/%b/%Y:%H:%M:%S %z"
+
+transform:
+  - fields:
+      - timestamp
+    type: time
+    index: timestamp
+  - fields:
+      - ip_address
+    type: string
+    index: skipping
+  - fields:
+      - username
+    type: string
+    tag: true
+  - fields:
+      - http_method
+    type: string
+    index: inverted
+  - fields:
+      - request_line
+    type: string
+    index: fulltext
+  - fields:
+      - protocol
+    type: string
+  - fields:
+      - status_code
+    type: int32
+    index: inverted
+    tag: true
+  - fields:
+      - response_size
+    type: int64
+    on_failure: default
+    default: 0
+  - fields:
+      - message
+    type: string
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .get("/v1/pipelines/test/ddl?table=logs1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let sql = resp
+        .get("sql")
+        .unwrap()
+        .get("sql")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert_eq!(
+        "CREATE TABLE IF NOT EXISTS `logs1` (\n  `timestamp` TIMESTAMP(9) NOT NULL,\n  `ip_address` STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  `username` STRING NULL,\n  `http_method` STRING NULL INVERTED INDEX,\n  `request_line` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\n  `protocol` STRING NULL,\n  `status_code` INT NULL INVERTED INDEX,\n  `response_size` BIGINT NULL,\n  `message` STRING NULL,\n  TIME INDEX (`timestamp`),\n  PRIMARY KEY (`username`, `status_code`)\n)\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)",
+        sql
+    );
 
     guard.remove_all().await;
 }

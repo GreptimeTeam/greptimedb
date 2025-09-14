@@ -1,0 +1,63 @@
+-- Migrated from DuckDB test: test/sql/join/cross_product/test_cross_product.test
+-- Tests CROSS JOIN functionality
+CREATE TABLE small_table (a INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE another_table (b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO small_table VALUES (1, 1000), (2, 2000);
+
+Affected Rows: 2
+
+INSERT INTO another_table VALUES (10, 3000), (20, 4000), (30, 5000);
+
+Affected Rows: 3
+
+-- Basic CROSS JOIN
+SELECT * FROM small_table CROSS JOIN another_table ORDER BY a, b;
+
++---+---------------------+----+---------------------+
+| a | ts                  | b  | ts                  |
++---+---------------------+----+---------------------+
+| 1 | 1970-01-01T00:00:01 | 10 | 1970-01-01T00:00:03 |
+| 1 | 1970-01-01T00:00:01 | 20 | 1970-01-01T00:00:04 |
+| 1 | 1970-01-01T00:00:01 | 30 | 1970-01-01T00:00:05 |
+| 2 | 1970-01-01T00:00:02 | 10 | 1970-01-01T00:00:03 |
+| 2 | 1970-01-01T00:00:02 | 20 | 1970-01-01T00:00:04 |
+| 2 | 1970-01-01T00:00:02 | 30 | 1970-01-01T00:00:05 |
++---+---------------------+----+---------------------+
+
+-- CROSS JOIN with WHERE filter
+SELECT * FROM small_table CROSS JOIN another_table WHERE a + b < 25 ORDER BY a, b;
+
++---+---------------------+----+---------------------+
+| a | ts                  | b  | ts                  |
++---+---------------------+----+---------------------+
+| 1 | 1970-01-01T00:00:01 | 10 | 1970-01-01T00:00:03 |
+| 1 | 1970-01-01T00:00:01 | 20 | 1970-01-01T00:00:04 |
+| 2 | 1970-01-01T00:00:02 | 10 | 1970-01-01T00:00:03 |
+| 2 | 1970-01-01T00:00:02 | 20 | 1970-01-01T00:00:04 |
++---+---------------------+----+---------------------+
+
+-- CROSS JOIN with aliases
+SELECT s.a, t.b FROM small_table s CROSS JOIN another_table t WHERE s.a = 1 ORDER BY b;
+
++---+----+
+| a | b  |
++---+----+
+| 1 | 10 |
+| 1 | 20 |
+| 1 | 30 |
++---+----+
+
+DROP TABLE another_table;
+
+Affected Rows: 0
+
+DROP TABLE small_table;
+
+Affected Rows: 0
+

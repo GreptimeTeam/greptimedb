@@ -17,7 +17,6 @@ use std::sync::LazyLock;
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::Value;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt64VectorBuilder, VectorRef};
@@ -49,8 +48,8 @@ impl Function for S2LatLngToCell {
         "s2_latlng_to_cell"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -112,8 +111,8 @@ impl Function for S2CellLevel {
         "s2_cell_level"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {
@@ -148,8 +147,8 @@ impl Function for S2CellToToken {
         "s2_cell_to_token"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -184,8 +183,8 @@ impl Function for S2CellParent {
         "s2_cell_parent"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint64_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
     }
 
     fn signature(&self) -> Signature {

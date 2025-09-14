@@ -18,7 +18,6 @@ use std::str::FromStr;
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use derive_more::Display;
@@ -53,8 +52,8 @@ impl Function for Ipv4NumToString {
         "ipv4_num_to_string"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::string_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
     }
 
     fn signature(&self) -> Signature {
@@ -116,8 +115,8 @@ impl Function for Ipv4StringToNum {
         "ipv4_string_to_num"
     }
 
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::uint32_datatype())
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt32)
     }
 
     fn signature(&self) -> Signature {
