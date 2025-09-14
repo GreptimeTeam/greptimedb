@@ -201,3 +201,4 @@ WHERE c.relkind IN ('v','')
 ORDER BY 1,2;
 
 Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
+

@@ -256,21 +256,6 @@ pub enum Error {
         error: std::io::Error,
     },
 
-    #[snafu(display("Failed to send prometheus remote request"))]
-    SendPromRemoteRequest {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: reqwest::Error,
-    },
-
-    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
-    InvalidExportMetricsConfig {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to compress prometheus remote request"))]
     CompressPromRemoteRequest {
         #[snafu(implicit)]
@@ -648,7 +633,6 @@ impl ErrorExt for Error {
             | StartHttp { .. }
             | StartGrpc { .. }
             | TcpBind { .. }
-            | SendPromRemoteRequest { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,
@@ -685,7 +669,6 @@ impl ErrorExt for Error {
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }

@@ -782,18 +782,6 @@ SELECT * FROM CHECK_CONSTRAINTS;
 +--------------------+-------------------+-----------------+--------------+
 +--------------------+-------------------+-----------------+--------------+
 
-
-+-------------+----------------------+-----+------+---------+---------------+
-| Column      | Type                 | Key | Null | Default | Semantic Type |
-+-------------+----------------------+-----+------+---------+---------------+
-| metric_name | String               |     | NO   |         | FIELD         |
-| value       | Float64              |     | NO   |         | FIELD         |
-| labels      | String               |     | YES  |         | FIELD         |
-| peer_addr   | String               |     | YES  |         | FIELD         |
-| peer_type   | String               |     | NO   |         | FIELD         |
-| timestamp   | TimestampMillisecond |     | NO   |         | FIELD         |
-+-------------+----------------------+-----+------+---------+---------------+
-
 DESC TABLE REGION_PEERS;
 
 +---------------+--------+-----+------+---------+---------------+
@@ -852,3 +840,4 @@ Error: 4001(TableNotFound), Table not found: greptime.my_db.foo
 use public;
 
 Affected Rows: 0
+
