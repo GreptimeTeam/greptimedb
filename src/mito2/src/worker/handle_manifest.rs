@@ -207,8 +207,8 @@ impl<S> RegionWorkerLoop<S> {
             mut edit,
             tx: sender,
         } = request;
-        let file_sequence = region.version().flushed_sequence + 1;
-        edit.flushed_sequence = Some(file_sequence);
+        let file_sequence = region.version_control.committed_sequence() + 1;
+        edit.committed_sequence = Some(file_sequence);
 
         // For every file added through region edit, we should fill the file sequence
         for file in &mut edit.files_to_add {

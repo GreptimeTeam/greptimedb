@@ -62,6 +62,7 @@ pub struct RegionEdit {
     pub compaction_time_window: Option<Duration>,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
+    pub committed_sequence: Option<SequenceNumber>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -377,6 +378,7 @@ impl RegionMetaActionList {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         for action in self.actions {
@@ -390,6 +392,10 @@ impl RegionMetaActionList {
                 }
                 if let Some(seq) = region_edit.flushed_sequence {
                     edit.flushed_sequence = Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                }
+                if let Some(seq) = region_edit.committed_sequence {
+                    edit.committed_sequence =
+                        Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
                 }
                 // Prefer the latest non-none time window
                 if region_edit.compaction_time_window.is_some() {
@@ -872,6 +878,7 @@ mod tests {
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                committed_sequence: None,
             },
             new_from_old
         );
@@ -884,6 +891,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         let new_json = serde_json::to_string(&new).unwrap();

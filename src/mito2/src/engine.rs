@@ -465,6 +465,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                ..
             }
         )
 }
@@ -1015,6 +1016,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1026,6 +1028,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1037,6 +1040,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1048,6 +1052,7 @@ mod tests {
             compaction_time_window: Some(Duration::from_secs(1)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1057,6 +1062,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: Some(1),
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1066,6 +1072,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
     }

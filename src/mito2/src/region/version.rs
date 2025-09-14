@@ -137,6 +137,7 @@ impl VersionControl {
     ) {
         let version = self.current().version;
         let builder = VersionBuilder::from_version(version);
+        let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
         let builder = if let Some(edit) = edit {
             builder.apply_edit(edit, purger)
         } else {
@@ -145,6 +146,11 @@ impl VersionControl {
         let new_version = Arc::new(builder.remove_memtables(memtables_to_remove).build());
 
         let mut version_data = self.data.write().unwrap();
+        version_data.committed_sequence = if let Some(committed_in_edit) = committed_sequence {
+            version_data.committed_sequence.max(committed_in_edit)
+        } else {
+            version_data.committed_sequence
+        };
         version_data.version = new_version;
     }
 
