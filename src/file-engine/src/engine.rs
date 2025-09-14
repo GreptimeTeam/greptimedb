@@ -115,7 +115,7 @@ impl RegionEngine for FileRegionEngine {
         None
     }
 
-    async fn get_last_seq_num(&self, _: RegionId) -> Result<SequenceNumber, BoxedError> {
+    async fn get_committed_sequence(&self, _: RegionId) -> Result<SequenceNumber, BoxedError> {
         Ok(Default::default())
     }
 

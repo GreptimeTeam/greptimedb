@@ -97,7 +97,7 @@ impl MetricEngineInner {
             utils::to_data_region_id(physical_region_id)
         };
         self.mito
-            .get_last_seq_num(region_id)
+            .get_committed_sequence(region_id)
             .await
             .context(MitoReadOperationSnafu)
     }

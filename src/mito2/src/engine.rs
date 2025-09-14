@@ -659,7 +659,8 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber> {
+    /// Returns the sequence of latest committed data.
+    fn get_committed_sequence(&self, region_id: RegionId) -> Result<SequenceNumber> {
         // Reading a region doesn't need to go through the region worker thread.
         self.find_region(region_id)
             .map(|r| r.find_committed_sequence())
@@ -830,9 +831,12 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    async fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber, BoxedError> {
+    async fn get_committed_sequence(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SequenceNumber, BoxedError> {
         self.inner
-            .get_last_seq_num(region_id)
+            .get_committed_sequence(region_id)
             .map_err(BoxedError::new)
     }
 

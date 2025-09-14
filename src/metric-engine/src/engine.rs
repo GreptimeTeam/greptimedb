@@ -257,7 +257,10 @@ impl RegionEngine for MetricEngine {
         self.handle_query(region_id, request).await
     }
 
-    async fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber, BoxedError> {
+    async fn get_committed_sequence(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SequenceNumber, BoxedError> {
         self.inner
             .get_last_seq_num(region_id)
             .await
