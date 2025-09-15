@@ -1443,6 +1443,7 @@ parallel_scan_channel_size = 32
 max_concurrent_scan_files = 384
 allow_stale_entries = false
 min_compaction_interval = "0s"
+enable_experimental_flat_format = false
 
 [region_engine.mito.index]
 aux_path = ""
