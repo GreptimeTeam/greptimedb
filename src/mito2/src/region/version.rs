@@ -71,6 +71,12 @@ impl VersionControl {
         self.data.read().unwrap().clone()
     }
 
+    /// Updates the `committed_sequence` of version.
+    pub(crate) fn set_committed_sequence(&self, seq: SequenceNumber) {
+        let mut data = self.data.write().unwrap();
+        data.committed_sequence = seq;
+    }
+
     /// Updates committed sequence and entry id.
     pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
         let mut data = self.data.write().unwrap();

@@ -23,6 +23,8 @@ mod basic_test;
 #[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
+mod bump_committed_sequence_test;
+#[cfg(test)]
 mod catchup_test;
 #[cfg(test)]
 mod close_test;

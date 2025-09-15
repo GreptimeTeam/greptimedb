@@ -473,6 +473,16 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
+        if let Some(committed_sequence) = manifest.committed_sequence {
+            debug!(
+                "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
+                self.region_id,
+                version_control.current().version.flushed_sequence,
+                version_control.committed_sequence(),
+                committed_sequence
+            );
+            version_control.set_committed_sequence(committed_sequence);
+        }
         let topic_latest_entry_id = if !self.skip_wal_replay {
             let replay_from_entry_id = self
                 .replay_checkpoint
