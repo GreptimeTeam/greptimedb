@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -298,4 +299,26 @@ macro_rules! maybe_skip_postgres15_integration_test {
             return;
         }
     };
+}
+
+
+
+/// Returns the directory of the etcd TLS certs.
+pub fn etcd_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("etcd-tls-certs")
+}
+
+/// Returns the directory of the pgsql TLS certs.
+pub fn pgsql_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("pgsql-certs")
 }

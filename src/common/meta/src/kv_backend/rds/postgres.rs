@@ -903,6 +903,7 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
+    use crate::test_util::pgsql_certs_dir;
     use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
@@ -991,6 +992,97 @@ mod tests {
         test_kv_put_with_prefix(&kv, prefix.to_vec()).await;
         test_kv_batch_get_with_prefix(&kv, prefix.to_vec()).await;
         unprepare_kv(&kv, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_with_tls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::Require,
+            cert_path: String::new(),
+            key_path: String::new(),
+            ca_cert_path: String::new(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_with_mtls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = pgsql_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::Require,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: String::new(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_verify_ca() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = pgsql_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::VerifyCa,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: certs_dir.join("root.crt").display().to_string(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_verify_full() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_postgres_integration_test!();
+        let certs_dir = pgsql_certs_dir();
+        let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
+        let tls_connector = create_postgres_tls_connector(&TlsOption {
+            mode: TlsMode::VerifyFull,
+            cert_path: certs_dir.join("client.crt").display().to_string(),
+            key_path: certs_dir.join("client.key").display().to_string(),
+            ca_cert_path: certs_dir.join("root.crt").display().to_string(),
+            watch: false,
+        })
+        .unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), tls_connector)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client.execute("SELECT 1", &[]).await.unwrap();
     }
 
     #[tokio::test]
