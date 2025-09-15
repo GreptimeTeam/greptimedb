@@ -276,8 +276,9 @@ async fn test_series_scan() {
 
     let metrics_set = ExecutionPlanMetricsSet::default();
 
-    let mut partition_batches = vec![vec![]; 3];
-    let mut streams: Vec<_> = (0..3)
+    let num_parts = 3;
+    let mut partition_batches = vec![vec![]; num_parts];
+    let mut streams: Vec<_> = (0..num_parts)
         .map(|partition| {
             let stream = scanner
                 .scan_partition(&Default::default(), &metrics_set, partition)
@@ -288,11 +289,11 @@ async fn test_series_scan() {
     let mut num_done = 0;
     let mut schema = None;
     // Pull streams in round-robin fashion to get the consistent output from the sender.
-    while num_done < 3 {
+    while num_done < num_parts {
         if schema.is_none() {
             schema = Some(streams[0].as_ref().unwrap().schema().clone());
         }
-        for i in 0..3 {
+        for i in 0..num_parts {
             let Some(mut stream) = streams[i].take() else {
                 continue;
             };
@@ -317,31 +318,27 @@ async fn test_series_scan() {
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
 | 0     | 0.0     | 1970-01-01T00:00:00 |
-| 3     | 3.0     | 1970-01-01T00:00:03 |
-| 3602  | 3602.0  | 1970-01-01T01:00:02 |
-| 7200  | 7200.0  | 1970-01-01T02:00:00 |
-+-------+---------+---------------------+";
-    check_result(expected);
-
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
 | 1     | 1.0     | 1970-01-01T00:00:01 |
-| 3600  | 3600.0  | 1970-01-01T01:00:00 |
-| 4     | 4.0     | 1970-01-01T00:00:04 |
-| 7201  | 7201.0  | 1970-01-01T02:00:01 |
-+-------+---------+---------------------+";
-    check_result(expected);
-
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
 | 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 3600  | 3600.0  | 1970-01-01T01:00:00 |
 | 3601  | 3601.0  | 1970-01-01T01:00:01 |
+| 3602  | 3602.0  | 1970-01-01T01:00:02 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
 | 5     | 5.0     | 1970-01-01T00:00:05 |
+| 7200  | 7200.0  | 1970-01-01T02:00:00 |
+| 7201  | 7201.0  | 1970-01-01T02:00:01 |
 | 7202  | 7202.0  | 1970-01-01T02:00:02 |
 +-------+---------+---------------------+";
+    check_result(expected);
+
+    let expected = "\
+++
+++";
+    check_result(expected);
+
+    let expected = "\
+++
+++";
     check_result(expected);
 }
