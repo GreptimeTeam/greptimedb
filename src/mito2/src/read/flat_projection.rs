@@ -49,6 +49,8 @@ pub struct FlatProjectionMapper {
     column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
+    ///
+    /// It doesn't contain internal columns but always contains the time index column.
     batch_schema: Vec<(ColumnId, ConcreteDataType)>,
     /// `true` If the original projection is empty.
     is_empty_projection: bool,
@@ -188,11 +190,13 @@ impl FlatProjectionMapper {
     }
 
     /// Returns ids of columns of the batch that the mapper expects to convert.
-    #[allow(dead_code)]
     pub(crate) fn batch_schema(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_schema
     }
 
+    /// Returns the input arrow schema from sources.
+    ///
+    /// The merge reader can use this schema.
     pub(crate) fn input_arrow_schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
         self.input_arrow_schema.clone()
     }
@@ -242,11 +246,22 @@ impl FlatProjectionMapper {
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
+///
+/// It adds the time index column if it doesn't present in the projection.
 pub(crate) fn flat_projected_columns(
     metadata: &RegionMetadata,
     format_projection: &FormatProjection,
 ) -> Vec<(ColumnId, ConcreteDataType)> {
-    let mut schema = vec![None; format_projection.column_id_to_projected_index.len()];
+    let time_index = metadata.time_index_column();
+    let num_columns = if format_projection
+        .column_id_to_projected_index
+        .contains_key(&time_index.column_id)
+    {
+        format_projection.column_id_to_projected_index.len()
+    } else {
+        format_projection.column_id_to_projected_index.len() + 1
+    };
+    let mut schema = vec![None; num_columns];
     for (column_id, index) in &format_projection.column_id_to_projected_index {
         // Safety: FormatProjection ensures the id is valid.
         schema[*index] = Some((
@@ -257,6 +272,12 @@ pub(crate) fn flat_projected_columns(
                 .column_schema
                 .data_type
                 .clone(),
+        ));
+    }
+    if num_columns != format_projection.column_id_to_projected_index.len() {
+        schema[num_columns - 1] = Some((
+            time_index.column_id,
+            time_index.column_schema.data_type.clone(),
         ));
     }
 

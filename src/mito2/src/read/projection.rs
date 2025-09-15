@@ -749,7 +749,8 @@ mod tests {
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
-                (4, ConcreteDataType::int64_datatype())
+                (4, ConcreteDataType::int64_datatype()),
+                (0, ConcreteDataType::timestamp_millisecond_datatype())
             ],
             mapper.as_flat().unwrap().batch_schema()
         );
