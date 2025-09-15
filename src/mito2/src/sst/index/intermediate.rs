@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -58,14 +59,22 @@ impl IntermediateManager {
         let aux_pb = PathBuf::from(aux_path.as_ref());
         let intm_dir = aux_pb.join(INTERMEDIATE_DIR);
         let deleted_dir = intm_dir.with_extension(format!("deleted-{}", Uuid::new_v4()));
-        if let Err(err) = tokio::fs::rename(&intm_dir, &deleted_dir).await {
-            warn!(err; "Failed to rename intermediate directory");
-        }
-        tokio::spawn(async move {
-            if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await {
-                warn!(err; "Failed to remove intermediate directory");
+        match tokio::fs::rename(&intm_dir, &deleted_dir).await {
+            Ok(_) => {
+                tokio::spawn(async move {
+                    if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await
+                        && err.kind() != ErrorKind::NotFound
+                    {
+                        warn!(err; "Failed to remove intermediate directory");
+                    }
+                });
             }
-        });
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    warn!(err; "Failed to rename intermediate directory");
+                }
+            }
+        }
 
         let store = new_fs_cache_store(&normalize_dir(aux_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
