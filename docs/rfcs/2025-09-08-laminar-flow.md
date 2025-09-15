@@ -1,11 +1,11 @@
 ---
-Feature Name: "luminar-flow"
+Feature Name: "laminar-flow"
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/TBD
 Date: 2025-09-08
 Author: "discord9 <discord9@163.com>"
 ---
 
-# Luminar Flow
+# laminar Flow
 
 ## Summary
 
@@ -20,7 +20,7 @@ The current flow architecture has several limitations:
 3. **State Management Complexity**: Mixing computation with state management makes the system harder to maintain and debug.
 4. **Network Overhead**: Additional network hops between flownode and separate frontend nodes add latency.
 
-The Luminar Flow architecture addresses these issues by:
+The laminar Flow architecture addresses these issues by:
 - Consolidating computation within flownode through embedded frontend
 - Eliminating network overhead by removing separate frontend node communication
 - Simplifying state management by focusing flownode on its core responsibility
@@ -30,7 +30,7 @@ The Luminar Flow architecture addresses these issues by:
 
 ### Architecture Overview
 
-The Luminar Flow architecture transforms flownode into a lightweight coordinator that maintains flow state with an embedded frontend for computation. The key components involved are:
+The laminar Flow architecture transforms flownode into a lightweight coordinator that maintains flow state with an embedded frontend for computation. The key components involved are:
 
 1. **Flownode**: Maintains in-memory state, coordinates computation, and includes an embedded frontend for query execution
 2. **Embedded Frontend**: Executes **incremental** computations within the flownode
@@ -38,7 +38,7 @@ The Luminar Flow architecture transforms flownode into a lightweight coordinator
 
 ```mermaid
 graph TB
-    subgraph "Luminar Flow Architecture"
+    subgraph "laminar Flow Architecture"
         subgraph Flownode["Flownode (State Manager + Embedded Frontend)"]
             StateMap["Flow State Map<br/>Map<Timestamp, (Map<Key, Value>, Sequence)>"]
             Coordinator["Computation Coordinator"]
@@ -451,7 +451,7 @@ Embed lightweight computation engines within flownode:
 
 ## Conclusion
 
-The Luminar Flow architecture represents a significant improvement over the current flow system by separating state management from computation execution. This design enables better resource utilization, improved scalability, and simplified maintenance while maintaining the core functionality of continuous aggregation.
+The laminar Flow architecture represents a significant improvement over the current flow system by separating state management from computation execution. This design enables better resource utilization, improved scalability, and simplified maintenance while maintaining the core functionality of continuous aggregation.
 
 The key benefits include:
 
