@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -32,11 +32,12 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::dist_plan::analyzer::utils::aliased_columns_for;
+use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -550,7 +551,7 @@ impl PlanRewriter {
 
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
-            on_node,
+            on_node.clone(),
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
@@ -560,6 +561,15 @@ impl PlanRewriter {
 
         // expand stages
         for new_stage in self.stage.drain(..) {
+            // tracking alias for merge sort's sort exprs
+            let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
+                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
+            {
+                // TODO(discord9): change `on_node` to `node` once alias tracking is supported for merge scan
+                rewrite_merge_sort_exprs(merge_sort, &on_node)?
+            } else {
+                new_stage
+            };
             node = new_stage
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
@@ -601,6 +611,7 @@ struct EnforceDistRequirementRewriter {
     /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
     /// because the `Projection` node is not in the scope of the `Aggregate` node
     cur_level: usize,
+    plan_per_level: BTreeMap<usize, LogicalPlan>,
 }
 
 impl EnforceDistRequirementRewriter {
@@ -608,7 +619,66 @@ impl EnforceDistRequirementRewriter {
         Self {
             column_requirements,
             cur_level,
+            plan_per_level: BTreeMap::new(),
         }
+    }
+
+    /// Return a mapping from (original column, level) to aliased columns in current node of all
+    /// applicable column requirements
+    /// i.e. only column requirements with level >= `cur_level` will be considered
+    fn get_current_applicable_column_requirements(
+        &self,
+        node: &LogicalPlan,
+    ) -> DfResult<BTreeMap<(Column, usize), BTreeSet<Column>>> {
+        let col_req_per_level = self
+            .column_requirements
+            .iter()
+            .filter(|(_, level)| *level >= self.cur_level)
+            .collect::<Vec<_>>();
+
+        // track alias for columns and use aliased columns instead
+        // aliased col reqs at current level
+        let mut result_alias_mapping = BTreeMap::new();
+        let Some(child) = node.inputs().first().cloned() else {
+            return Ok(Default::default());
+        };
+        for (col_req, level) in col_req_per_level {
+            if let Some(original) = self.plan_per_level.get(level) {
+                // query for alias in current plan
+                let aliased_cols =
+                    aliased_columns_for(&col_req.iter().cloned().collect(), node, Some(original))?;
+                for original_col in col_req {
+                    let aliased_cols = aliased_cols.get(original_col).cloned();
+                    if let Some(cols) = aliased_cols
+                        && !cols.is_empty()
+                    {
+                        result_alias_mapping.insert((original_col.clone(), *level), cols);
+                    } else {
+                        // if no aliased column found in current node, there should be alias in child node as promised by enforce col reqs
+                        // because it should insert required columns in child node
+                        // so we can find the alias in child node
+                        // if not found, it's an internal error
+                        let aliases_in_child = aliased_columns_for(
+                            &[original_col.clone()].into(),
+                            child,
+                            Some(original),
+                        )?;
+                        let Some(aliases) = aliases_in_child
+                            .get(original_col)
+                            .cloned()
+                            .filter(|a| !a.is_empty())
+                        else {
+                            return Err(datafusion_common::DataFusionError::Internal(format!(
+                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
+                            )));
+                        };
+
+                        result_alias_mapping.insert((original_col.clone(), *level), aliases);
+                    }
+                }
+            }
+        }
+        Ok(result_alias_mapping)
     }
 }
 
@@ -623,6 +693,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                     .to_string(),
             ));
         }
+        self.plan_per_level.insert(self.cur_level, node.clone());
         self.cur_level += 1;
         Ok(Transformed::no(node))
     }
@@ -630,38 +701,41 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         self.cur_level -= 1;
         // first get all applicable column requirements
-        let mut applicable_column_requirements = self
-            .column_requirements
-            .iter()
-            .filter(|(_, level)| *level >= self.cur_level)
-            .map(|(cols, _)| cols.clone())
-            .reduce(|mut acc, cols| {
-                acc.extend(cols);
-                acc
-            })
-            .unwrap_or_default();
-
-        debug!(
-            "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
-            self.cur_level,
-            applicable_column_requirements,
-            node.display()
-        );
 
         // make sure all projection applicable scope has the required columns
         if let LogicalPlan::Projection(ref projection) = node {
+            let mut applicable_column_requirements =
+                self.get_current_applicable_column_requirements(&node)?;
+
+            debug!(
+                "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
+                self.cur_level,
+                applicable_column_requirements,
+                node.display()
+            );
+
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
-                applicable_column_requirements.remove(&column);
+                applicable_column_requirements.retain(|_col_level, alias_set| {
+                    // remove all columns that are already in the projection exprs
+                    !alias_set.contains(&column)
+                });
             }
             if applicable_column_requirements.is_empty() {
                 return Ok(Transformed::no(node));
             }
 
             let mut new_exprs = projection.expr.clone();
-            for col in &applicable_column_requirements {
-                new_exprs.push(Expr::Column(col.clone()));
+            for (col, alias_set) in &applicable_column_requirements {
+                // use the first alias in alias set as the column to add
+                new_exprs.push(Expr::Column(alias_set.first().cloned().ok_or_else(
+                    || {
+                        datafusion_common::DataFusionError::Internal(
+                            format!("EnforceDistRequirementRewriter: alias set is empty, for column {col:?} in node {node}"),
+                        )
+                    },
+                )?));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
@@ -669,6 +743,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 "EnforceDistRequirementRewriter: added missing columns {:?} to projection node from old node: \n{node}\n Making new node: \n{new_node}",
                 applicable_column_requirements
             );
+
+            // update plan for later use
+            self.plan_per_level.insert(self.cur_level, new_node.clone());
 
             // still need to continue for next projection if applicable
             return Ok(Transformed::yes(new_node));

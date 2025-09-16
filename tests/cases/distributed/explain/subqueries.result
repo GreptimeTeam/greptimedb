@@ -49,9 +49,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 +-+-+
 | logical_plan_| Sort: i1.i ASC NULLS LAST_|
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
-|_|_SubqueryAlias: i1_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| TableScan: integers_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
 |_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: integers.i_|
@@ -152,6 +152,523 @@ drop table other;
 Affected Rows: 0
 
 drop table integers;
+
+Affected Rows: 0
+
+CREATE TABLE integers(i INTEGER, j TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (i) (
+  i < 1000,
+  i >= 1000 AND i < 2000,
+  i >= 2000
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: i1.i ASC NULLS LAST_|
+|_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
+|_| ]]_|
+|_|_SubqueryAlias: __correlated_sq_1_|
+|_|_Projection: integers.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHERE i=i1.i) ORDER BY i1.i;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: i1.i ASC NULLS LAST_|
+|_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: i1_|
+|_|_TableScan: integers_|
+|_| ]]_|
+|_|_SubqueryAlias: __correlated_sq_1_|
+|_|_Aggregate: groupBy=[[integers.i]], aggr=[[]]_|
+|_|_Projection: integers.i_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_AggregateExec: mode=SinglePartitioned, gby=[i@0 as i], aggr=[]_|
+|_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
+CREATE TABLE t(ts timestamp time index, a INT, b INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+CREATE TABLE t1(ts timestamp time index, a INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+CREATE TABLE t2(ts timestamp time index, a INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+INSERT INTO t(ts,a,b) VALUES (1,3,30),(2,1,10),(3,2,20);
+
+Affected Rows: 3
+
+INSERT INTO t1(ts,a) VALUES (1,1),(2,3);
+
+Affected Rows: 2
+
+INSERT INTO t2(ts,a) VALUES (1,2),(2,3);
+
+Affected Rows: 2
+
+SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: sq.x ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: sq.x ASC NULLS LAST_|
+|_|_Projection: sq.x_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
+
++---+---+
+| x | c |
++---+---+
+| 1 | 1 |
+| 2 | 1 |
+| 3 | 1 |
++---+---+
+
+-- expected:
+-- x | c
+-- 1 | 1
+-- 2 | 1
+-- 3 | 1
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: sq.x ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: sq.x ASC NULLS LAST_|
+|_|_Projection: sq.x, count(Int64(1)) AS count(*) AS c_|
+|_|_Aggregate: groupBy=[[sq.x]], aggr=[[count(Int64(1))]]_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expecetd: 1,2,3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: sq.x ASC NULLS LAST_|
+|_|_Aggregate: groupBy=[[sq.x]], aggr=[[]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: sq.x_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_AggregateExec: mode=SinglePartitioned, gby=[x@0 as x], aggr=[]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: sq.x ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: sq.x ASC NULLS LAST_|
+|_|_Projection: sq.x_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER BY y;
+
++---+
+| y |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+-- expected: 1,2,3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER BY y;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: sq2.y ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: sq2.y ASC NULLS LAST_|
+|_|_Projection: sq2.y_|
+|_|_SubqueryAlias: sq2_|
+|_|_Projection: sq1.x AS y_|
+|_|_SubqueryAlias: sq1_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [y@0 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++---+---+
+| x | y |
++---+---+
+| 1 | 2 |
+| 2 | 3 |
+| 3 | 4 |
++---+---+
+
+-- expected:
+-- (x,y)
+-- (1,2)
+-- (2,3)
+-- (3,4)
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: sq.x ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: sq.x ASC NULLS LAST_|
+|_|_Projection: sq.x, CAST(sq.x AS Int64) + Int64(1) AS y_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER BY a;
+
++---+
+| a |
++---+
+| 1 |
+| 2 |
+| 3 |
+| 3 |
++---+
+
+-- expected: 1,2,3,3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER BY a;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: u.a ASC NULLS LAST_|
+|_|_SubqueryAlias: u_|
+|_|_Union_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: t1.a_|
+|_|_TableScan: t1_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: t2.a_|
+|_|_TableScan: t2_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_InterleaveExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT u1.a
+FROM (SELECT a FROM t1) u1
+JOIN (SELECT a FROM t2) u2 ON u1.a = u2.a
+ORDER BY u1.a;
+
++---+
+| a |
++---+
+| 3 |
++---+
+
+-- expected: 3
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT u1.a
+FROM (SELECT a FROM t1) u1
+JOIN (SELECT a FROM t2) u2 ON u1.a = u2.a
+ORDER BY u1.a;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: u1.a ASC NULLS LAST_|
+|_|_Projection: u1.a_|
+|_|_Inner Join: u1.a = u2.a_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: u1_|
+|_|_Projection: t1.a_|
+|_|_TableScan: t1_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| SubqueryAlias: u2_|
+|_|_Projection: t2.a_|
+|_|_TableScan: t2_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
++---+
+
+-- expected: 1,2
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: v.x ASC NULLS LAST_|
+|_|_SubqueryAlias: v_|
+|_|_Projection: column1 AS x_|
+|_|_Values: (Int64(2)), (Int64(1))_|
+| physical_plan | SortExec: expr=[x@0 ASC NULLS LAST], preserve_partitioning=[false] |
+|_|_ProjectionExec: expr=[column1@0 as x]_|
+|_|_DataSourceExec: partitions=1, partition_sizes=[1]_|
+|_|_|
++-+-+
+
+SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
+
++---+
+| x |
++---+
+| 1 |
+| 2 |
++---+
+
+-- expected: 1,2
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Limit: skip=0, fetch=2_|
+|_|_MergeSort: sq.x ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Limit: skip=0, fetch=2_|
+|_|_Sort: sq.x ASC NULLS LAST_|
+|_|_Projection: sq.x_|
+|_|_SubqueryAlias: sq_|
+|_|_Projection: t.a AS x_|
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST], fetch=2_|
+|_|_CooperativeExec_|
+|_|_SortExec: TopK(fetch=2), expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE t;
+
+Affected Rows: 0
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
 
 Affected Rows: 0
 
