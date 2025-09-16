@@ -21,45 +21,23 @@ use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
-#[cfg(feature = "pg_kvbackend")]
-use common_error::ext::BoxedError;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-#[cfg(feature = "mysql_kvbackend")]
-use common_meta::kv_backend::rds::MySqlStore;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::PgStore;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::create_postgres_tls_connector;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::{TlsMode as PgTlsMode, TlsOption as PgTlsOption};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
-#[cfg(feature = "pg_kvbackend")]
-use deadpool_postgres::{Config, Runtime};
 use either::Either;
-use etcd_client::{Client, ConnectOptions};
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-use servers::tls::TlsOption;
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use snafu::OptionExt;
 use snafu::ResultExt;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlConnectOptions;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
-#[cfg(feature = "pg_kvbackend")]
-use tokio_postgres::NoTls;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
@@ -67,10 +45,6 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
-#[cfg(feature = "mysql_kvbackend")]
-use crate::election::rds::mysql::MySqlElection;
-#[cfg(feature = "pg_kvbackend")]
-use crate::election::rds::postgres::PgElection;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -82,6 +56,7 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
+use crate::utils::etcd::create_etcd_client_with_tls;
 use crate::{Result, error};
 
 pub struct MetasrvInstance {
@@ -306,8 +281,11 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+            use common_meta::kv_backend::rds::PgStore;
+            use deadpool_postgres::Config;
 
-            use crate::election::rds::postgres::ElectionPgClient;
+            use crate::election::rds::postgres::{ElectionPgClient, PgElection};
+            use crate::utils::postgres::create_postgres_pool;
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -319,8 +297,8 @@ pub async fn metasrv_builder(
             cfg.keepalives = Some(true);
             cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool =
-                create_postgres_pool_with(&opts.store_addrs, cfg, opts.backend_tls.clone()).await?;
+            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
+                .await?;
 
             let election_client = ElectionPgClient::new(
                 pool,
@@ -340,7 +318,8 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
+            let pool =
+                create_postgres_pool(&opts.store_addrs, None, opts.backend_tls.clone()).await?;
             let kv_backend = PgStore::with_pg_pool(
                 pool,
                 opts.meta_schema_name.as_deref(),
@@ -356,9 +335,12 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
-            use crate::election::rds::mysql::ElectionMysqlClient;
+            use common_meta::kv_backend::rds::MySqlStore;
 
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            use crate::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
+            use crate::utils::mysql::create_mysql_pool;
+
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
@@ -366,7 +348,7 @@ pub async fn metasrv_builder(
             // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
             let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -451,261 +433,4 @@ pub(crate) fn build_default_meta_peer_client(
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
-}
-
-pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
-    create_etcd_client_with_tls(store_addrs, None).await
-}
-
-fn build_connection_options(tls_config: Option<&TlsOption>) -> Result<Option<ConnectOptions>> {
-    use std::fs;
-
-    use common_telemetry::debug;
-    use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
-    use servers::tls::TlsMode;
-
-    // If TLS options are not provided, return None
-    let Some(tls_config) = tls_config else {
-        return Ok(None);
-    };
-    // If TLS is disabled, return None
-    if matches!(tls_config.mode, TlsMode::Disable) {
-        return Ok(None);
-    }
-    info!("Creating etcd client with TLS mode: {:?}", tls_config.mode);
-    let mut etcd_tls_opts = TlsOptions::new();
-    // Set CA certificate if provided
-    if !tls_config.ca_cert_path.is_empty() {
-        debug!("Using CA certificate from {}", tls_config.ca_cert_path);
-        let ca_cert_pem = fs::read(&tls_config.ca_cert_path).context(error::FileIoSnafu {
-            path: &tls_config.ca_cert_path,
-        })?;
-        let ca_cert = Certificate::from_pem(ca_cert_pem);
-        etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
-    }
-    // Set client identity (cert + key) if both are provided
-    if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
-        debug!(
-            "Using client certificate from {} and key from {}",
-            tls_config.cert_path, tls_config.key_path
-        );
-        let cert_pem = fs::read(&tls_config.cert_path).context(error::FileIoSnafu {
-            path: &tls_config.cert_path,
-        })?;
-        let key_pem = fs::read(&tls_config.key_path).context(error::FileIoSnafu {
-            path: &tls_config.key_path,
-        })?;
-        let identity = Identity::from_pem(cert_pem, key_pem);
-        etcd_tls_opts = etcd_tls_opts.identity(identity);
-    }
-    // Enable native TLS roots for additional trust anchors
-    etcd_tls_opts = etcd_tls_opts.with_native_roots();
-    Ok(Some(ConnectOptions::new().with_tls(etcd_tls_opts)))
-}
-
-pub async fn create_etcd_client_with_tls(
-    store_addrs: &[String],
-    tls_config: Option<&TlsOption>,
-) -> Result<Client> {
-    let etcd_endpoints = store_addrs
-        .iter()
-        .map(|x| x.trim())
-        .filter(|x| !x.is_empty())
-        .collect::<Vec<_>>();
-
-    let connect_options = build_connection_options(tls_config)?;
-
-    Client::connect(&etcd_endpoints, connect_options)
-        .await
-        .context(error::ConnectEtcdSnafu)
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Converts servers::tls::TlsOption to postgres::TlsOption to avoid circular dependencies
-fn convert_tls_option(tls_option: &TlsOption) -> PgTlsOption {
-    let mode = match tls_option.mode {
-        servers::tls::TlsMode::Disable => PgTlsMode::Disable,
-        servers::tls::TlsMode::Prefer => PgTlsMode::Prefer,
-        servers::tls::TlsMode::Require => PgTlsMode::Require,
-        servers::tls::TlsMode::VerifyCa => PgTlsMode::VerifyCa,
-        servers::tls::TlsMode::VerifyFull => PgTlsMode::VerifyFull,
-    };
-
-    PgTlsOption {
-        mode,
-        cert_path: tls_option.cert_path.clone(),
-        key_path: tls_option.key_path.clone(),
-        ca_cert_path: tls_option.ca_cert_path.clone(),
-        watch: tls_option.watch,
-    }
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend with optional TLS.
-///
-/// It only use first store addr to create a pool.
-pub async fn create_postgres_pool(
-    store_addrs: &[String],
-    tls_config: Option<TlsOption>,
-) -> Result<deadpool_postgres::Pool> {
-    create_postgres_pool_with(store_addrs, Config::new(), tls_config).await
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend with config and optional TLS.
-///
-/// It only use first store addr to create a pool, and use the given config to create a pool.
-pub async fn create_postgres_pool_with(
-    store_addrs: &[String],
-    mut cfg: Config,
-    tls_config: Option<TlsOption>,
-) -> Result<deadpool_postgres::Pool> {
-    let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    cfg.url = Some(postgres_url.to_string());
-
-    let pool = if let Some(tls_config) = tls_config {
-        let pg_tls_config = convert_tls_option(&tls_config);
-        let tls_connector =
-            create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
-                source: BoxedError::new(e),
-                location: snafu::Location::new(file!(), line!(), 0),
-            })?;
-        cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
-            .context(error::CreatePostgresPoolSnafu)?
-    } else {
-        cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-            .context(error::CreatePostgresPoolSnafu)?
-    };
-
-    Ok(pool)
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-async fn setup_mysql_options(store_addrs: &[String]) -> Result<MySqlConnectOptions> {
-    let mysql_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    // Avoid `SET` commands in sqlx
-    let opts: MySqlConnectOptions = mysql_url
-        .parse()
-        .context(error::ParseMySqlUrlSnafu { mysql_url })?;
-    let opts = opts
-        .no_engine_substitution(false)
-        .pipes_as_concat(false)
-        .timezone(None)
-        .set_names(false);
-    Ok(opts)
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
-    let opts = setup_mysql_options(store_addrs).await?;
-    let pool = MySqlPool::connect_with(opts)
-        .await
-        .context(error::CreateMySqlPoolSnafu)?;
-
-    Ok(pool)
-}
-
-#[cfg(test)]
-mod tests {
-    use servers::tls::TlsMode;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_without_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let tls_config = TlsOption {
-            mode: TlsMode::Require,
-            ca_cert_path: String::new(),
-            cert_path: String::new(),
-            key_path: String::new(),
-            watch: false,
-        };
-
-        let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_with_client_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let cert_dir = std::env::current_dir()
-            .unwrap()
-            .join("tests-integration")
-            .join("fixtures")
-            .join("etcd-tls-certs");
-
-        if cert_dir.join("client.crt").exists() && cert_dir.join("client-key.pem").exists() {
-            let tls_config = TlsOption {
-                mode: TlsMode::Require,
-                ca_cert_path: String::new(),
-                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
-                key_path: cert_dir
-                    .join("client-key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                watch: false,
-            };
-
-            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-                .await
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_with_full_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let cert_dir = std::env::current_dir()
-            .unwrap()
-            .join("tests-integration")
-            .join("fixtures")
-            .join("etcd-tls-certs");
-
-        if cert_dir.join("ca.crt").exists()
-            && cert_dir.join("client.crt").exists()
-            && cert_dir.join("client-key.pem").exists()
-        {
-            let tls_config = TlsOption {
-                mode: TlsMode::Require,
-                ca_cert_path: cert_dir.join("ca.crt").to_string_lossy().to_string(),
-                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
-                key_path: cert_dir
-                    .join("client-key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                watch: false,
-            };
-
-            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-                .await
-                .unwrap();
-        }
-    }
 }

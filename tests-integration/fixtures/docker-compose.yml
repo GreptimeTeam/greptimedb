@@ -89,7 +89,7 @@ services:
       - 5432:5432
     volumes:
       - ~/apps/postgres:/var/lib/postgresql/data
-      - ./pgsql-certs:/tmp/certs:ro
+      - ./certs:/tmp/certs:ro
       - ./postgres/tls/pg_hba.conf:/var/lib/postgresql/pg_hba.conf
     environment:
       - POSTGRES_USER=greptimedb
@@ -127,7 +127,8 @@ services:
     ports:
       - 3306:3306
     volumes:
-      - ~/apps/mysql:/var/lib/mysql
+      - ./certs:/certs:ro
+      - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
     environment:
       - MYSQL_DATABASE=mysql
       - MYSQL_USER=greptimedb

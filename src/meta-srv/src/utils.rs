@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod etcd;
 pub mod insert_forwarder;
+#[cfg(feature = "mysql_kvbackend")]
+pub mod mysql;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
 
 #[macro_export]
 macro_rules! define_ticker {

@@ -984,8 +984,8 @@ mod tests {
     use common_telemetry::init_default_ut_logging;
 
     use super::*;
-    use crate::bootstrap::create_mysql_pool;
     use crate::error;
+    use crate::utils::mysql::create_mysql_pool;
 
     async fn create_mysql_client(
         table_name: Option<&str>,
@@ -1000,7 +1000,7 @@ mod tests {
             }
             .fail();
         }
-        let pool = create_mysql_pool(&[endpoint]).await.unwrap();
+        let pool = create_mysql_pool(&[endpoint], None).await.unwrap();
         let mut client = ElectionMysqlClient::new(
             pool,
             execution_timeout,

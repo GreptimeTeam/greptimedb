@@ -981,6 +981,14 @@ pub enum Error {
         #[snafu(source)]
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to build tls options"))]
+    BuildTlsOptions {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -1116,6 +1124,7 @@ impl ErrorExt for Error {
             | Error::InitDdlManager { source, .. }
             | Error::InitReconciliationManager { source, .. } => source.status_code(),
 
+            Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 

@@ -826,8 +826,8 @@ mod tests {
     use common_meta::maybe_skip_postgres_integration_test;
 
     use super::*;
-    use crate::bootstrap::create_postgres_pool;
     use crate::error;
+    use crate::utils::postgres::create_postgres_pool;
 
     async fn create_postgres_client(
         table_name: Option<&str>,
@@ -842,7 +842,7 @@ mod tests {
             }
             .fail();
         }
-        let pool = create_postgres_pool(&[endpoint], None).await.unwrap();
+        let pool = create_postgres_pool(&[endpoint], None, None).await.unwrap();
         let mut pg_client = ElectionPgClient::new(
             pool,
             execution_timeout,
