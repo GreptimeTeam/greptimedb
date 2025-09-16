@@ -444,6 +444,7 @@ impl RegionFlushTask {
                 common_telemetry::error!(e; "Failed to compact memtable before flush");
             }
             let compact_cost = compact_start.elapsed();
+            flush_metrics.compact_memtable += compact_cost;
 
             let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
             let num_mem_ranges = mem_ranges.ranges.len();

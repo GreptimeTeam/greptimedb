@@ -497,6 +497,9 @@ allow_stale_entries = false
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"
 
+## Whether to enable experimental flat format.
+enable_experimental_flat_format = false
+
 ## The options for index in Mito engine.
 [region_engine.mito.index]
 

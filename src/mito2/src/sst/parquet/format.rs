@@ -732,6 +732,8 @@ pub(crate) struct FormatProjection {
     pub(crate) projection_indices: Vec<usize>,
     /// Column id to their index in the projected schema (
     /// the schema after projection).
+    ///
+    /// It doesn't contain time index column if it is not present in the projection.
     pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
 }
 

@@ -68,6 +68,7 @@ pub struct Metrics {
     pub(crate) update_index: Duration,
     pub(crate) upload_parquet: Duration,
     pub(crate) upload_puffin: Duration,
+    pub(crate) compact_memtable: Duration,
 }
 
 impl Metrics {
@@ -79,6 +80,7 @@ impl Metrics {
             update_index: Default::default(),
             upload_parquet: Default::default(),
             upload_puffin: Default::default(),
+            compact_memtable: Default::default(),
         }
     }
 
@@ -89,6 +91,7 @@ impl Metrics {
         self.update_index += other.update_index;
         self.upload_parquet += other.upload_parquet;
         self.upload_puffin += other.upload_puffin;
+        self.compact_memtable += other.compact_memtable;
         self
     }
 
@@ -110,6 +113,11 @@ impl Metrics {
                 FLUSH_ELAPSED
                     .with_label_values(&["upload_puffin"])
                     .observe(self.upload_puffin.as_secs_f64());
+                if !self.compact_memtable.is_zero() {
+                    FLUSH_ELAPSED
+                        .with_label_values(&["compact_memtable"])
+                        .observe(self.upload_puffin.as_secs_f64());
+                }
             }
             WriteType::Compaction => {
                 COMPACTION_STAGE_ELAPSED
