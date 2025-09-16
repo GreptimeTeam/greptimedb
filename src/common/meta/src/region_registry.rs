@@ -67,6 +67,7 @@ impl LeaderRegionManifestInfo {
             RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removal_rate: _,
             } => LeaderRegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
