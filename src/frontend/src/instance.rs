@@ -396,6 +396,9 @@ impl Instance {
                 // add doc links in err msg later
                 ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
+                // drop hit_cache to release references before inserting
+                drop(hit_cache);
+
                 let flag = hit_legacy;
                 // set cache for all names
                 names.iter().for_each(|name| {
