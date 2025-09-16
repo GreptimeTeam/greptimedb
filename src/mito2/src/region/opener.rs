@@ -735,7 +735,6 @@ where
             None,
         );
         for mutation in entry.mutations {
-            info!("=== Replay mutation sequence: {}", mutation.sequence);
             rows_replayed += mutation
                 .rows
                 .as_ref()
