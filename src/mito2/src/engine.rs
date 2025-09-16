@@ -274,7 +274,6 @@ impl MitoEngine {
         let file_ref_mgr = self.file_ref_manager();
 
         let region_ids = region_ids.into_iter().collect::<Vec<_>>();
-
         // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
         let regions: Vec<MitoRegionRef> = region_ids
             .into_iter()

@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
+use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
@@ -29,6 +30,7 @@ use crate::error::{
     DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::manager::RemoveFileOptions;
+use crate::region::ManifestStats;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
@@ -292,6 +294,52 @@ pub struct RemovedFilesRecord {
     /// a list of `(FileIds, timestamp)` pairs, where the timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
     pub removed_files: Vec<RemovedFiles>,
+}
+
+impl RemovedFilesRecord {
+    /// Count the number of files removed after the given timestamp. Also return the minimum
+    /// timestamp of all removed files.
+    fn file_removed_cnt_after(&self, t_ms: i64) -> (u64, Option<i64>) {
+        let mut cnt = 0;
+        let mut min_ts_after: Option<i64> = None;
+        for record in &self.removed_files {
+            if record.removed_at >= t_ms {
+                cnt += record.file_ids.len();
+            }
+            min_ts_after = match min_ts_after {
+                Some(ts) => Some(ts.min(record.removed_at)),
+                None => Some(record.removed_at),
+            };
+        }
+        (cnt as u64, min_ts_after)
+    }
+
+    pub fn update_file_removal_rate_to_stats(&self, stats: &ManifestStats) {
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+        let one_hour_ago_ms = one_hour_ago.timestamp_millis();
+        let (cnt, min_ts) = self.file_removed_cnt_after(one_hour_ago_ms);
+        // if min_ts is some, scale the cnt to rate per hour
+        if let Some(min_ts) = min_ts {
+            let duration = now.timestamp_millis() - min_ts;
+            if duration > 0 {
+                let rate = (cnt as f64) * 3_600_000.0 / (duration as f64);
+                stats
+                    .file_removal_rate
+                    .store(rate as u64, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                warn!(
+                    "Duration for calculating file removal rate is non-positive: {}, min_ts: {}, now: {}",
+                    duration, min_ts, now
+                );
+            }
+        } else {
+            // no removed files, cnt should be 0, update anyway
+            stats
+                .file_removal_rate
+                .store(cnt, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]

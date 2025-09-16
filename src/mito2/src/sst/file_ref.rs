@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use dashmap::{DashMap, Entry};
 use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 

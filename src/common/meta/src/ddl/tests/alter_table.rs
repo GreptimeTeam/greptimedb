@@ -182,7 +182,7 @@ fn alter_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionRe
         let region_id = RegionId::from(req.region_id);
         response.extensions.insert(
             MANIFEST_INFO_EXTENSION_KEY.to_string(),
-            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::mito(1, 1))])
+            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::mito(1, 1, 0))])
                 .unwrap(),
         );
         response.extensions.insert(

@@ -410,16 +410,12 @@ impl LocalGcWorker {
             },
         };
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id,
-            region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
-        })
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .context(EmptyRegionDirSnafu {
+                region_id,
+                region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
+            })
     }
 
     /// Get all the removed files in delta manifest files and their expel times.

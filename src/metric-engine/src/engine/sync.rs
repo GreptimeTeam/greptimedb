@@ -45,7 +45,7 @@ impl MetricEngineInner {
             .metadata_flushed_entry_id()
             .unwrap_or_default();
         let metadata_region_manifest =
-            RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id);
+            RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id, 0);
         let metadata_synced = self
             .mito
             .sync_region(metadata_region_id, metadata_region_manifest)
@@ -57,7 +57,7 @@ impl MetricEngineInner {
         let data_manifest_version = manifest_info.data_manifest_version();
         let data_flushed_entry_id = manifest_info.data_flushed_entry_id();
         let data_region_manifest =
-            RegionManifestInfo::mito(data_manifest_version, data_flushed_entry_id);
+            RegionManifestInfo::mito(data_manifest_version, data_flushed_entry_id, 0);
 
         let data_synced = self
             .mito
