@@ -396,7 +396,7 @@ impl Instance {
                 // add doc links in err msg later
                 ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
-                // drop hit_cache to release references before inserting
+                // drop hit_cache to release references before inserting to avoid deadlock
                 drop(hit_cache);
 
                 let flag = hit_legacy;
