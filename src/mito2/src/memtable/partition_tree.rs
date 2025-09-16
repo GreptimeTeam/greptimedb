@@ -32,9 +32,7 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
-#[cfg(any(test, feature = "test"))]
-use store_api::storage::SequenceRange;
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};

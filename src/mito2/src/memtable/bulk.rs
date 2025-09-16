@@ -31,8 +31,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
-#[cfg(any(test, feature = "test"))]
-use store_api::storage::SequenceRange;
+use store_api::storage::{SequenceRange};
 use tokio::sync::Semaphore;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
