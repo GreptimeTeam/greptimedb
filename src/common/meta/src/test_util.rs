@@ -301,8 +301,6 @@ macro_rules! maybe_skip_postgres15_integration_test {
     };
 }
 
-
-
 /// Returns the directory of the etcd TLS certs.
 pub fn etcd_certs_dir() -> PathBuf {
     let project_path = env!("CARGO_MANIFEST_DIR");
