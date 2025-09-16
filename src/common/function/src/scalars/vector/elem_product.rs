@@ -13,19 +13,17 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::Float32Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use nalgebra::DVectorView;
 
 use crate::function::Function;
-use crate::scalars::vector::impl_conv;
+use crate::scalars::vector::{VectorCalculator, impl_conv};
 
 const NAME: &str = "vec_elem_product";
 
@@ -68,25 +66,17 @@ impl Function for ElemProductFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let body = |v0: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v0 = impl_conv::as_veclit(v0)?
+                .map(|v0| DVectorView::from_slice(&v0, v0.len()).product());
+            Ok(ScalarValue::Float32(v0))
+        };
 
-        let len = arg0.len();
-        let mut builder = Float32Array::builder(len);
-        if len == 0 {
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-
-        for i in 0..len {
-            let v = ScalarValue::try_from_array(&arg0, i)?;
-            let Some(v) = impl_conv::as_veclit(&v)? else {
-                builder.append_null();
-                continue;
-            };
-            builder.append_value(DVectorView::from_slice(&v, v.len()).product());
-        }
-
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_single_argument(args)
     }
 }
 

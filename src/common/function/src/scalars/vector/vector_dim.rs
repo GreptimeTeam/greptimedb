@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::UInt64Builder;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 
 use crate::function::Function;
+use crate::scalars::vector::VectorCalculator;
 use crate::scalars::vector::impl_conv::as_veclit;
 
 const NAME: &str = "vec_dim";
@@ -67,26 +66,16 @@ impl Function for VectorDimFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let body = |v0: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v = as_veclit(v0)?.map(|v0| v0.len() as u64);
+            Ok(ScalarValue::UInt64(v))
+        };
 
-        let len = arg0.len();
-        let mut builder = UInt64Builder::with_capacity(len);
-        if len == 0 {
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-
-        for i in 0..len {
-            let v = ScalarValue::try_from_array(&arg0, i)?;
-            let arg0 = as_veclit(&v)?;
-            let Some(arg0) = arg0 else {
-                builder.append_null();
-                continue;
-            };
-            builder.append_value(arg0.len() as u64);
-        }
-
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_single_argument(args)
     }
 }
 
@@ -162,8 +151,9 @@ mod tests {
             config_options: Arc::new(ConfigOptions::new()),
         };
         let e = func.invoke_with_args(args).unwrap_err();
-        assert!(e.to_string().starts_with(
-            "Internal error: Arguments has mixed length. Expected length: 4, found length: 3."
-        ))
+        assert!(
+            e.to_string()
+                .starts_with("Execution error: vec_dim function requires 1 argument, got 2")
+        )
     }
 }

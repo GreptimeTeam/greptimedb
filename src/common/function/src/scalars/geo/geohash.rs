@@ -21,7 +21,7 @@ use common_query::error::{self, Result};
 use datafusion::arrow::array::{Array, AsArray, ListBuilder, StringViewBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, UInt8Type};
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::utils;
+use datafusion_common::{DataFusionError, utils};
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use geohash::Coord;
@@ -30,18 +30,13 @@ use snafu::ResultExt;
 use crate::function::Function;
 use crate::scalars::geo::helpers;
 
-macro_rules! ensure_resolution_usize {
-    ($v: expr) => {
-        if !($v > 0 && $v <= 12) {
-            Err(BoxedError::new(PlainError::new(
-                format!("Invalid geohash resolution {}, expect value: [1, 12]", $v),
-                StatusCode::EngineExecuteQuery,
-            )))
-            .context(error::ExecuteSnafu)
-        } else {
-            Ok($v as usize)
-        }
-    };
+fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
+    if v == 0 || v > 12 {
+        return Err(DataFusionError::Execution(format!(
+            "Invalid geohash resolution {v}, valid value range: [1, 12]"
+        )));
+    }
+    Ok(v as usize)
 }
 
 /// Function that return geohash string for a given geospatial coordinate.
@@ -100,7 +95,7 @@ impl Function for GeohashFunction {
             let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
             let r = resolutions
                 .is_valid(i)
-                .then(|| ensure_resolution_usize!(resolutions.value(i)))
+                .then(|| ensure_resolution_usize(resolutions.value(i)))
                 .transpose()?;
 
             let result = match (lat, lon, r) {
@@ -192,7 +187,7 @@ impl Function for GeohashNeighboursFunction {
             let lon = lon_vec.is_valid(i).then(|| lon_vec.value(i));
             let r = resolutions
                 .is_valid(i)
-                .then(|| ensure_resolution_usize!(resolutions.value(i)))
+                .then(|| ensure_resolution_usize(resolutions.value(i)))
                 .transpose()?;
 
             match (lat, lon, r) {

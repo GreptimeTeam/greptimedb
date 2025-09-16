@@ -13,19 +13,16 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::array::{Array, AsArray, Float32Array};
-use datafusion::arrow::datatypes::Int64Type;
+use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::datatypes::DataType;
-use snafu::ensure;
 
 use crate::function::Function;
 use crate::helper;
+use crate::scalars::vector::VectorCalculator;
 use crate::scalars::vector::impl_conv::as_veclit;
 
 const NAME: &str = "vec_kth_elem";
@@ -69,58 +66,40 @@ impl Function for VectorKthElemFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
-        let arg1 = arg1.as_primitive::<Int64Type>();
+        let body = |v0: &ScalarValue, v1: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v0 = as_veclit(v0)?;
 
-        let len = arg0.len();
-        let mut builder = Float32Array::builder(len);
-        if len == 0 {
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
+            let v1 = if let ScalarValue::Int64(Some(v1)) = v1
+                && *v1 >= 0
+            {
+                *v1 as usize
+            } else {
+                return Err(DataFusionError::Execution(format!(
+                    "2nd argument not a valid index: {}",
+                    self.name()
+                )));
+            };
+
+            let result = v0
+                .map(|v0| {
+                    if v1 >= v0.len() {
+                        Err(DataFusionError::Execution(format!(
+                            "index out of bound: {}",
+                            self.name()
+                        )))
+                    } else {
+                        Ok(v0[v1])
+                    }
+                })
+                .transpose()?;
+            Ok(ScalarValue::Float32(result))
         };
 
-        for i in 0..len {
-            let v = ScalarValue::try_from_array(&arg0, i)?;
-            let arg0 = as_veclit(&v)?;
-            let Some(arg0) = arg0 else {
-                builder.append_null();
-                continue;
-            };
-
-            let arg1 = arg1.is_valid(i).then(|| arg1.value(i) as f64);
-            let Some(arg1) = arg1 else {
-                builder.append_null();
-                continue;
-            };
-
-            ensure!(
-                arg1 >= 0.0 && arg1.fract() == 0.0,
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "Invalid argument: k must be a non-negative integer, but got k = {}.",
-                        arg1
-                    ),
-                }
-            );
-
-            let k = arg1 as usize;
-
-            ensure!(
-                k < arg0.len(),
-                InvalidFuncArgsSnafu {
-                    err_msg: format!(
-                        "Out of range: k must be in the range [0, {}], but got k = {}.",
-                        arg0.len() - 1,
-                        k
-                    ),
-                }
-            );
-
-            let value = arg0[k];
-
-            builder.append_value(value);
-        }
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_args(args)
     }
 }
 
@@ -135,7 +114,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::Field;
-    use datafusion::arrow::array::{ArrayRef, Int64Array, StringViewArray};
+    use datafusion::arrow::array::{Array, ArrayRef, AsArray, Int64Array, StringViewArray};
     use datafusion::arrow::datatypes::Float32Type;
     use datafusion_common::config::ConfigOptions;
 

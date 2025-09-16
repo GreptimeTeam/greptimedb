@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::BinaryViewBuilder;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use nalgebra::DVectorView;
 
 use crate::function::Function;
+use crate::scalars::vector::VectorCalculator;
 use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
 
 const NAME: &str = "vec_norm";
@@ -70,38 +69,23 @@ impl Function for VectorNormFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
-
-        let len = arg0.len();
-        let mut builder = BinaryViewBuilder::with_capacity(len);
-        if len == 0 {
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-
-        for i in 0..len {
-            let v = ScalarValue::try_from_array(&arg0, i)?;
-            let arg0 = as_veclit(&v)?;
-            let Some(arg0) = arg0 else {
-                builder.append_null();
-                continue;
+        let body = |v0: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v0 = as_veclit(v0)?;
+            let Some(v0) = v0 else {
+                return Ok(ScalarValue::BinaryView(None));
             };
 
-            let vec0 = DVectorView::from_slice(&arg0, arg0.len());
-            let vec1 = DVectorView::from_slice(&arg0, arg0.len());
-            let vec2scalar = vec1.component_mul(&vec0);
-            let scalar_var = vec2scalar.sum().sqrt();
+            let v0 = DVectorView::from_slice(&v0, v0.len());
+            let result =
+                veclit_to_binlit(v0.unscale(v0.component_mul(&v0).sum().sqrt()).as_slice());
+            Ok(ScalarValue::BinaryView(Some(result)))
+        };
 
-            let vec = DVectorView::from_slice(&arg0, arg0.len());
-            // Use unscale to avoid division by zero and keep more precision as possible
-            let vec_res = vec.unscale(scalar_var);
-
-            let veclit = vec_res.as_slice();
-            let binlit = veclit_to_binlit(veclit);
-            builder.append_value(&binlit);
-        }
-
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_single_argument(args)
     }
 }
 

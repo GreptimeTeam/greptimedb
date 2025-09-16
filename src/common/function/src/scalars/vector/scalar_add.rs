@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::{Array, AsArray, BinaryViewBuilder};
-use datafusion::arrow::datatypes::{DataType, Float64Type};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use nalgebra::DVectorView;
 
 use crate::function::Function;
 use crate::helper;
+use crate::scalars::vector::VectorCalculator;
 use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
 
 const NAME: &str = "vec_scalar_add";
@@ -74,39 +73,22 @@ impl Function for ScalarAddFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
-        let arg0 = arg0.as_primitive::<Float64Type>();
-
-        let len = arg0.len();
-        let mut builder = BinaryViewBuilder::with_capacity(len);
-        if len == 0 {
-            return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-        }
-
-        for i in 0..len {
-            let arg0 = arg0.is_valid(i).then(|| arg0.value(i));
-            let Some(arg0) = arg0 else {
-                builder.append_null();
-                continue;
+        let body = |v0: &ScalarValue, v1: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let ScalarValue::Float64(Some(v0)) = v0 else {
+                return Ok(ScalarValue::BinaryView(None));
             };
 
-            let v = ScalarValue::try_from_array(&arg1, i)?;
-            let arg1 = as_veclit(&v)?;
-            let Some(arg1) = arg1 else {
-                builder.append_null();
-                continue;
-            };
+            let v1 = as_veclit(v1)?
+                .map(|v1| DVectorView::from_slice(&v1, v1.len()).add_scalar(*v0 as f32));
+            let result = v1.map(|v1| veclit_to_binlit(v1.as_slice()));
+            Ok(ScalarValue::BinaryView(result))
+        };
 
-            let vec = DVectorView::from_slice(&arg1, arg1.len());
-            let vec_res = vec.add_scalar(arg0 as _);
-
-            let veclit = vec_res.as_slice();
-            let binlit = veclit_to_binlit(veclit);
-            builder.append_value(&binlit);
-        }
-
-        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_args(args)
     }
 }
 

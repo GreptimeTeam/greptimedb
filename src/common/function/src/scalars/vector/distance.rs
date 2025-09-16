@@ -17,15 +17,12 @@ mod dot;
 mod l2sq;
 
 use std::fmt::Display;
-use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::array::Float32Array;
+use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::datatypes::DataType;
-use snafu::ensure;
 
 use crate::function::Function;
 use crate::helper;
@@ -33,7 +30,6 @@ use crate::scalars::vector::impl_conv;
 
 macro_rules! define_distance_function {
     ($StructName:ident, $display_name:expr, $similarity_method:path) => {
-
         /// A function calculates the distance between two vectors.
 
         #[derive(Debug, Clone, Default)]
@@ -59,42 +55,32 @@ macro_rules! define_distance_function {
                 &self,
                 args: ScalarFunctionArgs,
             ) -> datafusion_common::Result<ColumnarValue> {
-                let args = ColumnarValue::values_to_arrays(&args.args)?;
-                let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+                let body = |v0: &ScalarValue,
+                            v1: &ScalarValue|
+                 -> datafusion_common::Result<ScalarValue> {
+                    let v0 = impl_conv::as_veclit(v0)?;
+                    let v1 = impl_conv::as_veclit(v1)?;
+                    let result = if let (Some(v0), Some(v1)) = (v0, v1) {
+                        if v0.len() != v1.len() {
+                            return Err(datafusion_common::DataFusionError::Execution(format!(
+                                "vectors length not match: {}",
+                                self.name()
+                            )));
+                        }
 
-                let size = arg0.len();
-                let mut builder = Float32Array::builder(size);
-                if size == 0 {
-                    return Ok(ColumnarValue::Array(Arc::new(builder.finish())));
-                }
-
-                for i in 0..size {
-                    let v = ScalarValue::try_from_array(&arg0, i)?;
-                    let vec0 = impl_conv::as_veclit(&v)?;
-                    let v = ScalarValue::try_from_array(&arg1, i)?;
-                    let vec1 = impl_conv::as_veclit(&v)?;
-
-                    if let (Some(vec0), Some(vec1)) = (vec0, vec1) {
-                        ensure!(
-                            vec0.len() == vec1.len(),
-                            InvalidFuncArgsSnafu {
-                                err_msg: format!(
-                                    "The length of the vectors must match to calculate distance, have: {} vs {}",
-                                    vec0.len(),
-                                    vec1.len()
-                                ),
-                            }
-                        );
-
-                        // Checked if the length of the vectors match
-                        let d = $similarity_method(vec0.as_ref(), vec1.as_ref());
-                        builder.append_value(d);
+                        let d = $similarity_method(v0.as_ref(), v1.as_ref());
+                        Some(d)
                     } else {
-                        builder.append_null();
-                    }
-                }
+                        None
+                    };
+                    Ok(ScalarValue::Float32(result))
+                };
 
-                Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+                let calculator = $crate::scalars::vector::VectorCalculator {
+                    name: self.name(),
+                    func: body,
+                };
+                calculator.invoke_with_args(args)
             }
         }
 
@@ -103,7 +89,7 @@ macro_rules! define_distance_function {
                 write!(f, "{}", $display_name.to_ascii_uppercase())
             }
         }
-    }
+    };
 }
 
 define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos);
