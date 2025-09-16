@@ -127,7 +127,8 @@ services:
     ports:
       - 3306:3306
     volumes:
-      - ~/apps/mysql:/var/lib/mysql
+      - ./mysql-certs:/certs:ro
+      - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
     environment:
       - MYSQL_DATABASE=mysql
       - MYSQL_USER=greptimedb
