@@ -842,7 +842,7 @@ mod tests {
             }
             .fail();
         }
-        let pool = create_postgres_pool(&[endpoint], None).await.unwrap();
+        let pool = create_postgres_pool(&[endpoint], None, None).await.unwrap();
         let mut pg_client = ElectionPgClient::new(
             pool,
             execution_timeout,

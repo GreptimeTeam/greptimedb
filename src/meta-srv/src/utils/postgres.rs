@@ -42,24 +42,15 @@ fn convert_tls_option(tls_option: &TlsOption) -> PgTlsOption {
     }
 }
 
-/// Creates a pool for the Postgres backend with optional TLS.
-///
-/// It only use first store addr to create a pool.
-pub async fn create_postgres_pool(
-    store_addrs: &[String],
-    tls_config: Option<TlsOption>,
-) -> Result<deadpool_postgres::Pool> {
-    create_postgres_pool_with(store_addrs, Config::new(), tls_config).await
-}
-
 /// Creates a pool for the Postgres backend with config and optional TLS.
 ///
 /// It only use first store addr to create a pool, and use the given config to create a pool.
-pub async fn create_postgres_pool_with(
+pub async fn create_postgres_pool(
     store_addrs: &[String],
-    mut cfg: Config,
+    cfg: Option<Config>,
     tls_config: Option<TlsOption>,
 ) -> Result<deadpool_postgres::Pool> {
+    let mut cfg = cfg.unwrap_or_default();
     let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
         err_msg: "empty store addrs",
     })?;

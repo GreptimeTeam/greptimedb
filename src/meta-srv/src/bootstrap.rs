@@ -285,7 +285,7 @@ pub async fn metasrv_builder(
             use deadpool_postgres::Config;
 
             use crate::election::rds::postgres::{ElectionPgClient, PgElection};
-            use crate::utils::postgres::{create_postgres_pool, create_postgres_pool_with};
+            use crate::utils::postgres::create_postgres_pool;
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -297,8 +297,8 @@ pub async fn metasrv_builder(
             cfg.keepalives = Some(true);
             cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool =
-                create_postgres_pool_with(&opts.store_addrs, cfg, opts.backend_tls.clone()).await?;
+            let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
+                .await?;
 
             let election_client = ElectionPgClient::new(
                 pool,
@@ -318,7 +318,8 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
+            let pool =
+                create_postgres_pool(&opts.store_addrs, None, opts.backend_tls.clone()).await?;
             let kv_backend = PgStore::with_pg_pool(
                 pool,
                 opts.meta_schema_name.as_deref(),
