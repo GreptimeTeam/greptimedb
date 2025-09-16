@@ -61,11 +61,23 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 
 DROP TABLE integers;
 
-CREATE TABLE t(ts timestamp time index, a INT, b INT);
+CREATE TABLE t(ts timestamp time index, a INT, b INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
 
-CREATE TABLE t1(ts timestamp time index, a INT);
+CREATE TABLE t1(ts timestamp time index, a INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
 
-CREATE TABLE t2(ts timestamp time index, a INT);
+CREATE TABLE t2(ts timestamp time index, a INT)PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
 
 INSERT INTO t(ts,a,b) VALUES (1,3,30),(2,1,10),(3,2,20);
 
@@ -76,6 +88,13 @@ INSERT INTO t2(ts,a) VALUES (1,2),(2,3);
 SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 -- expected: 1,2,3
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
 SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
 -- expected:
 -- x | c
@@ -83,14 +102,42 @@ SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
 -- 2 | 1
 -- 3 | 1
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER BY x;
+
 SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 -- expecetd: 1,2,3
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 
 SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
 -- expected: 1,2,3
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
+
 SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER BY y;
 -- expected: 1,2,3
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER BY y;
 
 SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
 -- expected:
@@ -99,8 +146,22 @@ SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
 -- (2,3)
 -- (3,4)
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
+
 SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER BY a;
 -- expected: 1,2,3,3
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER BY a;
 
 SELECT u1.a
 FROM (SELECT a FROM t1) u1
@@ -108,11 +169,35 @@ JOIN (SELECT a FROM t2) u2 ON u1.a = u2.a
 ORDER BY u1.a;
 -- expected: 3
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT u1.a
+FROM (SELECT a FROM t1) u1
+JOIN (SELECT a FROM t2) u2 ON u1.a = u2.a
+ORDER BY u1.a;
+
 SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
 -- expected: 1,2
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (VALUES (2),(1)) v(x) ORDER BY x;
+
 SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 -- expected: 1,2
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 
 DROP TABLE t;
 DROP TABLE t1;

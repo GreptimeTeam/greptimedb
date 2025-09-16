@@ -653,6 +653,9 @@ impl EnforceDistRequirementRewriter {
                         result_alias_mapping.insert((original_col.clone(), *level), cols);
                     } else {
                         // if no aliased column found in current node, there should be alias in child node as promised by enforce col reqs
+                        // because it should insert required columns in child node
+                        // so we can find the alias in child node
+                        // if not found, it's an internal error
                         let aliases_in_child = aliased_columns_for(
                             &[original_col.clone()].into(),
                             child,
@@ -667,7 +670,7 @@ impl EnforceDistRequirementRewriter {
                                 "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
                             )));
                         };
-                        // TODO(discord9): fix the problem of it in first projection, but not found in second projection
+
                         result_alias_mapping.insert((original_col.clone(), *level), aliases);
                     }
                 }
