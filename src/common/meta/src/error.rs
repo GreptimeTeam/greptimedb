@@ -752,7 +752,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to load TLS certificate from path: {}", path))]
     LoadTlsCertificate {
         path: String,
@@ -1181,13 +1180,14 @@ impl ErrorExt for Error {
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
+            LoadTlsCertificate { .. } => StatusCode::Internal,
+
             #[cfg(feature = "pg_kvbackend")]
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
             | PostgresTransaction { .. }
             | PostgresTlsConfig { .. }
-            | LoadTlsCertificate { .. }
             | InvalidTlsConfig { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
             MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {

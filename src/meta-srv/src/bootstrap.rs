@@ -41,7 +41,6 @@ use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
 use either::Either;
-use etcd_client::{Client, ConnectOptions};
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -82,6 +81,7 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
 use crate::service::admin;
 use crate::service::admin::admin_axum_router;
+use crate::utils::etcd::create_etcd_client_with_tls;
 use crate::{Result, error};
 
 pub struct MetasrvInstance {
@@ -453,73 +453,6 @@ pub(crate) fn build_default_meta_peer_client(
         .unwrap()
 }
 
-pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
-    create_etcd_client_with_tls(store_addrs, None).await
-}
-
-fn build_connection_options(tls_config: Option<&TlsOption>) -> Result<Option<ConnectOptions>> {
-    use std::fs;
-
-    use common_telemetry::debug;
-    use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
-    use servers::tls::TlsMode;
-
-    // If TLS options are not provided, return None
-    let Some(tls_config) = tls_config else {
-        return Ok(None);
-    };
-    // If TLS is disabled, return None
-    if matches!(tls_config.mode, TlsMode::Disable) {
-        return Ok(None);
-    }
-    info!("Creating etcd client with TLS mode: {:?}", tls_config.mode);
-    let mut etcd_tls_opts = TlsOptions::new();
-    // Set CA certificate if provided
-    if !tls_config.ca_cert_path.is_empty() {
-        debug!("Using CA certificate from {}", tls_config.ca_cert_path);
-        let ca_cert_pem = fs::read(&tls_config.ca_cert_path).context(error::FileIoSnafu {
-            path: &tls_config.ca_cert_path,
-        })?;
-        let ca_cert = Certificate::from_pem(ca_cert_pem);
-        etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
-    }
-    // Set client identity (cert + key) if both are provided
-    if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
-        debug!(
-            "Using client certificate from {} and key from {}",
-            tls_config.cert_path, tls_config.key_path
-        );
-        let cert_pem = fs::read(&tls_config.cert_path).context(error::FileIoSnafu {
-            path: &tls_config.cert_path,
-        })?;
-        let key_pem = fs::read(&tls_config.key_path).context(error::FileIoSnafu {
-            path: &tls_config.key_path,
-        })?;
-        let identity = Identity::from_pem(cert_pem, key_pem);
-        etcd_tls_opts = etcd_tls_opts.identity(identity);
-    }
-    // Enable native TLS roots for additional trust anchors
-    etcd_tls_opts = etcd_tls_opts.with_native_roots();
-    Ok(Some(ConnectOptions::new().with_tls(etcd_tls_opts)))
-}
-
-pub async fn create_etcd_client_with_tls(
-    store_addrs: &[String],
-    tls_config: Option<&TlsOption>,
-) -> Result<Client> {
-    let etcd_endpoints = store_addrs
-        .iter()
-        .map(|x| x.trim())
-        .filter(|x| !x.is_empty())
-        .collect::<Vec<_>>();
-
-    let connect_options = build_connection_options(tls_config)?;
-
-    Client::connect(&etcd_endpoints, connect_options)
-        .await
-        .context(error::ConnectEtcdSnafu)
-}
-
 #[cfg(feature = "pg_kvbackend")]
 /// Converts servers::tls::TlsOption to postgres::TlsOption to avoid circular dependencies
 fn convert_tls_option(tls_option: &TlsOption) -> PgTlsOption {
@@ -607,105 +540,4 @@ pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
         .context(error::CreateMySqlPoolSnafu)?;
 
     Ok(pool)
-}
-
-#[cfg(test)]
-mod tests {
-    use servers::tls::TlsMode;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_without_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let tls_config = TlsOption {
-            mode: TlsMode::Require,
-            ca_cert_path: String::new(),
-            cert_path: String::new(),
-            key_path: String::new(),
-            watch: false,
-        };
-
-        let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_with_client_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let cert_dir = std::env::current_dir()
-            .unwrap()
-            .join("tests-integration")
-            .join("fixtures")
-            .join("etcd-tls-certs");
-
-        if cert_dir.join("client.crt").exists() && cert_dir.join("client-key.pem").exists() {
-            let tls_config = TlsOption {
-                mode: TlsMode::Require,
-                ca_cert_path: String::new(),
-                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
-                key_path: cert_dir
-                    .join("client-key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                watch: false,
-            };
-
-            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-                .await
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_create_etcd_client_tls_with_full_certs() {
-        let endpoints: Vec<String> = match std::env::var("GT_ETCD_TLS_ENDPOINTS") {
-            Ok(endpoints_str) => endpoints_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            Err(_) => return,
-        };
-
-        let cert_dir = std::env::current_dir()
-            .unwrap()
-            .join("tests-integration")
-            .join("fixtures")
-            .join("etcd-tls-certs");
-
-        if cert_dir.join("ca.crt").exists()
-            && cert_dir.join("client.crt").exists()
-            && cert_dir.join("client-key.pem").exists()
-        {
-            let tls_config = TlsOption {
-                mode: TlsMode::Require,
-                ca_cert_path: cert_dir.join("ca.crt").to_string_lossy().to_string(),
-                cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
-                key_path: cert_dir
-                    .join("client-key.pem")
-                    .to_string_lossy()
-                    .to_string(),
-                watch: false,
-            };
-
-            let _client = create_etcd_client_with_tls(&endpoints, Some(&tls_config))
-                .await
-                .unwrap();
-        }
-    }
 }

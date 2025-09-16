@@ -301,6 +301,22 @@ macro_rules! maybe_skip_postgres15_integration_test {
     };
 }
 
+#[macro_export]
+/// Skip the test if the environment variable `GT_ETCD_TLS_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_ETCD_TLS_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_etcd_tls_integration_test {
+    () => {
+        if std::env::var("GT_ETCD_TLS_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The etcd with tls endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
+
 /// Returns the directory of the etcd TLS certs.
 pub fn etcd_certs_dir() -> PathBuf {
     let project_path = env!("CARGO_MANIFEST_DIR");

@@ -13,15 +13,17 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fs;
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use etcd_client::{
-    Client, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, TxnResponse,
+    Certificate, Client, DeleteOptions, GetOptions, Identity, PutOptions, TlsOptions, Txn, TxnOp,
+    TxnOpResponse, TxnResponse,
 };
 use snafu::{ResultExt, ensure};
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, LoadTlsCertificateSnafu, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
@@ -451,8 +453,76 @@ impl TryFrom<DeleteRangeRequest> for Delete {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TlsMode {
+    #[default]
+    Disable,
+    Require,
+}
+
+/// TLS configuration for Etcd connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsOption {
+    pub mode: TlsMode,
+    pub cert_path: String,
+    pub key_path: String,
+    pub ca_cert_path: String,
+}
+
+/// Creates a Etcd [`TlsOptions`] from a [`TlsOption`].
+///
+/// This function builds the TLS options for etcd client connections based on the provided
+/// [`TlsOption`]. It supports disabling TLS, setting a custom CA certificate, and configuring
+/// client identity for mutual TLS authentication.
+///
+/// Note: All TlsMode variants except [`TlsMode::Disable`] will be treated as enabling TLS.
+pub fn create_etcd_tls_options(tls_config: &TlsOption) -> Result<Option<TlsOptions>> {
+    // If TLS mode is disabled, return None to indicate no TLS configuration.
+    if matches!(tls_config.mode, TlsMode::Disable) {
+        return Ok(None);
+    }
+
+    info!("Creating etcd TLS with mode: {:?}", tls_config.mode);
+    // Start with default TLS options.
+    let mut etcd_tls_opts = TlsOptions::new();
+
+    // If a CA certificate path is provided, load the CA certificate and add it to the options.
+    if !tls_config.ca_cert_path.is_empty() {
+        debug!("Using CA certificate from {}", tls_config.ca_cert_path);
+        let ca_cert_pem = fs::read(&tls_config.ca_cert_path).context(LoadTlsCertificateSnafu {
+            path: &tls_config.ca_cert_path,
+        })?;
+        let ca_cert = Certificate::from_pem(ca_cert_pem);
+        etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
+    }
+
+    // If both client certificate and key paths are provided, load them and set the client identity.
+    if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
+        info!("Loading client certificate for mutual TLS");
+        debug!(
+            "Using client certificate from {} and key from {}",
+            tls_config.cert_path, tls_config.key_path
+        );
+        let cert_pem = fs::read(&tls_config.cert_path).context(LoadTlsCertificateSnafu {
+            path: &tls_config.cert_path,
+        })?;
+        let key_pem = fs::read(&tls_config.key_path).context(LoadTlsCertificateSnafu {
+            path: &tls_config.key_path,
+        })?;
+        let identity = Identity::from_pem(cert_pem, key_pem);
+        etcd_tls_opts = etcd_tls_opts.identity(identity);
+    }
+
+    // Always enable native TLS roots for additional trust anchors.
+    etcd_tls_opts = etcd_tls_opts.with_native_roots();
+
+    Ok(Some(etcd_tls_opts))
+}
+
 #[cfg(test)]
 mod tests {
+    use etcd_client::ConnectOptions;
+
     use super::*;
 
     #[test]
@@ -555,6 +625,8 @@ mod tests {
         test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
         unprepare_kv,
     };
+    use crate::maybe_skip_etcd_tls_integration_test;
+    use crate::test_util::etcd_certs_dir;
 
     async fn build_kv_backend() -> Option<EtcdStore> {
         let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
@@ -653,5 +725,42 @@ mod tests {
             test_txn_compare_less(&kv_backend).await;
             test_txn_compare_not_equal(&kv_backend).await;
         }
+    }
+
+    async fn create_etcd_client_with_tls(endpoints: &[String], tls_config: &TlsOption) -> Client {
+        let endpoints = endpoints
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        let connect_options =
+            ConnectOptions::new().with_tls(create_etcd_tls_options(tls_config).unwrap().unwrap());
+
+        Client::connect(&endpoints, Some(connect_options))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_etcd_client_with_mtls_and_ca() {
+        maybe_skip_etcd_tls_integration_test!();
+        let endpoints = std::env::var("GT_ETCD_TLS_ENDPOINTS")
+            .unwrap()
+            .split(',')
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        let cert_dir = etcd_certs_dir();
+        let tls_config = TlsOption {
+            mode: TlsMode::Require,
+            ca_cert_path: cert_dir.join("ca.crt").to_string_lossy().to_string(),
+            cert_path: cert_dir.join("client.crt").to_string_lossy().to_string(),
+            key_path: cert_dir
+                .join("client-key.pem")
+                .to_string_lossy()
+                .to_string(),
+        };
+        let mut client = create_etcd_client_with_tls(&endpoints, &tls_config).await;
+        let _ = client.get(b"hello", None).await.unwrap();
     }
 }
