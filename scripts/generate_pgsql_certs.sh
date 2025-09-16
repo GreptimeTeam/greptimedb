@@ -4,7 +4,6 @@ set -euo pipefail
 CERT_DIR="${1:-$(dirname "$0")/../tests-integration/fixtures/pgsql-certs}"
 DAYS="${2:-365}"
 
-rm -rf "${CERT_DIR}"
 mkdir -p "${CERT_DIR}"
 cd "${CERT_DIR}"
 
