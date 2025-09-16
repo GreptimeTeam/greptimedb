@@ -327,22 +327,12 @@ pub fn etcd_certs_dir() -> PathBuf {
         .join("etcd-tls-certs")
 }
 
-/// Returns the directory of the pgsql TLS certs.
-pub fn pgsql_certs_dir() -> PathBuf {
+/// Returns the directory of the test certs.
+pub fn test_certs_dir() -> PathBuf {
     let project_path = env!("CARGO_MANIFEST_DIR");
     let project_path = PathBuf::from(project_path);
     let base = project_path.ancestors().nth(3).unwrap();
     base.join("tests-integration")
         .join("fixtures")
-        .join("pgsql-certs")
-}
-
-/// Returns the directory of the mysql TLS certs.
-pub fn mysql_certs_dir() -> PathBuf {
-    let project_path = env!("CARGO_MANIFEST_DIR");
-    let project_path = PathBuf::from(project_path);
-    let base = project_path.ancestors().nth(3).unwrap();
-    base.join("tests-integration")
-        .join("fixtures")
-        .join("mysql-certs")
+        .join("certs")
 }

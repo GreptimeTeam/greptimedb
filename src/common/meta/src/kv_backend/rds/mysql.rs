@@ -585,7 +585,7 @@ mod tests {
         text_txn_multi_compare_op, unprepare_kv,
     };
     use crate::maybe_skip_mysql_integration_test;
-    use crate::test_util::mysql_certs_dir;
+    use crate::test_util::test_certs_dir;
 
     async fn build_mysql_kv_backend(table_name: &str) -> Option<MySqlStore> {
         init_default_ut_logging();
@@ -733,7 +733,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
-        let certs_dir = mysql_certs_dir();
+        let certs_dir = test_certs_dir();
 
         let opts = endpoint
             .parse::<MySqlConnectOptions>()
@@ -750,7 +750,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
-        let certs_dir = mysql_certs_dir();
+        let certs_dir = test_certs_dir();
 
         let opts = endpoint
             .parse::<MySqlConnectOptions>()
@@ -768,7 +768,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_mysql_integration_test!();
         let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
-        let certs_dir = mysql_certs_dir();
+        let certs_dir = test_certs_dir();
 
         let opts = endpoint
             .parse::<MySqlConnectOptions>()

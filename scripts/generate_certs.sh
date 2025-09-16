@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CERT_DIR="${1:-$(dirname "$0")/../tests-integration/fixtures/pgsql-certs}"
+CERT_DIR="${1:-$(dirname "$0")/../tests-integration/fixtures/certs}"
 DAYS="${2:-365}"
 
 mkdir -p "${CERT_DIR}"
@@ -10,13 +10,13 @@ cd "${CERT_DIR}"
 echo "Generating CA certificate..."
 openssl req -new -x509 -days "${DAYS}" -nodes -text \
   -out root.crt -keyout root.key \
-  -subj "/CN=PostgresRootCA"
+  -subj "/CN=GreptimeDBRootCA"
 
 
 echo "Generating server certificate..."
 openssl req -new -nodes -text \
   -out server.csr -keyout server.key \
-  -subj "/CN=postgres"
+  -subj "/CN=greptime"
 
 openssl x509 -req -in server.csr -text -days "${DAYS}" \
   -CA root.crt -CAkey root.key -CAcreateserial \
@@ -36,6 +36,6 @@ rm -f *.csr
 
 echo "TLS certificates generated successfully in ${CERT_DIR}"
 
-chmod 600 root.key
-chmod 600 client.key
-chmod 600 server.key
+chmod 644 root.key
+chmod 644 client.key
+chmod 644 server.key

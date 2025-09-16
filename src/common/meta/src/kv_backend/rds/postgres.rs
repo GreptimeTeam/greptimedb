@@ -903,7 +903,7 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
-    use crate::test_util::pgsql_certs_dir;
+    use crate::test_util::test_certs_dir;
     use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
@@ -1020,7 +1020,7 @@ mod tests {
     async fn test_pg_with_mtls() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_postgres_integration_test!();
-        let certs_dir = pgsql_certs_dir();
+        let certs_dir = test_certs_dir();
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
         let tls_connector = create_postgres_tls_connector(&TlsOption {
             mode: TlsMode::Require,
@@ -1043,7 +1043,7 @@ mod tests {
     async fn test_pg_verify_ca() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_postgres_integration_test!();
-        let certs_dir = pgsql_certs_dir();
+        let certs_dir = test_certs_dir();
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
         let tls_connector = create_postgres_tls_connector(&TlsOption {
             mode: TlsMode::VerifyCa,
@@ -1066,7 +1066,7 @@ mod tests {
     async fn test_pg_verify_full() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_postgres_integration_test!();
-        let certs_dir = pgsql_certs_dir();
+        let certs_dir = test_certs_dir();
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap();
         let tls_connector = create_postgres_tls_connector(&TlsOption {
             mode: TlsMode::VerifyFull,
