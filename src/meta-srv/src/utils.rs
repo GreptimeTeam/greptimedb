@@ -14,6 +14,8 @@
 
 pub mod etcd;
 pub mod insert_forwarder;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
 
 #[macro_export]
 macro_rules! define_ticker {

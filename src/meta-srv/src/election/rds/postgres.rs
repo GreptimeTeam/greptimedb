@@ -826,8 +826,8 @@ mod tests {
     use common_meta::maybe_skip_postgres_integration_test;
 
     use super::*;
-    use crate::bootstrap::create_postgres_pool;
     use crate::error;
+    use crate::utils::postgres::create_postgres_pool;
 
     async fn create_postgres_client(
         table_name: Option<&str>,

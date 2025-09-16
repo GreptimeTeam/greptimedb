@@ -116,9 +116,10 @@ impl StoreConfig {
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
                     let tls_config = self.tls_config();
-                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, tls_config)
-                        .await
-                        .map_err(BoxedError::new)?;
+                    let pool =
+                        meta_srv::utils::postgres::create_postgres_pool(store_addrs, tls_config)
+                            .await
+                            .map_err(BoxedError::new)?;
                     let schema_name = self.meta_schema_name.as_deref();
                     Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
                         pool,

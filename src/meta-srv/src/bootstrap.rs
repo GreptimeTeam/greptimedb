@@ -21,8 +21,6 @@ use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
-#[cfg(feature = "pg_kvbackend")]
-use common_error::ext::BoxedError;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -30,23 +28,14 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 #[cfg(feature = "mysql_kvbackend")]
 use common_meta::kv_backend::rds::MySqlStore;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::PgStore;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::create_postgres_tls_connector;
-#[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::rds::postgres::{TlsMode as PgTlsMode, TlsOption as PgTlsOption};
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
-#[cfg(feature = "pg_kvbackend")]
-use deadpool_postgres::{Config, Runtime};
 use either::Either;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-use servers::tls::TlsOption;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -57,8 +46,6 @@ use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
-#[cfg(feature = "pg_kvbackend")]
-use tokio_postgres::NoTls;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
@@ -68,8 +55,6 @@ use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "mysql_kvbackend")]
 use crate::election::rds::mysql::MySqlElection;
-#[cfg(feature = "pg_kvbackend")]
-use crate::election::rds::postgres::PgElection;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -306,8 +291,11 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+            use common_meta::kv_backend::rds::PgStore;
+            use deadpool_postgres::Config;
 
-            use crate::election::rds::postgres::ElectionPgClient;
+            use crate::election::rds::postgres::{ElectionPgClient, PgElection};
+            use crate::utils::postgres::{create_postgres_pool, create_postgres_pool_with};
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -451,68 +439,6 @@ pub(crate) fn build_default_meta_peer_client(
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Converts servers::tls::TlsOption to postgres::TlsOption to avoid circular dependencies
-fn convert_tls_option(tls_option: &TlsOption) -> PgTlsOption {
-    let mode = match tls_option.mode {
-        servers::tls::TlsMode::Disable => PgTlsMode::Disable,
-        servers::tls::TlsMode::Prefer => PgTlsMode::Prefer,
-        servers::tls::TlsMode::Require => PgTlsMode::Require,
-        servers::tls::TlsMode::VerifyCa => PgTlsMode::VerifyCa,
-        servers::tls::TlsMode::VerifyFull => PgTlsMode::VerifyFull,
-    };
-
-    PgTlsOption {
-        mode,
-        cert_path: tls_option.cert_path.clone(),
-        key_path: tls_option.key_path.clone(),
-        ca_cert_path: tls_option.ca_cert_path.clone(),
-        watch: tls_option.watch,
-    }
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend with optional TLS.
-///
-/// It only use first store addr to create a pool.
-pub async fn create_postgres_pool(
-    store_addrs: &[String],
-    tls_config: Option<TlsOption>,
-) -> Result<deadpool_postgres::Pool> {
-    create_postgres_pool_with(store_addrs, Config::new(), tls_config).await
-}
-
-#[cfg(feature = "pg_kvbackend")]
-/// Creates a pool for the Postgres backend with config and optional TLS.
-///
-/// It only use first store addr to create a pool, and use the given config to create a pool.
-pub async fn create_postgres_pool_with(
-    store_addrs: &[String],
-    mut cfg: Config,
-    tls_config: Option<TlsOption>,
-) -> Result<deadpool_postgres::Pool> {
-    let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    cfg.url = Some(postgres_url.to_string());
-
-    let pool = if let Some(tls_config) = tls_config {
-        let pg_tls_config = convert_tls_option(&tls_config);
-        let tls_connector =
-            create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
-                source: BoxedError::new(e),
-                location: snafu::Location::new(file!(), line!(), 0),
-            })?;
-        cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
-            .context(error::CreatePostgresPoolSnafu)?
-    } else {
-        cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-            .context(error::CreatePostgresPoolSnafu)?
-    };
-
-    Ok(pool)
 }
 
 #[cfg(feature = "mysql_kvbackend")]
