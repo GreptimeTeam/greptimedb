@@ -62,9 +62,7 @@ impl IntermediateManager {
         match tokio::fs::rename(&intm_dir, &deleted_dir).await {
             Ok(_) => {
                 tokio::spawn(async move {
-                    if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await
-                        && err.kind() != ErrorKind::NotFound
-                    {
+                    if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await {
                         warn!(err; "Failed to remove intermediate directory");
                     }
                 });
