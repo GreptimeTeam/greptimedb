@@ -27,9 +27,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
-#[cfg(any(test, feature = "test"))]
-use store_api::storage::SequenceRange;
+use store_api::storage::{ColumnId, SequenceRange};
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;

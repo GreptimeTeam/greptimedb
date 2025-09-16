@@ -30,9 +30,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use store_api::metadata::RegionMetadataRef;
-#[cfg(any(test, feature = "test"))]
-use store_api::storage::SequenceRange;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
