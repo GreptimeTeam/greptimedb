@@ -93,6 +93,8 @@ pub fn rewrite_merge_sort_exprs(
 /// Return all the original columns(at original node) for the given aliased columns at the aliased node
 ///
 /// if `original_node` is None, it means original columns are from leaf node
+///
+/// Return value use `BTreeMap` to have deterministic order for choose first alias when multiple alias exist
 #[allow(unused)]
 pub fn original_column_for(
     aliased_columns: &BTreeSet<Column>,
@@ -157,6 +159,8 @@ fn original_column_for_inner(
 /// Return all the aliased columns(at aliased node) for the given original columns(at original node)
 ///
 /// if `original_node` is None, it means original columns are from leaf node
+///
+/// Return value use `BTreeMap` to have deterministic order for choose first alias when multiple alias exist
 pub fn aliased_columns_for(
     original_columns: &BTreeSet<Column>,
     aliased_node: &LogicalPlan,
