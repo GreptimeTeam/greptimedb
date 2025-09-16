@@ -62,6 +62,7 @@ pub struct RegionEdit {
     pub compaction_time_window: Option<Duration>,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
+    pub committed_sequence: Option<SequenceNumber>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -119,6 +120,7 @@ pub struct RegionManifest {
     pub flushed_entry_id: EntryId,
     /// Last sequence of flushed data.
     pub flushed_sequence: SequenceNumber,
+    pub committed_sequence: Option<SequenceNumber>,
     /// Current manifest version.
     pub manifest_version: ManifestVersion,
     /// Last WAL entry id of truncated data.
@@ -138,6 +140,7 @@ impl PartialEq for RegionManifest {
             && self.manifest_version == other.manifest_version
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
+            && self.committed_sequence == other.committed_sequence
     }
 }
 
@@ -151,6 +154,7 @@ pub struct RegionManifestBuilder {
     manifest_version: ManifestVersion,
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
+    committed_sequence: Option<SequenceNumber>,
 }
 
 impl RegionManifestBuilder {
@@ -166,6 +170,7 @@ impl RegionManifestBuilder {
                 flushed_sequence: s.flushed_sequence,
                 truncated_entry_id: s.truncated_entry_id,
                 compaction_time_window: s.compaction_time_window,
+                committed_sequence: s.committed_sequence,
             }
         } else {
             Default::default()
@@ -198,6 +203,13 @@ impl RegionManifestBuilder {
         }
         if let Some(flushed_sequence) = edit.flushed_sequence {
             self.flushed_sequence = self.flushed_sequence.max(flushed_sequence);
+        }
+
+        if let Some(committed_sequence) = edit.committed_sequence {
+            self.committed_sequence = Some(
+                self.committed_sequence
+                    .map_or(committed_sequence, |exist| exist.max(committed_sequence)),
+            );
         }
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
@@ -253,6 +265,7 @@ impl RegionManifestBuilder {
             removed_files: self.removed_files,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
+            committed_sequence: self.committed_sequence,
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
@@ -377,6 +390,7 @@ impl RegionMetaActionList {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         for action in self.actions {
@@ -390,6 +404,10 @@ impl RegionMetaActionList {
                 }
                 if let Some(seq) = region_edit.flushed_sequence {
                     edit.flushed_sequence = Some(edit.flushed_sequence.map_or(seq, |v| v.max(seq)));
+                }
+                if let Some(seq) = region_edit.committed_sequence {
+                    edit.committed_sequence =
+                        Some(edit.committed_sequence.map_or(seq, |v| v.max(seq)));
                 }
                 // Prefer the latest non-none time window
                 if region_edit.compaction_time_window.is_some() {
@@ -698,6 +716,7 @@ mod tests {
             files: HashMap::new(),
             flushed_entry_id: 0,
             flushed_sequence: 0,
+            committed_sequence: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
@@ -807,6 +826,7 @@ mod tests {
                 removed_files: Default::default(),
                 flushed_entry_id: 0,
                 flushed_sequence: 0,
+                committed_sequence: None,
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
@@ -819,6 +839,7 @@ mod tests {
             removed_files: Default::default(),
             flushed_entry_id: 0,
             flushed_sequence: 0,
+            committed_sequence: None,
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
@@ -872,6 +893,7 @@ mod tests {
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                committed_sequence: None,
             },
             new_from_old
         );
@@ -884,6 +906,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         let new_json = serde_json::to_string(&new).unwrap();

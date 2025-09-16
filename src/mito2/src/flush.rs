@@ -384,6 +384,7 @@ impl RegionFlushTask {
             // The last entry has been flushed.
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
+            committed_sequence: None,
         };
         info!("Applying {edit:?} to region {}", self.region_id);
 
@@ -1313,6 +1314,7 @@ mod tests {
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                committed_sequence: None,
             }),
             &[0],
             builder.file_purger(),

@@ -96,6 +96,7 @@ async fn test_edit_region_schedule_compaction() {
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
+        committed_sequence: None,
     };
     engine
         .edit_region(region.region_id, new_edit())
@@ -185,6 +186,7 @@ async fn test_edit_region_fill_cache() {
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
+        committed_sequence: None,
     };
     engine.edit_region(region.region_id, edit).await.unwrap();
 
@@ -236,6 +238,7 @@ async fn test_edit_region_concurrently() {
                     compaction_time_window: None,
                     flushed_entry_id: None,
                     flushed_sequence: None,
+                    committed_sequence: None,
                 };
                 engine
                     .edit_region(self.region.region_id, edit)

@@ -89,7 +89,7 @@ impl MetricEngineInner {
         Ok(scanner)
     }
 
-    pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
+    pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber> {
         let region_id = if self.is_physical_region(region_id) {
             region_id
         } else {
@@ -97,7 +97,7 @@ impl MetricEngineInner {
             utils::to_data_region_id(physical_region_id)
         };
         self.mito
-            .get_last_seq_num(region_id)
+            .get_committed_sequence(region_id)
             .await
             .context(MitoReadOperationSnafu)
     }

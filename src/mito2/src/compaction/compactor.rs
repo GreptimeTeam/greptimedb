@@ -483,6 +483,7 @@ impl Compactor for DefaultCompactor {
                 .map(|seconds| Duration::from_secs(seconds as u64)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));

@@ -71,6 +71,12 @@ impl VersionControl {
         self.data.read().unwrap().clone()
     }
 
+    /// Updates the `committed_sequence` of version.
+    pub(crate) fn set_committed_sequence(&self, seq: SequenceNumber) {
+        let mut data = self.data.write().unwrap();
+        data.committed_sequence = seq;
+    }
+
     /// Updates committed sequence and entry id.
     pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
         let mut data = self.data.write().unwrap();
@@ -137,6 +143,7 @@ impl VersionControl {
     ) {
         let version = self.current().version;
         let builder = VersionBuilder::from_version(version);
+        let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
         let builder = if let Some(edit) = edit {
             builder.apply_edit(edit, purger)
         } else {
@@ -145,6 +152,11 @@ impl VersionControl {
         let new_version = Arc::new(builder.remove_memtables(memtables_to_remove).build());
 
         let mut version_data = self.data.write().unwrap();
+        version_data.committed_sequence = if let Some(committed_in_edit) = committed_sequence {
+            version_data.committed_sequence.max(committed_in_edit)
+        } else {
+            version_data.committed_sequence
+        };
         version_data.version = new_version;
     }
 

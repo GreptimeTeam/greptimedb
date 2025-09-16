@@ -77,6 +77,7 @@ fn nop_action() -> RegionMetaActionList {
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
+        committed_sequence: None,
     })])
 }
 
@@ -276,6 +277,7 @@ async fn checkpoint_with_different_compression_types() {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }
@@ -340,6 +342,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }

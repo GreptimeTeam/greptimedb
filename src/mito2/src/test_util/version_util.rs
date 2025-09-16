@@ -211,6 +211,7 @@ pub(crate) fn apply_edit(
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         }),
         &[],
         purger,

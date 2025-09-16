@@ -473,6 +473,7 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
+
         let topic_latest_entry_id = if !self.skip_wal_replay {
             let replay_from_entry_id = self
                 .replay_checkpoint
@@ -508,6 +509,21 @@ impl RegionOpener {
 
             0
         };
+
+        if let Some(committed_in_manifest) = manifest.committed_sequence {
+            let committed_after_replay = version_control.committed_sequence();
+            if committed_in_manifest > committed_after_replay {
+                info!(
+                    "Overriding committed sequence, region: {}, flushed_sequence: {}, committed_sequence: {} -> {}",
+                    self.region_id,
+                    version_control.current().version.flushed_sequence,
+                    version_control.committed_sequence(),
+                    committed_in_manifest
+                );
+                version_control.set_committed_sequence(committed_in_manifest);
+            }
+        }
+
         let now = self.time_provider.current_time_millis();
         let region = MitoRegion {
             region_id: self.region_id,
@@ -729,14 +745,22 @@ where
                 mutation.rows,
                 mutation.write_hint,
                 OptionOutputTx::none(),
+                // We should respect the sequence in WAL during replay.
+                Some(mutation.sequence),
             );
         }
 
         for bulk_entry in entry.bulk_entries {
             let part = BulkPart::try_from(bulk_entry)?;
             rows_replayed += part.num_rows();
+            // During replay, we should adopt the sequence from WAL.
+            let bulk_sequence_from_wal = part.sequence;
             ensure!(
-                region_write_ctx.push_bulk(OptionOutputTx::none(), part),
+                region_write_ctx.push_bulk(
+                    OptionOutputTx::none(),
+                    part,
+                    Some(bulk_sequence_from_wal)
+                ),
                 RegionCorruptedSnafu {
                     region_id,
                     reason: "unable to replay memtable with bulk entries",
