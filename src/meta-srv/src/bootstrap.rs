@@ -26,8 +26,6 @@ use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-#[cfg(feature = "mysql_kvbackend")]
-use common_meta::kv_backend::rds::MySqlStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use either::Either;
@@ -36,13 +34,7 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use snafu::OptionExt;
 use snafu::ResultExt;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlConnectOptions;
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
@@ -53,8 +45,6 @@ use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::election::etcd::EtcdElection;
-#[cfg(feature = "mysql_kvbackend")]
-use crate::election::rds::mysql::MySqlElection;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
     BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
@@ -344,9 +334,12 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
-            use crate::election::rds::mysql::ElectionMysqlClient;
+            use common_meta::kv_backend::rds::MySqlStore;
 
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            use crate::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
+            use crate::utils::mysql::create_mysql_pool;
+
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
@@ -354,7 +347,7 @@ pub async fn metasrv_builder(
             // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
             let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
@@ -439,31 +432,4 @@ pub(crate) fn build_default_meta_peer_client(
         .map(Arc::new)
         // Safety: all required fields set at initialization
         .unwrap()
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-async fn setup_mysql_options(store_addrs: &[String]) -> Result<MySqlConnectOptions> {
-    let mysql_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
-    // Avoid `SET` commands in sqlx
-    let opts: MySqlConnectOptions = mysql_url
-        .parse()
-        .context(error::ParseMySqlUrlSnafu { mysql_url })?;
-    let opts = opts
-        .no_engine_substitution(false)
-        .pipes_as_concat(false)
-        .timezone(None)
-        .set_names(false);
-    Ok(opts)
-}
-
-#[cfg(feature = "mysql_kvbackend")]
-pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
-    let opts = setup_mysql_options(store_addrs).await?;
-    let pool = MySqlPool::connect_with(opts)
-        .await
-        .context(error::CreateMySqlPoolSnafu)?;
-
-    Ok(pool)
 }

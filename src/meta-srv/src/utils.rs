@@ -14,6 +14,8 @@
 
 pub mod etcd;
 pub mod insert_forwarder;
+#[cfg(feature = "mysql_kvbackend")]
+pub mod mysql;
 #[cfg(feature = "pg_kvbackend")]
 pub mod postgres;
 

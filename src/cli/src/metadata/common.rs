@@ -133,9 +133,11 @@ impl StoreConfig {
                 #[cfg(feature = "mysql_kvbackend")]
                 BackendImpl::MysqlStore => {
                     let table_name = &self.meta_table_name;
-                    let pool = meta_srv::bootstrap::create_mysql_pool(store_addrs)
-                        .await
-                        .map_err(BoxedError::new)?;
+                    let tls_config = self.tls_config();
+                    let pool =
+                        meta_srv::utils::mysql::create_mysql_pool(store_addrs, tls_config.as_ref())
+                            .await
+                            .map_err(BoxedError::new)?;
                     Ok(common_meta::kv_backend::rds::MySqlStore::with_mysql_pool(
                         pool,
                         table_name,
