@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::Rows;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -89,6 +89,37 @@ async fn test_bump_committed_sequence() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
+                table_dir: table_dir.clone(),
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    region.set_role(RegionRole::Leader);
+    assert_eq!(region.version_control.current().version.flushed_sequence, 0);
+    assert_eq!(region.version_control.committed_sequence(), 43);
+
+    // Write another 2 rows after editing.
+    let column_schemas = rows_schema(&request);
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 2),
+    };
+    put_rows(&engine, region_id, rows).await;
+    assert_eq!(region.version_control.committed_sequence(), 45);
+    assert_eq!(region.version_control.current().version.flushed_sequence, 0);
+
+    // Reopen region.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
                 table_dir,
                 path_type: PathType::Bare,
                 options: HashMap::default(),
@@ -99,9 +130,7 @@ async fn test_bump_committed_sequence() {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
+    region.set_role(RegionRole::Leader);
     assert_eq!(region.version_control.current().version.flushed_sequence, 0);
-    // After reopen, firstly committed_sequence will be set to 43 because during manifest replay,
-    // we assign the committed_sequence of RegionEdit to region manifest. And the WAL replays to
-    // memtable and another 42 rows are written to memtable. So the committed sequence will be 85
-    assert_eq!(region.version_control.committed_sequence(), 85);
+    assert_eq!(region.version_control.committed_sequence(), 45);
 }
