@@ -7284,8 +7284,7 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 [[package]]
 name = "memcomparable"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "376101dbd964fc502d5902216e180f92b3d003b5cc3d2e40e044eb5470fca677"
+source = "git+https://github.com/v0y4g3r/memcomparable.git?rev=a07122dc03556bbd88ad66234cbea7efd3b23efb#a07122dc03556bbd88ad66234cbea7efd3b23efb"
 dependencies = [
  "bytes",
  "serde",
@@ -7603,7 +7602,6 @@ dependencies = [
  "itertools 0.14.0",
  "lazy_static",
  "log-store",
- "memcomparable",
  "mito-codec",
  "moka",
  "object-store",
