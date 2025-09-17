@@ -140,47 +140,57 @@ impl GcTrigger {
         Ok(table_to_region_stats)
     }
 
-    /// Iterate through all physical tables and trigger gc for each table.
-    /// TODO(discord9): Poc impl, will parallelize later.
+    /// Iterate through all region stats, find region that might need gc, and send gc instruction to
+    /// the corresponding datanode.
+    /// TODO(discord9): Poc impl, will parallelize later. And retry falling gc regions.
     async fn trigger_gc(&self) -> Result<()> {
         info!("Triggering gc");
         // TODO: trigger gc based on statistics, e.g. number of deleted files per table.
-        let mut tables: BoxStream<
-            'static,
-            common_meta::error::Result<(TableId, PhysicalTableRouteValue)>,
-        > = todo!("Maybe try filter tables that have most deleted files instead");
+        let mut tables = self.get_table_to_region_stats().await?;
 
-        while let Some((table_id, phy_table_val)) = tables
-            .as_mut()
-            .try_next()
-            .await
-            .context(TableMetadataManagerSnafu)?
-        {
+        for (table_id, region_stats) in &tables {
             info!("Triggering gc for table {}", table_id);
-            let phy_table_val: PhysicalTableRouteValue = phy_table_val;
-            let mut region_ids: Vec<RegionId> = phy_table_val
-                .region_routes
-                .iter()
-                .map(|r: &RegionRoute| r.region.id)
-                .collect::<Vec<_>>();
+            let mut region_ids: Vec<RegionId> =
+                region_stats.iter().map(|r| r.id).collect::<Vec<_>>();
 
             region_ids.sort_by_key(|f| f.region_number());
 
             // send instruction to first region id's datanode
-            let (first_region_id, first_region_peer) = phy_table_val
-                .region_routes
-                .first()
-                .and_then(|r| r.leader_peer.as_ref().map(|p| (r.region.id, p.clone())))
-                .context({ TableRouteNotFoundSnafu { table_id } })?;
+            let first_region_id = region_ids.first().with_context(|| UnexpectedSnafu {
+                violated: format!(
+                    "Expect table {table_id} to have at least one region, found none"
+                ),
+            })?;
 
-            let all_peers = phy_table_val
+            let (_, table_peer) = self
+                .table_metadata_manager
+                .table_route_manager()
+                .get_physical_table_route(first_region_id.table_id())
+                .await
+                .context(TableMetadataManagerSnafu)?;
+
+            let first_region_peer = table_peer
+                .region_routes
+                .iter()
+                .find_map(|r| {
+                    if r.region.id == *first_region_id {
+                        r.leader_peer.clone()
+                    } else {
+                        None
+                    }
+                })
+                .with_context(|| RegionRouteNotFoundSnafu {
+                    region_id: *first_region_id,
+                })?;
+
+            let all_peers = table_peer
                 .region_routes
                 .iter()
                 .filter_map(|r| r.leader_peer.clone())
                 .collect::<Vec<_>>();
 
             // only need to trigger gc for one region per datanode
-            let peers_to_region_ids: HashMap<Peer, RegionId> = phy_table_val
+            let peers_to_region_ids: HashMap<Peer, RegionId> = table_peer
                 .region_routes
                 .iter()
                 .filter_map(|p| {
