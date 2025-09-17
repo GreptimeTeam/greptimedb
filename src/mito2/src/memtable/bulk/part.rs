@@ -1371,11 +1371,14 @@ mod tests {
         let projection = &[4u32];
         let mut reader = part
             .read(
-                Arc::new(BulkIterContext::new(
-                    part.metadata.region_metadata.clone(),
-                    &Some(projection.as_slice()),
-                    None,
-                )),
+                Arc::new(
+                    BulkIterContext::new(
+                        part.metadata.region_metadata.clone(),
+                        &Some(projection.as_slice()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 None,
             )
             .unwrap()
@@ -1426,11 +1429,9 @@ mod tests {
         predicate: Option<Predicate>,
         expected_rows: usize,
     ) {
-        let context = Arc::new(BulkIterContext::new(
-            part.metadata.region_metadata.clone(),
-            &None,
-            predicate,
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(part.metadata.region_metadata.clone(), &None, predicate).unwrap(),
+        );
         let mut reader = part
             .read(context, None)
             .unwrap()
@@ -1454,13 +1455,16 @@ mod tests {
             ("b", 1, (180, 210), 4),
         ]);
 
-        let context = Arc::new(BulkIterContext::new(
-            part.metadata.region_metadata.clone(),
-            &None,
-            Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
-                datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
-            )])),
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                part.metadata.region_metadata.clone(),
+                &None,
+                Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
+                    datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
+                )])),
+            )
+            .unwrap(),
+        );
         assert!(part.read(context, None).unwrap().is_none());
 
         check_prune_row_group(&part, None, 310);

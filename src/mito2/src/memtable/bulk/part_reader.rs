@@ -362,11 +362,14 @@ mod tests {
         let region_metadata = builder.build().unwrap();
 
         // Create context
-        let context = Arc::new(BulkIterContext::new(
-            Arc::new(region_metadata.clone()),
-            &None, // No projection
-            None,  // No predicate
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata.clone()),
+                &None, // No projection
+                None,  // No predicate
+            )
+            .unwrap(),
+        );
         // Iterates all rows.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
@@ -385,11 +388,14 @@ mod tests {
         );
         assert_eq!(6, result[0].num_columns());
 
-        let context = Arc::new(BulkIterContext::new(
-            Arc::new(region_metadata),
-            &Some(&[0, 2]),
-            Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata),
+                &Some(&[0, 2]),
+                Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
+            )
+            .unwrap(),
+        );
         // Creates iter with projection and predicate.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();

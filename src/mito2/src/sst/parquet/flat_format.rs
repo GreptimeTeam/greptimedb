@@ -43,6 +43,7 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -53,7 +54,9 @@ use crate::error::{
 use crate::sst::parquet::format::{
     FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, ReadFormat, StatValues,
 };
-use crate::sst::{FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema};
+use crate::sst::{
+    FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, to_sst_arrow_schema,
+};
 
 /// Helper for writing the SST format.
 pub(crate) struct FlatWriteFormat {
@@ -146,33 +149,46 @@ impl FlatReadFormat {
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-        convert_to_flat: bool,
-    ) -> FlatReadFormat {
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
-
+        num_columns: Option<usize>,
+        file_path: &str,
+    ) -> Result<FlatReadFormat> {
+        let convert_to_flat = match num_columns {
+            Some(num) => Self::need_convert_to_flat(&metadata, num, file_path)?,
+            None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
+        };
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
-
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
             arrow_schema.fields.len(),
             column_ids,
         );
 
-        let convert_format = if convert_to_flat {
+        if convert_to_flat {
             let codec = build_primary_key_codec(&metadata);
-            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
-        } else {
-            None
-        };
 
-        FlatReadFormat {
-            metadata,
-            arrow_schema,
-            format_projection,
-            column_id_to_sst_index: id_to_index,
-            override_sequence: None,
-            convert_format,
+            let convert_format =
+                FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec);
+            let legacy_arrow_schema = to_sst_arrow_schema(&metadata);
+
+            Ok(FlatReadFormat {
+                metadata,
+                arrow_schema: legacy_arrow_schema,
+                format_projection,
+                column_id_to_sst_index: id_to_index,
+                override_sequence: None,
+                convert_format,
+            })
+        } else {
+            Ok(FlatReadFormat {
+                metadata,
+                arrow_schema,
+                format_projection,
+                column_id_to_sst_index: id_to_index,
+                override_sequence: None,
+                convert_format: None,
+            })
         }
     }
 
@@ -292,13 +308,13 @@ impl FlatReadFormat {
 
     /// Checks whether the batch from the parquet file needs to be converted to match the flat format.
     ///
-    /// * `file_path` is the path to the parquet file, for error message.
-    /// * `num_columns` is the number of columns in the parquet file.
     /// * `metadata` is the region metadata (always assumes flat format).
+    /// * `num_columns` is the number of columns in the parquet file.
+    /// * `file_path` is the path to the parquet file, for error message.
     pub(crate) fn need_convert_to_flat(
-        file_path: &str,
-        num_columns: usize,
         metadata: &RegionMetadata,
+        num_columns: usize,
+        file_path: &str,
     ) -> Result<bool> {
         // For flat format, compute expected column number:
         // all columns + internal columns (pk, sequence, op_type)
@@ -572,7 +588,9 @@ impl FlatReadFormat {
         Self::new(
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
-            false,
+            None,
+            "test",
         )
+        .unwrap()
     }
 }

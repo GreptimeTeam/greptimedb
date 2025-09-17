@@ -239,20 +239,26 @@ impl ParquetReaderBuilder {
         let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(
                 region_meta.clone(),
-                column_ids.iter().copied(),
+                &Some(&column_ids),
                 self.flat_format,
-            )
+                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+                &file_path,
+            )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
+            let column_ids: Vec<_> = expected_meta
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect();
             ReadFormat::new(
                 region_meta.clone(),
-                expected_meta
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id),
+                &Some(&column_ids),
                 self.flat_format,
-            )
+                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+                &file_path,
+            )?
         };
         if need_override_sequence(&parquet_meta) {
             read_format

@@ -1443,8 +1443,13 @@ mod tests {
         ));
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 1, 2, 3].into_iter(),
+            None,
+            "test",
+        )
+        .unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =
@@ -1527,8 +1532,13 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 1, 2, 3].into_iter(),
+            None,
+            "test",
+        )
+        .unwrap();
         let format_projection = read_format.format_projection();
 
         let compat_batch =

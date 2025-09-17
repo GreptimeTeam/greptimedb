@@ -343,7 +343,7 @@ impl Memtable for BulkMemtable {
             self.metadata.clone(),
             &projection,
             predicate.predicate().cloned(),
-        ));
+        )?);
 
         // Adds ranges for regular parts and encoded parts
         {
@@ -922,7 +922,7 @@ impl MemtableCompactor {
             metadata.clone(),
             &None, // No column projection for merging
             None,  // No predicate for merging
-        ));
+        )?);
 
         // Creates iterators for all parts to merge.
         let iterators: Vec<BoxedRecordBatchIterator> = parts_to_merge
