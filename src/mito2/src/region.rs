@@ -495,6 +495,7 @@ impl MitoRegion {
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let num_files = version.ssts.num_files();
         let manifest_version = self.stats.manifest_version();
+        let file_removal_rate = self.stats.file_removal_rate();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.written_bytes.load(Ordering::Relaxed);
@@ -510,6 +511,7 @@ impl MitoRegion {
             manifest: RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removal_rate,
             },
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
@@ -1119,9 +1121,10 @@ pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 
 /// Manifest stats.
 #[derive(Default, Debug, Clone)]
-pub(crate) struct ManifestStats {
-    total_manifest_size: Arc<AtomicU64>,
-    manifest_version: Arc<AtomicU64>,
+pub struct ManifestStats {
+    pub(crate) total_manifest_size: Arc<AtomicU64>,
+    pub(crate) manifest_version: Arc<AtomicU64>,
+    pub(crate) file_removal_rate: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
@@ -1131,6 +1134,10 @@ impl ManifestStats {
 
     fn manifest_version(&self) -> u64 {
         self.manifest_version.load(Ordering::Relaxed)
+    }
+
+    fn file_removal_rate(&self) -> u64 {
+        self.file_removal_rate.load(Ordering::Relaxed)
     }
 }
 
@@ -1237,8 +1244,7 @@ mod tests {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                 },
-                Default::default(),
-                Default::default(),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1303,8 +1309,7 @@ mod tests {
                 checkpoint_distance: 10,
                 remove_file_options: Default::default(),
             },
-            Default::default(),
-            Default::default(),
+            &Default::default(),
         )
         .await
         .unwrap();
