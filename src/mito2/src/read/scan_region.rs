@@ -33,7 +33,9 @@ use futures::StreamExt;
 use smallvec::SmallVec;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 use table::predicate::{Predicate, build_time_range_predicate};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -436,7 +438,7 @@ impl ScanRegion {
             let ranges_in_memtable = m.ranges(
                 Some(mapper.column_ids()),
                 predicate.clone(),
-                self.request.sequence,
+                SequenceRange::new(self.request.memtable_min_sequence, self.request.sequence),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange

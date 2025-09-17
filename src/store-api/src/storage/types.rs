@@ -14,6 +14,63 @@
 
 //! Common types.
 
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+
 /// Represents a sequence number of data in storage. The offset of logstore can be used
 /// as a sequence number.
 pub type SequenceNumber = u64;
+
+/// A range of sequence numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SequenceRange {
+    From {
+        /// Exclusive lower bound
+        min: SequenceNumber,
+    },
+    To {
+        /// Inclusive upper bound
+        max: SequenceNumber,
+    },
+    Range {
+        /// Exclusive lower bound
+        min: SequenceNumber,
+        /// Inclusive upper bound
+        max: SequenceNumber,
+    },
+}
+
+impl SequenceRange {
+    pub fn new(min: Option<SequenceNumber>, max: Option<SequenceNumber>) -> Option<Self> {
+        match (min, max) {
+            (Some(min), Some(max)) => Some(SequenceRange::Range { min, max }),
+            (Some(min), None) => Some(SequenceRange::From { min }),
+            (None, Some(max)) => Some(SequenceRange::To { max }),
+            (None, None) => None,
+        }
+    }
+
+    pub fn filter(
+        &self,
+        seqs: ArrayRef,
+    ) -> Result<BooleanArray, datatypes::arrow::error::ArrowError> {
+        match self {
+            SequenceRange::From { min } => {
+                let min = UInt64Array::new_scalar(*min);
+                let pred = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;
+                Ok(pred)
+            }
+            SequenceRange::To { max } => {
+                let max = UInt64Array::new_scalar(*max);
+                let pred = datafusion_common::arrow::compute::kernels::cmp::lt_eq(&seqs, &max)?;
+                Ok(pred)
+            }
+            SequenceRange::Range { min, max } => {
+                let min = UInt64Array::new_scalar(*min);
+                let max = UInt64Array::new_scalar(*max);
+                let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;
+                let pred_max = datafusion_common::arrow::compute::kernels::cmp::lt_eq(&seqs, &max)?;
+                datafusion_common::arrow::compute::kernels::boolean::and(&pred_min, &pred_max)
+            }
+        }
+    }
+}
