@@ -69,15 +69,15 @@ impl Function for VectorKthElemFunction {
         let body = |v0: &ScalarValue, v1: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
             let v0 = as_veclit(v0)?;
 
-            let v1 = if let ScalarValue::Int64(Some(v1)) = v1
-                && *v1 >= 0
-            {
-                *v1 as usize
-            } else {
-                return Err(DataFusionError::Execution(format!(
-                    "2nd argument not a valid index: {}",
-                    self.name()
-                )));
+            let v1 = match v1 {
+                ScalarValue::Int64(None) => return Ok(ScalarValue::Float32(None)),
+                ScalarValue::Int64(Some(v1)) if *v1 >= 0 => *v1 as usize,
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "2nd argument not a valid index or expected datatype: {}",
+                        self.name()
+                    )));
+                }
             };
 
             let result = v0
@@ -164,7 +164,10 @@ mod tests {
             config_options: Arc::new(ConfigOptions::new()),
         };
         let e = func.invoke_with_args(args).unwrap_err();
-        assert!(e.to_string().starts_with("External error: Invalid function args: Out of range: k must be in the range [0, 2], but got k = 3."));
+        assert!(
+            e.to_string()
+                .starts_with("Execution error: index out of bound: vec_kth_elem")
+        );
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![Some(
             "[1.0,2.0,3.0]".to_string(),
@@ -179,6 +182,8 @@ mod tests {
             config_options: Arc::new(ConfigOptions::new()),
         };
         let e = func.invoke_with_args(args).unwrap_err();
-        assert!(e.to_string().starts_with("External error: Invalid function args: Invalid argument: k must be a non-negative integer, but got k = -1."));
+        assert!(e.to_string().starts_with(
+            "Execution error: 2nd argument not a valid index or expected datatype: vec_kth_elem"
+        ));
     }
 }
