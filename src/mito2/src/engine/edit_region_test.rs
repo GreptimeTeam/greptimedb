@@ -19,7 +19,7 @@ use common_time::util::current_time_millis;
 use object_store::ObjectStore;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::{Barrier, oneshot};
 
 use crate::config::MitoConfig;
@@ -28,7 +28,7 @@ use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
 use crate::region::MitoRegionRef;
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]

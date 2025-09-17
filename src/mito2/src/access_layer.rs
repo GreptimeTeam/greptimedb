@@ -27,7 +27,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -37,7 +37,7 @@ use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, FileId, RegionFileId};
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;

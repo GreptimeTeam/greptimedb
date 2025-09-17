@@ -251,9 +251,9 @@ mod tests {
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
     use puffin::puffin_manager::PuffinWriter;
+    use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_index_applier_apply_basic() {

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::vectors::UInt32Vector;
-use store_api::storage::TimeSeriesRowSelector;
+use store_api::storage::{FileId, TimeSeriesRowSelector};
 
 use crate::cache::{
     CacheStrategy, SelectorResultKey, SelectorResultValue, selector_result_cache_hit,
@@ -26,7 +26,6 @@ use crate::cache::{
 };
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
-use crate::sst::file::FileId;
 use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
 /// Reader to keep the last row for each time series.

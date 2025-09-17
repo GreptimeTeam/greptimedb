@@ -35,7 +35,7 @@ use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::file::metadata::ParquetMetaData;
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
-use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
+use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -43,7 +43,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::RegionFileId;
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";

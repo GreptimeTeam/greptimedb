@@ -353,9 +353,9 @@ mod tests {
     use futures::future::BoxFuture;
     use puffin::puffin_manager::PuffinWriter;
     use store_api::metadata::RegionMetadata;
+    use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::FileId;
     use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,

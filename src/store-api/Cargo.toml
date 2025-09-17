@@ -37,6 +37,7 @@ snafu.workspace = true
 sqlparser.workspace = true
 strum.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-stream.workspace = true

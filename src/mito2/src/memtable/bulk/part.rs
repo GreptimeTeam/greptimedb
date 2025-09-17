@@ -51,8 +51,8 @@ use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::SequenceNumber;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use store_api::storage::{FileId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -63,7 +63,6 @@ use crate::memtable::BoxedRecordBatchIterator;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::sst::file::FileId;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};

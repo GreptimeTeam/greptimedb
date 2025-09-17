@@ -40,8 +40,8 @@ use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::SequenceNumber;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
@@ -50,7 +50,7 @@ use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::{Batch, FlatSource, Source};
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;

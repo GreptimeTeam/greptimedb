@@ -15,8 +15,9 @@
 use std::num::NonZeroU64;
 
 use common_time::Timestamp;
+use store_api::storage::FileId;
 
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
+use crate::sst::file::{FileHandle, FileMeta, Level};
 use crate::test_util::new_noop_file_purger;
 
 /// Test util to create file handles.
