@@ -112,11 +112,7 @@ pub fn to_flat_sst_arrow_schema(
     metadata: &RegionMetadata,
     options: &FlatSchemaOptions,
 ) -> SchemaRef {
-    let num_fields = if options.raw_pk_columns {
-        metadata.column_metadatas.len() + 3
-    } else {
-        metadata.column_metadatas.len() + 3 - metadata.primary_key.len()
-    };
+    let num_fields = flat_sst_arrow_schema_column_num(metadata, options);
     let mut fields = Vec::with_capacity(num_fields);
     let schema = metadata.schema.arrow_schema();
     if options.raw_pk_columns {
@@ -150,6 +146,18 @@ pub fn to_flat_sst_arrow_schema(
     }
 
     Arc::new(Schema::new(fields))
+}
+
+/// Returns the number of columns in the flat format.
+pub fn flat_sst_arrow_schema_column_num(
+    metadata: &RegionMetadata,
+    options: &FlatSchemaOptions,
+) -> usize {
+    if options.raw_pk_columns {
+        metadata.column_metadatas.len() + 3
+    } else {
+        metadata.column_metadatas.len() + 3 - metadata.primary_key.len()
+    }
 }
 
 /// Helper function to create a dictionary field from a field.

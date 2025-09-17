@@ -55,7 +55,8 @@ use crate::sst::parquet::format::{
     FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, ReadFormat, StatValues,
 };
 use crate::sst::{
-    FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, to_sst_arrow_schema,
+    FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
+    to_flat_sst_arrow_schema, to_sst_arrow_schema,
 };
 
 /// Helper for writing the SST format.
@@ -158,18 +159,17 @@ impl FlatReadFormat {
         };
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            arrow_schema.fields.len(),
-            column_ids,
-        );
+        let sst_column_num =
+            flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
+        let format_projection =
+            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, column_ids);
 
         if convert_to_flat {
             let codec = build_primary_key_codec(&metadata);
 
             let convert_format =
                 FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec);
+            // For old format, the SST has a different schema.
             let legacy_arrow_schema = to_sst_arrow_schema(&metadata);
 
             Ok(FlatReadFormat {
@@ -181,6 +181,8 @@ impl FlatReadFormat {
                 convert_format,
             })
         } else {
+            let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
             Ok(FlatReadFormat {
                 metadata,
                 arrow_schema,
