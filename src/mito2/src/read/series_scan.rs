@@ -48,7 +48,7 @@ use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Timeout to send a batch to a sender.
-const SEND_TIMEOUT: Duration = Duration::from_millis(10);
+const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// List of receivers.
 type ReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
