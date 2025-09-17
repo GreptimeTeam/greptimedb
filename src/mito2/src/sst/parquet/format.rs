@@ -198,22 +198,20 @@ impl ReadFormat {
                     file_path,
                 )
             }
+        } else if let Some(column_ids) = &projection {
+            Ok(ReadFormat::new_primary_key(
+                region_metadata,
+                column_ids.iter().copied(),
+            ))
         } else {
-            if let Some(column_ids) = &projection {
-                Ok(ReadFormat::new_primary_key(
-                    region_metadata,
-                    column_ids.iter().copied(),
-                ))
-            } else {
-                // No projection, lists all column ids to read.
-                Ok(ReadFormat::new_primary_key(
-                    region_metadata.clone(),
-                    region_metadata
-                        .column_metadatas
-                        .iter()
-                        .map(|col| col.column_id),
-                ))
-            }
+            // No projection, lists all column ids to read.
+            Ok(ReadFormat::new_primary_key(
+                region_metadata.clone(),
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            ))
         }
     }
 
