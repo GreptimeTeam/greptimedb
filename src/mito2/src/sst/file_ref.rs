@@ -38,6 +38,14 @@ impl FileRef {
     }
 }
 
+/// The tmp file uploaded to object storage to record one table's file references.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableFileRefsManifest {
+    pub file_refs: HashSet<FileRef>,
+    /// Manifest version when this manifest is read for it's files
+    pub manifest_version: HashMap<RegionId, ManifestVersion>,
+}
+
 /// File references for a table.
 /// It contains all files referenced by the table.
 #[derive(Debug, Clone, Default)]
@@ -60,14 +68,6 @@ pub struct FileReferenceManager {
 }
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
-
-/// The tmp file uploaded to object storage to record one table's file references.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableFileRefsManifest {
-    pub file_refs: HashSet<FileRef>,
-    /// Manifest version when this manifest is read for it's files
-    pub manifest_version: HashMap<RegionId, ManifestVersion>,
-}
 
 impl FileReferenceManager {
     pub fn new(node_id: Option<u64>) -> Self {
