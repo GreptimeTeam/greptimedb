@@ -25,8 +25,8 @@ use crate::error::{
 };
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
-    self, AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse, RemoveRegionFollowerRequest,
+    self, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureStateResponse,
 };
 
 /// The context of procedure executor.
@@ -45,26 +45,14 @@ pub trait ProcedureExecutor: Send + Sync {
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
 
-    /// Add a region follower
-    async fn add_region_follower(
+    /// Submit ad manage region follower task
+    async fn manage_region_follower(
         &self,
         _ctx: &ExecutorContext,
-        _request: AddRegionFollowerRequest,
+        _request: ManageRegionFollowerRequest,
     ) -> Result<()> {
         UnsupportedSnafu {
-            operation: "add_region_follower",
-        }
-        .fail()
-    }
-
-    /// Remove a region follower
-    async fn remove_region_follower(
-        &self,
-        _ctx: &ExecutorContext,
-        _request: RemoveRegionFollowerRequest,
-    ) -> Result<()> {
-        UnsupportedSnafu {
-            operation: "remove_region_follower",
+            operation: "manage_region_follower",
         }
         .fail()
     }
