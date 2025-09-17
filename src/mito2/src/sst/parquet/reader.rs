@@ -1385,17 +1385,10 @@ impl FlatRowGroupReader {
                 let record_batch = batch_result.context(ArrowReaderSnafu {
                     path: self.context.file_path(),
                 })?;
-
-                // Apply override sequence if needed
-                if let (Some(flat_format), Some(override_array)) = (
-                    self.context.read_format().as_flat(),
-                    &self.override_sequence,
-                ) {
-                    let converted =
-                        flat_format.convert_batch(record_batch, Some(override_array))?;
-                    return Ok(Some(converted));
-                }
-
+                // Safety: Only flat format use FlatRowGroupReader.
+                let flat_format = self.context.read_format().as_flat().unwrap();
+                let record_batch =
+                    flat_format.convert_batch(record_batch, self.override_sequence.as_ref())?;
                 Ok(Some(record_batch))
             }
             None => Ok(None),
