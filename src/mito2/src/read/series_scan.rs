@@ -540,18 +540,16 @@ impl SeriesDistributor {
                 continue;
             }
 
-            // We find a new series.
-            // let series_batch =
-            //     std::mem::replace(&mut current_series, SingleSeriesBatch::single(batch));
-            // batches.push(series_batch);
+            // We find a new series. We need to push the new series or finish current buffer.
             if batches.num_rows < DEFAULT_READ_BATCH_SIZE {
-                batches.push_last_series(batch);
-                // We didn't collect enough rows to send.
+                // We haven't collected enough rows to send.
+                // We can push the new series.
+                batches.push_new_series(batch);
                 fetch_start = Instant::now();
                 continue;
             }
             // We have enough rows.
-            let to_send = std::mem::take(&mut batches);
+            let to_send = std::mem::replace(&mut batches, PrimaryKeySeriesBatch::with_batch(batch));
             let yield_start = Instant::now();
             self.senders
                 .send_batch(SeriesBatch::PrimaryKey(to_send))
@@ -607,23 +605,41 @@ impl SingleSeriesBatch {
 #[derive(Default, Debug)]
 pub struct PrimaryKeySeriesBatch {
     /// Batches with different series..
-    /// Must use `push_last_series()` to add a new batch in order to maintain the correct `num_rows`.
+    /// Must use `push_last_series()`/`push_new_series()` to add a new batch in order to maintain the correct `num_rows`.
     pub batches: SmallVec<[SingleSeriesBatch; 2]>,
     /// Number of rows in all batches.
     pub num_rows: usize,
 }
 
 impl PrimaryKeySeriesBatch {
-    fn push_last_series(&mut self, batch: Batch) {
-        if batch.is_empty() {
-            return;
+    /// Creates a new [PrimaryKeySeriesBatch] with a single batch.
+    fn with_batch(batch: Batch) -> Self {
+        debug_assert!(!batch.is_empty());
+        let num_rows = batch.num_rows();
+        Self {
+            batches: smallvec![SingleSeriesBatch::single(batch)],
+            num_rows,
         }
+    }
+
+    /// Pushes a batch as a batch of the last series.
+    fn push_last_series(&mut self, batch: Batch) {
+        debug_assert!(!batch.is_empty());
         self.num_rows += batch.num_rows();
         if let Some(last) = self.batches.last_mut() {
+            debug_assert_eq!(last.current_key().unwrap(), batch.primary_key());
             last.push(batch);
         } else {
             self.batches.push(SingleSeriesBatch::single(batch));
         }
+    }
+
+    /// Pushes a batch as new series.
+    fn push_new_series(&mut self, batch: Batch) {
+        debug_assert!(!batch.is_empty());
+        self.num_rows += batch.num_rows();
+        debug_assert_ne!(self.last_key(), Some(batch.primary_key()));
+        self.batches.push(SingleSeriesBatch::single(batch));
     }
 
     /// Returns the series key of the last batch.
