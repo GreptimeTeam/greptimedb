@@ -37,6 +37,7 @@ INSERT INTO vals VALUES (1, 1.5, 1000), (2, 2.5, 2000), (3, 3.5, 3000), (NULL, N
 SELECT AVG(i), AVG(j) FROM vals;
 
 -- FIXME(dennis): AVG(DISTINCT) not supported
+-- https://github.com/apache/datafusion/issues/2408
 -- SELECT AVG(DISTINCT i), AVG(DISTINCT j) FROM vals;
 
 -- cleanup

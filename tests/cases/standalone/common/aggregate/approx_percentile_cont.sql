@@ -1,5 +1,5 @@
 -- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_approx_quantile.test
--- Test APPROX_QUANTILE function
+-- Test approx_percentile_cont function instead of approx_quantile
 
 -- Test basic approximate quantile
 CREATE TABLE approx_test(i INTEGER, ts TIMESTAMP TIME INDEX);

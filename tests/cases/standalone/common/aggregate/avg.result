@@ -89,6 +89,7 @@ SELECT AVG(i), AVG(j) FROM vals;
 +-------------+-------------+
 
 -- FIXME(dennis): AVG(DISTINCT) not supported
+-- https://github.com/apache/datafusion/issues/2408
 -- SELECT AVG(DISTINCT i), AVG(DISTINCT j) FROM vals;
 -- cleanup
 DROP TABLE integers;

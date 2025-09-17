@@ -1,5 +1,5 @@
 -- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_approximate_distinct_count.test
--- Test approx_count_distinct operator
+-- Test approx_distinct function
 
 -- Basic tests
 SELECT APPROX_DISTINCT(1);
