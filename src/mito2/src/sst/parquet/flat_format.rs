@@ -56,9 +56,7 @@ use crate::sst::parquet::format::{
 use crate::sst::{FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema};
 
 /// Helper for writing the SST format.
-#[allow(dead_code)]
 pub(crate) struct FlatWriteFormat {
-    metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
@@ -66,18 +64,15 @@ pub(crate) struct FlatWriteFormat {
 
 impl FlatWriteFormat {
     /// Creates a new helper.
-    #[allow(dead_code)]
     pub(crate) fn new(metadata: RegionMetadataRef, options: &FlatSchemaOptions) -> FlatWriteFormat {
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, options);
         FlatWriteFormat {
-            metadata,
             arrow_schema,
             override_sequence: None,
         }
     }
 
     /// Set override sequence.
-    #[allow(dead_code)]
     pub(crate) fn with_override_sequence(
         mut self,
         override_sequence: Option<SequenceNumber>,
@@ -87,13 +82,11 @@ impl FlatWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
-    #[allow(dead_code)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
-    #[allow(dead_code)]
     pub(crate) fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
@@ -184,7 +177,6 @@ impl FlatReadFormat {
     }
 
     /// Sets the sequence number to override.
-    #[allow(dead_code)]
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
     }
@@ -266,7 +258,6 @@ impl FlatReadFormat {
     ///
     /// Returns a new RecordBatch with flat format conversion applied first (if enabled),
     /// then the sequence column replaced by the override sequence array.
-    #[allow(dead_code)]
     pub(crate) fn convert_batch(
         &self,
         record_batch: RecordBatch,
@@ -304,7 +295,6 @@ impl FlatReadFormat {
     /// * `file_path` is the path to the parquet file, for error message.
     /// * `num_columns` is the number of columns in the parquet file.
     /// * `metadata` is the region metadata (always assumes flat format).
-    #[allow(dead_code)]
     pub(crate) fn need_convert_to_flat(
         file_path: &str,
         num_columns: usize,
