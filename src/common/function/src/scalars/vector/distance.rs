@@ -16,6 +16,7 @@ mod cos;
 mod dot;
 mod l2sq;
 
+use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::Result;
@@ -26,7 +27,6 @@ use datatypes::arrow::datatypes::DataType;
 
 use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv;
 
 macro_rules! define_distance_function {
     ($StructName:ident, $display_name:expr, $similarity_method:path) => {
@@ -55,11 +55,9 @@ macro_rules! define_distance_function {
                 &self,
                 args: ScalarFunctionArgs,
             ) -> datafusion_common::Result<ColumnarValue> {
-                let body = |v0: &ScalarValue,
-                            v1: &ScalarValue|
+                let body = |v0: &Option<Cow<[f32]>>,
+                            v1: &Option<Cow<[f32]>>|
                  -> datafusion_common::Result<ScalarValue> {
-                    let v0 = impl_conv::as_veclit(v0)?;
-                    let v1 = impl_conv::as_veclit(v1)?;
                     let result = if let (Some(v0), Some(v1)) = (v0, v1) {
                         if v0.len() != v1.len() {
                             return Err(datafusion_common::DataFusionError::Execution(format!(
@@ -68,7 +66,7 @@ macro_rules! define_distance_function {
                             )));
                         }
 
-                        let d = $similarity_method(v0.as_ref(), v1.as_ref());
+                        let d = $similarity_method(v0, v1);
                         Some(d)
                     } else {
                         None
@@ -80,7 +78,7 @@ macro_rules! define_distance_function {
                     name: self.name(),
                     func: body,
                 };
-                calculator.invoke_with_args(args)
+                calculator.invoke_with_vectors(args)
             }
         }
 

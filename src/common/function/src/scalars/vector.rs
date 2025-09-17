@@ -28,10 +28,13 @@ mod vector_norm;
 mod vector_sub;
 mod vector_subvector;
 
+use std::borrow::Cow;
+
 use datafusion_common::{DataFusionError, Result, ScalarValue, utils};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::vector::impl_conv::as_veclit;
 
 pub(crate) struct VectorFunction;
 
@@ -128,6 +131,60 @@ where
             let v0 = try_get_scalar_value!(arg0, i);
             let v1 = try_get_scalar_value!(arg1, i);
             results.push((self.func)(v0, v1)?);
+        }
+
+        let results = ScalarValue::iter_to_array(results.into_iter())?;
+        Ok(ColumnarValue::Array(results))
+    }
+}
+
+impl<F> VectorCalculator<'_, F>
+where
+    F: Fn(&Option<Cow<[f32]>>, &Option<Cow<[f32]>>) -> Result<ScalarValue>,
+{
+    fn invoke_with_vectors(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let [arg0, arg1] = utils::take_function_args(self.name, &args.args)?;
+
+        if let (ColumnarValue::Scalar(v0), ColumnarValue::Scalar(v1)) = (arg0, arg1) {
+            let v0 = as_veclit(v0)?;
+            let v1 = as_veclit(v1)?;
+            let result = (self.func)(&v0, &v1)?;
+            return Ok(ColumnarValue::Scalar(result));
+        }
+
+        let len = ensure_same_length(&[arg0, arg1])?;
+        let mut results = Vec::with_capacity(len);
+
+        match (arg0, arg1) {
+            (ColumnarValue::Scalar(v0), ColumnarValue::Array(a1)) => {
+                let v0 = as_veclit(v0)?;
+                for i in 0..len {
+                    let v1 = ScalarValue::try_from_array(a1, i)?;
+                    let v1 = as_veclit(&v1)?;
+                    results.push((self.func)(&v0, &v1)?);
+                }
+            }
+            (ColumnarValue::Array(a0), ColumnarValue::Scalar(v1)) => {
+                let v1 = as_veclit(v1)?;
+                for i in 0..len {
+                    let v0 = ScalarValue::try_from_array(a0, i)?;
+                    let v0 = as_veclit(&v0)?;
+                    results.push((self.func)(&v0, &v1)?);
+                }
+            }
+            (ColumnarValue::Array(a0), ColumnarValue::Array(a1)) => {
+                for i in 0..len {
+                    let v0 = ScalarValue::try_from_array(a0, i)?;
+                    let v0 = as_veclit(&v0)?;
+                    let v1 = ScalarValue::try_from_array(a1, i)?;
+                    let v1 = as_veclit(&v1)?;
+                    results.push((self.func)(&v0, &v1)?);
+                }
+            }
+            (ColumnarValue::Scalar(_), ColumnarValue::Scalar(_)) => {
+                // unreachable because this arm has been separately dealt with above
+                unreachable!()
+            }
         }
 
         let results = ScalarValue::iter_to_array(results.into_iter())?;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::fmt::Display;
 
 use common_query::error::Result;
@@ -24,7 +25,7 @@ use nalgebra::DVectorView;
 use crate::function::Function;
 use crate::helper;
 use crate::scalars::vector::VectorCalculator;
-use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
+use crate::scalars::vector::impl_conv::veclit_to_binlit;
 
 const NAME: &str = "vec_div";
 
@@ -65,12 +66,12 @@ impl Function for VectorDivFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let body = |v0: &ScalarValue, v1: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
-            let v0 = as_veclit(v0)?;
-            let v1 = as_veclit(v1)?;
+        let body = |v0: &Option<Cow<[f32]>>,
+                    v1: &Option<Cow<[f32]>>|
+         -> datafusion_common::Result<ScalarValue> {
             let result = if let (Some(v0), Some(v1)) = (v0, v1) {
-                let v0 = DVectorView::from_slice(&v0, v0.len());
-                let v1 = DVectorView::from_slice(&v1, v1.len());
+                let v0 = DVectorView::from_slice(v0, v0.len());
+                let v1 = DVectorView::from_slice(v1, v1.len());
                 if v0.len() != v1.len() {
                     return Err(DataFusionError::Execution(format!(
                         "vectors length not match: {}",
@@ -90,7 +91,7 @@ impl Function for VectorDivFunction {
             name: self.name(),
             func: body,
         };
-        calculator.invoke_with_args(args)
+        calculator.invoke_with_vectors(args)
     }
 }
 
