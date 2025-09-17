@@ -245,7 +245,10 @@ impl FlatReadFormat {
 
     /// Gets sorted projection indices to read.
     pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.format_projection.projection_indices
+        match &self.convert_format {
+            Some(c) => &c.legacy_projection_indices,
+            None => &self.format_projection.projection_indices,
+        }
     }
 
     /// Gets the projection.
@@ -396,6 +399,9 @@ pub(crate) struct FlatConvertFormat {
     codec: Arc<dyn PrimaryKeyCodec>,
     /// Projected primary key column information: (column_id, pk_index, column_index in metadata).
     projected_primary_keys: Vec<(ColumnId, usize, usize)>,
+    /// Projection indices under the old file format.
+    /// It filters the primary key columns.
+    legacy_projection_indices: Vec<usize>,
 }
 
 impl FlatConvertFormat {
@@ -414,6 +420,14 @@ impl FlatConvertFormat {
             return None;
         }
 
+        let num_primary_keys = metadata.primary_key.len();
+        let legacy_projection_indices = format_projection
+            .projection_indices
+            .iter()
+            .copied()
+            .filter(|p| *p >= num_primary_keys)
+            .collect();
+
         // Builds projected primary keys list maintaining the order of RegionMetadata::primary_key
         let mut projected_primary_keys = Vec::new();
         for (pk_index, &column_id) in metadata.primary_key.iter().enumerate() {
@@ -431,6 +445,7 @@ impl FlatConvertFormat {
             metadata,
             codec,
             projected_primary_keys,
+            legacy_projection_indices,
         })
     }
 
