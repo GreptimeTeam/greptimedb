@@ -40,7 +40,7 @@ pub struct BulkIterContext {
 impl BulkIterContext {
     pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: &Option<&[ColumnId]>,
+        projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);

@@ -341,7 +341,7 @@ impl Memtable for BulkMemtable {
         // TODO(yingwen): Filter ranges by sequence.
         let context = Arc::new(BulkIterContext::new(
             self.metadata.clone(),
-            &projection,
+            projection,
             predicate.predicate().cloned(),
         )?);
 
@@ -920,8 +920,8 @@ impl MemtableCompactor {
 
         let context = Arc::new(BulkIterContext::new(
             metadata.clone(),
-            &None, // No column projection for merging
-            None,  // No predicate for merging
+            None, // No column projection for merging
+            None, // No predicate for merging
         )?);
 
         // Creates iterators for all parts to merge.

@@ -365,8 +365,8 @@ mod tests {
         let context = Arc::new(
             BulkIterContext::new(
                 Arc::new(region_metadata.clone()),
-                &None, // No projection
-                None,  // No predicate
+                None, // No projection
+                None, // No predicate
             )
             .unwrap(),
         );
@@ -391,7 +391,7 @@ mod tests {
         let context = Arc::new(
             BulkIterContext::new(
                 Arc::new(region_metadata),
-                &Some(&[0, 2]),
+                Some(&[0, 2]),
                 Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
             )
             .unwrap(),

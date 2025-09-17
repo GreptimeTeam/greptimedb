@@ -172,14 +172,13 @@ impl ReadFormat {
     /// Creates a new read format.
     pub fn new(
         region_metadata: RegionMetadataRef,
-        // TODO(yingwen): Remove &
-        projection: &Option<&[ColumnId]>,
+        projection: Option<&[ColumnId]>,
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
     ) -> Result<ReadFormat> {
         if flat_format {
-            if let Some(column_ids) = &projection {
+            if let Some(column_ids) = projection {
                 ReadFormat::new_flat(
                     region_metadata,
                     column_ids.iter().copied(),
@@ -198,7 +197,7 @@ impl ReadFormat {
                     file_path,
                 )
             }
-        } else if let Some(column_ids) = &projection {
+        } else if let Some(column_ids) = projection {
             Ok(ReadFormat::new_primary_key(
                 region_metadata,
                 column_ids.iter().copied(),
@@ -1279,7 +1278,7 @@ mod tests {
             .map(|col| col.column_id)
             .collect();
         let read_format =
-            ReadFormat::new(metadata, &Some(&column_ids), false, None, "test").unwrap();
+            ReadFormat::new(metadata, Some(&column_ids), false, None, "test").unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1

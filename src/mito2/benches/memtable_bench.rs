@@ -458,8 +458,8 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
         let context = Arc::new(
             BulkIterContext::new(
                 metadata.clone(),
-                &None, // No projection
-                None,  // No predicate
+                None, // No projection
+                None, // No predicate
             )
             .unwrap(),
         );
@@ -525,7 +525,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             let context = Arc::new(
                 BulkIterContext::new(
                     metadata.clone(),
-                    &None,                   // No projection
+                    None,                    // No projection
                     Some(predicate.clone()), // With hostname filter
                 )
                 .unwrap(),
@@ -549,8 +549,8 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             let context = Arc::new(
                 BulkIterContext::new(
                     metadata.clone(),
-                    &None, // No projection
-                    None,  // No predicate
+                    None, // No projection
+                    None, // No predicate
                 )
                 .unwrap(),
             );
