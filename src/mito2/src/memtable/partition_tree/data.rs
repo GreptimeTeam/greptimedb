@@ -774,7 +774,9 @@ impl<'a> DataPartEncoder<'a> {
             .set_column_encoding(sequence_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(sequence_col, false)
             .set_column_encoding(op_type_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(op_type_col, true);
+            .set_column_dictionary_enabled(op_type_col, true)
+            .set_column_index_truncate_length(None)
+            .set_statistics_truncate_length(None);
         builder.build()
     }
 
