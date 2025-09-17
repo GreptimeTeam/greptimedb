@@ -251,10 +251,20 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
 
 // See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_name.go#L55
 pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> String {
-    let mut name_tokens = NON_ALPHA_NUM_CHAR
+    // Split metric name in "tokens" (remove all non-alphanumeric), filtering out empty strings
+    let mut name_tokens: Vec<String> = NON_ALPHA_NUM_CHAR
         .split(&metric.name)
-        .map(|s| s.to_string())
-        .collect_vec();
+        .filter_map(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect();
+
+    // Append unit if it exists
     if !metric.unit.is_empty() {
         let (main, per) = build_unit_suffix(&metric.unit);
         if let Some(main) = main
@@ -270,17 +280,24 @@ pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> Strin
         }
     }
 
+    // Append _total for Counters (monotonic sums)
     if matches!(metric_type, MetricType::MonotonicSum) {
+        // Remove existing "total" tokens first, then append
         name_tokens.retain(|t| t != TOTAL);
         name_tokens.push(TOTAL.to_string());
     }
+
+    // Append _ratio for metrics with unit "1" (gauges only)
     if metric.unit == "1" && matches!(metric_type, MetricType::Gauge) {
+        // Remove existing "ratio" tokens first, then append
         name_tokens.retain(|t| t != RATIO);
         name_tokens.push(RATIO.to_string());
     }
 
+    // Build the string from the tokens, separated with underscores
     let name = name_tokens.join(UNDERSCORE);
 
+    // Metric name cannot start with a digit, so prefix it with "_" in this case
     if let Some((_, first)) = name.char_indices().next()
         && first >= '0'
         && first <= '9'
@@ -1024,6 +1041,57 @@ mod tests {
                 },
                 MetricType::Init,
                 "foo_meters_per_second",
+            ),
+        ];
+
+        for (metric, metric_type, expected) in test_cases {
+            let result = normalize_metric_name(&metric, &metric_type);
+            assert_eq!(
+                result, expected,
+                "Failed for metric name: '{}', unit: '{}', type: {:?}",
+                metric.name, metric.unit, metric_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_metric_name_edge_cases() {
+        let test_cases = vec![
+            // Edge case: name with multiple non-alphanumeric chars in a row
+            (
+                Metric {
+                    name: "foo--bar__baz".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_bar_baz",
+            ),
+            // Edge case: name starting and ending with non-alphanumeric
+            (
+                Metric {
+                    name: "-foo_bar-".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_bar",
+            ),
+            // Edge case: name with only special chars (should be empty)
+            (
+                Metric {
+                    name: "--___--".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "",
+            ),
+            // Edge case: name starting with digit
+            (
+                Metric {
+                    name: "2xx_requests".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "_2xx_requests",
             ),
         ];
 
