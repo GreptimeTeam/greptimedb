@@ -72,7 +72,7 @@ pub struct FileGcOption {
     pub unknown_file_lingering_time: Duration,
     /// Maximum concurrent list operations per GC job.
     /// This is used to limit the number of concurrent listing operations and speed up listing.
-    pub max_concurrent_per_gc_job: usize,
+    pub max_concurrent_lister_per_gc_job: usize,
 }
 
 impl Default for FileGcOption {
@@ -82,7 +82,7 @@ impl Default for FileGcOption {
             lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
-            max_concurrent_per_gc_job: 32,
+            max_concurrent_lister_per_gc_job: 32,
         }
     }
 }
@@ -93,12 +93,32 @@ pub struct LocalGcWorker {
     pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
-    pub(crate) mito_config: MitoConfig,
+    pub(crate) manifest_open_config: ManifestOpenConfig,
     /// Tmp ref files manifest, used to determine which files are still in use by ongoing queries.
     ///
     /// Also contains manifest versions of regions when the tmp ref files are generated.
     /// Used to determine whether the tmp ref files are outdated.
     pub(crate) file_ref_manifest: TableFileRefsManifest,
+}
+
+pub(crate) struct ManifestOpenConfig {
+    pub compress_manifest: bool,
+    pub manifest_checkpoint_distance: u64,
+    pub experimental_manifest_keep_removed_file_count: usize,
+    pub experimental_manifest_keep_removed_file_ttl: Duration,
+}
+
+impl From<MitoConfig> for ManifestOpenConfig {
+    fn from(mito_config: MitoConfig) -> Self {
+        Self {
+            compress_manifest: mito_config.compress_manifest,
+            manifest_checkpoint_distance: mito_config.manifest_checkpoint_distance,
+            experimental_manifest_keep_removed_file_count: mito_config
+                .experimental_manifest_keep_removed_file_count,
+            experimental_manifest_keep_removed_file_ttl: mito_config
+                .experimental_manifest_keep_removed_file_ttl,
+        }
+    }
 }
 
 impl LocalGcWorker {
@@ -124,7 +144,7 @@ impl LocalGcWorker {
             cache_manager,
             manifest_mgrs: HashMap::new(),
             opt,
-            mito_config,
+            manifest_open_config: mito_config.into(),
             file_ref_manifest,
         };
 
@@ -263,7 +283,7 @@ impl LocalGcWorker {
 
         let concurrency = (current_files.len() / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
-            .min(self.opt.max_concurrent_per_gc_job);
+            .min(self.opt.max_concurrent_lister_per_gc_job);
 
         let in_used = current_files
             .keys()
@@ -318,7 +338,7 @@ impl LocalGcWorker {
     async fn open_mgr_for(&self, region_id: RegionId) -> Result<RegionManifestManager> {
         let table_dir = self.access_layer.table_dir();
         let path_type = self.access_layer.path_type();
-        let mito_config = &self.mito_config;
+        let mito_config = &self.manifest_open_config;
 
         let region_manifest_options = RegionManifestOptions {
             manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
