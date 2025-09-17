@@ -431,7 +431,13 @@ impl FlatConvertFormat {
             .projection_indices
             .iter()
             .copied()
-            .filter(|p| *p >= num_primary_keys)
+            .filter_map(|p| {
+                if p >= num_primary_keys {
+                    Some(p - num_primary_keys)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Builds projected primary keys list maintaining the order of RegionMetadata::primary_key
