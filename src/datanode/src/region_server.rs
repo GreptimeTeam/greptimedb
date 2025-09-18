@@ -158,6 +158,11 @@ impl RegionServer {
         }
     }
 
+    /// Gets the MitoEngine if it's registered.
+    pub fn mito_engine(&self) -> Option<MitoEngine> {
+        self.inner.mito_engine.read().unwrap().clone()
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_batch_open_requests(
         &self,
@@ -676,14 +681,14 @@ struct RegionServerInner {
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
-    // The number of queries allowed to be executed at the same time.
-    // Act as last line of defense on datanode to prevent query overloading.
+    /// The number of queries allowed to be executed at the same time.
+    /// Act as last line of defense on datanode to prevent query overloading.
     parallelism: Option<RegionServerParallelism>,
-    // The topic stats reporter.
+    /// The topic stats reporter.
     topic_stats_reporter: RwLock<Option<Box<dyn TopicStatsReporter>>>,
-    // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
-    // server with a concrete engine; acceptable for now to fetch Mito-specific
-    // info (e.g., list SSTs). Consider a diagnostics trait later.
+    /// HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
+    /// server with a concrete engine; acceptable for now to fetch Mito-specific
+    /// info (e.g., list SSTs). Consider a diagnostics trait later.
     mito_engine: RwLock<Option<MitoEngine>>,
 }
 

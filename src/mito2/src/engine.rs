@@ -98,7 +98,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::storage::{FileRefsManifest, RegionId, ScanRequest, SequenceNumber, TableId};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -253,6 +253,14 @@ impl MitoEngine {
 
     pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
         self.inner.workers.file_ref_manager()
+    }
+
+    /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
+    pub async fn get_snapshot_of_unmanifested_refs(
+        &self,
+        region_ids: impl IntoIterator<Item = RegionId>,
+    ) -> Result<FileRefsManifest> {
+        todo!()
     }
 
     /// Returns true if the specific region exists.

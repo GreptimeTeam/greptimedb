@@ -85,7 +85,7 @@ impl FileRef {
 /// The tmp file manifest which record a table's file references.
 /// Also record the manifest version when these tmp files are read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableFileRefsManifest {
+pub struct FileRefsManifest {
     pub file_refs: HashSet<FileRef>,
     /// Manifest version when this manifest is read for it's files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,

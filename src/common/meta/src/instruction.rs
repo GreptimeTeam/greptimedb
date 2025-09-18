@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use store_api::storage::{RegionId, RegionNumber, TableFileRefsManifest};
+use store_api::storage::{FileRefsManifest, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 use table::table_name::TableName;
@@ -423,7 +423,7 @@ pub struct GcRegion {
     /// The region ID to perform GC on.
     pub region_id: RegionId,
     /// The file references manifest containing temporary file references.
-    pub file_refs_manifest: TableFileRefsManifest,
+    pub file_refs_manifest: FileRefsManifest,
 }
 
 impl Display for GcRegion {
@@ -441,7 +441,7 @@ impl Display for GcRegion {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetFileRefsReply {
     /// The file references manifest.
-    pub file_refs_manifest: TableFileRefsManifest,
+    pub file_refs_manifest: FileRefsManifest,
     /// Whether the operation was successful.
     pub success: bool,
     /// Error message if any.

@@ -26,6 +26,7 @@ use store_api::storage::RegionId;
 
 mod close_region;
 mod downgrade_region;
+mod file_ref;
 mod flush_region;
 mod open_region;
 mod upgrade_region;
@@ -102,7 +103,10 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_regions_instruction(flush_regions)
             })),
-            _ => todo!(),
+            Instruction::GetFileRefs(get_file_refs) => Ok(Box::new(move |handler_context| {
+                Box::pin(handler_context.handle_get_file_refs_instruction(get_file_refs))
+            })),
+            Instruction::GcRegion(_) => InvalidHeartbeatResponseSnafu.fail(),
         }
     }
 }

@@ -26,6 +26,6 @@ pub use datatypes::schema::{
 };
 
 pub use self::descriptors::*;
-pub use self::file::{FileId, FileRef, ParseIdError, TableFileRefsManifest};
+pub use self::file::{FileId, FileRef, FileRefsManifest, ParseIdError};
 pub use self::requests::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 pub use self::types::SequenceNumber;

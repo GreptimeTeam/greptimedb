@@ -19,11 +19,11 @@ use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
 use store_api::ManifestVersion;
-use store_api::storage::{FileId, FileRef, RegionId, TableFileRefsManifest, TableId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId, TableId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
-use crate::region::RegionMapRef;
+use crate::region::{MitoRegionRef, RegionMapRef};
 use crate::sst::file::FileMeta;
 
 /// File references for a table.
@@ -36,7 +36,6 @@ pub struct TableFileRefs {
 
 /// Manages all file references in one datanode.
 /// It keeps track of which files are referenced and group by table ids.
-/// And periodically update the references to tmp file in object storage.
 /// This is useful for ensuring that files are not deleted while they are still in use by any
 /// query.
 #[derive(Debug)]
@@ -61,8 +60,7 @@ impl FileReferenceManager {
         let file_refs = if let Some(file_refs) = self.files_per_table.get(&table_id) {
             file_refs.clone()
         } else {
-            // still return an empty manifest to indicate no files are referenced.
-            // and differentiate from error case where table_id not found.
+            // table_id not found.
             return None;
         };
 
@@ -100,22 +98,24 @@ impl FileReferenceManager {
     #[allow(unused)]
     pub(crate) async fn get_snapshot_of_unmanifested_refs(
         &self,
-        table_id: TableId,
-        region_map: &RegionMapRef,
-    ) -> Result<TableFileRefsManifest> {
-        let Some(ref_files) = self.ref_file_set(table_id) else {
-            return Ok(Default::default());
-        };
-        let region_list = region_map.list_regions();
-        let table_regions = region_list
+        regions: impl IntoIterator<Item = MitoRegionRef>,
+    ) -> Result<FileRefsManifest> {
+        let regions: Vec<MitoRegionRef> = regions.into_iter().collect();
+        let all_table_ids = regions
             .iter()
-            .filter(|r| r.region_id().table_id() == table_id)
-            .collect::<Vec<_>>();
+            .map(|r| r.region_id().table_id())
+            .collect::<HashSet<_>>();
+        let mut ref_files = HashSet::new();
+        for table_id in all_table_ids {
+            if let Some(files) = self.ref_file_set(table_id) {
+                ref_files.extend(files);
+            }
+        }
 
         let mut in_manifest_files = HashSet::new();
         let mut manifest_version = HashMap::new();
 
-        for r in &table_regions {
+        for r in &regions {
             let manifest = r.manifest_ctx.manifest().await;
             let files = manifest.files.keys().cloned().collect::<Vec<_>>();
             in_manifest_files.extend(files);
@@ -128,7 +128,7 @@ impl FileReferenceManager {
             .cloned()
             .collect::<HashSet<_>>();
 
-        Ok(TableFileRefsManifest {
+        Ok(FileRefsManifest {
             file_refs: ref_files_excluding_in_manifest,
             manifest_version,
         })
