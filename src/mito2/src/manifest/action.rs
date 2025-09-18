@@ -30,8 +30,8 @@ use crate::error::{
     DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::manager::RemoveFileOptions;
-use crate::sst::file::FileMeta;
 use crate::region::ManifestStats;
+use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
