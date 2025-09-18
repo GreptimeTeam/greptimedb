@@ -29,9 +29,9 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Handles projection and converts batches in flat format with correct schema.
 ///
@@ -297,21 +297,17 @@ fn compute_input_arrow_schema(
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
     for (column_id, _) in batch_schema {
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
+        let field = Arc::new(Field::new(
+            &column_metadata.column_schema.name,
+            column_metadata.column_schema.data_type.as_arrow_type(),
+            column_metadata.column_schema.is_nullable(),
+        ));
         let field = if column_metadata.semantic_type == SemanticType::Tag {
-            Field::new_dictionary(
-                &column_metadata.column_schema.name,
-                datatypes::arrow::datatypes::DataType::UInt32,
-                column_metadata.column_schema.data_type.as_arrow_type(),
-                column_metadata.column_schema.is_nullable(),
-            )
+            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
         } else {
-            Field::new(
-                &column_metadata.column_schema.name,
-                column_metadata.column_schema.data_type.as_arrow_type(),
-                column_metadata.column_schema.is_nullable(),
-            )
+            field
         };
-        new_fields.push(Arc::new(field));
+        new_fields.push(field);
     }
     new_fields.extend_from_slice(&internal_fields());
 
