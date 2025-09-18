@@ -12358,6 +12358,7 @@ dependencies = [
  "sqlparser 0.55.0-greptime",
  "strum 0.27.1",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
