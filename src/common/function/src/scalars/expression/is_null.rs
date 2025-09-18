@@ -16,17 +16,13 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error;
-use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::array::ArrayRef;
+use common_query::error::Result;
 use datafusion::arrow::compute::is_null;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::VectorRef;
-use datatypes::vectors::Helper;
-use snafu::{ResultExt, ensure};
+use datafusion_common::utils;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 
 const NAME: &str = "isnull";
 
@@ -53,25 +49,15 @@ impl Function for IsNullFunction {
         Signature::any(1, Volatility::Immutable)
     }
 
-    fn eval(
+    fn invoke_with_args(
         &self,
-        _func_ctx: &FunctionContext,
-        columns: &[VectorRef],
-    ) -> common_query::error::Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let values = &columns[0];
-        let arrow_array = &values.to_arrow_array();
-        let result = is_null(arrow_array).context(ArrowComputeSnafu)?;
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let result = is_null(&arg0)?;
 
-        Helper::try_into_vector(Arc::new(result) as ArrayRef).context(error::FromArrowArraySnafu)
+        Ok(ColumnarValue::Array(Arc::new(result)))
     }
 }
 
@@ -79,9 +65,9 @@ impl Function for IsNullFunction {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{AsArray, BooleanArray, Float32Array};
     use datafusion_expr::TypeSignature;
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BooleanVector, Float32Vector};
 
     use super::*;
     #[test]
@@ -98,9 +84,20 @@ mod tests {
         );
         let values = vec![None, Some(3.0), None];
 
-        let args: Vec<VectorRef> = vec![Arc::new(Float32Vector::from(values))];
-        let vector = is_null.eval(&FunctionContext::default(), &args).unwrap();
-        let expect: VectorRef = Arc::new(BooleanVector::from_vec(vec![true, false, true]));
+        let result = is_null
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(Arc::new(Float32Array::from(values)))],
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("", DataType::Boolean, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let vector = result.as_boolean();
+        let expect = &BooleanArray::from(vec![true, false, true]);
         assert_eq!(expect, vector);
     }
 }

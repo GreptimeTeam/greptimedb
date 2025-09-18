@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
+use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
+use datafusion_common::arrow::datatypes::{DataType, Float64Type};
+use datafusion_common::utils;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use derive_more::Display;
 use geo_types::{Geometry, Point};
 use snafu::ResultExt;
 use wkt::{ToWkt, TryFromWkt};
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
+use crate::function::Function;
+use crate::scalars::geo::helpers;
 
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
@@ -43,7 +43,7 @@ impl Function for LatLngToPointWkt {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
@@ -59,28 +59,34 @@ impl Function for LatLngToPointWkt {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
 
-        let lat_vec = &columns[0];
-        let lng_vec = &columns[1];
+        let arg0 = helpers::cast::<Float64Type>(&arg0)?;
+        let lat_vec = arg0.as_primitive::<Float64Type>();
+        let arg1 = helpers::cast::<Float64Type>(&arg1)?;
+        let lng_vec = arg1.as_primitive::<Float64Type>();
 
         let size = lat_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let lat = lat_vec.get(i).as_f64_lossy();
-            let lng = lng_vec.get(i).as_f64_lossy();
+            let lat = lat_vec.is_valid(i).then(|| lat_vec.value(i));
+            let lng = lng_vec.is_valid(i).then(|| lng_vec.value(i));
 
             let result = match (lat, lng) {
                 (Some(lat), Some(lng)) => Some(Point::new(lng, lat).wkt_string()),
                 _ => None,
             };
 
-            results.push(result.as_deref());
+            builder.append_option(result.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
