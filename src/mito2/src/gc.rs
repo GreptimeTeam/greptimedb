@@ -101,7 +101,7 @@ pub struct LocalGcWorker {
     pub(crate) file_ref_manifest: TableFileRefsManifest,
 }
 
-pub(crate) struct ManifestOpenConfig {
+pub struct ManifestOpenConfig {
     pub compress_manifest: bool,
     pub manifest_checkpoint_distance: u64,
     pub experimental_manifest_keep_removed_file_count: usize,
@@ -130,7 +130,7 @@ impl LocalGcWorker {
         cache_manager: Option<CacheManagerRef>,
         regions_to_gc: BTreeSet<RegionId>,
         opt: FileGcOption,
-        mito_config: MitoConfig,
+        manifest_open_config: ManifestOpenConfig,
         file_ref_manifest: TableFileRefsManifest,
     ) -> Result<Self> {
         let table_id = regions_to_gc
@@ -144,7 +144,7 @@ impl LocalGcWorker {
             cache_manager,
             manifest_mgrs: HashMap::new(),
             opt,
-            manifest_open_config: mito_config.into(),
+            manifest_open_config,
             file_ref_manifest,
         };
 
