@@ -30,8 +30,6 @@ SELECT grp, sum(val), round(stddev_pop(val), 1), min(val) FROM stddev_test WHERE
 -- var_samp
 SELECT round(var_samp(val), 1) FROM stddev_test;
 
-SELECT round(var_samp(val), 1) FROM stddev_test;
-
 SELECT round(var_samp(val), 1) FROM stddev_test WHERE val IS NOT NULL;
 
 SELECT grp, sum(val), round(var_samp(val), 1), min(val) FROM stddev_test GROUP BY grp ORDER BY grp;

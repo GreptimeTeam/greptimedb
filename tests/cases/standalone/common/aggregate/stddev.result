@@ -105,14 +105,6 @@ SELECT round(var_samp(val), 1) FROM stddev_test;
 | 229281.6                             |
 +--------------------------------------+
 
-SELECT round(var_samp(val), 1) FROM stddev_test;
-
-+--------------------------------------+
-| round(var(stddev_test.val),Int64(1)) |
-+--------------------------------------+
-| 229281.6                             |
-+--------------------------------------+
-
 SELECT round(var_samp(val), 1) FROM stddev_test WHERE val IS NOT NULL;
 
 +--------------------------------------+
