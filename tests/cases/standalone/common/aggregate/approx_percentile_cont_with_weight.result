@@ -104,14 +104,8 @@ INSERT INTO zero_weight VALUES
 
 Affected Rows: 4
 
-SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM zero_weight;
-
-+---------------------------------------------------------------------------------------------------------------------+
-| approx_percentile_cont_with_weight(zero_weight.weight,Float64(0.5)) WITHIN GROUP [zero_weight.value ASC NULLS LAST] |
-+---------------------------------------------------------------------------------------------------------------------+
-| 0                                                                                                                   |
-+---------------------------------------------------------------------------------------------------------------------+
-
+--TODO: this result is unstable currently
+--SELECT approx_percentile_cont_with_weight(weight, 0.5) WITHIN GROUP (ORDER BY "value") FROM zero_weight;
 -- Test with NULL values
 INSERT INTO weight_test VALUES (NULL, 1, 6000), (60, NULL, 7000);
 

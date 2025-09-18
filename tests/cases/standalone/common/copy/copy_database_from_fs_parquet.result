@@ -25,7 +25,7 @@ SELECT * FROM demo ORDER BY ts;
 
 COPY DATABASE public FROM '${SQLNESS_HOME}/demo/export/parquet/';
 
-Error: 4001(TableNotFound), Table not found: greptime.public.split_test
+Affected Rows: 2
 
 SELECT * FROM demo ORDER BY ts;
 
@@ -42,7 +42,7 @@ Affected Rows: 2
 
 COPY DATABASE public FROM '${SQLNESS_HOME}/demo/export/parquet_range/';
 
-Error: 4001(TableNotFound), Table not found: greptime.public.split_test
+Affected Rows: 1
 
 SELECT * FROM demo ORDER BY ts;
 
