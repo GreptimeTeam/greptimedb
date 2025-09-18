@@ -98,7 +98,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{FileRefsManifest, RegionId, ScanRequest, SequenceNumber, TableId};
+use store_api::storage::{FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -260,7 +260,20 @@ impl MitoEngine {
         &self,
         region_ids: impl IntoIterator<Item = RegionId>,
     ) -> Result<FileRefsManifest> {
-        todo!()
+        let file_ref_mgr = self.file_ref_manager();
+
+        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
+        let regions: Vec<MitoRegionRef> = region_ids
+            .into_iter()
+            .map(|region_id| {
+                self.find_region(region_id)
+                    .with_context(|| RegionNotFoundSnafu { region_id })
+            })
+            .collect::<Result<_>>()?;
+
+        file_ref_mgr
+            .get_snapshot_of_unmanifested_refs(regions)
+            .await
     }
 
     /// Returns true if the specific region exists.
