@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
+use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{MutableVector, UInt64VectorBuilder, VectorRef};
-use snafu::ensure;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
+use crate::function::Function;
+use crate::scalars::vector::VectorCalculator;
+use crate::scalars::vector::impl_conv::as_veclit;
 
 const NAME: &str = "vec_dim";
 
@@ -63,43 +62,20 @@ impl Function for VectorDimFunction {
         )
     }
 
-    fn eval(
+    fn invoke_with_args(
         &self,
-        _func_ctx: &FunctionContext,
-        columns: &[VectorRef],
-    ) -> common_query::error::Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                )
-            }
-        );
-        let arg0 = &columns[0];
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let body = |v0: &ScalarValue| -> datafusion_common::Result<ScalarValue> {
+            let v = as_veclit(v0)?.map(|v0| v0.len() as u64);
+            Ok(ScalarValue::UInt64(v))
+        };
 
-        let len = arg0.len();
-        let mut result = UInt64VectorBuilder::with_capacity(len);
-        if len == 0 {
-            return Ok(result.to_vector());
-        }
-
-        let arg0_const = as_veclit_if_const(arg0)?;
-
-        for i in 0..len {
-            let arg0 = match arg0_const.as_ref() {
-                Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
-                None => as_veclit(arg0.get_ref(i))?,
-            };
-            let Some(arg0) = arg0 else {
-                result.push_null();
-                continue;
-            };
-            result.push(Some(arg0.len() as u64));
-        }
-
-        Ok(result.to_vector())
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_single_argument(args)
     }
 }
 
@@ -113,8 +89,10 @@ impl Display for VectorDimFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::error::Error;
-    use datatypes::vectors::StringVector;
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, AsArray, StringViewArray};
+    use datafusion::arrow::datatypes::UInt64Type;
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -122,49 +100,60 @@ mod tests {
     fn test_vec_dim() {
         let func = VectorDimFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0 = Arc::new(StringViewArray::from(vec![
             Some("[0.0,2.0,3.0]".to_string()),
             Some("[1.0,2.0,3.0,4.0]".to_string()),
             None,
             Some("[5.0]".to_string()),
         ]));
 
-        let result = func.eval(&FunctionContext::default(), &[input0]).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let result = func
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
+            .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_primitive::<UInt64Type>();
         assert_eq!(result.len(), 4);
-        assert_eq!(result.get_ref(0).as_u64().unwrap(), Some(3));
-        assert_eq!(result.get_ref(1).as_u64().unwrap(), Some(4));
-        assert!(result.get_ref(2).is_null());
-        assert_eq!(result.get_ref(3).as_u64().unwrap(), Some(1));
+        assert_eq!(result.value(0), 3);
+        assert_eq!(result.value(1), 4);
+        assert!(result.is_null(2));
+        assert_eq!(result.value(3), 1);
     }
 
     #[test]
     fn test_dim_error() {
         let func = VectorDimFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             None,
             Some("[2.0,3.0,3.0]".to_string()),
         ]));
-        let input1 = Arc::new(StringVector::from(vec![
+        let input1 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,1.0,1.0]".to_string()),
             Some("[6.0,5.0,4.0]".to_string()),
             Some("[3.0,2.0,2.0]".to_string()),
         ]));
 
-        let result = func.eval(&FunctionContext::default(), &[input0, input1]);
-
-        match result {
-            Err(Error::InvalidFuncArgs { err_msg, .. }) => {
-                assert_eq!(
-                    err_msg,
-                    "The length of the args is not correct, expect exactly one, have: 2"
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(
+            e.to_string()
+                .starts_with("Execution error: vec_dim function requires 1 argument, got 2")
+        )
     }
 }

@@ -14,14 +14,15 @@
 
 use std::fmt;
 
-use common_query::error::{ArrowComputeSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, Result};
-use datafusion_expr::Signature;
+use common_query::error::{ArrowComputeSnafu, Result};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::utils;
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
-use datatypes::vectors::{Helper, VectorRef};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
 
 /// A function subtracts an interval value to Timestamp, Date, and return the result.
@@ -58,25 +59,15 @@ impl Function for DateSubFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect 2, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-
-        let left = columns[0].to_arrow_array();
-        let right = columns[1].to_arrow_array();
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [left, right] = utils::take_function_args(self.name(), args)?;
 
         let result = numeric::sub(&left, &right).context(ArrowComputeSnafu)?;
-        let arrow_type = result.data_type().clone();
-        Helper::try_into_vector(result).context(IntoVectorSnafu {
-            data_type: arrow_type,
-        })
+        Ok(ColumnarValue::Array(result))
     }
 }
 
@@ -90,12 +81,14 @@ impl fmt::Display for DateSubFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion_expr::{TypeSignature, Volatility};
-    use datatypes::arrow::datatypes::IntervalDayTime;
-    use datatypes::value::Value;
-    use datatypes::vectors::{
-        DateVector, IntervalDayTimeVector, IntervalYearMonthVector, TimestampSecondVector,
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{
+        Array, AsArray, Date32Array, IntervalDayTimeArray, IntervalYearMonthArray,
+        TimestampSecondArray,
     };
+    use datafusion::arrow::datatypes::{Date32Type, IntervalDayTime, TimestampSecondType};
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::{TypeSignature, Volatility};
 
     use super::{DateSubFunction, *};
 
@@ -142,25 +135,37 @@ mod tests {
         ];
         let results = [Some(122), None, Some(39), None];
 
-        let time_vector = TimestampSecondVector::from(times.clone());
-        let interval_vector = IntervalDayTimeVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(time_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(TimestampSecondArray::from(times.clone()))),
+            ColumnarValue::Array(Arc::new(IntervalDayTimeArray::from(intervals))),
+        ];
+
+        let vector = f
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 4,
+                return_field: Arc::new(Field::new(
+                    "x",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    true,
+                )),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .and_then(|v| ColumnarValue::values_to_arrays(&[v]))
+            .map(|mut a| a.remove(0))
+            .unwrap();
+        let vector = vector.as_primitive::<TimestampSecondType>();
 
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
             let result = results.get(i).unwrap();
 
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Timestamp(ts) => {
-                    assert_eq!(ts.value(), result.unwrap());
-                }
-                _ => unreachable!(),
+            if let Some(x) = result {
+                assert!(vector.is_valid(i));
+                assert_eq!(vector.value(i), *x);
+            } else {
+                assert!(vector.is_null(i));
             }
         }
     }
@@ -180,25 +185,37 @@ mod tests {
         let intervals = vec![1, 2, 3, 1];
         let results = [Some(3659), None, Some(1168), None];
 
-        let date_vector = DateVector::from(dates.clone());
-        let interval_vector = IntervalYearMonthVector::from_vec(intervals);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Date32Array::from(dates.clone()))),
+            ColumnarValue::Array(Arc::new(IntervalYearMonthArray::from(intervals))),
+        ];
+
+        let vector = f
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 4,
+                return_field: Arc::new(Field::new(
+                    "x",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    true,
+                )),
+                config_options: Arc::new(ConfigOptions::new()),
+            })
+            .and_then(|v| ColumnarValue::values_to_arrays(&[v]))
+            .map(|mut a| a.remove(0))
+            .unwrap();
+        let vector = vector.as_primitive::<Date32Type>();
 
         assert_eq!(4, vector.len());
         for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
             let result = results.get(i).unwrap();
 
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Date(date) => {
-                    assert_eq!(date.val(), result.unwrap());
-                }
-                _ => unreachable!(),
+            if let Some(x) = result {
+                assert!(vector.is_valid(i));
+                assert_eq!(vector.value(i), *x);
+            } else {
+                assert!(vector.is_null(i));
             }
         }
     }

@@ -15,17 +15,17 @@
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::Signature;
-use datatypes::arrow::datatypes::DataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
+use common_query::error::Result;
+use datafusion::arrow::datatypes::DataType;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use nalgebra::DVectorView;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, veclit_to_binlit};
+use crate::scalars::vector::VectorCalculator;
+use crate::scalars::vector::impl_conv::veclit_to_binlit;
 
 const NAME: &str = "vec_add";
 
@@ -51,7 +51,7 @@ impl Function for VectorAddFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+        Ok(DataType::BinaryView)
     }
 
     fn signature(&self) -> Signature {
@@ -61,66 +61,36 @@ impl Function for VectorAddFunction {
         )
     }
 
-    fn eval(
+    fn invoke_with_args(
         &self,
-        _func_ctx: &FunctionContext,
-        columns: &[VectorRef],
-    ) -> common_query::error::Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                )
-            }
-        );
-        let arg0 = &columns[0];
-        let arg1 = &columns[1];
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let body = |v0: &Option<Cow<[f32]>>,
+                    v1: &Option<Cow<[f32]>>|
+         -> datafusion_common::Result<ScalarValue> {
+            let result = if let (Some(v0), Some(v1)) = (v0, v1) {
+                let v0 = DVectorView::from_slice(v0, v0.len());
+                let v1 = DVectorView::from_slice(v1, v1.len());
+                if v0.len() != v1.len() {
+                    return Err(DataFusionError::Execution(format!(
+                        "vectors length not match: {}",
+                        self.name()
+                    )));
+                }
 
-        ensure!(
-            arg0.len() == arg1.len(),
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The lengths of the vector are not aligned, args 0: {}, args 1: {}",
-                    arg0.len(),
-                    arg1.len(),
-                )
-            }
-        );
-
-        let len = arg0.len();
-        let mut result = BinaryVectorBuilder::with_capacity(len);
-        if len == 0 {
-            return Ok(result.to_vector());
-        }
-
-        let arg0_const = as_veclit_if_const(arg0)?;
-        let arg1_const = as_veclit_if_const(arg1)?;
-
-        for i in 0..len {
-            let arg0 = match arg0_const.as_ref() {
-                Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
-                None => as_veclit(arg0.get_ref(i))?,
+                let result = veclit_to_binlit((v0 + v1).as_slice());
+                Some(result)
+            } else {
+                None
             };
-            let arg1 = match arg1_const.as_ref() {
-                Some(arg1) => Some(Cow::Borrowed(arg1.as_ref())),
-                None => as_veclit(arg1.get_ref(i))?,
-            };
-            let (Some(arg0), Some(arg1)) = (arg0, arg1) else {
-                result.push_null();
-                continue;
-            };
-            let vec0 = DVectorView::from_slice(&arg0, arg0.len());
-            let vec1 = DVectorView::from_slice(&arg1, arg1.len());
+            Ok(ScalarValue::BinaryView(result))
+        };
 
-            let vec_res = vec0 + vec1;
-            let veclit = vec_res.as_slice();
-            let binlit = veclit_to_binlit(veclit);
-            result.push(Some(&binlit));
-        }
-
-        Ok(result.to_vector())
+        let calculator = VectorCalculator {
+            name: self.name(),
+            func: body,
+        };
+        calculator.invoke_with_vectors(args)
     }
 }
 
@@ -134,8 +104,9 @@ impl Display for VectorAddFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::error::Error;
-    use datatypes::vectors::StringVector;
+    use arrow_schema::Field;
+    use datafusion::arrow::array::{Array, AsArray, StringViewArray};
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -143,63 +114,71 @@ mod tests {
     fn test_sub() {
         let func = VectorAddFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             None,
             Some("[2.0,3.0,3.0]".to_string()),
         ]));
-        let input1 = Arc::new(StringVector::from(vec![
+        let input1 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,1.0,1.0]".to_string()),
             Some("[6.0,5.0,4.0]".to_string()),
             Some("[3.0,2.0,2.0]".to_string()),
             None,
         ]));
 
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
         let result = func
-            .eval(&FunctionContext::default(), &[input0, input1])
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(4))
             .unwrap();
 
-        let result = result.as_ref();
+        let result = result.as_binary_view();
         assert_eq!(result.len(), 4);
         assert_eq!(
-            result.get_ref(0).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[2.0, 3.0, 4.0]).as_slice())
+            result.value(0),
+            veclit_to_binlit(&[2.0, 3.0, 4.0]).as_slice()
         );
         assert_eq!(
-            result.get_ref(1).as_binary().unwrap(),
-            Some(veclit_to_binlit(&[10.0, 10.0, 10.0]).as_slice())
+            result.value(1),
+            veclit_to_binlit(&[10.0, 10.0, 10.0]).as_slice()
         );
-        assert!(result.get_ref(2).is_null());
-        assert!(result.get_ref(3).is_null());
+        assert!(result.is_null(2));
+        assert!(result.is_null(3));
     }
 
     #[test]
     fn test_sub_error() {
         let func = VectorAddFunction;
 
-        let input0 = Arc::new(StringVector::from(vec![
+        let input0 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             None,
             Some("[2.0,3.0,3.0]".to_string()),
         ]));
-        let input1 = Arc::new(StringVector::from(vec![
+        let input1 = Arc::new(StringViewArray::from(vec![
             Some("[1.0,1.0,1.0]".to_string()),
             Some("[6.0,5.0,4.0]".to_string()),
             Some("[3.0,2.0,2.0]".to_string()),
         ]));
 
-        let result = func.eval(&FunctionContext::default(), &[input0, input1]);
-
-        match result {
-            Err(Error::InvalidFuncArgs { err_msg, .. }) => {
-                assert_eq!(
-                    err_msg,
-                    "The lengths of the vector are not aligned, args 0: 4, args 1: 3"
-                )
-            }
-            _ => unreachable!(),
-        }
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(input0), ColumnarValue::Array(input1)],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(ConfigOptions::new()),
+        };
+        let e = func.invoke_with_args(args).unwrap_err();
+        assert!(e.to_string().starts_with(
+            "Internal error: Arguments has mixed length. Expected length: 4, found length: 3."
+        ));
     }
 }
