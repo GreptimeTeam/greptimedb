@@ -82,4 +82,14 @@ mod tests {
         let parsed = uuid_str.parse().unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn test_file_id_serialization() {
+        let id = FileId::random();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{id}\""), json);
+
+        let parsed = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
 }
