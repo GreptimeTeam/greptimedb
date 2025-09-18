@@ -28,8 +28,9 @@ use common_meta::rpc::router::RegionRoute;
 use common_telemetry::{debug, error, info, warn};
 use futures::TryStreamExt;
 use futures::stream::{FuturesUnordered, StreamExt};
+use ordered_float::OrderedFloat;
 use snafu::{OptionExt as _, ResultExt};
-use store_api::storage::{RegionId, TableFileRefsManifest};
+use store_api::storage::{FileRefsManifest, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::sleep;
@@ -63,6 +64,8 @@ pub struct GcConfig {
     pub file_removal_rate_weight: f64,
     /// Cooldown period between GC operations on the same region.
     pub gc_cooldown_period: Duration,
+    /// Maximum number of regions to select for GC per table.
+    pub regions_per_table_threshold: usize,
 }
 
 impl Default for GcConfig {
@@ -75,6 +78,7 @@ impl Default for GcConfig {
             sst_count_weight: 1.0,
             file_removal_rate_weight: 0.5,
             gc_cooldown_period: Duration::from_secs(60 * 30), // 30 minutes
+            regions_per_table_threshold: 20,                  // Select top 20 regions per table
         }
     }
 }
@@ -83,7 +87,7 @@ impl Default for GcConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GcCandidate {
     region_id: RegionId,
-    score: u64, // Changed to u64 for Hash/Eq implementation
+    score: OrderedFloat<f64>,
     region_stat: RegionStat,
 }
 
@@ -91,13 +95,13 @@ impl GcCandidate {
     fn new(region_id: RegionId, score: f64, region_stat: RegionStat) -> Self {
         Self {
             region_id,
-            score: (score * 1000.0) as u64, // Convert to u64 for hashing
+            score: OrderedFloat(score),
             region_stat,
         }
     }
 
     fn score_f64(&self) -> f64 {
-        self.score as f64 / 1000.0
+        self.score.into_inner()
     }
 }
 
@@ -247,7 +251,7 @@ impl GcTrigger {
         let gc_tracker = self.region_gc_tracker.lock().await;
 
         for (table_id, region_stats) in table_to_region_stats {
-            let mut candidates = HashSet::new();
+            let mut candidates = Vec::new();
 
             for region_stat in region_stats {
                 // Skip regions that are too small
@@ -267,17 +271,25 @@ impl GcTrigger {
 
                 // Only consider regions with a meaningful score
                 if score > 0.0 {
-                    candidates.insert(GcCandidate::new(region_stat.id, score, region_stat.clone()));
+                    candidates.push(GcCandidate::new(region_stat.id, score, region_stat.clone()));
                 }
             }
 
-            if !candidates.is_empty() {
+            // Sort candidates by score in descending order and take top N
+            candidates.sort_by(|a, b| b.score.cmp(&a.score));
+            let top_candidates: HashSet<GcCandidate> = candidates
+                .into_iter()
+                .take(self.config.regions_per_table_threshold)
+                .collect();
+
+            if !top_candidates.is_empty() {
                 info!(
-                    "Selected {} GC candidates for table {}",
-                    candidates.len(),
-                    table_id
+                    "Selected {} GC candidates for table {} (top {} out of all qualified)",
+                    top_candidates.len(),
+                    table_id,
+                    self.config.regions_per_table_threshold
                 );
-                table_candidates.insert(*table_id, candidates);
+                table_candidates.insert(*table_id, top_candidates);
             }
         }
 
@@ -388,9 +400,38 @@ impl GcTrigger {
             .get_file_references(&related_region_ids, &table_peer)
             .await?;
 
-        // Step 4: Process each candidate region with retry logic
-        let mut successful_regions = 0;
+        // Step 4: Filter out candidates that don't have file references available
+        let total_candidates = candidates.len();
+        let mut valid_candidates = Vec::new();
         for candidate in candidates {
+            // Check if we have file references for this region
+            if let Some(region_route) = table_peer
+                .region_routes
+                .iter()
+                .find(|r| r.region.id == candidate.region_id)
+            {
+                if let Some(peer) = &region_route.leader_peer {
+                    // Check if this peer's file references were successfully obtained
+                    if file_refs_manifest
+                        .manifest_version
+                        .contains_key(&candidate.region_id)
+                    {
+                        valid_candidates.push(candidate);
+                    } else {
+                        warn!(
+                            "Skipping region {} due to missing file references (datanode {} may be unavailable)",
+                            candidate.region_id, peer
+                        );
+                    }
+                }
+            }
+        }
+
+        // Step 5: Process each valid candidate region with retry logic
+        let valid_candidates_count = valid_candidates.len();
+        let mut successful_regions = 0;
+
+        for candidate in valid_candidates {
             let region_id = candidate.region_id;
             match self
                 .process_region_gc_with_retry(candidate, &file_refs_manifest, &table_peer)
@@ -409,10 +450,11 @@ impl GcTrigger {
         }
 
         info!(
-            "Completed GC for table {}: {}/{} regions successful",
+            "Completed GC for table {}: {}/{} regions successful ({} skipped due to missing file references)",
             table_id,
             successful_regions,
-            candidate_region_ids.len()
+            valid_candidates_count,
+            total_candidates - valid_candidates_count
         );
 
         Ok(successful_regions)
@@ -434,7 +476,7 @@ impl GcTrigger {
         &self,
         region_ids: &[RegionId],
         table_peer: &PhysicalTableRouteValue,
-    ) -> Result<TableFileRefsManifest> {
+    ) -> Result<FileRefsManifest> {
         info!("Getting file references for {} regions", region_ids.len());
 
         // Group regions by datanode to minimize RPC calls
@@ -466,13 +508,17 @@ impl GcTrigger {
                     all_manifest_versions.extend(manifest.manifest_version);
                 }
                 Err(e) => {
-                    error!("Failed to get file refs from datanode {}: {}", peer, e);
-                    return Err(e);
+                    warn!(
+                        "Failed to get file refs from datanode {}: {}. Skipping regions on this datanode.",
+                        peer, e
+                    );
+                    // Continue processing other datanodes instead of failing the entire operation
+                    continue;
                 }
             }
         }
 
-        Ok(TableFileRefsManifest {
+        Ok(FileRefsManifest {
             file_refs: all_file_refs,
             manifest_version: all_manifest_versions,
         })
@@ -482,7 +528,7 @@ impl GcTrigger {
     async fn process_region_gc_with_retry(
         &self,
         candidate: GcCandidate,
-        file_refs_manifest: &TableFileRefsManifest,
+        file_refs_manifest: &FileRefsManifest,
         table_peer: &PhysicalTableRouteValue,
     ) -> Result<()> {
         let region_id = candidate.region_id;
@@ -548,7 +594,7 @@ impl GcTrigger {
         &self,
         peer: &Peer,
         region_ids: &[RegionId],
-    ) -> Result<TableFileRefsManifest> {
+    ) -> Result<FileRefsManifest> {
         info!(
             "Sending GetFileRefs instruction to datanode {} for {} regions",
             peer,
@@ -618,7 +664,7 @@ impl GcTrigger {
         &self,
         peer: Peer,
         region_id: RegionId,
-        file_refs_manifest: &TableFileRefsManifest,
+        file_refs_manifest: &FileRefsManifest,
     ) -> Result<()> {
         info!(
             "Sending GC instruction to datanode {} for region {}",
