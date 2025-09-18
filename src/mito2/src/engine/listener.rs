@@ -20,10 +20,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::info;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::Notify;
-
-use crate::sst::file::FileId;
 
 /// Mito engine background event listener.
 #[async_trait]

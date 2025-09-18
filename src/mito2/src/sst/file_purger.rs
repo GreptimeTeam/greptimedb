@@ -223,12 +223,12 @@ mod tests {
     use object_store::services::Fs;
     use smallvec::SmallVec;
     use store_api::region_request::PathType;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;

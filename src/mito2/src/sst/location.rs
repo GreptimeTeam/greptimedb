@@ -56,10 +56,9 @@ pub fn index_file_path(
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::FileId;
 
     #[test]
     fn test_sst_file_path() {

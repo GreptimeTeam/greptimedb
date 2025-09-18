@@ -27,10 +27,10 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
 
 /// Test region id.

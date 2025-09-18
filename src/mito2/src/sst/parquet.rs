@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::storage::FileId;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::sst::file::{FileId, FileTimeRange};
+use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 
 pub(crate) mod file_range;

@@ -206,12 +206,12 @@ mod tests {
 
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
     use crate::region::options::RegionOptions;
-    use crate::sst::file::{FileId, FileMeta, Level};
+    use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;

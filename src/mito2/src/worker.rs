@@ -47,7 +47,7 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
@@ -66,7 +66,6 @@ use crate::request::{
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
-use crate::sst::file::FileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;

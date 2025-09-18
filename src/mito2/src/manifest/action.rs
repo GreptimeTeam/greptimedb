@@ -22,14 +22,14 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use strum::Display;
 
 use crate::error::{
     DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
 };
 use crate::manifest::manager::RemoveFileOptions;
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.

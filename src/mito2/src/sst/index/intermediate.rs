@@ -24,7 +24,7 @@ use index::error::Result as IndexResult;
 use index::external_provider::ExternalTempFileProvider;
 use object_store::util::{self, normalize_dir};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, FileId, RegionId};
 use uuid::Uuid;
 
 use crate::access_layer::new_fs_cache_store;
@@ -34,7 +34,6 @@ use crate::metrics::{
     INDEX_INTERMEDIATE_READ_OP_TOTAL, INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
     INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
 };
-use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
 
 const INTERMEDIATE_DIR: &str = "__intm";
@@ -275,10 +274,9 @@ mod tests {
     use common_test_util::temp_dir;
     use futures::{AsyncReadExt, AsyncWriteExt};
     use regex::Regex;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_manager() {

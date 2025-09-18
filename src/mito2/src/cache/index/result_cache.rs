@@ -19,10 +19,9 @@ use index::bloom_filter::applier::InListPredicate;
 use index::inverted_index::search::predicate::{Predicate, RangePredicate};
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 use crate::sst::index::fulltext_index::applier::builder::{
     FulltextQuery, FulltextRequest, FulltextTerm,
 };

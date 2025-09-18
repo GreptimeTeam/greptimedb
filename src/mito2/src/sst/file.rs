@@ -17,7 +17,6 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,10 +25,8 @@ use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use snafu::{ResultExt, Snafu};
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
-use uuid::Uuid;
+use store_api::storage::{FileId, RegionId};
 
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
@@ -78,52 +75,6 @@ where
 pub type Level = u8;
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: Level = 2;
-
-#[derive(Debug, Snafu, PartialEq)]
-pub struct ParseIdError {
-    source: uuid::Error,
-}
-
-/// Unique id for [SST File].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct FileId(Uuid);
-
-impl FileId {
-    /// Returns a new unique [FileId] randomly.
-    pub fn random() -> FileId {
-        FileId(Uuid::new_v4())
-    }
-
-    /// Parses id from string.
-    pub fn parse_str(input: &str) -> std::result::Result<FileId, ParseIdError> {
-        Uuid::parse_str(input).map(FileId).context(ParseIdSnafu)
-    }
-
-    /// Converts [FileId] as byte slice.
-    pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
-}
-
-impl From<FileId> for Uuid {
-    fn from(value: FileId) -> Self {
-        value.0
-    }
-}
-
-impl fmt::Display for FileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for FileId {
-    type Err = ParseIdError;
-
-    fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
-        FileId::parse_str(s)
-    }
-}
 
 /// Cross-region file id.
 ///
@@ -410,32 +361,12 @@ impl FileHandleInner {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use datatypes::value::Value;
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
-
-    #[test]
-    fn test_file_id() {
-        let id = FileId::random();
-        let uuid_str = id.to_string();
-        assert_eq!(id.0.to_string(), uuid_str);
-
-        let parsed = FileId::parse_str(&uuid_str).unwrap();
-        assert_eq!(id, parsed);
-        let parsed = uuid_str.parse().unwrap();
-        assert_eq!(id, parsed);
-    }
-
-    #[test]
-    fn test_file_id_serialization() {
-        let id = FileId::random();
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(format!("\"{id}\""), json);
-
-        let parsed = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, parsed);
-    }
 
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
