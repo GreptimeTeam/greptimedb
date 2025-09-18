@@ -19,32 +19,12 @@ use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
 use store_api::ManifestVersion;
-use store_api::storage::{FileId, RegionId, TableId};
+use store_api::storage::{FileId, FileRef, RegionId, TableFileRefsManifest, TableId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::RegionMapRef;
 use crate::sst::file::FileMeta;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct FileRef {
-    pub region_id: RegionId,
-    pub file_id: FileId,
-}
-
-impl FileRef {
-    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
-        Self { region_id, file_id }
-    }
-}
-
-/// The tmp file uploaded to object storage to record one table's file references.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableFileRefsManifest {
-    pub file_refs: HashSet<FileRef>,
-    /// Manifest version when this manifest is read for it's files
-    pub manifest_version: HashMap<RegionId, ManifestVersion>,
-}
 
 /// File references for a table.
 /// It contains all files referenced by the table.

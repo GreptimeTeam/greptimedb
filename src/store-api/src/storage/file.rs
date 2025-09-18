@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -19,6 +20,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
+
+use crate::ManifestVersion;
+use crate::storage::RegionId;
 
 #[derive(Debug, Snafu, PartialEq)]
 pub struct ParseIdError {
@@ -64,6 +68,27 @@ impl FromStr for FileId {
     fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
         FileId::parse_str(s)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileRef {
+    pub region_id: RegionId,
+    pub file_id: FileId,
+}
+
+impl FileRef {
+    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
+        Self { region_id, file_id }
+    }
+}
+
+/// The tmp file manifest which record a table's file references.
+/// Also record the manifest version when these tmp files are read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableFileRefsManifest {
+    pub file_refs: HashSet<FileRef>,
+    /// Manifest version when this manifest is read for it's files
+    pub manifest_version: HashMap<RegionId, ManifestVersion>,
 }
 
 #[cfg(test)]
