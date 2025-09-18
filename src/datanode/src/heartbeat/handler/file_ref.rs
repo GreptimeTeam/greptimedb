@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-
 use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionReply};
-use mito2::engine::MitoEngine;
-use snafu::ResultExt as _;
-use store_api::storage::{FileRefsManifest, RegionId, TableId};
+use store_api::storage::FileRefsManifest;
 
-use crate::error::{ListTmpRefFilesSnafu, Result};
 use crate::heartbeat::handler::HandlerContext;
 impl HandlerContext {
     /// Handles GetFileRefs instruction by getting file references from MitoEngine.

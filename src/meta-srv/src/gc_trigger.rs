@@ -24,9 +24,7 @@ use common_meta::instruction::{
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::RegionRoute;
 use common_telemetry::{debug, error, info, warn};
-use futures::TryStreamExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use ordered_float::OrderedFloat;
 use snafu::{OptionExt as _, ResultExt};
@@ -36,13 +34,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::sleep;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{
-    self, RegionRouteNotFoundSnafu, Result, TableMetadataManagerSnafu, TableRouteNotFoundSnafu,
-    UnexpectedInstructionReplySnafu, UnexpectedSnafu,
-};
+use crate::define_ticker;
+use crate::error::{self, RegionRouteNotFoundSnafu, Result, TableMetadataManagerSnafu};
 use crate::handler::HeartbeatMailbox;
-use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
-use crate::{define_ticker, metrics};
+use crate::service::mailbox::{Channel, MailboxRef};
 
 /// The interval of the gc ticker.
 const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
@@ -462,12 +457,12 @@ impl GcTrigger {
 
     /// Find related regions that might share files with the candidate regions.
     /// Currently returns the same regions since repartition is not implemented yet.
+    /// TODO(discord9): When repartition is implemented, this should also find parent/child regions
+    /// that might share files with the candidate regions.
     async fn find_related_regions(
         &self,
         candidate_region_ids: &[RegionId],
     ) -> Result<Vec<RegionId>> {
-        // TODO: When repartition is implemented, this should find parent/child regions
-        // that might share files with the candidate regions.
         Ok(candidate_region_ids.to_vec())
     }
 

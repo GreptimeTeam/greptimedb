@@ -322,13 +322,6 @@ pub enum Error {
         source: mito2::error::Error,
     },
 
-    #[snafu(display("Failed to list tmp ref files from metadata"))]
-    ListTmpRefFiles {
-        #[snafu(implicit)]
-        location: Location,
-        source: mito2::error::Error,
-    },
-
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -468,7 +461,6 @@ impl ErrorExt for Error {
             BuildMitoEngine { source, .. } => source.status_code(),
             BuildMetricEngine { source, .. } => source.status_code(),
             ListStorageSsts { source, .. } => source.status_code(),
-            ListTmpRefFiles { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }
