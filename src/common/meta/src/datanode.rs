@@ -69,7 +69,7 @@ pub struct Stat {
 }
 
 /// The statistics of a region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RegionStat {
     /// The region_id.
     pub id: RegionId,
@@ -126,7 +126,7 @@ pub trait TopicStatsReporter: Send + Sync {
     fn reportable_topics(&mut self) -> Vec<TopicStat>;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
