@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
@@ -20,6 +22,8 @@ use common_error::status_code::StatusCode;
 use common_query::error::{ExecuteSnafu, Result};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::DataFusionError;
+use datafusion_common::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -58,6 +62,42 @@ impl Default for FunctionContext {
             state: Arc::new(FunctionState::default()),
         }
     }
+}
+
+impl ExtensionOptions for FunctionContext {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, _: &str, _: &str) -> datafusion_common::Result<()> {
+        Err(DataFusionError::NotImplemented(
+            "set options for `FunctionContext`".to_string(),
+        ))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![]
+    }
+}
+
+impl Debug for FunctionContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FunctionContext")
+            .field("query_ctx", &self.query_ctx)
+            .finish()
+    }
+}
+
+impl ConfigExtension for FunctionContext {
+    const PREFIX: &'static str = "FunctionContext";
 }
 
 /// Scalar function trait, modified from databend to adapt datafusion

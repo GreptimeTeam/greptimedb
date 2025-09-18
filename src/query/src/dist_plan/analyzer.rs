@@ -15,11 +15,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
+use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
@@ -27,7 +29,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion_optimizer::{OptimizerContext, OptimizerRule};
+use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -100,8 +102,35 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // preprocess the input plan
-        let optimizer_context = OptimizerContext::new();
+        let mut config = config.clone();
+        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
+        config.optimizer.filter_null_join_keys = true;
+        let config = Arc::new(config);
+
+        struct OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext,
+            config: Arc<ConfigOptions>,
+        }
+
+        impl OptimizerConfig for OptimizerContext {
+            fn query_execution_start_time(&self) -> DateTime<Utc> {
+                self.inner.query_execution_start_time()
+            }
+
+            fn alias_generator(&self) -> &Arc<AliasGenerator> {
+                self.inner.alias_generator()
+            }
+
+            fn options(&self) -> Arc<ConfigOptions> {
+                self.config.clone()
+            }
+        }
+
+        let optimizer_context = OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+        };
+
         let plan = SimplifyExpressions::new()
             .rewrite(plan, &optimizer_context)?
             .data;

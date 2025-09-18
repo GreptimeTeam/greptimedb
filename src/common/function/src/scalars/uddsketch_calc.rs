@@ -16,17 +16,16 @@
 
 use std::fmt;
 use std::fmt::Display;
+use std::sync::Arc;
 
-use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
-use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::Vector;
-use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
-use datatypes::vectors::{BinaryVector, Float64VectorBuilder, MutableVector, VectorRef};
-use snafu::OptionExt;
+use common_query::error::Result;
+use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
+use datafusion_common::arrow::datatypes::{DataType, Float64Type};
+use datafusion_common::{DataFusionError, utils};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use uddsketch::UDDSketch;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
 
 const NAME: &str = "uddsketch_calc";
@@ -71,30 +70,36 @@ impl Function for UddSketchCalcFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        if columns.len() != 2 {
-            return InvalidFuncArgsSnafu {
-                err_msg: format!("uddsketch_calc expects 2 arguments, got {}", columns.len()),
-            }
-            .fail();
-        }
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
 
-        let perc_vec = &columns[0];
-        let sketch_vec = columns[1]
-            .as_any()
-            .downcast_ref::<BinaryVector>()
-            .with_context(|| DowncastVectorSnafu {
-                err_msg: format!("expect BinaryVector, got {}", columns[1].vector_type_name()),
-            })?;
+        let Some(percentages) = arg0.as_primitive_opt::<Float64Type>() else {
+            return Err(DataFusionError::Execution(format!(
+                "'{}' expects 1st argument to be Float64 datatype, got {}",
+                self.name(),
+                arg0.data_type()
+            )));
+        };
+        let Some(sketch_vec) = arg1.as_binary_opt::<i32>() else {
+            return Err(DataFusionError::Execution(format!(
+                "'{}' expects 2nd argument to be Binary datatype, got {}",
+                self.name(),
+                arg1.data_type()
+            )));
+        };
         let len = sketch_vec.len();
-        let mut builder = Float64VectorBuilder::with_capacity(len);
+        let mut builder = Float64Builder::with_capacity(len);
 
         for i in 0..len {
-            let perc_opt = perc_vec.get(i).as_f64_lossy();
-            let sketch_opt = sketch_vec.get_data(i);
+            let perc_opt = percentages.is_valid(i).then(|| percentages.value(i));
+            let sketch_opt = sketch_vec.is_valid(i).then(|| sketch_vec.value(i));
 
             if sketch_opt.is_none() || perc_opt.is_none() {
-                builder.push_null();
+                builder.append_null();
                 continue;
             }
 
@@ -106,7 +111,7 @@ impl Function for UddSketchCalcFunction {
                 Ok(s) => s,
                 Err(e) => {
                     common_telemetry::trace!("Failed to deserialize UDDSketch: {}", e);
-                    builder.push_null();
+                    builder.append_null();
                     continue;
                 }
             };
@@ -115,15 +120,15 @@ impl Function for UddSketchCalcFunction {
             // This is important to avoid panics when calling estimate_quantile on an empty sketch
             // In practice, this will happen if input is all null
             if sketch.bucket_iter().count() == 0 {
-                builder.push_null();
+                builder.append_null();
                 continue;
             }
             // Compute the estimated quantile from the sketch
             let result = sketch.estimate_quantile(perc);
-            builder.push(Some(result));
+            builder.append_value(result);
         }
 
-        Ok(builder.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -131,7 +136,8 @@ impl Function for UddSketchCalcFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{BinaryVector, Float64Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{BinaryArray, Float64Array};
 
     use super::*;
 
@@ -165,26 +171,32 @@ mod tests {
         let serialized = bincode::serialize(&sketch).unwrap();
         let percentiles = vec![0.5, 0.9, 0.95];
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(Float64Vector::from_vec(percentiles.clone())),
-            Arc::new(BinaryVector::from(vec![Some(serialized.clone()); 3])),
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(percentiles.clone()))),
+            ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(vec![serialized; 3]))),
         ];
 
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<Float64Type>();
         assert_eq!(result.len(), 3);
 
         // Test median (p50)
-        assert!(
-            matches!(result.get(0), datatypes::value::Value::Float64(v) if (v - expected_p50).abs() < 1e-10)
-        );
+        assert!((result.value(0) - expected_p50).abs() < 1e-10);
         // Test p90
-        assert!(
-            matches!(result.get(1), datatypes::value::Value::Float64(v) if (v - expected_p90).abs() < 1e-10)
-        );
+        assert!((result.value(1) - expected_p90).abs() < 1e-10);
         // Test p95
-        assert!(
-            matches!(result.get(2), datatypes::value::Value::Float64(v) if (v - expected_p95).abs() < 1e-10)
-        );
+        assert!((result.value(2) - expected_p95).abs() < 1e-10);
     }
 
     #[test]
@@ -192,23 +204,42 @@ mod tests {
         let function = UddSketchCalcFunction;
 
         // Test with invalid number of arguments
-        let args: Vec<VectorRef> = vec![Arc::new(Float64Vector::from_vec(vec![0.95]))];
-        let result = function.eval(&FunctionContext::default(), &args);
+        let result = function.invoke_with_args(ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(Float64Array::from(vec![
+                0.95,
+            ])))],
+            arg_fields: vec![],
+            number_rows: 0,
+            return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+            config_options: Arc::new(Default::default()),
+        });
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("uddsketch_calc expects 2 arguments")
+                .contains("Execution error: uddsketch_calc function requires 2 arguments, got 1")
         );
 
         // Test with invalid binary data
-        let args: Vec<VectorRef> = vec![
-            Arc::new(Float64Vector::from_vec(vec![0.95])),
-            Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])])), // Invalid binary data
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(vec![0.95]))),
+            ColumnarValue::Array(Arc::new(BinaryArray::from_iter(vec![Some(vec![1, 2, 3])]))),
         ];
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 0,
+                return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<Float64Type>();
         assert_eq!(result.len(), 1);
-        assert!(matches!(result.get(0), datatypes::value::Value::Null));
+        assert!(result.is_null(0));
     }
 }
