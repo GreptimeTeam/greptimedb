@@ -202,7 +202,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
 
 /// The role of the region.
 /// TODO(weny): rename it to `RegionRoleState`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
