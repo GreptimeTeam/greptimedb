@@ -70,6 +70,7 @@ impl FlatProjectionMapper {
         projection: impl Iterator<Item = usize>,
     ) -> Result<Self> {
         let mut projection: Vec<_> = projection.collect();
+
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
         if is_empty_projection {

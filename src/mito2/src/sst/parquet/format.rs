@@ -141,7 +141,9 @@ impl PrimaryKeyWriteFormat {
 
 /// Helper to read parquet formats.
 pub enum ReadFormat {
+    /// The parquet is in the old primary key format.
     PrimaryKey(PrimaryKeyReadFormat),
+    /// The parquet is in the new flat format.
     Flat(FlatReadFormat),
 }
 
