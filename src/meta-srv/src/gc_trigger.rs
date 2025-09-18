@@ -314,9 +314,9 @@ impl GcTrigger {
         );
 
         // Step 2: Select GC candidates based on our scoring algorithm
-        let table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
+        let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
 
-        if table_candidates.is_empty() {
+        if per_table_candidates.is_empty() {
             info!("No GC candidates found, skipping GC cycle");
             return Ok(());
         }
@@ -327,7 +327,7 @@ impl GcTrigger {
         let mut successful_tables = 0;
         let mut total_regions_processed = 0;
 
-        for (table_id, candidates) in table_candidates {
+        for (table_id, candidates) in per_table_candidates {
             let task = self.process_table_gc(table_id, candidates);
             table_tasks.push(task);
 
@@ -472,6 +472,8 @@ impl GcTrigger {
     }
 
     /// Get file references for the specified regions.
+    ///
+    /// If certain datanodes are unreachable, it logs a warning and skips those regions instead of failing the entire operation.
     async fn get_file_references(
         &self,
         region_ids: &[RegionId],
@@ -571,15 +573,16 @@ impl GcTrigger {
                     // Wait for backoff period
                     sleep(self.config.retry_backoff_duration).await;
 
-                    // Refresh file references for retry
-                    match self.get_file_references(&[region_id], table_peer).await {
+                    // Refresh file references for retry using related regions
+                    let related_regions = self.find_related_regions(&[region_id]).await?;
+                    match self.get_file_references(&related_regions, table_peer).await {
                         Ok(new_manifest) => {
                             current_manifest = new_manifest;
                         }
                         Err(refresh_err) => {
                             error!(
-                                "Failed to refresh file references for region {}: {}",
-                                region_id, refresh_err
+                                "Failed to refresh file references for regions {:?}: {}",
+                                related_regions, refresh_err
                             );
                             return Err(refresh_err);
                         }
