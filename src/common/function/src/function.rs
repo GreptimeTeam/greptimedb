@@ -139,3 +139,17 @@ pub trait Function: fmt::Display + Sync + Send {
 }
 
 pub type FunctionRef = Arc<dyn Function>;
+
+/// Find the [FunctionContext] in the [ScalarFunctionArgs]. The [FunctionContext] was set
+/// previously in the DataFusion session context creation, and is passed all the way down to the
+/// args by DataFusion.
+pub(crate) fn find_function_context(
+    args: &ScalarFunctionArgs,
+) -> datafusion_common::Result<&FunctionContext> {
+    let Some(x) = args.config_options.extensions.get::<FunctionContext>() else {
+        return Err(DataFusionError::Execution(
+            "function context is not set".to_string(),
+        ));
+    };
+    Ok(x)
+}
