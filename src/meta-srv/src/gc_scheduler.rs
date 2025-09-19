@@ -17,18 +17,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
-use common_meta::datanode::{RegionManifestInfo, RegionStat};
+use common_meta::datanode::{GcStat, RegionManifestInfo, RegionStat};
 use common_meta::instruction::{
-    GcRegion, GetFileRefs, GetFileRefsReply, Instruction, InstructionReply,
+    GcRegions, GetFileRefs, GetFileRefsReply, Instruction, InstructionReply,
 };
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_telemetry::{debug, error, info, warn};
 use futures::stream::{FuturesUnordered, StreamExt};
+use itertools::Itertools;
 use ordered_float::OrderedFloat;
 use snafu::{OptionExt as _, ResultExt};
-use store_api::storage::{FileRefsManifest, RegionId};
+use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::sleep;
@@ -230,6 +230,49 @@ impl GcScheduler {
         Ok(table_to_region_stats)
     }
 
+    /// Get datanode GC statistics mapping from peer to GcStat
+    async fn get_datanode_gc_stats(&self) -> Result<HashMap<Peer, GcStat>> {
+        let dn_stats = self.meta_peer_client.get_all_dn_stat_kvs().await?;
+        let mut datanode_gc_stats: HashMap<Peer, GcStat> = HashMap::new();
+
+        for (_dn_key, stats) in dn_stats {
+            // Get the latest stat (most recent)
+            if let Some(latest_stat) = stats.stats.last() {
+                let peer = Peer {
+                    id: latest_stat.id,
+                    addr: latest_stat.addr.clone(),
+                };
+                datanode_gc_stats.insert(peer, latest_stat.gc_stat.clone());
+            }
+        }
+
+        Ok(datanode_gc_stats)
+    }
+
+    /// Select the best peer for GC based on load from GcStat
+    fn select_best_peer_for_gc(&self, datanode_gc_stats: &HashMap<Peer, GcStat>) -> Option<Peer> {
+        let mut best_peer = None;
+        let mut best_load_score = f64::MAX;
+
+        for (peer, gc_stat) in datanode_gc_stats {
+            // Calculate load score: ratio of running tasks to concurrency
+            // Lower score means lower load (better candidate)
+            let load_score = if gc_stat.gc_concurrency > 0 {
+                gc_stat.running_gc_tasks as f64 / gc_stat.gc_concurrency as f64
+            } else {
+                // If concurrency is 0, use a high score to avoid this peer
+                f64::MAX
+            };
+
+            if load_score < best_load_score {
+                best_load_score = load_score;
+                best_peer = Some(peer.clone());
+            }
+        }
+
+        best_peer
+    }
+
     /// Calculate GC priority score for a region based on various metrics.
     fn calculate_gc_score(&self, region_stat: &RegionStat) -> f64 {
         let sst_count_score = region_stat.sst_num as f64 * self.config.sst_count_weight;
@@ -394,13 +437,23 @@ impl GcScheduler {
             .await
             .context(TableMetadataManagerSnafu)?;
 
+        let region_to_peer = table_peer
+            .region_routes
+            .iter()
+            .filter_map(|r| {
+                r.leader_peer
+                    .as_ref()
+                    .map(|peer| (r.region.id, peer.clone()))
+            })
+            .collect::<HashMap<RegionId, Peer>>();
+
         // Step 2: Determine related regions for file reference fetching
         let candidate_region_ids: Vec<RegionId> = candidates.iter().map(|c| c.region_id).collect();
         let related_region_ids = self.find_related_regions(&candidate_region_ids).await?;
 
         // Step 3: Get file references for related regions
         let file_refs_manifest = self
-            .get_file_references(&related_region_ids, &table_peer)
+            .get_file_references(&related_region_ids, &region_to_peer)
             .await?;
 
         // Step 4: Filter out candidates that don't have file references available
@@ -408,12 +461,7 @@ impl GcScheduler {
         let mut valid_candidates = Vec::new();
         for candidate in candidates {
             // Check if we have file references for this region
-            if let Some(region_route) = table_peer
-                .region_routes
-                .iter()
-                .find(|r| r.region.id == candidate.region_id)
-                && let Some(peer) = &region_route.leader_peer
-            {
+            if let Some(peer) = region_to_peer.get(&candidate.region_id) {
                 // Check if this peer's file references were successfully obtained
                 if file_refs_manifest
                     .manifest_version
@@ -436,7 +484,7 @@ impl GcScheduler {
         for candidate in valid_candidates {
             let region_id = candidate.region_id;
             match self
-                .process_region_gc_with_retry(candidate, &file_refs_manifest, &table_peer)
+                .process_region_gc_with_retry(candidate, &file_refs_manifest, &region_to_peer)
                 .await
             {
                 Ok(()) => {
@@ -479,7 +527,7 @@ impl GcScheduler {
     async fn get_file_references(
         &self,
         region_ids: &[RegionId],
-        table_peer: &PhysicalTableRouteValue,
+        region_to_peer: &HashMap<RegionId, Peer>,
     ) -> Result<FileRefsManifest> {
         info!("Getting file references for {} regions", region_ids.len());
 
@@ -487,12 +535,7 @@ impl GcScheduler {
         let mut datanode_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
 
         for region_id in region_ids {
-            if let Some(region_route) = table_peer
-                .region_routes
-                .iter()
-                .find(|r| r.region.id == *region_id)
-                && let Some(peer) = &region_route.leader_peer
-            {
+            if let Some(peer) = region_to_peer.get(region_id) {
                 datanode_regions
                     .entry(peer.clone())
                     .or_default()
@@ -527,22 +570,46 @@ impl GcScheduler {
         })
     }
 
+    /// Refresh file references for related regions, typically used before retrying GC.
+    async fn refresh_file_refs_for(
+        &self,
+        regions: &[RegionId],
+        region_to_peer: &HashMap<RegionId, Peer>,
+    ) -> Result<FileRefsManifest> {
+        let related_regions = self.find_related_regions(regions).await?;
+        self.get_file_references(&related_regions, region_to_peer)
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to refresh file references for regions {:?}: {}",
+                    related_regions, e
+                );
+            })
+    }
+
     /// Process GC for a single region with retry logic.
     async fn process_region_gc_with_retry(
         &self,
         candidate: GcCandidate,
         file_refs_manifest: &FileRefsManifest,
-        table_peer: &PhysicalTableRouteValue,
+        // TODO(discord9): maybe also refresh region_to_peer mapping if needed?
+        region_to_peer: &HashMap<RegionId, Peer>,
     ) -> Result<()> {
         let region_id = candidate.region_id;
 
-        // Find the peer for this region
-        let peer = table_peer
-            .region_routes
-            .iter()
-            .find(|r| r.region.id == region_id)
-            .and_then(|r| r.leader_peer.as_ref())
-            .with_context(|| RegionRouteNotFoundSnafu { region_id })?;
+        // Get GC stats for all datanodes to choose the best peer based on load
+        let datanode_gc_stats = self.get_datanode_gc_stats().await?;
+
+        // Select the best peer based on GC load, or fall back to region-specific peer
+        let mut peer = if let Some(best_peer) = self.select_best_peer_for_gc(&datanode_gc_stats) {
+            best_peer
+        } else {
+            // Fall back to the original region-specific peer if no suitable peer found
+            region_to_peer
+                .get(&region_id)
+                .with_context(|| RegionRouteNotFoundSnafu { region_id })?
+                .clone()
+        };
 
         let mut retries = 0;
         let mut current_manifest = file_refs_manifest.clone();
@@ -552,11 +619,23 @@ impl GcScheduler {
                 .send_gc_region_instruction(peer.clone(), region_id, &current_manifest)
                 .await
             {
-                Ok(()) => {
-                    info!("Successfully completed GC for region {}", region_id);
-                    return Ok(());
+                Ok(report) => {
+                    if report.need_retry_regions.is_empty() {
+                        info!("Successfully completed GC for region {}", region_id);
+                        return Ok(());
+                    } else {
+                        // retry outdated regions if needed?
+                        current_manifest = self
+                            .refresh_file_refs_for(
+                                &report.need_retry_regions.clone().into_iter().collect_vec(),
+                                region_to_peer,
+                            )
+                            .await?;
+                    }
                 }
-                Err(e) => {
+
+                // Retryable errors: refresh file references and retry with backoff
+                Err(e) if e.is_retryable() => {
                     retries += 1;
                     if retries >= self.config.max_retries_per_region {
                         error!(
@@ -574,20 +653,33 @@ impl GcScheduler {
                     // Wait for backoff period
                     sleep(self.config.retry_backoff_duration).await;
 
-                    // Refresh file references for retry using related regions
-                    let related_regions = self.find_related_regions(&[region_id]).await?;
-                    match self.get_file_references(&related_regions, table_peer).await {
-                        Ok(new_manifest) => {
-                            current_manifest = new_manifest;
-                        }
-                        Err(refresh_err) => {
-                            error!(
-                                "Failed to refresh file references for regions {:?}: {}",
-                                related_regions, refresh_err
-                            );
-                            return Err(refresh_err);
-                        }
-                    }
+                    current_manifest = self
+                        .refresh_file_refs_for(&[region_id], region_to_peer)
+                        .await?;
+
+                    // use a possibly different peer based on current load
+
+                    // Get GC stats for all datanodes to choose the best peer based on load
+                    let datanode_gc_stats = self.get_datanode_gc_stats().await?;
+
+                    // Select the best peer based on GC load, or fall back to region-specific peer
+                    peer = if let Some(best_peer) = self.select_best_peer_for_gc(&datanode_gc_stats)
+                    {
+                        best_peer
+                    } else {
+                        // Fall back to the original region-specific peer if no suitable peer found
+                        region_to_peer
+                            .get(&region_id)
+                            .with_context(|| RegionRouteNotFoundSnafu { region_id })?
+                            .clone()
+                    };
+                }
+                Err(e) => {
+                    error!(
+                        "Non-retryable error during GC for region {}: {}",
+                        region_id, e
+                    );
+                    return Err(e);
                 }
             }
         }
@@ -664,19 +756,20 @@ impl GcScheduler {
     }
 
     /// Send GC instruction to a datanode for a specific region.
+    /// TODO(discord9): return outdated regions if needed
     async fn send_gc_region_instruction(
         &self,
         peer: Peer,
         region_id: RegionId,
         file_refs_manifest: &FileRefsManifest,
-    ) -> Result<()> {
+    ) -> Result<GcReport> {
         info!(
             "Sending GC instruction to datanode {} for region {}",
             peer, region_id
         );
 
-        let instruction = Instruction::GcRegion(GcRegion {
-            region_id,
+        let instruction = Instruction::GcRegions(GcRegions {
+            regions: vec![region_id],
             file_refs_manifest: file_refs_manifest.clone(),
         });
 
@@ -691,19 +784,47 @@ impl GcScheduler {
             input: instruction.to_string(),
         })?;
 
-        if let Err(e) = self
+        let receiver = self
             .mailbox
-            .send_oneway(&Channel::Datanode(peer.id), msg)
-            .await
-        {
-            error!("Failed to send GC instruction to datanode {}: {}", peer, e);
-            return Err(e);
-        }
+            .send(&Channel::Datanode(peer.id), msg, Duration::from_secs(60))
+            .await?;
 
-        info!(
-            "Successfully sent GC instruction to datanode {} for region {}",
-            peer, region_id
-        );
-        Ok(())
+        match receiver.await {
+            Ok(reply_msg) => {
+                let reply = HeartbeatMailbox::json_reply(&reply_msg)?;
+                let InstructionReply::GcRegions(reply) = reply else {
+                    return error::UnexpectedInstructionReplySnafu {
+                        mailbox_message: reply_msg.to_string(),
+                        reason: "Unexpected reply of the GcRegions instruction",
+                    }
+                    .fail();
+                };
+
+                let res = reply.result;
+                match res {
+                    Ok(report) => Ok(report),
+                    Err(e) => {
+                        error!(
+                            "Datanode {} reported error during GC for region {}: {}",
+                            peer, region_id, e
+                        );
+                        Err(error::UnexpectedSnafu {
+                            violated: format!(
+                                "Datanode {} reported error during GC for region {}: {}",
+                                peer, region_id, e
+                            ),
+                        }
+                        .fail()?)
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Failed to receive GC reply from datanode {} for region {}: {}",
+                    peer, region_id, e
+                );
+                Err(e)
+            }
+        }
     }
 }

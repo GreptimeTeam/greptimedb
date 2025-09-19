@@ -31,7 +31,7 @@ use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
-use store_api::storage::{FileId, FileRefsManifest, RegionId};
+use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
 
@@ -92,14 +92,6 @@ impl GcLimiter {
                 TryAcquireError::NoPermits => TooManyGcJobsSnafu {}.build(),
             })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GcReport {
-    /// deleted files per region
-    pub deleted_files: HashMap<RegionId, Vec<FileId>>,
-    /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
-    pub need_retry_regions: HashSet<RegionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
