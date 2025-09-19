@@ -345,8 +345,8 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?;
-        Ok(SeqScan::new(input, false))
+        let input = self.scan_input().await?.with_compaction(false);
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
@@ -692,6 +692,8 @@ pub struct ScanInput {
     pub(crate) distribution: Option<TimeSeriesDistribution>,
     /// Whether to use flat format.
     pub(crate) flat_format: bool,
+    /// Whether this scan is for compaction.
+    pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -721,6 +723,7 @@ impl ScanInput {
             series_row_selector: None,
             distribution: None,
             flat_format: false,
+            compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -869,6 +872,13 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
         self.flat_format = flat_format;
+        self
+    }
+
+    /// Sets whether this scan is for compaction.
+    #[must_use]
+    pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
         self
     }
 
@@ -1127,9 +1137,9 @@ pub struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput, compaction: bool) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::seq_scan_ranges(&input, compaction);
+        let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {

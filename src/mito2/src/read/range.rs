@@ -91,8 +91,8 @@ impl RangeMeta {
     }
 
     /// Creates a list of ranges from the `input` for seq scan.
-    /// If `compaction` is true, it doesn't split the ranges.
-    pub(crate) fn seq_scan_ranges(input: &ScanInput, compaction: bool) -> Vec<RangeMeta> {
+    /// If `input.compaction` is true, it doesn't split the ranges.
+    pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
         Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
@@ -101,7 +101,7 @@ impl RangeMeta {
         Self::push_extension_ranges(input, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
-        if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+        if input.compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
             // We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
             return ranges;
         }
