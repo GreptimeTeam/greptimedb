@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use crate::error::Result;
+use crate::gc::GcConfig;
 use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -145,6 +146,8 @@ pub struct MitoConfig {
     /// Whether to enable experimental flat format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
     pub enable_experimental_flat_format: bool,
+
+    pub gc: GcConfig,
 }
 
 impl Default for MitoConfig {
@@ -182,6 +185,7 @@ impl Default for MitoConfig {
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             enable_experimental_flat_format: false,
+            gc: GcConfig::default(),
         };
 
         // Adjust buffer and cache size according to system memory if we can.

@@ -124,8 +124,7 @@ impl SchedulerEnv {
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                 },
-                Default::default(),
-                Default::default(),
+                &Default::default(),
             )
             .await
             .unwrap(),

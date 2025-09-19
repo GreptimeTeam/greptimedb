@@ -5302,7 +5302,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36#f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0e888e3f7acb5da3dd78f6aa4ef33296141b3e40#0e888e3f7acb5da3dd78f6aa4ef33296141b3e40"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7397,6 +7397,7 @@ dependencies = [
  "lazy_static",
  "local-ip-address",
  "once_cell",
+ "ordered-float 4.6.0",
  "parking_lot 0.12.4",
  "prometheus",
  "prost 0.13.5",

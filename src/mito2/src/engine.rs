@@ -98,7 +98,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::storage::{FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -109,6 +109,7 @@ use crate::error::{
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
+use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
@@ -253,6 +254,31 @@ impl MitoEngine {
 
     pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
         self.inner.workers.file_ref_manager()
+    }
+
+    pub fn gc_limiter(&self) -> GcLimiterRef {
+        self.inner.workers.gc_limiter()
+    }
+
+    /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
+    pub async fn get_snapshot_of_unmanifested_refs(
+        &self,
+        region_ids: impl IntoIterator<Item = RegionId>,
+    ) -> Result<FileRefsManifest> {
+        let file_ref_mgr = self.file_ref_manager();
+
+        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
+        let regions: Vec<MitoRegionRef> = region_ids
+            .into_iter()
+            .map(|region_id| {
+                self.find_region(region_id)
+                    .with_context(|| RegionNotFoundSnafu { region_id })
+            })
+            .collect::<Result<_>>()?;
+
+        file_ref_mgr
+            .get_snapshot_of_unmanifested_refs(regions)
+            .await
     }
 
     /// Returns true if the specific region exists.

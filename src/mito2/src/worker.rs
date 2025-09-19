@@ -57,6 +57,7 @@ use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
@@ -133,6 +134,8 @@ pub(crate) struct WorkerGroup {
     cache_manager: CacheManagerRef,
     /// File reference manager.
     file_ref_manager: FileReferenceManagerRef,
+    /// Gc limiter to limit concurrent gc jobs.
+    gc_limiter: GcLimiterRef,
 }
 
 impl WorkerGroup {
@@ -188,6 +191,7 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -223,6 +227,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 
@@ -278,6 +283,10 @@ impl WorkerGroup {
         self.file_ref_manager.clone()
     }
 
+    pub(crate) fn gc_limiter(&self) -> GcLimiterRef {
+        self.gc_limiter.clone()
+    }
+
     /// Get worker for specific `region_id`.
     pub(crate) fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let index = region_id_to_index(region_id, self.workers.len());
@@ -310,6 +319,8 @@ impl WorkerGroup {
         time_provider: TimeProviderRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
     ) -> Result<WorkerGroup> {
+        use std::sync::Arc;
+
         let (flush_sender, flush_receiver) = watch::channel(());
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(
@@ -345,6 +356,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -379,6 +391,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 
