@@ -17,7 +17,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
@@ -32,10 +31,14 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
+use datafusion_common::arrow::array::{ArrayRef, AsArray, Float64Array, Int64Array, UInt64Array};
+use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::sqlparser::ast::NullTreatment;
-use datafusion_expr::{Aggregate, Expr, LogicalPlan, SortExpr, TableScan, lit};
+use datafusion_expr::{
+    Aggregate, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr, TableScan, lit,
+};
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datatypes::arrow_array::StringArray;
@@ -649,14 +652,20 @@ async fn test_udaf_correct_eval_result() {
             expected_output: None,
             expected_fn: Some(|arr| {
                 let percent = ScalarValue::Float64(Some(0.5)).to_array().unwrap();
-                let percent = datatypes::vectors::Helper::try_into_vector(percent).unwrap();
-                let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
+                let percent = ColumnarValue::Array(percent);
+                let state = ColumnarValue::Array(arr);
                 let udd_calc = UddSketchCalcFunction;
                 let res = udd_calc
-                    .eval(&Default::default(), &[percent, state])
+                    .invoke_with_args(ScalarFunctionArgs {
+                        args: vec![percent, state],
+                        arg_fields: vec![],
+                        number_rows: 1,
+                        return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                        config_options: Arc::new(Default::default()),
+                    })
                     .unwrap();
-                let binding = res.to_arrow_array();
-                let res_arr = binding.as_any().downcast_ref::<Float64Array>().unwrap();
+                let binding = res.to_array(1).unwrap();
+                let res_arr = binding.as_primitive::<Float64Type>();
                 assert!(res_arr.len() == 1);
                 assert!((res_arr.value(0) - 2.856578984907706f64).abs() <= f64::EPSILON);
                 true
@@ -683,11 +692,20 @@ async fn test_udaf_correct_eval_result() {
             ]))],
             expected_output: None,
             expected_fn: Some(|arr| {
-                let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
+                let number_rows = arr.len();
+                let state = ColumnarValue::Array(arr);
                 let hll_calc = HllCalcFunction;
-                let res = hll_calc.eval(&Default::default(), &[state]).unwrap();
-                let binding = res.to_arrow_array();
-                let res_arr = binding.as_any().downcast_ref::<UInt64Array>().unwrap();
+                let res = hll_calc
+                    .invoke_with_args(ScalarFunctionArgs {
+                        args: vec![state],
+                        arg_fields: vec![],
+                        number_rows,
+                        return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+                        config_options: Arc::new(Default::default()),
+                    })
+                    .unwrap();
+                let binding = res.to_array(1).unwrap();
+                let res_arr = binding.as_primitive::<UInt64Type>();
                 assert!(res_arr.len() == 1);
                 assert_eq!(res_arr.value(0), 3);
                 true
