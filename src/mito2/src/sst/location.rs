@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use object_store::util;
+use snafu::OptionExt as _;
 use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
+use crate::error::UnexpectedSnafu;
 use crate::sst::file::RegionFileId;
 
 /// Generate region dir from table_dir, region_id and path_type
@@ -52,6 +54,33 @@ pub fn index_file_path(
     let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
     let index_dir = util::join_dir(&region_dir, "index");
     util::join_path(&index_dir, &format!("{}.puffin", region_file_id.file_id()))
+}
+
+/// Get RegionFileId from sst or index filename
+pub fn parse_file_id_from_path(filepath: &str) -> crate::error::Result<FileId> {
+    let filename = filepath.rsplit('/').next().context(UnexpectedSnafu {
+        reason: format!("invalid file path: {}", filepath),
+    })?;
+    let parts: Vec<&str> = filename.split('.').collect();
+    if parts.len() != 2 {
+        return UnexpectedSnafu {
+            reason: format!("invalid file name: {}", filename),
+        }
+        .fail();
+    }
+    if parts[1] != "parquet" && parts[1] != "puffin" {
+        return UnexpectedSnafu {
+            reason: format!("invalid file extension: {}", parts[1]),
+        }
+        .fail();
+    }
+    let file_id = parts[0];
+    FileId::parse_str(file_id).map_err(|e| {
+        UnexpectedSnafu {
+            reason: format!("invalid file id: {}, err: {}", file_id, e),
+        }
+        .build()
+    })
 }
 
 #[cfg(test)]
