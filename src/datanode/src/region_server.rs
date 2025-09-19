@@ -160,7 +160,23 @@ impl RegionServer {
 
     /// Gets the MitoEngine if it's registered.
     pub fn mito_engine(&self) -> Option<MitoEngine> {
-        self.inner.mito_engine.read().unwrap().clone()
+        if let Some(mito) = self.inner.mito_engine.read().unwrap().clone() {
+            Some(mito)
+        } else {
+            self.inner
+                .engines
+                .read()
+                .unwrap()
+                .get(MITO_ENGINE_NAME)
+                .cloned()
+                .and_then(|e| {
+                    let mito = e.as_any().downcast_ref::<MitoEngine>().cloned();
+                    if mito.is_none() {
+                        warn!("Mito engine not found in region server engines");
+                    }
+                    mito
+                })
+        }
     }
 
     #[tracing::instrument(skip_all)]

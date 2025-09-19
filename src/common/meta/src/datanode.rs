@@ -66,6 +66,8 @@ pub struct Stat {
     pub node_epoch: u64,
     /// The datanode workloads.
     pub datanode_workloads: DatanodeWorkloads,
+    /// The GC statistics of the datanode.
+    pub gc_stat: GcStat,
 }
 
 /// The statistics of a region.
@@ -223,6 +225,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
             node_epoch,
             node_workloads,
             topic_stats,
+            extensions,
             ..
         } = value;
 
@@ -235,6 +238,8 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                 let topic_stats = topic_stats.iter().map(TopicStat::from).collect::<Vec<_>>();
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
+
+                let gc_stat = GcStat::from_extensions(extensions).ok_or(None)?;
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
@@ -248,6 +253,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     topic_stats,
                     node_epoch: *node_epoch,
                     datanode_workloads,
+                    gc_stat,
                 })
             }
             (header, _) => Err(header.clone()),
@@ -319,6 +325,38 @@ impl From<&api::v1::meta::TopicStat> for TopicStat {
             record_size: value.record_size,
             record_num: value.record_num,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GcStat {
+    /// Number of GC tasks currently running on the datanode.
+    pub running_gc_tasks: u32,
+    /// The maximum number of concurrent GC tasks the datanode can handle.
+    pub gc_concurrency: u32,
+}
+
+impl GcStat {
+    pub const GC_STAT_KEY: &str = "__gc_stat";
+
+    pub fn new(running_gc_tasks: u32, gc_concurrency: u32) -> Self {
+        Self {
+            running_gc_tasks,
+            gc_concurrency,
+        }
+    }
+
+    pub fn into_extensions(&self, extensions: &mut std::collections::HashMap<String, Vec<u8>>) {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        extensions.insert(Self::GC_STAT_KEY.to_string(), bytes);
+    }
+
+    pub fn from_extensions(
+        extensions: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Option<Self> {
+        extensions
+            .get(Self::GC_STAT_KEY)
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
     }
 }
 
