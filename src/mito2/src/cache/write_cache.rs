@@ -124,7 +124,6 @@ impl WriteCache {
             .writer(&cache_path)
             .await
             .context(crate::error::OpenDalSnafu)?;
-
         cache_writer
             .write(data.clone())
             .await
@@ -134,11 +133,6 @@ impl WriteCache {
             .await
             .context(crate::error::OpenDalSnafu)?;
 
-        // Register in file cache
-        let index_value = IndexValue {
-            file_size: data.len() as u32,
-        };
-        self.file_cache.put(parquet_key, index_value).await;
         metrics.write_batch = cache_start.elapsed();
 
         // Upload to remote store
