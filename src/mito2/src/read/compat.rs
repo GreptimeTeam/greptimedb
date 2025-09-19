@@ -206,11 +206,14 @@ impl FlatCompatBatch {
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let actual_schema = flat_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
-        // has_same_columns_and_pk_encoding() already checks columns and encodings.
-        debug_assert_ne!(expect_schema, actual_schema);
+        if expect_schema == actual_schema {
+            // Although the SST has a different schema, but the schema after projection is the same
+            // as expected schema.
+            return Ok(None);
+        }
 
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
@@ -275,11 +278,11 @@ impl FlatCompatBatch {
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
-        Ok(Self {
+        Ok(Some(Self {
             index_or_defaults,
             arrow_schema: Arc::new(Schema::new(fields)),
             compat_pk,
-        })
+        }))
     }
 
     /// Make columns of the `batch` compatible.
@@ -1443,12 +1446,19 @@ mod tests {
         ));
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 1, 2, 3].into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection).unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
+            .unwrap()
+            .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1527,12 +1537,19 @@ mod tests {
         let expected_metadata = Arc::new(expected_metadata);
 
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
-        let read_format =
-            FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter(), false);
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 1, 2, 3].into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch =
-            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection).unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
+            .unwrap()
+            .unwrap();
 
         // Tag array.
         let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();

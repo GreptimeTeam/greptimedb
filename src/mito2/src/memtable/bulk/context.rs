@@ -23,6 +23,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
+use crate::error::Result;
 use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
@@ -39,9 +40,10 @@ pub struct BulkIterContext {
 impl BulkIterContext {
     pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: &Option<&[ColumnId]>,
+        projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> Self {
+        skip_auto_convert: bool,
+    ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
         let simple_filters = predicate
@@ -55,9 +57,16 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = build_read_format(region_metadata, projection, true);
+        let read_format = ReadFormat::new(
+            region_metadata,
+            projection,
+            true,
+            None,
+            "memtable",
+            skip_auto_convert,
+        )?;
 
-        Self {
+        Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
                 read_format,
@@ -66,7 +75,7 @@ impl BulkIterContext {
                 compat_batch: None,
             },
             predicate,
-        }
+        })
     }
 
     /// Prunes row groups by stats.
@@ -94,25 +103,5 @@ impl BulkIterContext {
 
     pub(crate) fn read_format(&self) -> &ReadFormat {
         &self.base.read_format
-    }
-}
-
-fn build_read_format(
-    region_metadata: RegionMetadataRef,
-    projection: &Option<&[ColumnId]>,
-    flat_format: bool,
-) -> ReadFormat {
-    if let Some(column_ids) = &projection {
-        ReadFormat::new(region_metadata, column_ids.iter().copied(), flat_format)
-    } else {
-        // No projection, lists all column ids to read.
-        ReadFormat::new(
-            region_metadata.clone(),
-            region_metadata
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id),
-            flat_format,
-        )
     }
 }

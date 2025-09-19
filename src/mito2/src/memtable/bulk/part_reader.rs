@@ -178,14 +178,20 @@ impl Iterator for BulkPartRecordBatchIter {
     }
 }
 
-// TODO(yingwen): Supports sparse encoding which doesn't have decoded primary key columns.
 /// Applies both predicate filtering and sequence filtering in a single pass.
 /// Returns None if the filtered batch is empty.
+///
+/// # Panics
+/// Panics if the format is not flat.
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<Scalar<UInt64Array>>,
     record_batch: RecordBatch,
 ) -> error::Result<Option<RecordBatch>> {
+    // Converts the format to the flat format first.
+    let format = context.read_format().as_flat().unwrap();
+    let record_batch = format.convert_batch(record_batch, None)?;
+
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;
 
@@ -362,11 +368,15 @@ mod tests {
         let region_metadata = builder.build().unwrap();
 
         // Create context
-        let context = Arc::new(BulkIterContext::new(
-            Arc::new(region_metadata.clone()),
-            &None, // No projection
-            None,  // No predicate
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata.clone()),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
         // Iterates all rows.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
@@ -385,11 +395,15 @@ mod tests {
         );
         assert_eq!(6, result[0].num_columns());
 
-        let context = Arc::new(BulkIterContext::new(
-            Arc::new(region_metadata),
-            &Some(&[0, 2]),
-            Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata),
+                Some(&[0, 2]),
+                Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
+                false,
+            )
+            .unwrap(),
+        );
         // Creates iter with projection and predicate.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();

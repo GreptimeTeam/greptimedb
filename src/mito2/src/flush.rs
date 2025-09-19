@@ -364,13 +364,22 @@ impl RegionFlushTask {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
+        let mut file_ids = Vec::with_capacity(file_metas.len());
+        let mut total_rows = 0;
+        let mut total_bytes = 0;
+        for meta in &file_metas {
+            file_ids.push(meta.file_id);
+            total_rows += meta.num_rows;
+            total_bytes += meta.file_size;
+        }
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}, metrics: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
             series_count,
+            total_rows,
+            total_bytes,
             timer.stop_and_record(),
             flush_metrics,
         );
@@ -447,7 +456,8 @@ impl RegionFlushTask {
             let compact_cost = compact_start.elapsed();
             flush_metrics.compact_memtable += compact_cost;
 
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
+            // Sets `for_flush` flag to true.
+            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None, true)?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();
@@ -558,8 +568,10 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema =
-            to_flat_sst_arrow_schema(&version.metadata, &FlatSchemaOptions::default());
+        let batch_schema = to_flat_sst_arrow_schema(
+            &version.metadata,
+            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
+        );
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,

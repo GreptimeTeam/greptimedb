@@ -80,7 +80,7 @@ impl SeriesScan {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, false));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {

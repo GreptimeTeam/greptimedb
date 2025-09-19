@@ -118,27 +118,17 @@ impl WriteCache {
         // Write to cache first
         let cache_start = Instant::now();
         let cache_path = self.file_cache.cache_file_path(parquet_key);
-        let mut cache_writer = self
-            .file_cache
-            .local_store()
-            .writer(&cache_path)
+        let store = self.file_cache.local_store();
+        let cleaner = TempFileCleaner::new(region_id, store.clone());
+        let write_res = store
+            .write(&cache_path, data.clone())
             .await
-            .context(crate::error::OpenDalSnafu)?;
+            .context(crate::error::OpenDalSnafu);
+        if let Err(e) = write_res {
+            cleaner.clean_by_file_id(file_id).await;
+            return Err(e);
+        }
 
-        cache_writer
-            .write(data.clone())
-            .await
-            .context(crate::error::OpenDalSnafu)?;
-        cache_writer
-            .close()
-            .await
-            .context(crate::error::OpenDalSnafu)?;
-
-        // Register in file cache
-        let index_value = IndexValue {
-            file_size: data.len() as u32,
-        };
-        self.file_cache.put(parquet_key, index_value).await;
         metrics.write_batch = cache_start.elapsed();
 
         // Upload to remote store

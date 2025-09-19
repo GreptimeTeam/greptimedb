@@ -99,6 +99,7 @@ impl Memtable for EmptyMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: PredicateGroup,
         _sequence: Option<SequenceNumber>,
+        _for_flush: bool,
     ) -> Result<MemtableRanges> {
         Ok(MemtableRanges::default())
     }

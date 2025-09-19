@@ -300,6 +300,7 @@ impl Memtable for TimeSeriesMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
+        _for_flush: bool,
     ) -> Result<MemtableRanges> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
