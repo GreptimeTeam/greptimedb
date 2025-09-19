@@ -40,7 +40,6 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::addrs;
-use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -445,9 +444,6 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
             .context(error::StartFrontendSnafu)?;
@@ -456,7 +452,6 @@ impl StartCommand {
             instance,
             servers,
             heartbeat_task,
-            export_metrics_task,
         };
 
         Ok(Instance::new(frontend, guard))
