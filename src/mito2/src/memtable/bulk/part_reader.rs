@@ -164,7 +164,11 @@ impl BulkPartRecordBatchIter {
             return Ok(None);
         };
 
-        Ok(Some(filtered_batch))
+        // Safety: We checked this in new.
+        let format = self.context.read_format().as_flat().unwrap();
+        let converted = format.convert_batch(filtered_batch, None)?;
+
+        Ok(Some(converted))
     }
 }
 

@@ -265,6 +265,7 @@ impl FlatReadFormat {
         record_batch: RecordBatch,
         override_sequence_array: Option<&ArrayRef>,
     ) -> Result<RecordBatch> {
+        // FIXME(yingwen): Don't convert format if this is compaction.
         // First, apply flat format conversion.
         let batch = match &self.parquet_adapter {
             ParquetAdapter::Flat(_) => record_batch,
