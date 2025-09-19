@@ -261,12 +261,8 @@ impl WalPruneManager {
                     Err(error::Error::PruneTaskAlreadyRunning { topic, .. }) => {
                         warn!("Prune task for topic {} is already running", topic);
                     }
-                    Err(e) => {
-                        error!(
-                            "Failed to submit prune task for topic {}: {}",
-                            topic_name.clone(),
-                            e
-                        );
+                    Err(err) => {
+                        error!(err; "Failed to prune remote WAL for topic {}", topic_name.as_str());
                     }
                 }
             });
