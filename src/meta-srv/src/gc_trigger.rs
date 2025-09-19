@@ -40,11 +40,14 @@ use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// The interval of the gc ticker.
+#[allow(unused)]
 const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
 /// Configuration for GC operations.
 #[derive(Debug, Clone)]
 pub struct GcConfig {
+    /// Whether GC is enabled.
+    pub enabled: bool,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -66,6 +69,7 @@ pub struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
@@ -95,6 +99,7 @@ impl GcCandidate {
         }
     }
 
+    #[allow(unused)]
     fn score_f64(&self) -> f64 {
         self.score.into_inner()
     }
@@ -111,6 +116,7 @@ pub(crate) enum Event {
     Tick,
 }
 
+#[allow(unused)]
 pub(crate) type GcTickerRef = Arc<GcTicker>;
 
 define_ticker!(
@@ -140,6 +146,7 @@ pub struct GcTrigger {
 
 impl GcTrigger {
     /// Creates a new [`GcTrigger`].
+    #[allow(unused)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,
@@ -156,6 +163,7 @@ impl GcTrigger {
     }
 
     /// Creates a new [`GcTrigger`] with custom configuration.
+    #[allow(unused)]
     pub(crate) fn new_with_config(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,
@@ -255,11 +263,11 @@ impl GcTrigger {
                 }
 
                 // Skip regions that are in cooldown period
-                if let Some(last_gc_time) = gc_tracker.get(&region_stat.id) {
-                    if now.duration_since(*last_gc_time) < self.config.gc_cooldown_period {
-                        debug!("Skipping region {} due to cooldown", region_stat.id);
-                        continue;
-                    }
+                if let Some(last_gc_time) = gc_tracker.get(&region_stat.id)
+                    && now.duration_since(*last_gc_time) < self.config.gc_cooldown_period
+                {
+                    debug!("Skipping region {} due to cooldown", region_stat.id);
+                    continue;
                 }
 
                 let score = self.calculate_gc_score(region_stat);
@@ -327,17 +335,17 @@ impl GcTrigger {
             table_tasks.push(task);
 
             // Limit concurrent table processing
-            if table_tasks.len() >= self.config.max_concurrent_tables {
-                if let Some(result) = table_tasks.next().await {
-                    processed_tables += 1;
-                    match result {
-                        Ok(regions_count) => {
-                            successful_tables += 1;
-                            total_regions_processed += regions_count;
-                        }
-                        Err(e) => {
-                            error!("Failed to process table GC: {}", e);
-                        }
+            if table_tasks.len() >= self.config.max_concurrent_tables
+                && let Some(result) = table_tasks.next().await
+            {
+                processed_tables += 1;
+                match result {
+                    Ok(regions_count) => {
+                        successful_tables += 1;
+                        total_regions_processed += regions_count;
+                    }
+                    Err(e) => {
+                        error!("Failed to process table GC: {}", e);
                     }
                 }
             }
@@ -404,20 +412,19 @@ impl GcTrigger {
                 .region_routes
                 .iter()
                 .find(|r| r.region.id == candidate.region_id)
+                && let Some(peer) = &region_route.leader_peer
             {
-                if let Some(peer) = &region_route.leader_peer {
-                    // Check if this peer's file references were successfully obtained
-                    if file_refs_manifest
-                        .manifest_version
-                        .contains_key(&candidate.region_id)
-                    {
-                        valid_candidates.push(candidate);
-                    } else {
-                        warn!(
-                            "Skipping region {} due to missing file references (datanode {} may be unavailable)",
-                            candidate.region_id, peer
-                        );
-                    }
+                // Check if this peer's file references were successfully obtained
+                if file_refs_manifest
+                    .manifest_version
+                    .contains_key(&candidate.region_id)
+                {
+                    valid_candidates.push(candidate);
+                } else {
+                    warn!(
+                        "Skipping region {} due to missing file references (datanode {} may be unavailable)",
+                        candidate.region_id, peer
+                    );
                 }
             }
         }
@@ -484,13 +491,12 @@ impl GcTrigger {
                 .region_routes
                 .iter()
                 .find(|r| r.region.id == *region_id)
+                && let Some(peer) = &region_route.leader_peer
             {
-                if let Some(peer) = &region_route.leader_peer {
-                    datanode_regions
-                        .entry(peer.clone())
-                        .or_default()
-                        .push(*region_id);
-                }
+                datanode_regions
+                    .entry(peer.clone())
+                    .or_default()
+                    .push(*region_id);
             }
         }
 

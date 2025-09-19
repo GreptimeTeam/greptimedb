@@ -29,7 +29,7 @@ use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{FileId, FileRefsManifest, RegionId};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
@@ -44,7 +44,6 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::metrics::GC_FILE_CNT;
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::delete_files;
-use crate::sst::file_ref::TableFileRefsManifest;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +56,8 @@ pub struct GcReport {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileGcOption {
+    /// Whether GC is enabled.
+    pub enabled: bool,
     /// Lingering time before deleting files.
     /// Should be long enough to allow long running queries to finish.
     ///
@@ -78,6 +79,7 @@ pub struct FileGcOption {
 impl Default for FileGcOption {
     fn default() -> Self {
         Self {
+            enabled: true,
             // expect long running queries to be finished within a reasonable time
             lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
@@ -98,7 +100,7 @@ pub struct LocalGcWorker {
     ///
     /// Also contains manifest versions of regions when the tmp ref files are generated.
     /// Used to determine whether the tmp ref files are outdated.
-    pub(crate) file_ref_manifest: TableFileRefsManifest,
+    pub(crate) file_ref_manifest: FileRefsManifest,
 }
 
 pub struct ManifestOpenConfig {
@@ -131,7 +133,7 @@ impl LocalGcWorker {
         regions_to_gc: BTreeSet<RegionId>,
         opt: FileGcOption,
         manifest_open_config: ManifestOpenConfig,
-        file_ref_manifest: TableFileRefsManifest,
+        file_ref_manifest: FileRefsManifest,
     ) -> Result<Self> {
         let table_id = regions_to_gc
             .first()
@@ -353,16 +355,12 @@ impl LocalGcWorker {
             },
         };
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id,
-            region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
-        })
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .context(EmptyRegionDirSnafu {
+                region_id,
+                region_dir: &region_dir_from_table_dir(table_dir, region_id, path_type),
+            })
     }
 
     /// Get all the removed files in delta manifest files and their expel times.
