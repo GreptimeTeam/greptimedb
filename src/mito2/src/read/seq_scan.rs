@@ -285,7 +285,7 @@ impl SeqScan {
         }
 
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
-        let schema = mapper.input_arrow_schema();
+        let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
 
         let reader = FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE).await?;
 

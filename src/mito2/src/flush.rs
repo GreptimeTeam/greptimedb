@@ -568,8 +568,10 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema =
-            to_flat_sst_arrow_schema(&version.metadata, &FlatSchemaOptions::default());
+        let batch_schema = to_flat_sst_arrow_schema(
+            &version.metadata,
+            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
+        );
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,

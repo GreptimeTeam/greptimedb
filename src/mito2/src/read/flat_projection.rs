@@ -31,7 +31,9 @@ use store_api::storage::ColumnId;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
+use crate::sst::{
+    FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
+};
 
 /// Handles projection and converts batches in flat format with correct schema.
 ///
@@ -198,8 +200,19 @@ impl FlatProjectionMapper {
     /// Returns the input arrow schema from sources.
     ///
     /// The merge reader can use this schema.
-    pub(crate) fn input_arrow_schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
-        self.input_arrow_schema.clone()
+    pub(crate) fn input_arrow_schema(
+        &self,
+        compaction: bool,
+    ) -> datatypes::arrow::datatypes::SchemaRef {
+        if !compaction {
+            self.input_arrow_schema.clone()
+        } else {
+            // For compaction, we need to build a different schema from encoding.
+            to_flat_sst_arrow_schema(
+                &self.metadata,
+                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
+            )
+        }
     }
 
     /// Returns the schema of converted [RecordBatch].
