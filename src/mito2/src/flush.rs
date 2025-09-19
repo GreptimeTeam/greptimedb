@@ -364,13 +364,22 @@ impl RegionFlushTask {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
+        let mut file_ids = Vec::with_capacity(file_metas.len());
+        let mut total_rows = 0;
+        let mut total_bytes = 0;
+        for meta in &file_metas {
+            file_ids.push(meta.file_id);
+            total_rows += meta.num_rows;
+            total_bytes += meta.file_size;
+        }
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}, metrics: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
             series_count,
+            total_rows,
+            total_bytes,
             timer.stop_and_record(),
             flush_metrics,
         );
