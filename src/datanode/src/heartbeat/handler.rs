@@ -106,7 +106,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::GetFileRefs(get_file_refs) => Ok(Box::new(move |handler_context| {
                 Box::pin(handler_context.handle_get_file_refs_instruction(get_file_refs))
             })),
-            Instruction::GcRegion(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::GcRegions(_) => InvalidHeartbeatResponseSnafu.fail(),
         }
     }
 }
