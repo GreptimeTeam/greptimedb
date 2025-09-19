@@ -16,11 +16,11 @@ use std::fmt::{self};
 
 use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, find_function_context};
 
 /// A function to return current schema name.
 #[derive(Clone, Debug, Default)]
@@ -197,15 +197,6 @@ impl Function for ConnectionIdFunction {
     }
 }
 
-fn find_function_context(args: &ScalarFunctionArgs) -> datafusion_common::Result<&FunctionContext> {
-    let Some(x) = args.config_options.extensions.get::<FunctionContext>() else {
-        return Err(DataFusionError::Execution(
-            "function context is not set".to_string(),
-        ));
-    };
-    Ok(x)
-}
-
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
@@ -239,6 +230,7 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::*;
+    use crate::function::FunctionContext;
     #[test]
     fn test_build_function() {
         let build = DatabaseFunction;
