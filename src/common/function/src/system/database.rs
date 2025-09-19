@@ -28,10 +28,6 @@ use crate::function::{Function, FunctionContext};
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseFunction;
 
-#[derive(Clone, Debug, Default)]
-pub struct CurrentSchemaFunction;
-pub struct SessionUserFunction;
-
 pub struct ReadPreferenceFunction;
 
 #[derive(Display)]
@@ -43,8 +39,6 @@ pub struct PgBackendPidFunction;
 pub struct ConnectionIdFunction;
 
 const DATABASE_FUNCTION_NAME: &str = "database";
-const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
-const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 const READ_PREFERENCE_FUNCTION_NAME: &str = "read_preference";
 const PG_BACKEND_PID: &str = "pg_backend_pid";
 const CONNECTION_ID: &str = "connection_id";
@@ -66,48 +60,6 @@ impl Function for DatabaseFunction {
         let db = func_ctx.query_ctx.current_schema();
 
         Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
-    }
-}
-
-// Though "current_schema" can be aliased to "database", to not cause any breaking changes,
-// we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
-impl Function for CurrentSchemaFunction {
-    fn name(&self) -> &str {
-        CURRENT_SCHEMA_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let db = func_ctx.query_ctx.current_schema();
-
-        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
-    }
-}
-
-impl Function for SessionUserFunction {
-    fn name(&self) -> &str {
-        SESSION_USER_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let user = func_ctx.query_ctx.current_user();
-
-        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
     }
 }
 
@@ -174,18 +126,6 @@ impl Function for ConnectionIdFunction {
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
-    }
-}
-
-impl fmt::Display for CurrentSchemaFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CURRENT_SCHEMA")
-    }
-}
-
-impl fmt::Display for SessionUserFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SESSION_USER")
     }
 }
 
