@@ -29,7 +29,7 @@ use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
@@ -43,7 +43,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, Rem
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics::GC_FILE_CNT;
 use crate::region::opener::new_manifest_dir;
-use crate::sst::file::{FileId, delete_files};
+use crate::sst::file::delete_files;
 use crate::sst::file_ref::TableFileRefsManifest;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
