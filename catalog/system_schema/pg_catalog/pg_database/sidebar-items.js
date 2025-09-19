@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DATNAME","INIT_CAPACITY"],"struct":["PGCDatabaseBuilder","PGDatabase"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_DATA_HOME"],"fn":["metadata_store_dir"],"mod":["config","error","utils"],"struct":["KvBackendConfig"]};

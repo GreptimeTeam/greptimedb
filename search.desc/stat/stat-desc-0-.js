@@ -1,0 +1,1 @@
+searchState.loadedDescShard("stat", 0, "<code>MAX_VALUE</code> is used to indicate that the resource is …\nGet the limit of cpu in millicores.\nGet the limit of memory in bytes.\n<code>MAX_VALUE</code> is used to indicate that the resource is …\nGet the limit of cpu in millicores.\nGet the limit of memory in bytes.")

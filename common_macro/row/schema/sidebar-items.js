@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["derive_schema_impl","impl_schema_method"]};
