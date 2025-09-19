@@ -45,7 +45,7 @@ const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
 /// Configuration for GC operations.
 #[derive(Debug, Clone)]
-pub struct GcConfig {
+pub struct GcSchedulerConfig {
     /// Whether GC is enabled.
     pub enabled: bool,
     /// Maximum number of tables to process concurrently.
@@ -66,7 +66,7 @@ pub struct GcConfig {
     pub regions_per_table_threshold: usize,
 }
 
-impl Default for GcConfig {
+impl Default for GcSchedulerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -126,8 +126,8 @@ define_ticker!(
     event_value = Event::Tick
 );
 
-/// [`GcTrigger`] is used to periodically trigger garbage collection on datanodes.
-pub struct GcTrigger {
+/// [`GcScheduler`] is used to periodically trigger garbage collection on datanodes.
+pub struct GcScheduler {
     /// The metadata manager.
     table_metadata_manager: TableMetadataManagerRef,
     /// For getting `RegionStats`.
@@ -139,13 +139,13 @@ pub struct GcTrigger {
     /// The receiver of events.
     receiver: Receiver<Event>,
     /// GC configuration.
-    config: GcConfig,
+    config: GcSchedulerConfig,
     /// Tracks the last GC time for regions.
     region_gc_tracker: Arc<tokio::sync::Mutex<RegionGcTracker>>,
 }
 
-impl GcTrigger {
-    /// Creates a new [`GcTrigger`].
+impl GcScheduler {
+    /// Creates a new [`GcScheduler`].
     #[allow(unused)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
@@ -158,18 +158,18 @@ impl GcTrigger {
             meta_peer_client,
             mailbox,
             server_addr,
-            GcConfig::default(),
+            GcSchedulerConfig::default(),
         )
     }
 
-    /// Creates a new [`GcTrigger`] with custom configuration.
+    /// Creates a new [`GcScheduler`] with custom configuration.
     #[allow(unused)]
     pub(crate) fn new_with_config(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
-        config: GcConfig,
+        config: GcSchedulerConfig,
     ) -> (Self, GcTicker) {
         let (tx, rx) = Self::channel();
         let gc_ticker = GcTicker::new(TICKER_INTERVAL, tx);

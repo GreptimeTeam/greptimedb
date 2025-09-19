@@ -109,6 +109,7 @@ use crate::error::{
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
+use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
@@ -253,6 +254,10 @@ impl MitoEngine {
 
     pub fn file_ref_manager(&self) -> FileReferenceManagerRef {
         self.inner.workers.file_ref_manager()
+    }
+
+    pub fn gc_limiter(&self) -> GcLimiterRef {
+        self.inner.workers.gc_limiter()
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
