@@ -164,11 +164,7 @@ impl BulkPartRecordBatchIter {
             return Ok(None);
         };
 
-        // Safety: We checked this in new.
-        let format = self.context.read_format().as_flat().unwrap();
-        let converted = format.convert_batch(filtered_batch, None)?;
-
-        Ok(Some(converted))
+        Ok(Some(filtered_batch))
     }
 }
 
@@ -182,14 +178,20 @@ impl Iterator for BulkPartRecordBatchIter {
     }
 }
 
-// TODO(yingwen): Supports sparse encoding which doesn't have decoded primary key columns.
 /// Applies both predicate filtering and sequence filtering in a single pass.
 /// Returns None if the filtered batch is empty.
+///
+/// # Panics
+/// Panics if the format is not flat.
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<Scalar<UInt64Array>>,
     record_batch: RecordBatch,
 ) -> error::Result<Option<RecordBatch>> {
+    // Converts the format to the flat format first.
+    let format = context.read_format().as_flat().unwrap();
+    let record_batch = format.convert_batch(record_batch, None)?;
+
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;
 
