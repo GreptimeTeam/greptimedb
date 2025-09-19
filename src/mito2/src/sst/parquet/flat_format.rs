@@ -147,23 +147,18 @@ impl FlatReadFormat {
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<FlatReadFormat> {
-        let convert_to_flat = match num_columns {
-            Some(num) => Self::need_convert_to_flat(&metadata, num, file_path)?,
-            None => {
-                if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-                    // For sparse encoding, we only convert to flat when this is not for compaction/flush.
-                    !skip_auto_convert
-                } else {
-                    false
-                }
-            }
+        let is_legacy = match num_columns {
+            Some(num) => Self::is_legacy_format(&metadata, num, file_path)?,
+            None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         };
 
-        let parquet_adapter = if convert_to_flat {
-            // Safety: need_convert_to_flat() ensures primary_key is not empty.
-            ParquetAdapter::PrimaryKeyToFlat(
-                ParquetPrimaryKeyToFlat::may_new(metadata, column_ids).unwrap(),
-            )
+        let parquet_adapter = if is_legacy {
+            // Safety: is_legacy_format() ensures primary_key is not empty.
+            ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
+                metadata,
+                column_ids,
+                skip_auto_convert,
+            ))
         } else {
             ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
         };
@@ -276,7 +271,7 @@ impl FlatReadFormat {
         // First, apply flat format conversion.
         let batch = match &self.parquet_adapter {
             ParquetAdapter::Flat(_) => record_batch,
-            ParquetAdapter::PrimaryKeyToFlat(p) => p.convert_format.convert(record_batch)?,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.convert_batch(record_batch)?,
         };
 
         // Then apply sequence override if provided
@@ -304,7 +299,7 @@ impl FlatReadFormat {
     /// * `metadata` is the region metadata (always assumes flat format).
     /// * `num_columns` is the number of columns in the parquet file.
     /// * `file_path` is the path to the parquet file, for error message.
-    pub(crate) fn need_convert_to_flat(
+    pub(crate) fn is_legacy_format(
         metadata: &RegionMetadata,
         num_columns: usize,
         file_path: &str,
@@ -363,19 +358,18 @@ struct ParquetPrimaryKeyToFlat {
     /// The primary key format to read the parquet.
     format: PrimaryKeyReadFormat,
     /// Format converter for handling flat format conversion.
-    convert_format: FlatConvertFormat,
+    convert_format: Option<FlatConvertFormat>,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
 }
 
 impl ParquetPrimaryKeyToFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    ///
-    /// Returns `None` if no need to convert.
-    fn may_new(
+    fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-    ) -> Option<ParquetPrimaryKeyToFlat> {
+        skip_auto_convert: bool,
+    ) -> ParquetPrimaryKeyToFlat {
         let column_ids: Vec<_> = column_ids.collect();
 
         // Creates a map to lookup index based on the new format.
@@ -389,16 +383,27 @@ impl ParquetPrimaryKeyToFlat {
             column_ids.iter().copied(),
         );
         let codec = build_primary_key_codec(&metadata);
-        let convert_format =
-            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)?;
+        let convert_format = if skip_auto_convert {
+            None
+        } else {
+            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
+        };
 
         let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
 
-        Some(Self {
+        Self {
             format,
             convert_format,
             format_projection,
-        })
+        }
+    }
+
+    fn convert_batch(&self, record_batch: RecordBatch) -> Result<RecordBatch> {
+        if let Some(convert_format) = &self.convert_format {
+            convert_format.convert(record_batch)
+        } else {
+            Ok(record_batch)
+        }
     }
 }
 

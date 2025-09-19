@@ -1495,8 +1495,7 @@ mod tests {
         // For flat format: all columns (5) + internal columns (3)
         let expected_columns = metadata.column_metadatas.len() + 3;
         let result =
-            FlatReadFormat::need_convert_to_flat(&metadata, expected_columns, "test.parquet")
-                .unwrap();
+            FlatReadFormat::is_legacy_format(&metadata, expected_columns, "test.parquet").unwrap();
         assert!(
             !result,
             "Should not need conversion when column counts match"
@@ -1506,7 +1505,7 @@ mod tests {
         // Missing primary key columns (2 primary keys in test metadata)
         let num_columns_without_pk = expected_columns - metadata.primary_key.len();
         let result =
-            FlatReadFormat::need_convert_to_flat(&metadata, num_columns_without_pk, "test.parquet")
+            FlatReadFormat::is_legacy_format(&metadata, num_columns_without_pk, "test.parquet")
                 .unwrap();
         assert!(
             result,
@@ -1515,15 +1514,14 @@ mod tests {
 
         // Test case 3: Invalid case - actual columns more than expected
         let too_many_columns = expected_columns + 1;
-        let err = FlatReadFormat::need_convert_to_flat(&metadata, too_many_columns, "test.parquet")
+        let err = FlatReadFormat::is_legacy_format(&metadata, too_many_columns, "test.parquet")
             .unwrap_err();
         assert!(err.to_string().contains("Expected columns"), "{err:?}");
 
         // Test case 4: Invalid case - column difference doesn't match primary key count
         let wrong_diff_columns = expected_columns - 1; // Difference of 1, but we have 2 primary keys
-        let err =
-            FlatReadFormat::need_convert_to_flat(&metadata, wrong_diff_columns, "test.parquet")
-                .unwrap_err();
+        let err = FlatReadFormat::is_legacy_format(&metadata, wrong_diff_columns, "test.parquet")
+            .unwrap_err();
         assert!(
             err.to_string().contains("Column number difference"),
             "{err:?}"
