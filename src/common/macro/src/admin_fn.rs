@@ -280,6 +280,8 @@ fn build_struct(
                 &self,
                 args: datafusion::logical_expr::ScalarFunctionArgs,
             ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+                use common_error::ext::ErrorExt;
+
                 let columns = args.args
                     .iter()
                     .map(|arg| {
@@ -293,7 +295,7 @@ fn build_struct(
                             })
                     })
                     .collect::<common_query::error::Result<Vec<_>>>()
-                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Column conversion error: {}", e)))?;
+                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Column conversion error: {}", e.output_msg())))?;
 
                 // Safety check: Ensure under the `greptime` catalog for security
                 #user_path::ensure_greptime!(self.func_ctx);
@@ -314,14 +316,14 @@ fn build_struct(
                     .#handler
                     .as_ref()
                     .context(#snafu_type)
-                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Handler error: {}", e)))?;
+                    .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Handler error: {}", e.output_msg())))?;
 
                 let mut builder = store_api::storage::ConcreteDataType::#ret()
                     .create_mutable_vector(rows_num);
 
                 if columns_num == 0 {
                     let result = #fn_name(handler, query_ctx, &[]).await
-                        .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e)))?;
+                        .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
 
                     builder.push_value_ref(result.as_value_ref());
                 } else {
@@ -331,7 +333,7 @@ fn build_struct(
                             .collect();
 
                         let result = #fn_name(handler, query_ctx, &args).await
-                            .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e)))?;
+                            .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
 
                         builder.push_value_ref(result.as_value_ref());
                     }
