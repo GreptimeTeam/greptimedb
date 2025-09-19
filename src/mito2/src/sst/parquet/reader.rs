@@ -115,6 +115,8 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether to use flat format for reading.
     flat_format: bool,
+    /// Whether this reader is for compaction.
+    compaction: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -138,6 +140,7 @@ impl ParquetReaderBuilder {
             fulltext_index_applier: None,
             expected_metadata: None,
             flat_format: false,
+            compaction: false,
         }
     }
 
@@ -208,6 +211,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Sets the compaction flag.
+    #[must_use]
+    pub fn compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -243,6 +253,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
+                self.compaction,
             )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -258,6 +269,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
+                self.compaction,
             )?
         };
         if need_override_sequence(&parquet_meta) {

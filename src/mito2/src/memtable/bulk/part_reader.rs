@@ -371,6 +371,7 @@ mod tests {
                 Arc::new(region_metadata.clone()),
                 None, // No projection
                 None, // No predicate
+                false,
             )
             .unwrap(),
         );
@@ -397,6 +398,7 @@ mod tests {
                 Arc::new(region_metadata),
                 Some(&[0, 2]),
                 Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
+                false,
             )
             .unwrap(),
         );

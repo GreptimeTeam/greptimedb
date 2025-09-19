@@ -42,6 +42,7 @@ impl BulkIterContext {
         region_metadata: RegionMetadataRef,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        skip_auto_convert: bool,
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
@@ -56,7 +57,14 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = ReadFormat::new(region_metadata, projection, true, None, "memtable")?;
+        let read_format = ReadFormat::new(
+            region_metadata,
+            projection,
+            true,
+            None,
+            "memtable",
+            skip_auto_convert,
+        )?;
 
         Ok(Self {
             base: RangeBase {

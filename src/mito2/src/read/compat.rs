@@ -1448,6 +1448,7 @@ mod tests {
             [0, 1, 2, 3].into_iter(),
             None,
             "test",
+            false,
         )
         .unwrap();
         let format_projection = read_format.format_projection();
@@ -1537,6 +1538,7 @@ mod tests {
             [0, 1, 2, 3].into_iter(),
             None,
             "test",
+            false,
         )
         .unwrap();
         let format_projection = read_format.format_projection();

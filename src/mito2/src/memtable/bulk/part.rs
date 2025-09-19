@@ -1376,6 +1376,7 @@ mod tests {
                         part.metadata.region_metadata.clone(),
                         Some(projection.as_slice()),
                         None,
+                        false,
                     )
                     .unwrap(),
                 ),
@@ -1430,7 +1431,13 @@ mod tests {
         expected_rows: usize,
     ) {
         let context = Arc::new(
-            BulkIterContext::new(part.metadata.region_metadata.clone(), None, predicate).unwrap(),
+            BulkIterContext::new(
+                part.metadata.region_metadata.clone(),
+                None,
+                predicate,
+                false,
+            )
+            .unwrap(),
         );
         let mut reader = part
             .read(context, None)
@@ -1462,6 +1469,7 @@ mod tests {
                 Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
                     datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
                 )])),
+                false,
             )
             .unwrap(),
         );

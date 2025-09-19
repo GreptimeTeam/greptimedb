@@ -334,6 +334,7 @@ impl Memtable for BulkMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
+        for_flush: bool,
     ) -> Result<MemtableRanges> {
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
@@ -343,6 +344,7 @@ impl Memtable for BulkMemtable {
             self.metadata.clone(),
             projection,
             predicate.predicate().cloned(),
+            for_flush,
         )?);
 
         // Adds ranges for regular parts and encoded parts
@@ -922,6 +924,7 @@ impl MemtableCompactor {
             metadata.clone(),
             None, // No column projection for merging
             None, // No predicate for merging
+            true,
         )?);
 
         // Creates iterators for all parts to merge.
@@ -1190,7 +1193,7 @@ mod tests {
         assert_eq!(3000, max_ts.value());
 
         let predicate_group = PredicateGroup::new(&metadata, &[]);
-        let ranges = memtable.ranges(None, predicate_group, None).unwrap();
+        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1232,7 +1235,7 @@ mod tests {
         let projection = vec![4u32];
         let predicate_group = PredicateGroup::new(&metadata, &[]);
         let ranges = memtable
-            .ranges(Some(&projection), predicate_group, None)
+            .ranges(Some(&projection), predicate_group, None, false)
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1348,7 +1351,7 @@ mod tests {
         }
 
         let predicate_group = PredicateGroup::new(&metadata, &[]);
-        let ranges = memtable.ranges(None, predicate_group, None).unwrap();
+        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1381,7 +1384,7 @@ mod tests {
         let predicate_group = PredicateGroup::new(&metadata, &[]);
         let sequence_filter = Some(400u64); // Filters out rows with sequence > 400
         let ranges = memtable
-            .ranges(None, predicate_group, sequence_filter)
+            .ranges(None, predicate_group, sequence_filter, false)
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1413,7 +1416,7 @@ mod tests {
         memtable.compact(false).unwrap();
 
         let predicate_group = PredicateGroup::new(&metadata, &[]);
-        let ranges = memtable.ranges(None, predicate_group, None).unwrap();
+        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         // Should have ranges for both bulk parts and encoded parts
         assert_eq!(3, ranges.ranges.len());

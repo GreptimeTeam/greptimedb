@@ -191,6 +191,7 @@ impl Memtable for PartitionTreeMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
+        _for_flush: bool,
     ) -> Result<MemtableRanges> {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {

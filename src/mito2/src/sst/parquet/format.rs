@@ -162,12 +162,14 @@ impl ReadFormat {
         column_ids: impl Iterator<Item = ColumnId>,
         num_columns: Option<usize>,
         file_path: &str,
+        skip_auto_convert: bool,
     ) -> Result<Self> {
         Ok(ReadFormat::Flat(FlatReadFormat::new(
             metadata,
             column_ids,
             num_columns,
             file_path,
+            skip_auto_convert,
         )?))
     }
 
@@ -178,6 +180,7 @@ impl ReadFormat {
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
+        skip_auto_convert: bool,
     ) -> Result<ReadFormat> {
         if flat_format {
             if let Some(column_ids) = projection {
@@ -186,6 +189,7 @@ impl ReadFormat {
                     column_ids.iter().copied(),
                     num_columns,
                     file_path,
+                    skip_auto_convert,
                 )
             } else {
                 // No projection, lists all column ids to read.
@@ -197,6 +201,7 @@ impl ReadFormat {
                         .map(|col| col.column_id),
                     num_columns,
                     file_path,
+                    skip_auto_convert,
                 )
             }
         } else if let Some(column_ids) = projection {
@@ -1280,7 +1285,7 @@ mod tests {
             .map(|col| col.column_id)
             .collect();
         let read_format =
-            ReadFormat::new(metadata, Some(&column_ids), false, None, "test").unwrap();
+            ReadFormat::new(metadata, Some(&column_ids), false, None, "test", false).unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1409,22 +1414,25 @@ mod tests {
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test").unwrap();
+            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test").unwrap();
+            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
         let read_format =
-            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test").unwrap();
+            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
         let read_format =
-            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test").unwrap();
+            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
@@ -1436,6 +1444,7 @@ mod tests {
             std::iter::once(1), // Just read tag0
             Some(8),
             "test",
+            false,
         )
         .unwrap();
 
@@ -1649,8 +1658,14 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), Some(6), "test").unwrap();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            column_ids.into_iter(),
+            Some(6),
+            "test",
+            false,
+        )
+        .unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1725,8 +1740,14 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test").unwrap();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            column_ids.into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;

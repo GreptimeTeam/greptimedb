@@ -145,10 +145,18 @@ impl FlatReadFormat {
         column_ids: impl Iterator<Item = ColumnId>,
         num_columns: Option<usize>,
         file_path: &str,
+        skip_auto_convert: bool,
     ) -> Result<FlatReadFormat> {
         let convert_to_flat = match num_columns {
             Some(num) => Self::need_convert_to_flat(&metadata, num, file_path)?,
-            None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
+            None => {
+                if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                    // For sparse encoding, we only convert to flat when this is not for compaction/flush.
+                    !skip_auto_convert
+                } else {
+                    false
+                }
+            }
         };
 
         let parquet_adapter = if convert_to_flat {
@@ -683,6 +691,7 @@ impl FlatReadFormat {
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
             "test",
+            false,
         )
         .unwrap()
     }

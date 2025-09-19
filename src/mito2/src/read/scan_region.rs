@@ -437,6 +437,7 @@ impl ScanRegion {
                 Some(mapper.column_ids()),
                 predicate.clone(),
                 self.request.sequence,
+                false,
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange
@@ -932,6 +933,7 @@ impl ScanInput {
             .fulltext_index_applier(self.fulltext_index_applier.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
+            .compaction(self.compaction)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {

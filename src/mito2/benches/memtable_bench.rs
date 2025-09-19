@@ -460,6 +460,7 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
                 metadata.clone(),
                 None, // No projection
                 None, // No predicate
+                false,
             )
             .unwrap(),
         );
@@ -527,6 +528,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                     metadata.clone(),
                     None,                    // No projection
                     Some(predicate.clone()), // With hostname filter
+                    false,
                 )
                 .unwrap(),
             );
@@ -551,6 +553,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                     metadata.clone(),
                     None, // No projection
                     None, // No predicate
+                    false,
                 )
                 .unwrap(),
             );

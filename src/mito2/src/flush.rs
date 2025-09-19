@@ -456,7 +456,8 @@ impl RegionFlushTask {
             let compact_cost = compact_start.elapsed();
             flush_metrics.compact_memtable += compact_cost;
 
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
+            // Sets `for_flush` flag to true.
+            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None, true)?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();
