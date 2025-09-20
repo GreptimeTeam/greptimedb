@@ -54,8 +54,11 @@ pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "schema_infer_max_record";
 pub const FORMAT_HAS_HEADER: &str = "has_header";
 pub const FORMAT_TYPE: &str = "format";
 pub const FILE_PATTERN: &str = "pattern";
+pub const TIMESTAMP_FORMAT: &str = "timestamp_format";
+pub const TIME_FORMAT: &str = "time_format";
+pub const DATE_FORMAT: &str = "date_format";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Format {
     Csv(CsvFormat),
     Json(JsonFormat),
