@@ -34,6 +34,10 @@ COPY (select host, cpu, jsons, ts from demo where host = 'host2') TO '${SQLNESS_
 
 Affected Rows: 1
 
+COPY (select host, cpu, jsons, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.csv' WITH (format='csv', timestamp_format='%Y-%m-%d');
+
+Affected Rows: 1
+
 drop table demo;
 
 Affected Rows: 0

@@ -160,6 +160,12 @@ impl CopyTableArgument {
             .get(common_datasource::file_format::FILE_PATTERN)
             .cloned()
     }
+
+    pub fn timestamp_pattern(&self) -> Option<String> {
+        self.with
+            .get(common_datasource::file_format::TIMESTAMP_FORMAT)
+            .cloned()
+    }
 }
 
 #[cfg(test)]

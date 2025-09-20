@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
@@ -27,7 +27,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::ObjectStore;
 use object_store::services::Fs;
 
-use crate::file_format::csv::stream_to_csv;
+use crate::file_format::csv::{CsvFormat, stream_to_csv};
 use crate::file_format::json::stream_to_json;
 use crate::test_util;
 
@@ -64,6 +64,17 @@ pub fn test_basic_schema() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
+    ]);
+    Arc::new(schema)
+}
+
+pub fn csv_basic_schema() -> SchemaRef {
+    let schema = Schema::new(vec![
+        Field::new("num", DataType::Int64, false),
+        Field::new("str", DataType::Utf8, false),
+        Field::new("ts", DataType::Timestamp(TimeUnit::Second, None), false),
+        Field::new("t", DataType::Time32(TimeUnit::Second), false),
+        Field::new("date", DataType::Date32, false),
     ]);
     Arc::new(schema)
 }
@@ -128,10 +139,14 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     assert_eq_lines(written.to_vec(), origin.to_vec());
 }
 
-pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
+pub async fn setup_stream_to_csv_test(
+    origin_path: &str,
+    format_path: &str,
+    threshold: impl Fn(usize) -> usize,
+) {
     let store = test_store("/");
 
-    let schema = test_basic_schema();
+    let schema = csv_basic_schema();
 
     let csv_source = CsvSource::new(true, b',', b'"')
         .with_schema(schema.clone())
@@ -150,21 +165,29 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let output_path = format!("{}/{}", dir.path().display(), "output");
 
+    let csv_format = CsvFormat {
+        timestamp_format: Some("%m-%d-%Y".to_string()),
+        date_format: Some("%m-%d-%Y".to_string()),
+        time_format: Some("%Ss".to_string()),
+        ..Default::default()
+    };
+
     assert!(
         stream_to_csv(
             Box::pin(stream),
             tmp_store.clone(),
             &output_path,
             threshold(size),
-            8
+            8,
+            &csv_format,
         )
         .await
         .is_ok()
     );
 
     let written = tmp_store.read(&output_path).await.unwrap();
-    let origin = store.read(origin_path).await.unwrap();
-    assert_eq_lines(written.to_vec(), origin.to_vec());
+    let format_expect = store.read(format_path).await.unwrap();
+    assert_eq_lines(written.to_vec(), format_expect.to_vec());
 }
 
 // Ignore the CRLF difference across operating systems.

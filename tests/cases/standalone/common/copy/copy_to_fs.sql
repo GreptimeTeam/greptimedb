@@ -16,4 +16,6 @@ COPY (select host, cpu, jsons, ts from demo where host = 'host2') TO '${SQLNESS_
 
 COPY (select host, cpu, jsons, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.json' WITH (format='json');
 
+COPY (select host, cpu, jsons, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.csv' WITH (format='csv', timestamp_format='%Y-%m-%d');
+
 drop table demo;

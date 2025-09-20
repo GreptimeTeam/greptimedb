@@ -864,6 +864,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "timestamp_format not supported when transforming to {} format type",
+        file_format
+    ))]
+    TimestampFormatNotSupported {
+        file_format: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Too large duration"))]
     TooLargeDuration {
@@ -1002,6 +1012,7 @@ impl ErrorExt for Error {
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::PathNotFound { .. } => StatusCode::InvalidArguments,
+            Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
         }
     }

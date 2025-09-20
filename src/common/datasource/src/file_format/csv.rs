@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use arrow::csv;
 use arrow::csv::reader::Format;
+use arrow::csv::{self, WriterBuilder};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
@@ -33,12 +33,15 @@ use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvFormat {
     pub has_header: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
+    pub timestamp_format: Option<String>,
+    pub time_format: Option<String>,
+    pub date_format: Option<String>,
 }
 
 impl TryFrom<&HashMap<String, String>> for CsvFormat {
@@ -79,6 +82,15 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                 }
                 .build()
             })?;
+        };
+        if let Some(timestamp_format) = value.get(file_format::TIMESTAMP_FORMAT) {
+            format.timestamp_format = Some(timestamp_format.clone());
+        }
+        if let Some(time_format) = value.get(file_format::TIME_FORMAT) {
+            format.timestamp_format = Some(time_format.clone());
+        }
+        if let Some(date_format) = value.get(file_format::DATE_FORMAT) {
+            format.timestamp_format = Some(date_format.clone());
         }
         Ok(format)
     }
@@ -91,6 +103,9 @@ impl Default for CsvFormat {
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
+            timestamp_format: None,
+            time_format: None,
+            date_format: None,
         }
     }
 }
@@ -140,9 +155,20 @@ pub async fn stream_to_csv(
     path: &str,
     threshold: usize,
     concurrency: usize,
+    format: &CsvFormat,
 ) -> Result<usize> {
     stream_to_file(stream, store, path, threshold, concurrency, |buffer| {
-        csv::Writer::new(buffer)
+        let mut builder = WriterBuilder::new();
+        if let Some(timestamp_format) = &format.timestamp_format {
+            builder = builder.with_timestamp_format(timestamp_format.to_owned())
+        }
+        if let Some(date_format) = &format.date_format {
+            builder = builder.with_date_format(date_format.to_owned())
+        }
+        if let Some(time_format) = &format.time_format {
+            builder = builder.with_time_format(time_format.to_owned())
+        }
+        builder.build(buffer)
     })
     .await
 }
@@ -265,6 +291,9 @@ mod tests {
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
+                timestamp_format: None,
+                time_format: None,
+                date_format: None
             }
         );
     }
