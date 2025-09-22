@@ -378,10 +378,9 @@
 | `procedure.max_metadata_value_size` | String | `1500KiB` | Auto split large value<br/>GreptimeDB procedure uses etcd as the default metadata storage backend.<br/>The etcd the maximum size of any request is 1.5 MiB<br/>1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)<br/>Comments out the `max_metadata_value_size`, for don't split large value (no limit). |
 | `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `failure_detector` | -- | -- | -- |
-| `failure_detector.threshold` | Float | `8.0` | The threshold value used by the failure detector to determine failure conditions. |
-| `failure_detector.min_std_deviation` | String | `100ms` | The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations. |
-| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable. |
-| `failure_detector.first_heartbeat_estimate` | String | `1000ms` | The initial estimate of the heartbeat interval used by the failure detector. |
+| `failure_detector.threshold` | Float | `8.0` | Maximum acceptable φ before the peer is treated as failed.<br/>Lower values react faster but yield more false positives. |
+| `failure_detector.min_std_deviation` | String | `100ms` | The minimum standard deviation of the heartbeat intervals.<br/>So tiny variations don’t make φ explode. Prevents hypersensitivity when heartbeat intervals barely vary. |
+| `failure_detector.acceptable_heartbeat_pause` | String | `10000ms` | The acceptable pause duration between heartbeats.<br/>Additional extra grace period to the learned mean interval before φ rises, absorbing temporary network hiccups or GC pauses. |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.timeout` | String | `10s` | Operation timeout. |

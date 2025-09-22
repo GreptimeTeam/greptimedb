@@ -56,10 +56,6 @@ pub(crate) struct PhiAccrualFailureDetector {
     /// arrivals, due to for example network drop.
     acceptable_heartbeat_pause_millis: u32,
 
-    /// Bootstrap the stats with heartbeats that corresponds to this duration, with a rather high
-    /// standard deviation (since environment is unknown in the beginning).
-    first_heartbeat_estimate_millis: u32,
-
     heartbeat_history: HeartbeatHistory,
     last_heartbeat_millis: Option<i64>,
 }
@@ -72,8 +68,6 @@ pub struct PhiAccrualFailureDetectorOptions {
     pub min_std_deviation: Duration,
     #[serde(with = "humantime_serde")]
     pub acceptable_heartbeat_pause: Duration,
-    #[serde(with = "humantime_serde")]
-    pub first_heartbeat_estimate: Duration,
 }
 
 impl Default for PhiAccrualFailureDetectorOptions {
@@ -86,7 +80,6 @@ impl Default for PhiAccrualFailureDetectorOptions {
             acceptable_heartbeat_pause: Duration::from_secs(
                 distributed_time_constants::DATANODE_LEASE_SECS,
             ),
-            first_heartbeat_estimate: Duration::from_millis(1000),
         }
     }
 }
@@ -104,7 +97,6 @@ impl PhiAccrualFailureDetector {
             min_std_deviation_millis: options.min_std_deviation.as_millis() as f32,
             acceptable_heartbeat_pause_millis: options.acceptable_heartbeat_pause.as_millis()
                 as u32,
-            first_heartbeat_estimate_millis: options.first_heartbeat_estimate.as_millis() as u32,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         }
@@ -124,11 +116,12 @@ impl PhiAccrualFailureDetector {
             // guess statistics for first heartbeat,
             // important so that connections with only one heartbeat becomes unavailable
             // bootstrap with 2 entries with rather high standard deviation
-            let std_deviation = self.first_heartbeat_estimate_millis / 4;
+            let first_heartbeat_estimate_millis = first_heartbeat_estimate_millis();
+            let std_deviation = first_heartbeat_estimate_millis / 4;
             self.heartbeat_history
-                .add((self.first_heartbeat_estimate_millis - std_deviation) as _);
+                .add((first_heartbeat_estimate_millis - std_deviation) as _);
             self.heartbeat_history
-                .add((self.first_heartbeat_estimate_millis + std_deviation) as _);
+                .add((first_heartbeat_estimate_millis + std_deviation) as _);
         }
         let _ = self.last_heartbeat_millis.insert(ts_millis);
     }
@@ -169,6 +162,12 @@ impl PhiAccrualFailureDetector {
     pub(crate) fn acceptable_heartbeat_pause_millis(&self) -> u32 {
         self.acceptable_heartbeat_pause_millis
     }
+}
+
+fn first_heartbeat_estimate_millis() -> i64 {
+    let duration = Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS);
+    let millis = duration.as_millis();
+    millis.min(i64::MAX as u128) as i64
 }
 
 /// Calculation of phi, derived from the Cumulative distribution function for
@@ -268,13 +267,26 @@ mod tests {
 
         fd.heartbeat(ts_millis);
 
+        // Warm up with steady heartbeats so the detector reflects the observed cadence.
+        for i in 1..=1000 {
+            let ts = ts_millis + i as i64 * 1000;
+            fd.heartbeat(ts);
+        }
+
+        let last_heartbeat = fd
+            .last_heartbeat_millis
+            .expect("last heartbeat is updated after warm up");
         let acceptable_heartbeat_pause_millis = fd.acceptable_heartbeat_pause_millis as i64;
         // is available when heartbeat
-        assert!(fd.is_available(ts_millis));
+        assert!(fd.is_available(last_heartbeat));
         // is available before heartbeat timeout
-        assert!(fd.is_available(ts_millis + acceptable_heartbeat_pause_millis / 2));
+        assert!(fd.is_available(
+            last_heartbeat + acceptable_heartbeat_pause_millis / 2
+        ));
         // is not available after heartbeat timeout
-        assert!(!fd.is_available(ts_millis + acceptable_heartbeat_pause_millis * 2));
+        assert!(!fd.is_available(
+            last_heartbeat + acceptable_heartbeat_pause_millis * 2
+        ));
     }
 
     #[test]
@@ -367,7 +379,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -377,18 +388,18 @@ mod tests {
 
     #[test]
     fn test_return_phi_based_on_guess_when_only_one_heartbeat() {
+        let first_estimate = first_heartbeat_estimate_millis();
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
         fd.heartbeat(0);
-        assert!((fd.phi(1000)).abs() - 0.3 < 0.2);
-        assert!((fd.phi(2000)).abs() - 4.5 < 0.3);
-        assert!((fd.phi(3000)).abs() > 15.0);
+        assert!((fd.phi(first_estimate)).abs() - 0.3 < 0.2);
+        assert!((fd.phi(first_estimate * 2)).abs() - 4.5 < 0.5);
+        assert!((fd.phi(first_estimate * 3)).abs() > 15.0);
     }
 
     #[test]
@@ -397,7 +408,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -413,7 +423,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -431,7 +440,6 @@ mod tests {
             threshold: 3.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -449,7 +457,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -488,7 +495,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -507,7 +513,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 3000,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         };
@@ -528,7 +533,6 @@ mod tests {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
             acceptable_heartbeat_pause_millis: 0,
-            first_heartbeat_estimate_millis: 1000,
             heartbeat_history: HeartbeatHistory::new(3),
             last_heartbeat_millis: None,
         };
