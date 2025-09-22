@@ -14,15 +14,12 @@
 
 //! [`ConstraintPruner`] prunes partition info based on given expressions.
 
-use std::cmp::Ordering;
-use std::ops::Bound;
-
-use GluonOp::*;
 use ahash::{HashMap, HashSet};
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::{OrderedF64, OrderedFloat, Value};
-use partition::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
+use datatypes::value::{OrderedFloat, Value};
+use partition::collider::{AtomicExpr, Collider};
+use partition::overlap::atomic_exprs_overlap;
 use partition::expr::{Operand, PartitionExpr};
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
@@ -109,13 +106,9 @@ impl ConstraintPruner {
     }
 
     fn atomic_sets_overlap(query_atomics: &[&AtomicExpr], partition_atomic: &AtomicExpr) -> bool {
-        for query_atomic in query_atomics {
-            if Self::atomic_constraint_satisfied(query_atomic, partition_atomic) {
-                return true;
-            }
-        }
-
-        false
+        query_atomics
+            .iter()
+            .any(|qa| atomic_exprs_overlap(qa, partition_atomic))
     }
 
     fn normalize_datatype(
@@ -213,196 +206,8 @@ impl ConstraintPruner {
             _ => false,
         }
     }
-
-    /// Check if a single atomic constraint can be satisfied
-    fn atomic_constraint_satisfied(
-        query_atomic: &AtomicExpr,
-        partition_atomic: &AtomicExpr,
-    ) -> bool {
-        let mut query_index = 0;
-        let mut partition_index = 0;
-
-        while query_index < query_atomic.nucleons.len()
-            && partition_index < partition_atomic.nucleons.len()
-        {
-            let query_col = query_atomic.nucleons[query_index].column();
-            let partition_col = partition_atomic.nucleons[partition_index].column();
-
-            match query_col.cmp(partition_col) {
-                Ordering::Equal => {
-                    let mut query_index_for_next_col = query_index;
-                    let mut partition_index_for_next_col = partition_index;
-
-                    while query_index_for_next_col < query_atomic.nucleons.len()
-                        && query_atomic.nucleons[query_index_for_next_col].column() == query_col
-                    {
-                        query_index_for_next_col += 1;
-                    }
-                    while partition_index_for_next_col < partition_atomic.nucleons.len()
-                        && partition_atomic.nucleons[partition_index_for_next_col].column()
-                            == partition_col
-                    {
-                        partition_index_for_next_col += 1;
-                    }
-
-                    let query_range = Self::nucleons_to_range(
-                        &query_atomic.nucleons[query_index..query_index_for_next_col],
-                    );
-                    let partition_range = Self::nucleons_to_range(
-                        &partition_atomic.nucleons[partition_index..partition_index_for_next_col],
-                    );
-
-                    debug!("Comparing two ranges, {query_range:?} and {partition_range:?}");
-
-                    query_index = query_index_for_next_col;
-                    partition_index = partition_index_for_next_col;
-
-                    if !query_range.overlaps_with(&partition_range) {
-                        return false;
-                    }
-                }
-                Ordering::Less => {
-                    // Query column comes before partition column - skip query column
-                    while query_index < query_atomic.nucleons.len()
-                        && query_atomic.nucleons[query_index].column() == query_col
-                    {
-                        query_index += 1;
-                    }
-                }
-                Ordering::Greater => {
-                    // Partition column comes before query column - skip partition column
-                    while partition_index < partition_atomic.nucleons.len()
-                        && partition_atomic.nucleons[partition_index].column() == partition_col
-                    {
-                        partition_index += 1;
-                    }
-                }
-            }
-        }
-
-        true
-    }
-
-    /// Convert a slice of nucleons (all for the same column) into a ValueRange
-    fn nucleons_to_range(nucleons: &[NucleonExpr]) -> ValueRange {
-        let mut range = ValueRange::new();
-
-        for nucleon in nucleons {
-            let value = nucleon.value();
-            match nucleon.op() {
-                Eq => {
-                    range.lower = Bound::Included(value);
-                    range.upper = Bound::Included(value);
-                    break; // exact value, most restrictive
-                }
-                Lt => {
-                    // upper < value
-                    range.update_upper(Bound::Excluded(value));
-                }
-                LtEq => {
-                    range.update_upper(Bound::Included(value));
-                }
-                Gt => {
-                    range.update_lower(Bound::Excluded(value));
-                }
-                GtEq => {
-                    range.update_lower(Bound::Included(value));
-                }
-                NotEq => {
-                    // handled as two separate atomic exprs elsewhere
-                    continue;
-                }
-            }
-        }
-
-        range
-    }
 }
-
-/// Represents a value range derived from a group of nucleons for the same column
-#[derive(Debug, Clone)]
-struct ValueRange {
-    // lower and upper bounds using standard library Bound semantics
-    lower: Bound<OrderedF64>,
-    upper: Bound<OrderedF64>,
-}
-
-impl ValueRange {
-    fn new() -> Self {
-        Self {
-            lower: Bound::Unbounded,
-            upper: Bound::Unbounded,
-        }
-    }
-
-    // Update lower bound choosing the more restrictive one
-    fn update_lower(&mut self, new_lower: Bound<OrderedF64>) {
-        match (&self.lower, &new_lower) {
-            (Bound::Unbounded, _) => self.lower = new_lower,
-            (_, Bound::Unbounded) => { /* keep existing */ }
-            (Bound::Included(cur), Bound::Included(new))
-            | (Bound::Excluded(cur), Bound::Included(new))
-            | (Bound::Included(cur), Bound::Excluded(new))
-            | (Bound::Excluded(cur), Bound::Excluded(new)) => {
-                if new > cur {
-                    self.lower = new_lower;
-                } else if new == cur {
-                    // prefer Excluded over Included for the same value (more restrictive)
-                    if matches!(new_lower, Bound::Excluded(_))
-                        && matches!(self.lower, Bound::Included(_))
-                    {
-                        self.lower = new_lower;
-                    }
-                }
-            }
-        }
-    }
-
-    // Update upper bound choosing the more restrictive one
-    fn update_upper(&mut self, new_upper: Bound<OrderedF64>) {
-        match (&self.upper, &new_upper) {
-            (Bound::Unbounded, _) => self.upper = new_upper,
-            (_, Bound::Unbounded) => { /* keep existing */ }
-            (Bound::Included(cur), Bound::Included(new))
-            | (Bound::Excluded(cur), Bound::Included(new))
-            | (Bound::Included(cur), Bound::Excluded(new))
-            | (Bound::Excluded(cur), Bound::Excluded(new)) => {
-                if new < cur {
-                    self.upper = new_upper;
-                } else if new == cur {
-                    // prefer Excluded over Included for the same value (more restrictive)
-                    if matches!(new_upper, Bound::Excluded(_))
-                        && matches!(self.upper, Bound::Included(_))
-                    {
-                        self.upper = new_upper;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Check if this range overlaps with another range
-    fn overlaps_with(&self, other: &ValueRange) -> bool {
-        fn no_overlap(upper: &Bound<OrderedF64>, lower: &Bound<OrderedF64>) -> bool {
-            match (upper, lower) {
-                (Bound::Unbounded, _) | (_, Bound::Unbounded) => false,
-                // u], [l
-                (Bound::Included(u), Bound::Included(l)) => u < l,
-                // u], (l
-                (Bound::Included(u), Bound::Excluded(l))
-                // u), [l
-                | (Bound::Excluded(u), Bound::Included(l))
-                // u), (l
-                | (Bound::Excluded(u), Bound::Excluded(l)) => u <= l,
-            }
-        }
-
-        if no_overlap(&self.upper, &other.lower) || no_overlap(&other.upper, &self.lower) {
-            return false;
-        }
-        true
-    }
-}
+// Value range and atomic overlap logic is now refactored into `partition::diff`.
 
 #[cfg(test)]
 mod tests {
