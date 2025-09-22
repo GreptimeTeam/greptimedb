@@ -924,6 +924,11 @@ impl HttpServer {
                             .route(
                                 "/mem/status",
                                 routing::get(mem_prof::heap_prof_status_handler),
+                            ) // jemalloc gdump flag status and toggle
+                            .route(
+                                "/mem/gdump",
+                                routing::get(mem_prof::gdump_status_handler)
+                                    .post(mem_prof::gdump_toggle_handler),
                             ),
                     ),
             ))
