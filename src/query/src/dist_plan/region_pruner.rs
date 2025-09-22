@@ -19,9 +19,9 @@ use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedFloat, Value};
 use partition::collider::{AtomicExpr, Collider};
-use partition::overlap::atomic_exprs_overlap;
 use partition::expr::{Operand, PartitionExpr};
 use partition::manager::PartitionInfo;
+use partition::overlap::atomic_exprs_overlap;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
