@@ -21,7 +21,12 @@ mod table_names;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Weak};
 
+use arrow_schema::SchemaRef;
+use async_trait::async_trait;
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, PG_CATALOG_NAME};
+use datafusion::datasource::TableType;
+use datafusion::error::DataFusionError;
+use datafusion_postgres::pg_catalog::catalog_info::CatalogInfo;
 use datatypes::schema::ColumnSchema;
 use lazy_static::lazy_static;
 use paste::paste;
@@ -162,4 +167,76 @@ static PG_QUERY_CTX: LazyLock<QueryContext> = LazyLock::new(|| {
 
 fn query_ctx() -> Option<&'static QueryContext> {
     Some(&PG_QUERY_CTX)
+}
+
+#[derive(Clone)]
+pub struct CatalogManagerWrapper(Arc<dyn CatalogManager>);
+
+impl std::fmt::Debug for CatalogManagerWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogManagerWrapper").finish()
+    }
+}
+
+// TODO(sunng87): address query_context
+#[async_trait]
+impl CatalogInfo for CatalogManagerWrapper {
+    async fn catalog_names(&self) -> Result<Vec<String>, DataFusionError> {
+        CatalogManager::catalog_names(self.0.as_ref())
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    async fn schema_names(
+        &self,
+        catalog_name: &str,
+    ) -> Result<Option<Vec<String>>, DataFusionError> {
+        self.0
+            .schema_names(catalog_name, None)
+            .await
+            .map(Some)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    async fn table_names(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+    ) -> Result<Option<Vec<String>>, DataFusionError> {
+        self.0
+            .table_names(catalog_name, schema_name, None)
+            .await
+            .map(Some)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    async fn table_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<SchemaRef>, DataFusionError> {
+        let table = self
+            .0
+            .table(catalog_name, schema_name, table_name, None)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        Ok(table.map(|t| t.schema().arrow_schema().clone()))
+    }
+
+    async fn table_type(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<TableType>, DataFusionError> {
+        let table = self
+            .0
+            .table(catalog_name, schema_name, table_name, None)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        Ok(table.map(|t| t.table_type().into()))
+    }
 }

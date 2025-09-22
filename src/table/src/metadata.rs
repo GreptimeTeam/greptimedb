@@ -27,7 +27,7 @@ use datatypes::schema::{
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
@@ -97,6 +97,16 @@ impl std::fmt::Display for TableType {
             TableType::Base => f.write_str("BASE TABLE"),
             TableType::Temporary => f.write_str("TEMPORARY"),
             TableType::View => f.write_str("VIEW"),
+        }
+    }
+}
+
+impl Into<datafusion::datasource::TableType> for TableType {
+    fn into(self) -> datafusion::datasource::TableType {
+        match self {
+            Self::Base => datafusion::datasource::TableType::Base,
+            Self::View => datafusion::datasource::TableType::View,
+            Self::Temporary => datafusion::datasource::TableType::Temporary,
         }
     }
 }
