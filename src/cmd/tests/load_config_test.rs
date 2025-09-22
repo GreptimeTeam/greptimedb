@@ -15,7 +15,6 @@
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
-use cmd::standalone::StandaloneOptions;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
@@ -35,6 +34,7 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
+use standalone::options::StandaloneOptions;
 use store_api::path_utils::WAL_DIR;
 
 #[allow(deprecated)]

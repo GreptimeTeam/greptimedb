@@ -36,13 +36,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to open raft engine backend"))]
-    OpenRaftEngineBackend {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         #[snafu(implicit)]
@@ -419,8 +412,6 @@ impl ErrorExt for Error {
             Error::InvalidateTableCache { source, .. } => source.status_code(),
 
             Error::Table { source, .. } | Error::Insert { source, .. } => source.status_code(),
-
-            Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
 
             Error::RequestQuery { source, .. } => source.status_code(),
 
