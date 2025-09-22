@@ -280,13 +280,9 @@ mod tests {
         // is available when heartbeat
         assert!(fd.is_available(last_heartbeat));
         // is available before heartbeat timeout
-        assert!(fd.is_available(
-            last_heartbeat + acceptable_heartbeat_pause_millis / 2
-        ));
+        assert!(fd.is_available(last_heartbeat + acceptable_heartbeat_pause_millis / 2));
         // is not available after heartbeat timeout
-        assert!(!fd.is_available(
-            last_heartbeat + acceptable_heartbeat_pause_millis * 2
-        ));
+        assert!(!fd.is_available(last_heartbeat + acceptable_heartbeat_pause_millis * 2));
     }
 
     #[test]
