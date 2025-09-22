@@ -29,6 +29,13 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("External error"))]
+    External {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -37,6 +44,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::OpenMetadataKvBackend { source, .. } => source.status_code(),
+            Error::External { source, .. } => source.status_code(),
         }
     }
 
