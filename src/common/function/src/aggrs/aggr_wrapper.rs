@@ -118,6 +118,8 @@ impl StateMergeHelper {
     }
 
     /// Split an aggregate plan into two aggregate plans, one for the state function and one for the merge function.
+    ///
+    /// and upper plan's aggr input's
     pub fn split_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<StepAggrPlan> {
         let aggr = {
             // certain aggr func need type coercion to work correctly, so we need to analyze the plan first.
@@ -188,9 +190,13 @@ impl StateMergeHelper {
             let arg = Expr::Column(Column::new_unqualified(lower_state_output_col_name));
             let expr = AggregateFunction {
                 func: Arc::new(merge_func.into()),
+                // notice how filter/order_by is not supported in the merge function, as it's not meaningful to have them in the merge phase.
                 params: AggregateFunctionParams {
                     args: vec![arg],
-                    ..aggr_func.params.clone()
+                    distinct: aggr_func.params.distinct,
+                    filter: None,
+                    order_by: vec![],
+                    null_treatment: aggr_func.params.null_treatment,
                 },
             };
 
