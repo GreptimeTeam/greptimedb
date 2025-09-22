@@ -165,7 +165,7 @@ CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) e
 
 
 insert into
-    t1
+    t1(ts, val, host)
 values
     (0, 1.0, 'a'),
     (1, 2.0, 'b'),

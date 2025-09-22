@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use common_telemetry::init_default_ut_logging;
@@ -668,38 +669,41 @@ async fn test_last_value_order_by_udaf() {
         .downcast_ref::<AggregateExec>()
         .unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
-    dbg!(&aggr_func_expr.state_fields());
+
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
     // evaluate the state function
-    let input = Float64Array::from(vec![Some(1.), Some(2.), None, Some(3.)]);
+    let input = Int64Array::from(vec![Some(1), Some(2), None, Some(3)]);
     let values = vec![Arc::new(input) as arrow::array::ArrayRef];
 
     state_accum.update_batch(&values).unwrap();
+
     let state = state_accum.state().unwrap();
 
-    assert_eq!(state.len(), 2); // last value weird optimization(or maybe bug?) that it only has 2 state fields now
-    assert_eq!(state[0], ScalarValue::Float64(Some(3.)));
-    assert_eq!(state[1], ScalarValue::Boolean(Some(true)));
+    assert_eq!(state.len(), 3); // last value weird optimization(or maybe bug?) that it only has 2 state fields now
+    assert_eq!(state[0], ScalarValue::Int64(Some(3)));
+    assert_eq!(state[1], ScalarValue::Int64(Some(3))); // ordering field
+    assert_eq!(state[2], ScalarValue::Boolean(Some(true)));
 
     let eval_res = state_accum.evaluate().unwrap();
     let expected = Arc::new(
         StructArray::try_new(
             vec![
-                Field::new("last_value[last_value]", DataType::UInt64, true),
-                Field::new("avg[sum]", DataType::Float64, true),
+                Field::new("last_value[last_value]", DataType::Int64, true),
+                Field::new("number", DataType::Int64, true),
+                Field::new("is_set", DataType::Boolean, true),
             ]
             .into(),
             vec![
-                Arc::new(UInt64Array::from(vec![Some(3)])),
-                Arc::new(Float64Array::from(vec![Some(6.)])),
+                Arc::new(Int64Array::from(vec![Some(3)])),
+                Arc::new(Int64Array::from(vec![Some(3)])),
+                Arc::new(BooleanArray::from(vec![Some(true)])),
             ],
             None,
         )
         .unwrap(),
     );
     assert_eq!(eval_res, ScalarValue::Struct(expected));
-    return;
 
     let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&res.upper_merge, &ctx.state())
@@ -714,13 +718,15 @@ async fn test_last_value_order_by_udaf() {
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
 
     let merge_input = vec![
-        Arc::new(UInt64Array::from(vec![Some(3), Some(42), None])) as arrow::array::ArrayRef,
-        Arc::new(Float64Array::from(vec![Some(48.), Some(84.), None])),
+        Arc::new(Int64Array::from(vec![Some(3), Some(4)])) as arrow::array::ArrayRef,
+        Arc::new(Int64Array::from(vec![Some(3), Some(4)])),
+        Arc::new(BooleanArray::from(vec![Some(true), Some(true)])),
     ];
     let merge_input_struct_arr = StructArray::try_new(
         vec![
-            Field::new("avg[count]", DataType::UInt64, true),
-            Field::new("avg[sum]", DataType::Float64, true),
+            Field::new("last_value[last_value]", DataType::Int64, true),
+            Field::new("number", DataType::Int64, true),
+            Field::new("is_set", DataType::Boolean, true),
         ]
         .into(),
         merge_input,
@@ -732,13 +738,14 @@ async fn test_last_value_order_by_udaf() {
         .update_batch(&[Arc::new(merge_input_struct_arr)])
         .unwrap();
     let merge_state = merge_accum.state().unwrap();
-    assert_eq!(merge_state.len(), 2);
-    assert_eq!(merge_state[0], ScalarValue::UInt64(Some(45)));
-    assert_eq!(merge_state[1], ScalarValue::Float64(Some(132.)));
+    assert_eq!(merge_state.len(), 3);
+    assert_eq!(merge_state[0], ScalarValue::Int64(Some(4)));
+    assert_eq!(merge_state[1], ScalarValue::Int64(Some(4)));
+    assert_eq!(merge_state[2], ScalarValue::Boolean(Some(true)));
 
     let merge_eval_res = merge_accum.evaluate().unwrap();
     // the merge function returns the average, which is 132 / 45
-    assert_eq!(merge_eval_res, ScalarValue::Float64(Some(132. / 45_f64)));
+    assert_eq!(merge_eval_res, ScalarValue::Int64(Some(4)));
 }
 
 /// For testing whether the UDAF state fields are correctly implemented.

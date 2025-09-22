@@ -26,7 +26,7 @@ use crate::aggrs::aggr_wrapper::StateWrapper;
 /// if their input aggr is with order by
 ///
 /// should be applied to datanode's query engine
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FixStateUdafOrderingAnalyzer;
 
 impl FixStateUdafOrderingAnalyzer {

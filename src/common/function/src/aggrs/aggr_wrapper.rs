@@ -297,14 +297,15 @@ impl StateWrapper {
     }
 }
 
+/// Fix last value accum so that `state()` 's output actually matches the `state_fields()`.
 #[derive(Debug)]
-pub struct FixedLastValueAccum {
+struct FixedLastValueAccum {
     inner: Box<dyn Accumulator>,
+    ordering: Vec<FieldRef>,
 }
 
 impl Accumulator for FixedLastValueAccum {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
-        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
         self.inner.evaluate()
     }
 
@@ -321,7 +322,38 @@ impl Accumulator for FixedLastValueAccum {
     }
 
     fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
-        self.inner.state()
+        let unfixed_state = self.inner.state()?;
+        if unfixed_state.len() == 2 && self.ordering.len() == 1 {
+            // meaning it's order by the same field as the value field, so just duplicate the value field as the ordering field
+            let mut fixed_states = Vec::with_capacity(unfixed_state.len() + 1);
+            fixed_states.push(unfixed_state[0].clone());
+            fixed_states.push(unfixed_state[0].clone());
+            fixed_states.push(unfixed_state[1].clone());
+            Ok(fixed_states)
+        } else {
+            Ok(unfixed_state)
+        }
+    }
+}
+
+fn maybe_fix_accum(
+    inner: Box<dyn Accumulator>,
+    udf: &AggregateUDF,
+    ordering: &[FieldRef],
+) -> Box<dyn Accumulator> {
+    if let Some(_last_value) =
+        udf.inner()
+            .as_any()
+            .downcast_ref::<datafusion::functions_aggregate::first_last::LastValue>()
+        && !ordering.is_empty()
+    {
+        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
+        Box::new(FixedLastValueAccum {
+            inner,
+            ordering: ordering.to_vec(),
+        })
+    } else {
+        inner
     }
 }
 
@@ -345,6 +377,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
+        let inner = maybe_fix_accum(inner, self.inner(), &self.ordering);
         // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
@@ -401,10 +434,14 @@ impl AggregateUDFImpl for StateWrapper {
             name: args.name,
             input_fields: args.input_fields,
             return_field: self.inner.return_field(args.input_fields)?,
-            ordering_fields: dbg!(args.ordering_fields),
+            ordering_fields: args.ordering_fields,
             is_distinct: args.is_distinct,
         };
-        self.inner.state_fields(state_fields_args)
+        let fields = self.inner.state_fields(state_fields_args)?;
+
+        // TODO(discord9): maybe fix in here?
+
+        Ok(fields)
     }
 
     /// The state function's signature is the same as the original aggregate function's signature,
