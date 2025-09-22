@@ -41,7 +41,12 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
+use crate::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use crate::function_registry::FunctionRegistry;
+
+pub mod fix_order;
+#[cfg(test)]
+mod tests;
 
 /// Returns the name of the state function for the given aggregate function name.
 /// The state function is used to compute the state of the aggregate function.
@@ -213,6 +218,10 @@ impl StateMergeHelper {
         // update aggregate's output schema
         let lower_plan = lower_plan.recompute_schema()?;
 
+        // fix the ordering and distinct info of the state function, as they are not set in the wrapper.
+        let lower_plan =
+            FixStateUdafOrderingAnalyzer {}.analyze(lower_plan, &Default::default())?;
+
         let upper = Aggregate::try_new(
             Arc::new(lower_plan.clone()),
             upper_group_exprs,
@@ -243,13 +252,22 @@ impl StateMergeHelper {
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
+    /// Default to empty, might get fixed by analyzer later
+    ordering: Vec<FieldRef>,
+    /// Default to false, might get fixed by analyzer later
+    distinct: bool,
 }
 
 impl StateWrapper {
     /// `state_index`: The index of the state in the output of the state function.
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
         let name = aggr_state_func_name(inner.name());
-        Ok(Self { inner, name })
+        Ok(Self {
+            inner,
+            name,
+            ordering: vec![],
+            distinct: false,
+        })
     }
 
     pub fn inner(&self) -> &AggregateUDF {
@@ -325,9 +343,9 @@ impl AggregateUDFImpl for StateWrapper {
             name: self.inner().name(),
             input_fields,
             return_field: self.inner.return_field(input_fields)?,
-            // TODO(discord9): how to get this?, probably ok?
-            ordering_fields: &[],
-            is_distinct: false,
+            // those args are also needed as they are vital to construct the state fields correctly.
+            ordering_fields: &self.ordering,
+            is_distinct: self.distinct,
         };
         let state_fields = self.inner.state_fields(state_fields_args)?;
 
@@ -354,10 +372,10 @@ impl AggregateUDFImpl for StateWrapper {
             name: args.name,
             input_fields: args.input_fields,
             return_field: self.inner.return_field(args.input_fields)?,
-            ordering_fields: args.ordering_fields,
+            ordering_fields: dbg!(args.ordering_fields),
             is_distinct: args.is_distinct,
         };
-        self.inner.state_fields(state_fields_args)
+        dbg!(self.inner.state_fields(state_fields_args))
     }
 
     /// The state function's signature is the same as the original aggregate function's signature,
@@ -635,6 +653,3 @@ impl Accumulator for MergeAccum {
         self.inner.state()
     }
 }
-
-#[cfg(test)]
-mod tests;

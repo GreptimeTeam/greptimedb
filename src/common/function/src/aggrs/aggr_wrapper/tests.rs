@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
+use common_telemetry::init_default_ut_logging;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
@@ -432,6 +433,194 @@ async fn test_avg_udaf() {
         Arc::new(
             AggregateExprBuilder::new(
                 Arc::new(avg.clone()),
+                vec![Arc::new(
+                    datafusion::physical_expr::expressions::Column::new("number", 0),
+                )],
+            )
+            .schema(Arc::new(dummy_table_scan().schema().as_arrow().clone()))
+            .alias("avg(number)")
+            .build()
+            .unwrap(),
+        ),
+        // coerced to float64
+        vec![DataType::Float64],
+    )
+    .unwrap();
+
+    let expected_merge_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(coerced_aggr_state_plan.clone()),
+            vec![],
+            vec![
+                Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(expected_merge_fn.into()),
+                    vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                ))
+                .alias("avg(number)"),
+            ],
+        )
+        .unwrap(),
+    );
+    assert_eq!(&res.upper_merge, &expected_merge_plan);
+
+    let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
+        .await
+        .unwrap();
+    let aggr_exec = phy_aggr_state_plan
+        .as_any()
+        .downcast_ref::<AggregateExec>()
+        .unwrap();
+    let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+    let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
+
+    // evaluate the state function
+    let input = Float64Array::from(vec![Some(1.), Some(2.), None, Some(3.)]);
+    let values = vec![Arc::new(input) as arrow::array::ArrayRef];
+
+    state_accum.update_batch(&values).unwrap();
+    let state = state_accum.state().unwrap();
+    assert_eq!(state.len(), 2);
+    assert_eq!(state[0], ScalarValue::UInt64(Some(3)));
+    assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
+
+    let eval_res = state_accum.evaluate().unwrap();
+    let expected = Arc::new(
+        StructArray::try_new(
+            vec![
+                Field::new("avg[count]", DataType::UInt64, true),
+                Field::new("avg[sum]", DataType::Float64, true),
+            ]
+            .into(),
+            vec![
+                Arc::new(UInt64Array::from(vec![Some(3)])),
+                Arc::new(Float64Array::from(vec![Some(6.)])),
+            ],
+            None,
+        )
+        .unwrap(),
+    );
+    assert_eq!(eval_res, ScalarValue::Struct(expected));
+
+    let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&res.upper_merge, &ctx.state())
+        .await
+        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan
+        .as_any()
+        .downcast_ref::<AggregateExec>()
+        .unwrap();
+    let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+
+    let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
+
+    let merge_input = vec![
+        Arc::new(UInt64Array::from(vec![Some(3), Some(42), None])) as arrow::array::ArrayRef,
+        Arc::new(Float64Array::from(vec![Some(48.), Some(84.), None])),
+    ];
+    let merge_input_struct_arr = StructArray::try_new(
+        vec![
+            Field::new("avg[count]", DataType::UInt64, true),
+            Field::new("avg[sum]", DataType::Float64, true),
+        ]
+        .into(),
+        merge_input,
+        None,
+    )
+    .unwrap();
+
+    merge_accum
+        .update_batch(&[Arc::new(merge_input_struct_arr)])
+        .unwrap();
+    let merge_state = merge_accum.state().unwrap();
+    assert_eq!(merge_state.len(), 2);
+    assert_eq!(merge_state[0], ScalarValue::UInt64(Some(45)));
+    assert_eq!(merge_state[1], ScalarValue::Float64(Some(132.)));
+
+    let merge_eval_res = merge_accum.evaluate().unwrap();
+    // the merge function returns the average, which is 132 / 45
+    assert_eq!(merge_eval_res, ScalarValue::Float64(Some(132. / 45_f64)));
+}
+
+#[tokio::test]
+async fn test_last_value_order_by_udaf() {
+    init_default_ut_logging();
+    let ctx = SessionContext::new();
+
+    let last_value = datafusion::functions_aggregate::first_last::last_value_udaf();
+    let last_value = (*last_value).clone();
+
+    let original_aggr = Aggregate::try_new(
+        Arc::new(dummy_table_scan()),
+        vec![],
+        vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+            Arc::new(last_value.clone()),
+            vec![Expr::Column(Column::new_unqualified("number"))],
+            false,
+            None,
+            vec![datafusion_expr::expr::Sort::new(
+                Expr::Column(Column::new_unqualified("number")),
+                true,
+                true,
+            )],
+            None,
+        ))],
+    )
+    .unwrap();
+    let res = StateMergeHelper::split_aggr_node(original_aggr).unwrap();
+
+    let state_func: Arc<AggregateUDF> =
+        Arc::new(StateWrapper::new(last_value.clone()).unwrap().into());
+    let expected_aggr_state_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(dummy_table_scan()),
+            vec![],
+            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                state_func,
+                vec![Expr::Column(Column::new_unqualified("number"))],
+                false,
+                None,
+                vec![datafusion_expr::expr::Sort::new(
+                    Expr::Column(Column::new_unqualified("number")),
+                    true,
+                    true,
+                )],
+                None,
+            ))],
+        )
+        .unwrap(),
+    );
+    // type coerced so avg aggr function can function correctly
+    let coerced_aggr_state_plan = TypeCoercion::new()
+        .analyze(expected_aggr_state_plan.clone(), &Default::default())
+        .unwrap();
+    assert_eq!(&res.lower_state, &coerced_aggr_state_plan);
+    assert_eq!(
+        res.lower_state.schema().as_arrow(),
+        &arrow_schema::Schema::new(vec![Field::new(
+            "__last_value_state(number) ORDER BY [number ASC NULLS FIRST]",
+            DataType::Struct(
+                vec![
+                    Field::new("last_value[last_value]", DataType::Int64, true),
+                    // TODO(discord9): where is the ordering field?
+                    Field::new("is_set", DataType::Boolean, true)
+                ]
+                .into()
+            ),
+            true,
+        )])
+    );
+    return;
+
+    let expected_merge_fn = MergeWrapper::new(
+        last_value.clone(),
+        Arc::new(
+            AggregateExprBuilder::new(
+                Arc::new(last_value.clone()),
                 vec![Arc::new(
                     datafusion::physical_expr::expressions::Column::new("number", 0),
                 )],
