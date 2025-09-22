@@ -293,11 +293,18 @@ impl<'a> ParserContext<'a> {
 
         let output_table_name = self.intern_parse_table_name()?;
 
-        let expire_after = if self
-            .parser
-            .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
+        let expire_after = if let Token::Word(w1) = &self.parser.peek_token().token
+            && w1.value.eq_ignore_ascii_case(EXPIRE)
         {
-            Some(self.parse_interval_no_month("EXPIRE AFTER")?)
+            self.parser.next_token();
+            if let Token::Word(w2) = &self.parser.peek_token().token
+                && w2.value.eq_ignore_ascii_case(AFTER)
+            {
+                self.parser.next_token();
+                Some(self.parse_interval_no_month("EXPIRE AFTER")?)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1501,6 +1508,45 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     comment: None,
+                },
+            ),
+            (
+                r"
+create flow `task_3`
+sink to schema_1.table_1
+expire after '10 minutes'
+as
+select max(c1), min(c2) from schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName::from(vec![Ident::with_quote('`', "task_3")]),
+                    sink_table_name: ObjectName::from(vec![
+                        Ident::new("schema_1"),
+                        Ident::new("table_1"),
+                    ]),
+                    or_replace: false,
+                    if_not_exists: false,
+                    expire_after: Some(600), // 10 minutes in seconds
+                    comment: None,
+                },
+            ),
+            (
+                r"
+create or replace flow if not exists task_4
+sink to schema_1.table_1
+expire after interval '2 hours'
+comment 'lowercase test'
+as
+select max(c1), min(c2) from schema_2.table_2;",
+                CreateFlowWoutQuery {
+                    flow_name: ObjectName::from(vec![Ident::new("task_4")]),
+                    sink_table_name: ObjectName::from(vec![
+                        Ident::new("schema_1"),
+                        Ident::new("table_1"),
+                    ]),
+                    or_replace: true,
+                    if_not_exists: true,
+                    expire_after: Some(7200), // 2 hours in seconds
+                    comment: Some("lowercase test".to_string()),
                 },
             ),
         ];
