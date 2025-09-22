@@ -302,6 +302,20 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to build metadata kvbackend"))]
+    BuildMetadataKvbackend {
+        #[snafu(implicit)]
+        location: Location,
+        source: standalone::error::Error,
+    },
+
+    #[snafu(display("Failed to setup standalone plugins"))]
+    SetupStandalonePlugins {
+        #[snafu(implicit)]
+        location: Location,
+        source: standalone::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -320,6 +334,8 @@ impl ErrorExt for Error {
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::BuildCli { source, .. } => source.status_code(),
             Error::StartCli { source, .. } => source.status_code(),
+            Error::BuildMetadataKvbackend { source, .. } => source.status_code(),
+            Error::SetupStandalonePlugins { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

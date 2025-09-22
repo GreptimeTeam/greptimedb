@@ -61,6 +61,7 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
+    "src/standalone",
     "src/servers",
     "src/session",
     "src/sql",
@@ -308,6 +309,7 @@ query = { path = "src/query" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
+standalone = { path = "src/standalone" }
 stat = { path = "src/common/stat" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }

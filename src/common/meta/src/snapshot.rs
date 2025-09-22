@@ -23,12 +23,12 @@ use common_telemetry::info;
 use file::{Metadata, MetadataContent};
 use futures::{TryStreamExt, future};
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use strum::Display;
 
 use crate::error::{
     Error, InvalidFileExtensionSnafu, InvalidFileNameSnafu, InvalidFilePathSnafu, ReadObjectSnafu,
-    Result, WriteObjectSnafu,
+    Result, UnexpectedSnafu, WriteObjectSnafu,
 };
 use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use crate::kv_backend::KvBackendRef;
@@ -247,6 +247,20 @@ impl MetadataSnapshotManager {
         let file_path = file_path_buf.to_str().context(InvalidFileNameSnafu {
             reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
         })?;
+        // Ensure the file does not exist
+        ensure!(
+            !self
+                .object_store
+                .exists(file_path)
+                .await
+                .context(ReadObjectSnafu { file_path })?,
+            UnexpectedSnafu {
+                err_msg: format!(
+                    "The file '{}' already exists. Please choose a different name or remove the existing file before proceeding.",
+                    file_path
+                ),
+            }
+        );
         let now = Instant::now();
         let req = RangeRequest::new().with_range(vec![0], vec![0]);
         let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
@@ -403,6 +417,15 @@ mod tests {
             .unwrap();
         // Clean up the kv backend
         kv_backend.clear();
+        let err = manager
+            .dump(
+                &dump_path.as_path().display().to_string(),
+                "metadata_snapshot",
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("already exists"));
 
         let restore_path = dump_path
             .join("metadata_snapshot.metadata.fb")

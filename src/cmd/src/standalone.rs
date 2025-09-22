@@ -19,71 +19,47 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::information_schema::{DatanodeInspectRequest, InformationExtension};
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
-use client::SendableRecordBatchStream;
-use client::api::v1::meta::RegionRole;
 use common_base::Plugins;
-use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_config::{Configurable, KvBackendConfig, metadata_store_dir};
+use common_config::{Configurable, metadata_store_dir};
 use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
-use common_meta::cluster::{NodeInfo, NodeStatus};
-use common_meta::datanode::RegionStat;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::peer::Peer;
 use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocatorRef, build_wal_options_allocator};
-use common_options::memory::MemoryOptions;
-use common_procedure::{ProcedureInfo, ProcedureManagerRef};
-use common_query::request::QueryRequest;
+use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
-use common_telemetry::logging::{
-    DEFAULT_LOGGING_DIR, LoggingOptions, SlowQueryOptions, TracingOptions,
-};
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
-use common_wal::config::DatanodeWalConfig;
-use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
+use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
-use datanode::region_server::RegionServer;
-use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{
-    FlowConfig, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
-    FrontendInvoker, GrpcQueryHandlerWithBoxedError, StreamingEngine,
+    FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient, FrontendInvoker,
+    GrpcQueryHandlerWithBoxedError,
 };
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::Frontend;
+use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::server::Services;
-use frontend::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
-    PromStoreOptions,
-};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
-use mito2::config::MitoConfig;
-use query::options::QueryOptions;
-use serde::{Deserialize, Serialize};
-use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
-use servers::grpc::GrpcOptions;
-use servers::http::HttpOptions;
+use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
-use store_api::storage::RegionId;
-use tokio::sync::RwLock;
+use standalone::StandaloneInformationExtension;
+use standalone::options::StandaloneOptions;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
@@ -129,131 +105,6 @@ impl SubCommand {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct StandaloneOptions {
-    pub enable_telemetry: bool,
-    pub default_timezone: Option<String>,
-    pub http: HttpOptions,
-    pub grpc: GrpcOptions,
-    pub mysql: MysqlOptions,
-    pub postgres: PostgresOptions,
-    pub opentsdb: OpentsdbOptions,
-    pub influxdb: InfluxdbOptions,
-    pub jaeger: JaegerOptions,
-    pub prom_store: PromStoreOptions,
-    pub wal: DatanodeWalConfig,
-    pub storage: StorageConfig,
-    pub metadata_store: KvBackendConfig,
-    pub procedure: ProcedureConfig,
-    pub flow: FlowConfig,
-    pub logging: LoggingOptions,
-    pub user_provider: Option<String>,
-    /// Options for different store engines.
-    pub region_engine: Vec<RegionEngineConfig>,
-    pub export_metrics: ExportMetricsOption,
-    pub tracing: TracingOptions,
-    pub init_regions_in_background: bool,
-    pub init_regions_parallelism: usize,
-    pub max_in_flight_write_bytes: Option<ReadableSize>,
-    pub slow_query: SlowQueryOptions,
-    pub query: QueryOptions,
-    pub memory: MemoryOptions,
-}
-
-impl Default for StandaloneOptions {
-    fn default() -> Self {
-        Self {
-            enable_telemetry: true,
-            default_timezone: None,
-            http: HttpOptions::default(),
-            grpc: GrpcOptions::default(),
-            mysql: MysqlOptions::default(),
-            postgres: PostgresOptions::default(),
-            opentsdb: OpentsdbOptions::default(),
-            influxdb: InfluxdbOptions::default(),
-            jaeger: JaegerOptions::default(),
-            prom_store: PromStoreOptions::default(),
-            wal: DatanodeWalConfig::default(),
-            storage: StorageConfig::default(),
-            metadata_store: KvBackendConfig::default(),
-            procedure: ProcedureConfig::default(),
-            flow: FlowConfig::default(),
-            logging: LoggingOptions::default(),
-            export_metrics: ExportMetricsOption::default(),
-            user_provider: None,
-            region_engine: vec![
-                RegionEngineConfig::Mito(MitoConfig::default()),
-                RegionEngineConfig::File(FileEngineConfig::default()),
-            ],
-            tracing: TracingOptions::default(),
-            init_regions_in_background: false,
-            init_regions_parallelism: 16,
-            max_in_flight_write_bytes: None,
-            slow_query: SlowQueryOptions::default(),
-            query: QueryOptions::default(),
-            memory: MemoryOptions::default(),
-        }
-    }
-}
-
-impl Configurable for StandaloneOptions {
-    fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
-    }
-}
-
-/// The [`StandaloneOptions`] is only defined in cmd crate,
-/// we don't want to make `frontend` depends on it, so impl [`Into`]
-/// rather than [`From`].
-#[allow(clippy::from_over_into)]
-impl Into<FrontendOptions> for StandaloneOptions {
-    fn into(self) -> FrontendOptions {
-        self.frontend_options()
-    }
-}
-
-impl StandaloneOptions {
-    pub fn frontend_options(&self) -> FrontendOptions {
-        let cloned_opts = self.clone();
-        FrontendOptions {
-            default_timezone: cloned_opts.default_timezone,
-            http: cloned_opts.http,
-            grpc: cloned_opts.grpc,
-            mysql: cloned_opts.mysql,
-            postgres: cloned_opts.postgres,
-            opentsdb: cloned_opts.opentsdb,
-            influxdb: cloned_opts.influxdb,
-            jaeger: cloned_opts.jaeger,
-            prom_store: cloned_opts.prom_store,
-            meta_client: None,
-            logging: cloned_opts.logging,
-            user_provider: cloned_opts.user_provider,
-            // Handle the export metrics task run by standalone to frontend for execution
-            export_metrics: cloned_opts.export_metrics,
-            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
-            slow_query: cloned_opts.slow_query,
-            ..Default::default()
-        }
-    }
-
-    pub fn datanode_options(&self) -> DatanodeOptions {
-        let cloned_opts = self.clone();
-        DatanodeOptions {
-            node_id: Some(0),
-            enable_telemetry: cloned_opts.enable_telemetry,
-            wal: cloned_opts.wal,
-            storage: cloned_opts.storage,
-            region_engine: cloned_opts.region_engine,
-            grpc: cloned_opts.grpc,
-            init_regions_in_background: cloned_opts.init_regions_in_background,
-            init_regions_parallelism: cloned_opts.init_regions_parallelism,
-            query: cloned_opts.query,
-            ..Default::default()
         }
     }
 }
@@ -523,13 +374,14 @@ impl StartCommand {
             .context(error::CreateDirSnafu { dir: data_home })?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
-            metadata_dir,
-            opts.metadata_store,
-            opts.procedure,
-        )
-        .await
-        .context(error::StartFrontendSnafu)?;
+        let kv_backend = standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+            .context(error::BuildMetadataKvbackendSnafu)?;
+        let procedure_manager =
+            standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
+
+        plugins::setup_standalone_plugins(&mut plugins, &plugin_opts, &opts, kv_backend.clone())
+            .await
+            .context(error::SetupStandalonePluginsSnafu)?;
 
         // Builds cache registry
         let layered_cache_builder = LayeredCacheRegistryBuilder::default();
@@ -745,141 +597,6 @@ impl StartCommand {
     }
 }
 
-pub struct StandaloneInformationExtension {
-    region_server: RegionServer,
-    procedure_manager: ProcedureManagerRef,
-    start_time_ms: u64,
-    flow_streaming_engine: RwLock<Option<Arc<StreamingEngine>>>,
-}
-
-impl StandaloneInformationExtension {
-    pub fn new(region_server: RegionServer, procedure_manager: ProcedureManagerRef) -> Self {
-        Self {
-            region_server,
-            procedure_manager,
-            start_time_ms: common_time::util::current_time_millis() as u64,
-            flow_streaming_engine: RwLock::new(None),
-        }
-    }
-
-    /// Set the flow streaming engine for the standalone instance.
-    pub async fn set_flow_streaming_engine(&self, flow_streaming_engine: Arc<StreamingEngine>) {
-        let mut guard = self.flow_streaming_engine.write().await;
-        *guard = Some(flow_streaming_engine);
-    }
-}
-
-#[async_trait::async_trait]
-impl InformationExtension for StandaloneInformationExtension {
-    type Error = catalog::error::Error;
-
-    async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
-        let build_info = common_version::build_info();
-        let node_info = NodeInfo {
-            // For the standalone:
-            // - id always 0
-            // - empty string for peer_addr
-            peer: Peer {
-                id: 0,
-                addr: "".to_string(),
-            },
-            last_activity_ts: -1,
-            status: NodeStatus::Standalone,
-            version: build_info.version.to_string(),
-            git_commit: build_info.commit_short.to_string(),
-            // Use `self.start_time_ms` instead.
-            // It's not precise but enough.
-            start_time_ms: self.start_time_ms,
-            cpus: common_config::utils::get_cpus() as u32,
-            memory_bytes: common_config::utils::get_sys_total_memory()
-                .unwrap_or_default()
-                .as_bytes(),
-        };
-        Ok(vec![node_info])
-    }
-
-    async fn procedures(&self) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
-        self.procedure_manager
-            .list_procedures()
-            .await
-            .map_err(BoxedError::new)
-            .map(|procedures| {
-                procedures
-                    .into_iter()
-                    .map(|procedure| {
-                        let status = procedure.state.as_str_name().to_string();
-                        (status, procedure)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .context(catalog::error::ListProceduresSnafu)
-    }
-
-    async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
-        let stats = self
-            .region_server
-            .reportable_regions()
-            .into_iter()
-            .map(|stat| {
-                let region_stat = self
-                    .region_server
-                    .region_statistic(stat.region_id)
-                    .unwrap_or_default();
-                RegionStat {
-                    id: stat.region_id,
-                    rcus: 0,
-                    wcus: 0,
-                    approximate_bytes: region_stat.estimated_disk_size(),
-                    engine: stat.engine,
-                    role: RegionRole::from(stat.role).into(),
-                    num_rows: region_stat.num_rows,
-                    memtable_size: region_stat.memtable_size,
-                    manifest_size: region_stat.manifest_size,
-                    sst_size: region_stat.sst_size,
-                    sst_num: region_stat.sst_num,
-                    index_size: region_stat.index_size,
-                    region_manifest: region_stat.manifest.into(),
-                    data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
-                    metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
-                    written_bytes: region_stat.written_bytes,
-                }
-            })
-            .collect::<Vec<_>>();
-        Ok(stats)
-    }
-
-    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
-        Ok(Some(
-            self.flow_streaming_engine
-                .read()
-                .await
-                .as_ref()
-                .unwrap()
-                .gen_state_report()
-                .await,
-        ))
-    }
-
-    async fn inspect_datanode(
-        &self,
-        request: DatanodeInspectRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
-        let req = QueryRequest {
-            plan: request
-                .build_plan()
-                .context(catalog::error::DatafusionSnafu)?,
-            region_id: RegionId::default(),
-            header: None,
-        };
-
-        self.region_server
-            .handle_read(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(catalog::error::InternalSnafu)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::default::Default;
@@ -891,7 +608,9 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
+    use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
+    use servers::grpc::GrpcOptions;
 
     use super::*;
     use crate::options::GlobalOptions;

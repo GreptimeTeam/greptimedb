@@ -39,30 +39,22 @@ use catalog::process_manager::{
 use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
-use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
-use common_meta::state_store::KvStateStore;
-use common_procedure::ProcedureManagerRef;
-use common_procedure::local::{LocalManager, ManagerConfig};
-use common_procedure::options::ProcedureConfig;
 use common_query::Output;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
-use common_telemetry::{debug, error, info, tracing};
+use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
 use lazy_static::lazy_static;
-use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
@@ -136,40 +128,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn try_build_standalone_components(
-        dir: String,
-        kv_backend_config: KvBackendConfig,
-        procedure_config: ProcedureConfig,
-    ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
-        info!(
-            "Creating metadata kvbackend with config: {:?}",
-            kv_backend_config
-        );
-        let kv_backend = RaftEngineBackend::try_open_with_cfg(dir, &kv_backend_config)
-            .map_err(BoxedError::new)
-            .context(error::OpenRaftEngineBackendSnafu)?;
-
-        let kv_backend = Arc::new(kv_backend);
-        let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-
-        let manager_config = ManagerConfig {
-            max_retry_times: procedure_config.max_retry_times,
-            retry_delay: procedure_config.retry_delay,
-            max_running_procedures: procedure_config.max_running_procedures,
-            ..Default::default()
-        };
-        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
-        let procedure_manager = Arc::new(LocalManager::new(
-            manager_config,
-            kv_state_store.clone(),
-            kv_state_store,
-            Some(runtime_switch_manager),
-            None,
-        ));
-
-        Ok((kv_backend, procedure_manager))
-    }
-
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }

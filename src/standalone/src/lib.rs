@@ -12,18 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod cli;
-mod datanode;
-mod flownode;
-mod frontend;
-mod meta_srv;
-mod options;
-mod standalone;
+pub mod error;
+pub mod information_extension;
+pub mod metadata;
+pub mod options;
+pub mod procedure;
 
-pub use cli::SubCommand;
-pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
-pub use flownode::{setup_flownode_plugins, start_flownode_plugins};
-pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
-pub use meta_srv::{setup_metasrv_plugins, start_metasrv_plugins};
-pub use options::PluginOptions;
-pub use standalone::{setup_standalone_plugins, start_standalone_plugins};
+pub use information_extension::StandaloneInformationExtension;
+pub use metadata::build_metadata_kvbackend;
+pub use procedure::build_procedure_manager;

@@ -1951,6 +1951,7 @@ dependencies = [
  "session",
  "similar-asserts",
  "snafu 0.8.6",
+ "standalone",
  "stat",
  "store-api",
  "substrait 0.18.0",
@@ -4900,7 +4901,6 @@ dependencies = [
  "humantime-serde",
  "lazy_static",
  "log-query",
- "log-store",
  "meta-client",
  "num_cpus",
  "opentelemetry-proto",
@@ -9457,12 +9457,14 @@ dependencies = [
  "cli",
  "common-base",
  "common-error",
+ "common-meta",
  "datanode",
  "flow",
  "frontend",
  "meta-srv",
  "serde",
  "snafu 0.8.6",
+ "standalone",
 ]
 
 [[package]]
@@ -12311,6 +12313,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "standalone"
+version = "0.18.0"
+dependencies = [
+ "async-trait",
+ "catalog",
+ "client",
+ "common-base",
+ "common-config",
+ "common-error",
+ "common-macro",
+ "common-meta",
+ "common-options",
+ "common-procedure",
+ "common-query",
+ "common-telemetry",
+ "common-time",
+ "common-version",
+ "common-wal",
+ "datanode",
+ "file-engine",
+ "flow",
+ "frontend",
+ "log-store",
+ "mito2",
+ "query",
+ "serde",
+ "servers",
+ "snafu 0.8.6",
+ "store-api",
+ "tokio",
+]
+
+[[package]]
 name = "stat"
 version = "0.18.0"
 dependencies = [
@@ -13025,6 +13060,7 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "sqlx",
+ "standalone",
  "store-api",
  "substrait 0.18.0",
  "table",
