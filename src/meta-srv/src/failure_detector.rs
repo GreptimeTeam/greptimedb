@@ -18,6 +18,8 @@ use std::time::Duration;
 use common_meta::distributed_time_constants;
 use serde::{Deserialize, Serialize};
 
+const FIRST_HEARTBEAT_ESTIMATE_MILLIS: i64 = 1000;
+
 /// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
 /// under Apache License 2.0.
 ///
@@ -116,12 +118,11 @@ impl PhiAccrualFailureDetector {
             // guess statistics for first heartbeat,
             // important so that connections with only one heartbeat becomes unavailable
             // bootstrap with 2 entries with rather high standard deviation
-            let first_heartbeat_estimate_millis = first_heartbeat_estimate_millis();
-            let std_deviation = first_heartbeat_estimate_millis / 4;
+            let std_deviation = FIRST_HEARTBEAT_ESTIMATE_MILLIS / 4;
             self.heartbeat_history
-                .add((first_heartbeat_estimate_millis - std_deviation) as _);
+                .add((FIRST_HEARTBEAT_ESTIMATE_MILLIS - std_deviation) as _);
             self.heartbeat_history
-                .add((first_heartbeat_estimate_millis + std_deviation) as _);
+                .add((FIRST_HEARTBEAT_ESTIMATE_MILLIS + std_deviation) as _);
         }
         let _ = self.last_heartbeat_millis.insert(ts_millis);
     }
@@ -162,12 +163,6 @@ impl PhiAccrualFailureDetector {
     pub(crate) fn acceptable_heartbeat_pause_millis(&self) -> u32 {
         self.acceptable_heartbeat_pause_millis
     }
-}
-
-fn first_heartbeat_estimate_millis() -> i64 {
-    let duration = Duration::from_secs(distributed_time_constants::DATANODE_LEASE_SECS);
-    let millis = duration.as_millis();
-    millis.min(i64::MAX as u128) as i64
 }
 
 /// Calculation of phi, derived from the Cumulative distribution function for
@@ -267,22 +262,13 @@ mod tests {
 
         fd.heartbeat(ts_millis);
 
-        // Warm up with steady heartbeats so the detector reflects the observed cadence.
-        for i in 1..=1000 {
-            let ts = ts_millis + i as i64 * 1000;
-            fd.heartbeat(ts);
-        }
-
-        let last_heartbeat = fd
-            .last_heartbeat_millis
-            .expect("last heartbeat is updated after warm up");
         let acceptable_heartbeat_pause_millis = fd.acceptable_heartbeat_pause_millis as i64;
         // is available when heartbeat
-        assert!(fd.is_available(last_heartbeat));
+        assert!(fd.is_available(ts_millis));
         // is available before heartbeat timeout
-        assert!(fd.is_available(last_heartbeat + acceptable_heartbeat_pause_millis / 2));
+        assert!(fd.is_available(ts_millis + acceptable_heartbeat_pause_millis / 2));
         // is not available after heartbeat timeout
-        assert!(!fd.is_available(last_heartbeat + acceptable_heartbeat_pause_millis * 2));
+        assert!(!fd.is_available(ts_millis + acceptable_heartbeat_pause_millis * 2));
     }
 
     #[test]
@@ -384,7 +370,6 @@ mod tests {
 
     #[test]
     fn test_return_phi_based_on_guess_when_only_one_heartbeat() {
-        let first_estimate = first_heartbeat_estimate_millis();
         let mut fd = PhiAccrualFailureDetector {
             threshold: 8.0,
             min_std_deviation_millis: 100.0,
@@ -393,9 +378,9 @@ mod tests {
             last_heartbeat_millis: None,
         };
         fd.heartbeat(0);
-        assert!((fd.phi(first_estimate)).abs() - 0.3 < 0.2);
-        assert!((fd.phi(first_estimate * 2)).abs() - 4.5 < 0.5);
-        assert!((fd.phi(first_estimate * 3)).abs() > 15.0);
+        assert!((fd.phi(FIRST_HEARTBEAT_ESTIMATE_MILLIS)).abs() - 0.3 < 0.2);
+        assert!((fd.phi(FIRST_HEARTBEAT_ESTIMATE_MILLIS * 2)).abs() - 4.5 < 0.5);
+        assert!((fd.phi(FIRST_HEARTBEAT_ESTIMATE_MILLIS * 3)).abs() > 15.0);
     }
 
     #[test]
