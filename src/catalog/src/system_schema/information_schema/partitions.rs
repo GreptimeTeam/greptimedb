@@ -332,7 +332,7 @@ impl InformationSchemaPartitionsBuilder {
             let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
             self.partition_expressions.push(expression.as_deref());
             self.create_times.push(Some(TimestampMicrosecond::from(
-                table_info.meta.created_on.timestamp_millis(),
+                table_info.meta.created_on.timestamp_micros(),
             )));
             self.partition_ids.push(Some(partition.id.as_u64()));
         }
