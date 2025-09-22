@@ -101,12 +101,12 @@ impl std::fmt::Display for TableType {
     }
 }
 
-impl Into<datafusion::datasource::TableType> for TableType {
-    fn into(self) -> datafusion::datasource::TableType {
-        match self {
-            Self::Base => datafusion::datasource::TableType::Base,
-            Self::View => datafusion::datasource::TableType::View,
-            Self::Temporary => datafusion::datasource::TableType::Temporary,
+impl From<TableType> for datafusion::datasource::TableType {
+    fn from(t: TableType) -> datafusion::datasource::TableType {
+        match t {
+            TableType::Base => datafusion::datasource::TableType::Base,
+            TableType::View => datafusion::datasource::TableType::View,
+            TableType::Temporary => datafusion::datasource::TableType::Temporary,
         }
     }
 }

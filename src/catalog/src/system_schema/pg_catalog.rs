@@ -24,9 +24,16 @@ use std::sync::{Arc, LazyLock, Weak};
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, PG_CATALOG_NAME};
+use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_recordbatch::SendableRecordBatchStream;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion_postgres::pg_catalog::catalog_info::CatalogInfo;
+use datafusion_postgres::pg_catalog::ArrowTable;
 use datatypes::schema::ColumnSchema;
 use lazy_static::lazy_static;
 use paste::paste;
@@ -35,14 +42,20 @@ use pg_class::PGClass;
 use pg_database::PGDatabase;
 use pg_namespace::PGNamespace;
 use session::context::{Channel, QueryContext};
+use snafu::ResultExt;
+use store_api::storage::ScanRequest;
+use table::metadata::TableId;
 use table::TableRef;
 pub use table_names::*;
 
 use self::pg_namespace::oid_map::{PGNamespaceOidMap, PGNamespaceOidMapRef};
+use crate::error::{InternalSnafu, ProjectSchemaSnafu, Result};
 use crate::system_schema::memory_table::MemoryTable;
 use crate::system_schema::utils::tables::u32_column;
 use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
 use crate::CatalogManager;
+
+use super::SystemTable;
 
 lazy_static! {
     static ref MEMORY_TABLES: &'static [&'static str] = &[table_names::PG_TYPE];
@@ -181,7 +194,7 @@ impl std::fmt::Debug for CatalogManagerWrapper {
 // TODO(sunng87): address query_context
 #[async_trait]
 impl CatalogInfo for CatalogManagerWrapper {
-    async fn catalog_names(&self) -> Result<Vec<String>, DataFusionError> {
+    async fn catalog_names(&self) -> std::result::Result<Vec<String>, DataFusionError> {
         CatalogManager::catalog_names(self.0.as_ref())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))
@@ -190,7 +203,7 @@ impl CatalogInfo for CatalogManagerWrapper {
     async fn schema_names(
         &self,
         catalog_name: &str,
-    ) -> Result<Option<Vec<String>>, DataFusionError> {
+    ) -> std::result::Result<Option<Vec<String>>, DataFusionError> {
         self.0
             .schema_names(catalog_name, None)
             .await
@@ -202,7 +215,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         &self,
         catalog_name: &str,
         schema_name: &str,
-    ) -> Result<Option<Vec<String>>, DataFusionError> {
+    ) -> std::result::Result<Option<Vec<String>>, DataFusionError> {
         self.0
             .table_names(catalog_name, schema_name, None)
             .await
@@ -215,7 +228,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-    ) -> Result<Option<SchemaRef>, DataFusionError> {
+    ) -> std::result::Result<Option<SchemaRef>, DataFusionError> {
         let table = self
             .0
             .table(catalog_name, schema_name, table_name, None)
@@ -230,7 +243,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-    ) -> Result<Option<TableType>, DataFusionError> {
+    ) -> std::result::Result<Option<TableType>, DataFusionError> {
         let table = self
             .0
             .table(catalog_name, schema_name, table_name, None)
@@ -238,5 +251,99 @@ impl CatalogInfo for CatalogManagerWrapper {
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         Ok(table.map(|t| t.table_type().into()))
+    }
+}
+
+enum PgCatalogTable {
+    Static(Arc<ArrowTable>),
+    Dynamic(Arc<dyn PartitionStream>),
+}
+
+impl PgCatalogTable {
+    fn schema(&self) -> SchemaRef {
+        match self {
+            Self::Static(table) => table.schema().clone(),
+            Self::Dynamic(table) => table.schema().clone(),
+        }
+    }
+}
+
+struct DFTableProviderAsSystemTable {
+    pub table_id: TableId,
+    pub table_name: &'static str,
+    pub table_type: table::metadata::TableType,
+    pub schema: Arc<datatypes::schema::Schema>,
+    pub table_provider: PgCatalogTable,
+}
+
+impl DFTableProviderAsSystemTable {
+    pub fn try_new(
+        table_id: TableId,
+        table_name: &'static str,
+        table_type: table::metadata::TableType,
+        table_provider: PgCatalogTable,
+    ) -> Result<Self> {
+        let schema = Arc::new(
+            table_provider
+                .schema()
+                .try_into()
+                .context(ProjectSchemaSnafu)?,
+        );
+        Ok(Self {
+            table_id,
+            table_name,
+            table_type,
+            schema,
+            table_provider,
+        })
+    }
+}
+
+impl SystemTable for DFTableProviderAsSystemTable {
+    fn table_id(&self) -> TableId {
+        self.table_id
+    }
+
+    fn table_name(&self) -> &'static str {
+        self.table_name
+    }
+
+    fn schema(&self) -> Arc<datatypes::schema::Schema> {
+        self.schema.clone()
+    }
+
+    fn table_type(&self) -> table::metadata::TableType {
+        self.table_type
+    }
+
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
+        match &self.table_provider {
+            PgCatalogTable::Static(table) => {
+                let schema = self.schema.arrow_schema().clone();
+                let data = table
+                    .data()
+                    .into_iter()
+                    .map(|rb| Ok(rb.clone()))
+                    .collect::<Vec<_>>();
+                let stream = Box::pin(DfRecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::iter(data),
+                ));
+                Ok(Box::pin(
+                    RecordBatchStreamAdapter::try_new(stream)
+                        .map_err(BoxedError::new)
+                        .context(InternalSnafu)?,
+                ))
+            }
+
+            PgCatalogTable::Dynamic(table) => {
+                let stream = table.execute(Arc::new(TaskContext::default()));
+                Ok(Box::pin(
+                    RecordBatchStreamAdapter::try_new(stream)
+                        .map_err(BoxedError::new)
+                        .context(InternalSnafu)?,
+                ))
+            }
+        }
     }
 }
