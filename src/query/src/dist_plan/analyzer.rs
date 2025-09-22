@@ -107,6 +107,13 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
 
+        // The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
+        // planning stage, by executing them directly. For example, the `database()` function.
+        // So the `ConfigOptions` here (which is set from the session context) should be present
+        // in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
+        // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
+        // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
+        // to walk around the issue.
         struct OptimizerContext {
             inner: datafusion_optimizer::OptimizerContext,
             config: Arc<ConfigOptions>,

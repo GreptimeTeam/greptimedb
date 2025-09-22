@@ -179,7 +179,7 @@ impl Function for ConnectionIdFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::UInt64)
+        Ok(DataType::UInt32)
     }
 
     fn signature(&self) -> Signature {
@@ -193,7 +193,7 @@ impl Function for ConnectionIdFunction {
         let func_ctx = find_function_context(&args)?;
         let pid = func_ctx.query_ctx.process_id();
 
-        Ok(ColumnarValue::Scalar(ScalarValue::UInt64(Some(pid as u64))))
+        Ok(ColumnarValue::Scalar(ScalarValue::UInt32(Some(pid))))
     }
 }
 
