@@ -121,6 +121,8 @@ order by ordered_host;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select
     last_value(host order by ts) as ordered_host,
@@ -145,6 +147,8 @@ explain select last_value(ts order by ts) from t;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
     select last_value(ts order by ts) from t;
 
@@ -189,6 +193,8 @@ explain
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
     select last_value(ts order by ts) from t1;
 
@@ -219,6 +225,8 @@ order by ordered_host;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze 
 select
     last_value(host order by ts) as ordered_host,
