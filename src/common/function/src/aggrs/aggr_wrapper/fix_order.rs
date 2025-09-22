@@ -29,6 +29,12 @@ use crate::aggrs::aggr_wrapper::StateWrapper;
 #[derive(Debug)]
 pub struct FixStateUdafOrderingAnalyzer;
 
+impl FixStateUdafOrderingAnalyzer {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
 impl AnalyzerRule for FixStateUdafOrderingAnalyzer {
     fn name(&self) -> &str {
         "FixStateUdafOrderingAnalyzer"

@@ -575,6 +575,7 @@ async fn test_last_value_order_by_udaf() {
 
     let state_func: Arc<AggregateUDF> =
         Arc::new(StateWrapper::new(last_value.clone()).unwrap().into());
+
     let expected_aggr_state_plan = LogicalPlan::Aggregate(
         Aggregate::try_new(
             Arc::new(dummy_table_scan()),
@@ -594,11 +595,14 @@ async fn test_last_value_order_by_udaf() {
         )
         .unwrap(),
     );
-    // type coerced so avg aggr function can function correctly
-    let coerced_aggr_state_plan = TypeCoercion::new()
+    // fix the ordering & distinct info of the state udaf, as they are not set in the wrapper.
+    let fixed_aggr_state_plan = FixStateUdafOrderingAnalyzer {}
         .analyze(expected_aggr_state_plan.clone(), &Default::default())
         .unwrap();
-    assert_eq!(&res.lower_state, &coerced_aggr_state_plan);
+
+    assert_eq!(&res.lower_state, &fixed_aggr_state_plan);
+
+    // schema is the state fields of the last_value udaf
     assert_eq!(
         res.lower_state.schema().as_arrow(),
         &arrow_schema::Schema::new(vec![Field::new(
@@ -606,7 +610,7 @@ async fn test_last_value_order_by_udaf() {
             DataType::Struct(
                 vec![
                     Field::new("last_value[last_value]", DataType::Int64, true),
-                    // TODO(discord9): where is the ordering field?
+                    Field::new("number", DataType::Int64, true), // ordering field is added to state fields too
                     Field::new("is_set", DataType::Boolean, true)
                 ]
                 .into()
@@ -614,7 +618,6 @@ async fn test_last_value_order_by_udaf() {
             true,
         )])
     );
-    return;
 
     let expected_merge_fn = MergeWrapper::new(
         last_value.clone(),
@@ -626,29 +629,30 @@ async fn test_last_value_order_by_udaf() {
                 )],
             )
             .schema(Arc::new(dummy_table_scan().schema().as_arrow().clone()))
-            .alias("avg(number)")
+            .alias("last_value(number) ORDER BY [number ASC NULLS FIRST]")
             .build()
             .unwrap(),
         ),
-        // coerced to float64
-        vec![DataType::Float64],
+        vec![DataType::Int64],
     )
     .unwrap();
 
     let expected_merge_plan = LogicalPlan::Aggregate(
         Aggregate::try_new(
-            Arc::new(coerced_aggr_state_plan.clone()),
+            Arc::new(fixed_aggr_state_plan.clone()),
             vec![],
             vec![
                 Expr::AggregateFunction(AggregateFunction::new_udf(
                     Arc::new(expected_merge_fn.into()),
-                    vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
+                    vec![Expr::Column(Column::new_unqualified(
+                        "__last_value_state(number) ORDER BY [number ASC NULLS FIRST]",
+                    ))],
                     false,
                     None,
                     vec![],
                     None,
                 ))
-                .alias("avg(number)"),
+                .alias("last_value(number) ORDER BY [number ASC NULLS FIRST]"),
             ],
         )
         .unwrap(),
@@ -656,7 +660,7 @@ async fn test_last_value_order_by_udaf() {
     assert_eq!(&res.upper_merge, &expected_merge_plan);
 
     let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
-        .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
+        .create_physical_plan(&fixed_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
     let aggr_exec = phy_aggr_state_plan
@@ -664,6 +668,7 @@ async fn test_last_value_order_by_udaf() {
         .downcast_ref::<AggregateExec>()
         .unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+    dbg!(&aggr_func_expr.state_fields());
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
     // evaluate the state function
@@ -672,15 +677,16 @@ async fn test_last_value_order_by_udaf() {
 
     state_accum.update_batch(&values).unwrap();
     let state = state_accum.state().unwrap();
-    assert_eq!(state.len(), 2);
-    assert_eq!(state[0], ScalarValue::UInt64(Some(3)));
-    assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
+
+    assert_eq!(state.len(), 2); // last value weird optimization(or maybe bug?) that it only has 2 state fields now
+    assert_eq!(state[0], ScalarValue::Float64(Some(3.)));
+    assert_eq!(state[1], ScalarValue::Boolean(Some(true)));
 
     let eval_res = state_accum.evaluate().unwrap();
     let expected = Arc::new(
         StructArray::try_new(
             vec![
-                Field::new("avg[count]", DataType::UInt64, true),
+                Field::new("last_value[last_value]", DataType::UInt64, true),
                 Field::new("avg[sum]", DataType::Float64, true),
             ]
             .into(),
@@ -693,6 +699,7 @@ async fn test_last_value_order_by_udaf() {
         .unwrap(),
     );
     assert_eq!(eval_res, ScalarValue::Struct(expected));
+    return;
 
     let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&res.upper_merge, &ctx.state())

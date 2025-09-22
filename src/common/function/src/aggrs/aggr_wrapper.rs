@@ -297,6 +297,34 @@ impl StateWrapper {
     }
 }
 
+#[derive(Debug)]
+pub struct FixedLastValueAccum {
+    inner: Box<dyn Accumulator>,
+}
+
+impl Accumulator for FixedLastValueAccum {
+    fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
+        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
+        self.inner.evaluate()
+    }
+
+    fn merge_batch(&mut self, states: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
+        self.inner.merge_batch(states)
+    }
+
+    fn update_batch(&mut self, values: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
+        self.inner.update_batch(values)
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
+        self.inner.state()
+    }
+}
+
 impl AggregateUDFImpl for StateWrapper {
     fn accumulator<'a, 'b>(
         &'a self,
@@ -317,6 +345,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
+        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
 
@@ -375,7 +404,7 @@ impl AggregateUDFImpl for StateWrapper {
             ordering_fields: dbg!(args.ordering_fields),
             is_distinct: args.is_distinct,
         };
-        dbg!(self.inner.state_fields(state_fields_args))
+        self.inner.state_fields(state_fields_args)
     }
 
     /// The state function's signature is the same as the original aggregate function's signature,
