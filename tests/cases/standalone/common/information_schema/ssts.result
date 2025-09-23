@@ -1,0 +1,153 @@
+DESC TABLE information_schema.ssts_manifest;
+
++------------------+---------------------+-----+------+---------+---------------+
+| Column           | Type                | Key | Null | Default | Semantic Type |
++------------------+---------------------+-----+------+---------+---------------+
+| table_dir        | String              |     | NO   |         | FIELD         |
+| region_id        | UInt64              |     | NO   |         | FIELD         |
+| table_id         | UInt32              |     | NO   |         | FIELD         |
+| region_number    | UInt32              |     | NO   |         | FIELD         |
+| region_group     | UInt8               |     | NO   |         | FIELD         |
+| region_sequence  | UInt32              |     | NO   |         | FIELD         |
+| file_id          | String              |     | NO   |         | FIELD         |
+| level            | UInt8               |     | NO   |         | FIELD         |
+| file_path        | String              |     | NO   |         | FIELD         |
+| file_size        | UInt64              |     | NO   |         | FIELD         |
+| index_file_path  | String              |     | YES  |         | FIELD         |
+| index_file_size  | UInt64              |     | YES  |         | FIELD         |
+| num_rows         | UInt64              |     | NO   |         | FIELD         |
+| num_row_groups   | UInt64              |     | NO   |         | FIELD         |
+| min_ts           | TimestampNanosecond |     | YES  |         | FIELD         |
+| max_ts           | TimestampNanosecond |     | YES  |         | FIELD         |
+| sequence         | UInt64              |     | YES  |         | FIELD         |
+| origin_region_id | UInt64              |     | NO   |         | FIELD         |
+| node_id          | UInt64              |     | YES  |         | FIELD         |
+| visible          | Boolean             |     | NO   |         | FIELD         |
++------------------+---------------------+-----+------+---------+---------------+
+
+DESC TABLE information_schema.ssts_storage;
+
++------------------+----------------------+-----+------+---------+---------------+
+| Column           | Type                 | Key | Null | Default | Semantic Type |
++------------------+----------------------+-----+------+---------+---------------+
+| file_path        | String               |     | NO   |         | FIELD         |
+| file_size        | UInt64               |     | YES  |         | FIELD         |
+| last_modified_ms | TimestampMillisecond |     | YES  |         | FIELD         |
+| node_id          | UInt64               |     | YES  |         | FIELD         |
++------------------+----------------------+-----+------+---------+---------------+
+
+CREATE TABLE sst_case (
+  a INT PRIMARY KEY,
+  b STRING SKIPPING INDEX,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+INSERT INTO sst_case VALUES
+  (500, 'a', 1),
+  (1500, 'b', 2),
+  (2500, 'c', 3);
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE('sst_case');
+
++-------------------------------+
+| ADMIN FLUSH_TABLE('sst_case') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+-- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
+SELECT * FROM information_schema.ssts_manifest order by file_path;
+
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+SELECT * FROM information_schema.ssts_storage order by file_path;
+
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+| file_path                                                                                   | file_size | last_modified_ms | node_id |
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+
+INSERT INTO sst_case VALUES
+  (24, 'foo', 100),
+  (124, 'bar', 200),
+  (1024, 'baz', 300);
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE('sst_case');
+
++-------------------------------+
+| ADMIN FLUSH_TABLE('sst_case') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}) <DATETIME>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+-- SQLNESS REPLACE (/public/\d+) /public/<TABLE_ID>
+SELECT * FROM information_schema.ssts_manifest order by file_path;
+
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| table_dir                  | region_id     | table_id | region_number | region_group | region_sequence | file_id                              | level | file_path                                                                              | file_size | index_file_path                                                                             | index_file_size | num_rows | num_row_groups | min_ts                  | max_ts                  | sequence | origin_region_id | node_id | visible |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
+| data/greptime/public/<TABLE_ID>/ |<NUM>|<NUM>|<NUM>|<NUM>|<NUM>| <UUID> |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet |<NUM>| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |<NUM>|<NUM>|<NUM>| <DATETIME> | <DATETIME> |<NUM>|<NUM>|<NUM>| true    |
++----------------------------+---------------+----------+---------------+--------------+-----------------+--------------------------------------+-------+----------------------------------------------------------------------------------------+-----------+---------------------------------------------------------------------------------------------+-----------------+----------+----------------+-------------------------+-------------------------+----------+------------------+---------+---------+
+
+-- SQLNESS REPLACE (\s+\d+\s+) <NUM>
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) <UUID>
+-- SQLNESS REPLACE (/public/\d+/\d+_\d+) /public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>
+SELECT * FROM information_schema.ssts_storage order by file_path;
+
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+| file_path                                                                                   | file_size | last_modified_ms | node_id |
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/<UUID>.parquet      |           |                  |<NUM>|
+| data/greptime/public/<TABLE_ID>/<REGION_ID>_<REGION_NUMBER>/index/<UUID>.puffin |           |                  |<NUM>|
++---------------------------------------------------------------------------------------------+-----------+------------------+---------+
+
+DROP TABLE sst_case;
+
+Affected Rows: 0
+
