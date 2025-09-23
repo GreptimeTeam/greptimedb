@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::Parser;
 use cmd::error::{self, Result};
@@ -23,7 +23,6 @@ use mito2::config::MitoConfig;
 use mito2::read::Source;
 use mito2::sst::file::{FileHandle, FileId, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
-use mito2::sst::location;
 use mito2::sst::parquet::{WriteOptions, PARQUET_METADATA_KEY};
 use mito2::{build_access_layer, Metrics, OperationType, SstWriteRequest};
 use object_store::ObjectStore;
@@ -49,10 +48,17 @@ pub struct Command {
     /// Target SST file path in object-store; its parent directory is used as destination region dir.
     #[clap(long, value_name = "PATH")]
     pub target: String,
+
+    /// Verbose output
+    #[clap(short, long, default_value_t = false)]
+    pub verbose: bool,
 }
 
 impl Command {
     pub async fn run(&self) -> Result<()> {
+        if self.verbose {
+            common_telemetry::init_default_ut_logging();
+        }
         // Build object store from config
         let cfg_str = std::fs::read_to_string(&self.config).map_err(|e| {
             error::IllegalConfigSnafu {
@@ -165,13 +171,18 @@ impl Command {
 
         assert_eq!(infos.len(), 1);
         let dst_file_id = infos[0].file_id;
-        let dts_file_path = format!("{}/{}", self.target, dst_file_id.as_parquet(),);
+        let dst_file_path = format!("{}/{}", self.target, dst_file_id.as_parquet(),);
         // Report results
         println!(
             "Write complete, dest file: {}, rows={}, size={} bytes, build_reader={:?}, metrics: {:?}",
-            dts_file_path,
+            dst_file_path,
             total_rows, file_size, reader_build_elapsed, metrics
         );
+
+        object_store
+            .delete(&dst_file_path)
+            .await
+            .expect(&format!("Failed to delete dest file: {}", dst_file_path));
         Ok(())
     }
 }
