@@ -21,9 +21,7 @@ use std::sync::Arc;
 use common_query::error::Result;
 use datafusion::catalog::TableFunction;
 use datafusion_expr::{Signature, Volatility};
-use datafusion_postgres::pg_catalog::{
-    create_format_type_udf, create_pg_get_partkeydef_udf, has_privilege_udf, PgCatalogStaticTables,
-};
+use datafusion_postgres::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::scalars::{Scalar, ScalarVectorBuilder};
@@ -152,29 +150,22 @@ impl PGCatalogFunction {
         registry.register_scalar(CurrentSchemaFunction);
         registry.register_scalar(CurrentSchemasFunction);
         registry.register_scalar(SessionUserFunction);
-        registry.register(create_format_type_udf());
-        registry.register(create_pg_get_partkeydef_udf());
-        registry.register(has_privilege_udf::create_has_privilege_udf(
+        registry.register(pg_catalog::format_type::create_format_type_udf());
+        registry.register(pg_catalog::create_pg_get_partkeydef_udf());
+        registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
             "has_table_privilege",
         ));
-        registry.register(has_privilege_udf::create_has_privilege_udf(
-            "pg_catalog.has_table_privilege",
-        ));
-        registry.register(has_privilege_udf::create_has_privilege_udf(
+        registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
             "has_schema_privilege",
         ));
-        registry.register(has_privilege_udf::create_has_privilege_udf(
-            "pg_catalog.has_schema_privilege",
-        ));
-        registry.register(has_privilege_udf::create_has_privilege_udf(
+        registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
             "has_any_column_privilege",
-        ));
-        registry.register(has_privilege_udf::create_has_privilege_udf(
-            "pg_catalog.has_any_column_privilege",
         ));
         registry.register_table_function(TableFunction::new(
             "pg_get_keywords".to_string(),
             static_tables.pg_get_keywords.clone(),
         ));
+        registry.register(pg_catalog::create_pg_relation_is_publishable_udf());
+        registry.register(pg_catalog::create_pg_get_statisticsobjdef_columns_udf());
     }
 }
