@@ -109,6 +109,7 @@ mod tests {
         new_batch_with_binary, new_source, sst_file_handle, sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
+    use crate::Metrics;
 
     const FILE_DIR: &str = "/";
 
@@ -165,7 +166,7 @@ mod tests {
         .await;
 
         let info = writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);
@@ -222,7 +223,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);
@@ -293,7 +294,7 @@ mod tests {
         .await;
 
         let sst_info = writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);
@@ -334,7 +335,7 @@ mod tests {
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);
@@ -389,7 +390,7 @@ mod tests {
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);
@@ -427,7 +428,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all(source, None, &write_opts, &mut Metrics::default())
             .await
             .unwrap()
             .remove(0);

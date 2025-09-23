@@ -1117,7 +1117,6 @@ impl ParquetReader {
         self.context.read_format().metadata()
     }
 
-    #[cfg(test)]
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
     }

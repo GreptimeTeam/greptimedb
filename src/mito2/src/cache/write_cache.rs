@@ -40,6 +40,7 @@ use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::Metrics;
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -140,7 +141,12 @@ impl WriteCache {
         .await;
 
         let sst_info = writer
-            .write_all(write_request.source, write_request.max_sequence, write_opts)
+            .write_all(
+                write_request.source,
+                write_request.max_sequence,
+                write_opts,
+                &mut Metrics::default(),
+            )
             .await?;
 
         timer.stop_and_record();

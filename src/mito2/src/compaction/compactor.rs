@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
+use crate::access_layer::{AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
 use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
@@ -340,6 +340,7 @@ impl Compactor for DefaultCompactor {
                             bloom_filter_index_config,
                         },
                         &write_opts,
+                        &mut Metrics::default(),
                     )
                     .await?
                     .into_iter()

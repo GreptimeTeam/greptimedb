@@ -1825,6 +1825,8 @@ dependencies = [
  "mito2",
  "moka",
  "nu-ansi-term",
+ "object-store",
+ "parquet",
  "plugins",
  "prometheus",
  "prost 0.13.3",

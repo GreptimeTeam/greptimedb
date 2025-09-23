@@ -21,6 +21,8 @@ use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_version::version;
 use servers::install_ring_crypto_provider;
 
+pub mod objbench;
+
 #[derive(Parser)]
 #[command(name = "greptime", author, version, long_version = version(), about)]
 #[command(propagate_version = true)]

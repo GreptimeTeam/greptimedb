@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -45,6 +46,7 @@ use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::Metrics;
 
 /// Parquet SST writer.
 pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
@@ -156,13 +158,14 @@ where
         mut source: Source,
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
+        metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let write_format =
             WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(res) = self
-            .write_next_batch(&mut source, &write_format, opts)
+            .write_next_batch(&mut source, &write_format, opts, metrics)
             .await
             .transpose()
         {
@@ -189,9 +192,10 @@ where
             return Ok(smallvec![]);
         };
 
+        let close_start = Instant::now();
         arrow_writer.flush().await.context(WriteParquetSnafu)?;
-
         let file_meta = arrow_writer.close().await.context(WriteParquetSnafu)?;
+        metrics.close += close_start.elapsed();
         let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
 
         // Safety: num rows > 0 so we must have min/max.
@@ -238,17 +242,23 @@ where
         source: &mut Source,
         write_format: &WriteFormat,
         opts: &WriteOptions,
+        metrics: &mut Metrics,
     ) -> Result<Option<Batch>> {
+        let read_start = Instant::now();
         let Some(batch) = source.next_batch().await? else {
             return Ok(None);
         };
+        metrics.read += read_start.elapsed();
 
         let arrow_batch = write_format.convert_batch(&batch)?;
+
+        let write_start = Instant::now();
         self.maybe_init_writer(write_format.arrow_schema(), opts)
             .await?
             .write(&arrow_batch)
             .await
             .context(WriteParquetSnafu)?;
+        metrics.write += write_start.elapsed();
         Ok(Some(batch))
     }
 

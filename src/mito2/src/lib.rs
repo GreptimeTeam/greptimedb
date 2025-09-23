@@ -44,6 +44,12 @@ mod time_provider;
 pub mod wal;
 mod worker;
 
+// Public re-exports for tooling convenience
+pub use access_layer::{
+    build_access_layer, AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest,
+};
+pub use cache::{CacheManager, CacheManagerRef};
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document
 ///

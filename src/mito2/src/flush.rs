@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::{mpsc, watch};
 
-use crate::access_layer::{AccessLayerRef, OperationType, SstWriteRequest};
+use crate::access_layer::{AccessLayerRef, Metrics, OperationType, SstWriteRequest};
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -366,7 +366,7 @@ impl RegionFlushTask {
 
             let ssts_written = self
                 .access_layer
-                .write_sst(write_request, &write_opts)
+                .write_sst(write_request, &write_opts, &mut Metrics::default())
                 .await?;
             if ssts_written.is_empty() {
                 // No data written.

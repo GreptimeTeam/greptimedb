@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -41,6 +42,14 @@ use crate::sst::parquet::{SstInfo, WriteOptions};
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
+
+#[derive(Debug, Default)]
+pub struct Metrics {
+    pub read: Duration,
+    pub write: Duration,
+
+    pub close: Duration,
+}
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
@@ -121,10 +130,11 @@ impl AccessLayer {
     /// Writes a SST with specific `file_id` and `metadata` to the layer.
     ///
     /// Returns the info of the SST. If no data written, returns None.
-    pub(crate) async fn write_sst(
+    pub async fn write_sst(
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
+        metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
@@ -168,7 +178,7 @@ impl AccessLayer {
             )
             .await;
             writer
-                .write_all(request.source, request.max_sequence, write_opts)
+                .write_all(request.source, request.max_sequence, write_opts, metrics)
                 .await?
         };
 
@@ -189,28 +199,53 @@ impl AccessLayer {
     }
 }
 
+/// Helper to build an [AccessLayerRef] with internal index managers.
+///
+/// This is a convenience constructor intended for tooling that needs to
+/// interact with SSTs without wiring all indexing internals manually.
+pub async fn build_access_layer(
+    region_dir: &str,
+    object_store: ObjectStore,
+    config: &crate::config::MitoConfig,
+) -> Result<AccessLayerRef> {
+    let puffin_manager_factory = PuffinManagerFactory::new(
+        &config.index.aux_path,
+        config.index.staging_size.as_bytes(),
+        Some(config.index.write_buffer_size.as_bytes() as _),
+        config.index.staging_ttl,
+    )
+    .await?;
+    let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path).await?;
+    Ok(Arc::new(AccessLayer::new(
+        region_dir,
+        object_store,
+        puffin_manager_factory,
+        intermediate_manager,
+    )))
+}
+
 /// `OperationType` represents the origin of the `SstWriteRequest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum OperationType {
+pub enum OperationType {
     Flush,
     Compact,
 }
 
 /// Contents to build a SST.
-pub(crate) struct SstWriteRequest {
-    pub(crate) op_type: OperationType,
-    pub(crate) metadata: RegionMetadataRef,
-    pub(crate) source: Source,
-    pub(crate) cache_manager: CacheManagerRef,
+pub struct SstWriteRequest {
+    pub op_type: OperationType,
+    pub metadata: RegionMetadataRef,
+    pub source: Source,
+    pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
-    pub(crate) storage: Option<String>,
-    pub(crate) max_sequence: Option<SequenceNumber>,
+    pub storage: Option<String>,
+    pub max_sequence: Option<SequenceNumber>,
 
     /// Configs for index
-    pub(crate) index_options: IndexOptions,
-    pub(crate) inverted_index_config: InvertedIndexConfig,
-    pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_index_config: BloomFilterConfig,
+    pub index_options: IndexOptions,
+    pub inverted_index_config: InvertedIndexConfig,
+    pub fulltext_index_config: FulltextIndexConfig,
+    pub bloom_filter_index_config: BloomFilterConfig,
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
