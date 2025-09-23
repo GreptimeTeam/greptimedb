@@ -19,10 +19,9 @@ use std::sync::Arc;
 use common_query::error::Result;
 use datafusion::arrow::compute::is_null;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_common::utils;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 
 const NAME: &str = "isnull";
 
@@ -53,8 +52,7 @@ impl Function for IsNullFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let [arg0] = extract_args(self.name(), &args)?;
         let result = is_null(&arg0)?;
 
         Ok(ColumnarValue::Array(Arc::new(result)))

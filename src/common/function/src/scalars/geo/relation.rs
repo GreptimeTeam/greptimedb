@@ -18,7 +18,6 @@ use common_query::error::Result;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::utils;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 use geo::algorithm::contains::Contains;
@@ -26,7 +25,7 @@ use geo::algorithm::intersects::Intersects;
 use geo::algorithm::within::Within;
 use geo_types::Geometry;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Test if spatial relationship: contains
@@ -91,8 +90,7 @@ impl<T: StFunction + Display + Send + Sync> Function for T {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
         let wkt_this_vec = arg0.as_string_view();

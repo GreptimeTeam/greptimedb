@@ -19,14 +19,14 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, UInt64Builder};
-use datafusion_common::{DataFusionError, utils};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
 use hyperloglogplus::HyperLogLog;
 
 use crate::aggrs::approximate::hll::HllStateType;
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
 const NAME: &str = "hll_count";
@@ -70,8 +70,7 @@ impl Function for HllCalcFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let [arg0] = extract_args(self.name(), &args)?;
 
         let Some(hll_vec) = arg0.as_binary_opt::<i32>() else {
             return Err(DataFusionError::Execution(format!(

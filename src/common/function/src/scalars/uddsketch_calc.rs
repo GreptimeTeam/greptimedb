@@ -19,13 +19,13 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
-use datafusion_common::{DataFusionError, utils};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use uddsketch::UDDSketch;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
 const NAME: &str = "uddsketch_calc";
@@ -74,8 +74,7 @@ impl Function for UddSketchCalcFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let Some(percentages) = arg0.as_primitive_opt::<Float64Type>() else {
             return Err(DataFusionError::Execution(format!(

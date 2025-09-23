@@ -20,7 +20,6 @@ use common_query::error::{self, Result};
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::utils;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
@@ -28,7 +27,7 @@ use geo::{Area, Distance, Haversine};
 use geo_types::Geometry;
 use snafu::ResultExt;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
@@ -53,8 +52,7 @@ impl Function for STDistance {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
         let wkt_this_vec = arg0.as_string_view();
@@ -107,8 +105,7 @@ impl Function for STDistanceSphere {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
         let wkt_this_vec = arg0.as_string_view();
@@ -171,8 +168,7 @@ impl Function for STArea {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0] = utils::take_function_args(self.name(), args)?;
+        let [arg0] = extract_args(self.name(), &args)?;
 
         let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
         let wkt_vec = arg0.as_string_view();

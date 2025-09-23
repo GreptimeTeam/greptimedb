@@ -15,16 +15,16 @@
 use std::sync::{Arc, LazyLock};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion_common::ScalarValue;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
-use datafusion_common::{ScalarValue, utils};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use derive_more::Display;
 use s2::cellid::{CellID, MAX_LEVEL};
 use s2::latlng::LatLng;
 use snafu::ensure;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::helpers;
 use crate::scalars::geo::helpers::ensure_and_coerce;
 
@@ -69,8 +69,7 @@ impl Function for S2LatLngToCell {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let arg0 = helpers::cast::<Float64Type>(&arg0)?;
         let lat_vec = arg0.as_primitive::<Float64Type>();
@@ -129,8 +128,7 @@ impl Function for S2CellLevel {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = UInt64Builder::with_capacity(size);
@@ -168,8 +166,7 @@ impl Function for S2CellToToken {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = StringViewBuilder::with_capacity(size);
@@ -207,8 +204,7 @@ impl Function for S2CellParent {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec, levels] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec, levels] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = UInt64Builder::with_capacity(size);

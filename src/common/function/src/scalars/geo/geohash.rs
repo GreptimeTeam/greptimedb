@@ -21,13 +21,13 @@ use common_query::error::{self, Result};
 use datafusion::arrow::array::{Array, AsArray, ListBuilder, StringViewBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, UInt8Type};
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{DataFusionError, utils};
+use datafusion_common::DataFusionError;
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use geohash::Coord;
 use snafu::ResultExt;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::helpers;
 
 fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
@@ -77,8 +77,7 @@ impl Function for GeohashFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [lat_vec, lon_vec, resolutions] = utils::take_function_args(self.name(), args)?;
+        let [lat_vec, lon_vec, resolutions] = extract_args(self.name(), &args)?;
 
         let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();
@@ -169,8 +168,7 @@ impl Function for GeohashNeighboursFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [lat_vec, lon_vec, resolutions] = utils::take_function_args(self.name(), args)?;
+        let [lat_vec, lon_vec, resolutions] = extract_args(self.name(), &args)?;
 
         let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();

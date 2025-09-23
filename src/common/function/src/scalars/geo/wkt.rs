@@ -19,14 +19,13 @@ use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
-use datafusion_common::utils;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use derive_more::Display;
 use geo_types::{Geometry, Point};
 use snafu::ResultExt;
 use wkt::{ToWkt, TryFromWkt};
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::helpers;
 
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
@@ -63,8 +62,7 @@ impl Function for LatLngToPointWkt {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
         let arg0 = helpers::cast::<Float64Type>(&arg0)?;
         let lat_vec = arg0.as_primitive::<Float64Type>();

@@ -23,6 +23,7 @@ use common_query::error::{ExecuteSnafu, Result};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::vectors::VectorRef;
@@ -152,4 +153,13 @@ pub(crate) fn find_function_context(
         ));
     };
     Ok(x)
+}
+
+/// Extract UDF arguments (as Arrow's [ArrayRef]) from [ScalarFunctionArgs] directly.
+pub(crate) fn extract_args<const N: usize>(
+    name: &str,
+    args: &ScalarFunctionArgs,
+) -> datafusion_common::Result<[ArrayRef; N]> {
+    ColumnarValue::values_to_arrays(&args.args)
+        .and_then(|x| datafusion_common::utils::take_function_args(name, x))
 }
