@@ -137,6 +137,13 @@ impl StateMergeHelper {
         let mut lower_aggr_exprs = vec![];
         let mut upper_aggr_exprs = vec![];
 
+        let upper_group_exprs = aggr
+            .group_expr
+            .iter()
+            .map(|c| c.qualified_name())
+            .map(|(r, c)| Expr::Column(Column::new(r, c)))
+            .collect();
+
         for aggr_expr in aggr.aggr_expr.iter() {
             let Some(aggr_func) = get_aggr_func(aggr_expr) else {
                 return Err(datafusion_common::DataFusionError::NotImplemented(format!(
@@ -200,7 +207,12 @@ impl StateMergeHelper {
 
         let mut upper = aggr.clone();
         let aggr_plan = LogicalPlan::Aggregate(aggr);
+
         upper.aggr_expr = upper_aggr_exprs;
+
+        // change group expr to refer to the output group exprs of lower plan
+        upper.group_expr = upper_group_exprs;
+
         upper.input = Arc::new(lower_plan.clone());
         // upper schema's output schema should be the same as the original aggregate plan's output schema
         let upper_check = upper;

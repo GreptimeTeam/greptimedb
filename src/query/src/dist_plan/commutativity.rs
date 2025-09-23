@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, aggr_state_func_name};
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_telemetry::debug;
+use datafusion::error::Result as DfResult;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -121,15 +122,18 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
-    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<AliasMapping>) -> Commutativity {
+    pub fn check_plan(
+        plan: &LogicalPlan,
+        partition_cols: Option<AliasMapping>,
+    ) -> DfResult<Commutativity> {
         let partition_cols = partition_cols.unwrap_or_default();
 
-        match plan {
+        let comm = match plan {
             LogicalPlan::Projection(proj) => {
                 for expr in &proj.expr {
                     let commutativity = Self::check_expr(expr);
                     if !matches!(commutativity, Commutativity::Commutative) {
-                        return commutativity;
+                        return Ok(commutativity);
                     }
                 }
                 Commutativity::Commutative
@@ -142,24 +146,27 @@ impl Categorizer {
                 let matches_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
                 if !matches_partition && is_all_steppable {
                     debug!("Plan is steppable: {plan}");
-                    return Commutativity::TransformedCommutative {
+                    return Ok(Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
-                            ret.ok().map(|s| TransformerAction {
+                            ret.inspect_err(|err| {
+                                common_telemetry::error!("Failed to step aggregate plan: {err}");
+                            })
+                            .map(|s| TransformerAction {
                                 extra_parent_plans: s.extra_parent_plans,
                                 new_child_plan: s.new_child_plan,
                             })
                         })),
-                    };
+                    });
                 }
                 if !matches_partition {
-                    return Commutativity::NonCommutative;
+                    return Ok(Commutativity::NonCommutative);
                 }
                 for expr in &aggr.aggr_expr {
                     let commutativity = Self::check_expr(expr);
                     if !matches!(commutativity, Commutativity::Commutative) {
-                        return commutativity;
+                        return Ok(commutativity);
                     }
                 }
                 // all group by expressions are partition columns can push down, unless
@@ -170,7 +177,7 @@ impl Categorizer {
             }
             LogicalPlan::Sort(_) => {
                 if partition_cols.is_empty() {
-                    return Commutativity::Commutative;
+                    return Ok(Commutativity::Commutative);
                 }
 
                 // sort plan needs to consider column priority
@@ -219,7 +226,9 @@ impl Categorizer {
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
             LogicalPlan::Copy(_) => Commutativity::Unsupported,
             LogicalPlan::RecursiveQuery(_) => Commutativity::Unsupported,
-        }
+        };
+
+        Ok(comm)
     }
 
     pub fn check_extension_plan(
@@ -334,7 +343,7 @@ impl Categorizer {
 pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
 
 /// Returns transformer action that need to be applied
-pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<TransformerAction>>;
+pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> DfResult<TransformerAction>>;
 
 /// The Action that a transformer should take on the plan.
 pub struct TransformerAction {
@@ -369,7 +378,7 @@ mod test {
             fetch: None,
         });
         assert!(matches!(
-            Categorizer::check_plan(&plan, Some(Default::default())),
+            Categorizer::check_plan(&plan, Some(Default::default())).unwrap(),
             Commutativity::Commutative
         ));
     }
