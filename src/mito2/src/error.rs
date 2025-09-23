@@ -29,13 +29,12 @@ use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::ManifestVersion;
 use store_api::logstore::provider::Provider;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
-use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
 #[derive(Snafu)]
@@ -986,6 +985,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid partition expression: {}", expr))]
+    InvalidPartitionExpr {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
     #[snafu(display("Failed to decode bulk wal entry"))]
     ConvertBulkWalEntry {
         #[snafu(implicit)]
@@ -1159,6 +1166,7 @@ impl ErrorExt for Error {
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
             ApplyBloomFilterIndex { source, .. } => source.status_code(),
+            InvalidPartitionExpr { source, .. } => source.status_code(),
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }

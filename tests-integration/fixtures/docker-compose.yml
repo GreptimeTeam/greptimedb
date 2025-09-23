@@ -89,10 +89,26 @@ services:
       - 5432:5432
     volumes:
       - ~/apps/postgres:/var/lib/postgresql/data
+      - ./certs:/tmp/certs:ro
+      - ./postgres/tls/pg_hba.conf:/var/lib/postgresql/pg_hba.conf
     environment:
       - POSTGRES_USER=greptimedb
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=admin
+    # Hack: Ensures certs are owned by database user with 600 permissions.
+    command: >
+      bash -c "
+        mkdir -p /certs &&
+        cp /tmp/certs/* /certs &&
+        chown -R postgres:postgres /certs &&
+        chmod 600 /certs/*.key &&
+        chmod 644 /certs/*.crt &&
+        exec docker-entrypoint.sh postgres
+        -c hba_file=/var/lib/postgresql/pg_hba.conf
+        -c ssl=on
+        -c ssl_cert_file=/certs/server.crt
+        -c ssl_key_file=/certs/server.key
+        -c ssl_ca_file=/certs/root.crt"
 
   postgres15:
     image: docker.io/postgres:15-alpine
@@ -106,13 +122,13 @@ services:
         - POSTGRES_DB=postgres
         - POSTGRES_PASSWORD=admin
 
-
   mysql:
     image: greptime/mysql:5.7
     ports:
       - 3306:3306
     volumes:
-      - ~/apps/mysql:/var/lib/mysql
+      - ./certs:/certs:ro
+      - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
     environment:
       - MYSQL_DATABASE=mysql
       - MYSQL_USER=greptimedb

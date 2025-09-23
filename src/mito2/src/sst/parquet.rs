@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::storage::FileId;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::sst::file::{FileId, FileTimeRange};
+use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 
 pub(crate) mod file_range;
@@ -43,7 +44,7 @@ pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
 
 /// Parquet write options.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Buffer size for async writer.
     pub write_buffer_size: ReadableSize,
@@ -753,6 +754,11 @@ mod tests {
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
+                partition_expr: match &metadata.partition_expr {
+                    Some(json_str) => partition::expr::PartitionExpr::from_json_str(json_str)
+                        .expect("partition expression should be valid JSON"),
+                    None => None,
+                },
             },
             Arc::new(NoopFilePurger),
         );

@@ -181,9 +181,10 @@ mod tests {
     use object_store::services::Memory;
     use puffin::blob_metadata::CompressionCodec;
     use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+    use store_api::storage::FileId;
 
     use super::*;
-    use crate::sst::file::{FileId, RegionFileId};
+    use crate::sst::file::RegionFileId;
 
     struct TestFilePathProvider;
 

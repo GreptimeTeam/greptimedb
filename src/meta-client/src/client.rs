@@ -44,8 +44,9 @@ use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
-    RemoveRegionFollowerRequest,
+    AddRegionFollowerRequest, AddTableFollowerRequest, ManageRegionFollowerRequest,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -246,6 +247,10 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 
     async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
 
+    async fn add_table_follower(&self, request: AddTableFollowerRequest) -> Result<()>;
+
+    async fn remove_table_follower(&self, request: RemoveTableFollowerRequest) -> Result<()>;
+
     async fn start(&self, urls: &[&str]) -> Result<()>;
 
     async fn start_with(&self, leader_provider: LeaderProviderRef) -> Result<()>;
@@ -286,39 +291,41 @@ impl ProcedureExecutor for MetaClient {
             .context(meta_error::ExternalSnafu)
     }
 
-    async fn add_region_follower(
+    async fn manage_region_follower(
         &self,
         _ctx: &ExecutorContext,
-        request: AddRegionFollowerRequest,
+        request: ManageRegionFollowerRequest,
     ) -> MetaResult<()> {
         if let Some(region_follower) = &self.region_follower {
-            region_follower
-                .add_region_follower(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)
-        } else {
-            UnsupportedSnafu {
-                operation: "add_region_follower",
+            match request {
+                ManageRegionFollowerRequest::AddRegionFollower(add_region_follower_request) => {
+                    region_follower
+                        .add_region_follower(add_region_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::RemoveRegionFollower(
+                    remove_region_follower_request,
+                ) => {
+                    region_follower
+                        .remove_region_follower(remove_region_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::AddTableFollower(add_table_follower_request) => {
+                    region_follower
+                        .add_table_follower(add_table_follower_request)
+                        .await
+                }
+                ManageRegionFollowerRequest::RemoveTableFollower(remove_table_follower_request) => {
+                    region_follower
+                        .remove_table_follower(remove_table_follower_request)
+                        .await
+                }
             }
-            .fail()
-        }
-    }
-
-    async fn remove_region_follower(
-        &self,
-        _ctx: &ExecutorContext,
-        request: RemoveRegionFollowerRequest,
-    ) -> MetaResult<()> {
-        if let Some(region_follower) = &self.region_follower {
-            region_follower
-                .remove_region_follower(request)
-                .await
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
         } else {
             UnsupportedSnafu {
-                operation: "remove_region_follower",
+                operation: "manage_region_follower",
             }
             .fail()
         }

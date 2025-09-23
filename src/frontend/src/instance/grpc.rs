@@ -43,9 +43,9 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::error::{
-    CatalogSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SubstraitDecodeLogicalPlanSnafu,
-    TableNotFoundSnafu, TableOperationSnafu,
+    CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, IncompleteGrpcRequestSnafu,
+    NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{Instance, attach_timer};
 use crate::metrics::{
@@ -395,14 +395,10 @@ impl Instance {
         let analyzed_plan = state
             .analyzer()
             .execute_and_check(insert_into, state.config_options(), |_, _| {})
-            .context(common_query::error::GeneralDataFusionSnafu)
-            .context(SubstraitDecodeLogicalPlanSnafu)?;
+            .context(DataFusionSnafu)?;
 
         // Optimize the plan
-        let optimized_plan = state
-            .optimize(&analyzed_plan)
-            .context(common_query::error::GeneralDataFusionSnafu)
-            .context(SubstraitDecodeLogicalPlanSnafu)?;
+        let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
 
         let output = SqlQueryHandler::do_exec_plan(self, None, optimized_plan, ctx.clone()).await?;
 

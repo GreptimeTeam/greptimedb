@@ -61,6 +61,7 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
+    "src/standalone",
     "src/servers",
     "src/session",
     "src/sql",
@@ -145,7 +146,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "3e821d0d405e6733690a4e4352812ba2ff780a3e" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -308,6 +309,7 @@ query = { path = "src/query" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
+standalone = { path = "src/standalone" }
 stat = { path = "src/common/stat" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }

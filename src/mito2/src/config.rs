@@ -141,6 +141,10 @@ pub struct MitoConfig {
     /// To align with the old behavior, the default value is 0 (no restrictions).
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
+
+    /// Whether to enable experimental flat format.
+    /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
+    pub enable_experimental_flat_format: bool,
 }
 
 impl Default for MitoConfig {
@@ -177,6 +181,7 @@ impl Default for MitoConfig {
             bloom_filter_index: BloomFilterConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
+            enable_experimental_flat_format: false,
         };
 
         // Adjust buffer and cache size according to system memory if we can.

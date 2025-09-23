@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
@@ -35,7 +36,7 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::node_manager::{
     Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
-use crate::peer::{Peer, PeerLookupService};
+use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
@@ -208,20 +209,16 @@ pub fn new_ddl_context_with_kv_backend(
     }
 }
 
-pub struct NoopPeerLookupService;
+pub struct NoopPeerResolver;
 
 #[async_trait::async_trait]
-impl PeerLookupService for NoopPeerLookupService {
+impl PeerResolver for NoopPeerResolver {
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
-    }
-
-    async fn active_frontends(&self) -> Result<Vec<Peer>> {
-        Ok(vec![])
     }
 }
 
@@ -302,4 +299,40 @@ macro_rules! maybe_skip_postgres15_integration_test {
             return;
         }
     };
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_ETCD_TLS_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_ETCD_TLS_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_etcd_tls_integration_test {
+    () => {
+        if std::env::var("GT_ETCD_TLS_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The etcd with tls endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
+
+/// Returns the directory of the etcd TLS certs.
+pub fn etcd_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("etcd-tls-certs")
+}
+
+/// Returns the directory of the test certs.
+pub fn test_certs_dir() -> PathBuf {
+    let project_path = env!("CARGO_MANIFEST_DIR");
+    let project_path = PathBuf::from(project_path);
+    let base = project_path.ancestors().nth(3).unwrap();
+    base.join("tests-integration")
+        .join("fixtures")
+        .join("certs")
 }

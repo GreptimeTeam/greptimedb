@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ use index::error::Result as IndexResult;
 use index::external_provider::ExternalTempFileProvider;
 use object_store::util::{self, normalize_dir};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, FileId, RegionId};
 use uuid::Uuid;
 
 use crate::access_layer::new_fs_cache_store;
@@ -33,7 +34,6 @@ use crate::metrics::{
     INDEX_INTERMEDIATE_READ_OP_TOTAL, INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
     INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
 };
-use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
 
 const INTERMEDIATE_DIR: &str = "__intm";
@@ -58,14 +58,20 @@ impl IntermediateManager {
         let aux_pb = PathBuf::from(aux_path.as_ref());
         let intm_dir = aux_pb.join(INTERMEDIATE_DIR);
         let deleted_dir = intm_dir.with_extension(format!("deleted-{}", Uuid::new_v4()));
-        if let Err(err) = tokio::fs::rename(&intm_dir, &deleted_dir).await {
-            warn!(err; "Failed to rename intermediate directory");
-        }
-        tokio::spawn(async move {
-            if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await {
-                warn!(err; "Failed to remove intermediate directory");
+        match tokio::fs::rename(&intm_dir, &deleted_dir).await {
+            Ok(_) => {
+                tokio::spawn(async move {
+                    if let Err(err) = tokio::fs::remove_dir_all(deleted_dir).await {
+                        warn!(err; "Failed to remove intermediate directory");
+                    }
+                });
             }
-        });
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    warn!(err; "Failed to rename intermediate directory");
+                }
+            }
+        }
 
         let store = new_fs_cache_store(&normalize_dir(aux_path.as_ref())).await?;
         let store = InstrumentedStore::new(store);
@@ -268,10 +274,9 @@ mod tests {
     use common_test_util::temp_dir;
     use futures::{AsyncReadExt, AsyncWriteExt};
     use regex::Regex;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
-    use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_manager() {

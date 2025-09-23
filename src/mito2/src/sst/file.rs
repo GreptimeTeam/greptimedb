@@ -17,72 +17,68 @@
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::{error, info};
 use common_time::Timestamp;
+use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use snafu::{ResultExt, Snafu};
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
-use uuid::Uuid;
+use store_api::storage::{FileId, RegionId};
 
+use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
+
+/// Custom serde functions for partition_expr field in FileMeta
+fn serialize_partition_expr<S>(
+    partition_expr: &Option<PartitionExpr>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::Error;
+
+    match partition_expr {
+        None => serializer.serialize_none(),
+        Some(expr) => {
+            let json_str = expr.as_json_str().map_err(S::Error::custom)?;
+            serializer.serialize_some(&json_str)
+        }
+    }
+}
+
+fn deserialize_partition_expr<'de, D>(deserializer: D) -> Result<Option<PartitionExpr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let opt_json_str: Option<String> = Option::deserialize(deserializer)?;
+    match opt_json_str {
+        None => Ok(None),
+        Some(json_str) => {
+            if json_str.is_empty() {
+                // Empty string represents explicit "single-region/no-partition" designation
+                Ok(None)
+            } else {
+                // Parse the JSON string to PartitionExpr
+                PartitionExpr::from_json_str(&json_str).map_err(D::Error::custom)
+            }
+        }
+    }
+}
 
 /// Type to store SST level.
 pub type Level = u8;
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: Level = 2;
-
-#[derive(Debug, Snafu, PartialEq)]
-pub struct ParseIdError {
-    source: uuid::Error,
-}
-
-/// Unique id for [SST File].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct FileId(Uuid);
-
-impl FileId {
-    /// Returns a new unique [FileId] randomly.
-    pub fn random() -> FileId {
-        FileId(Uuid::new_v4())
-    }
-
-    /// Parses id from string.
-    pub fn parse_str(input: &str) -> std::result::Result<FileId, ParseIdError> {
-        Uuid::parse_str(input).map(FileId).context(ParseIdSnafu)
-    }
-
-    /// Converts [FileId] as byte slice.
-    pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
-}
-
-impl From<FileId> for Uuid {
-    fn from(value: FileId) -> Self {
-        value.0
-    }
-}
-
-impl fmt::Display for FileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for FileId {
-    type Err = ParseIdError;
-
-    fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
-        FileId::parse_str(s)
-    }
-}
 
 /// Cross-region file id.
 ///
@@ -132,7 +128,7 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
 }
 
 /// Metadata of a SST file.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
     /// Region that created the file. The region id may not be the id of the current region.
@@ -167,6 +163,18 @@ pub struct FileMeta {
     /// This sequence is the only sequence in this file. And it's retrieved from the max
     /// sequence of the rows on generating this file.
     pub sequence: Option<NonZeroU64>,
+    /// Partition expression from the region metadata when the file is created.
+    ///
+    /// This is stored as a PartitionExpr object in memory for convenience,
+    /// but serialized as JSON string for manifest compatibility.
+    /// Compatibility behavior:
+    /// - None: no partition expr was set when the file was created (legacy files).
+    /// - Some(expr): partition expression from region metadata.
+    #[serde(
+        serialize_with = "serialize_partition_expr",
+        deserialize_with = "deserialize_partition_expr"
+    )]
+    pub partition_expr: Option<PartitionExpr>,
 }
 
 impl Debug for FileMeta {
@@ -201,6 +209,7 @@ impl Debug for FileMeta {
                     write!(f, "{}", seq)
                 }
             })
+            .field("partition_expr", &self.partition_expr)
             .finish()
     }
 }
@@ -354,31 +363,79 @@ impl FileHandleInner {
     }
 }
 
+/// Delete
+pub async fn delete_files(
+    region_id: RegionId,
+    file_ids: &[FileId],
+    delete_index: bool,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    // Remove meta of the file from cache.
+    if let Some(cache) = &cache_manager {
+        for file_id in file_ids {
+            cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
+        }
+    }
+    let mut deleted_files = Vec::with_capacity(file_ids.len());
+
+    for file_id in file_ids {
+        let region_file_id = RegionFileId::new(region_id, *file_id);
+        match access_layer.delete_sst(&region_file_id).await {
+            Ok(_) => {
+                deleted_files.push(*file_id);
+            }
+            Err(e) => {
+                error!(e; "Failed to delete sst and index file for {}", region_file_id);
+            }
+        }
+    }
+
+    info!(
+        "Deleted {} files for region {}: {:?}",
+        deleted_files.len(),
+        region_id,
+        deleted_files
+    );
+
+    for file_id in file_ids {
+        let region_file_id = RegionFileId::new(region_id, *file_id);
+
+        if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
+            // Removes index file from the cache.
+            if delete_index {
+                write_cache
+                    .remove(IndexKey::new(region_id, *file_id, FileType::Puffin))
+                    .await;
+            }
+
+            // Remove the SST file from the cache.
+            write_cache
+                .remove(IndexKey::new(region_id, *file_id, FileType::Parquet))
+                .await;
+        }
+
+        // Purges index content in the stager.
+        if let Err(e) = access_layer
+            .puffin_manager_factory()
+            .purge_stager(region_file_id)
+            .await
+        {
+            error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
+                    file_id, region_id);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use datatypes::value::Value;
+    use partition::expr::{PartitionExpr, col};
+
     use super::*;
-
-    #[test]
-    fn test_file_id() {
-        let id = FileId::random();
-        let uuid_str = id.to_string();
-        assert_eq!(id.0.to_string(), uuid_str);
-
-        let parsed = FileId::parse_str(&uuid_str).unwrap();
-        assert_eq!(id, parsed);
-        let parsed = uuid_str.parse().unwrap();
-        assert_eq!(id, parsed);
-    }
-
-    #[test]
-    fn test_file_id_serialization() {
-        let id = FileId::random();
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(format!("\"{id}\""), json);
-
-        let parsed = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, parsed);
-    }
 
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
@@ -392,6 +449,7 @@ mod tests {
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         }
     }
 
@@ -414,5 +472,138 @@ mod tests {
         );
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
         assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_file_meta_with_partition_expr() {
+        let file_id = FileId::random();
+        let partition_expr = PartitionExpr::new(
+            col("a"),
+            partition::expr::RestrictedOp::GtEq,
+            Value::UInt32(10).into(),
+        );
+
+        let file_meta_with_partition = FileMeta {
+            region_id: 0.into(),
+            file_id,
+            time_range: FileTimeRange::default(),
+            level: 0,
+            file_size: 0,
+            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            index_file_size: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: Some(partition_expr.clone()),
+        };
+
+        // Test serialization/deserialization
+        let serialized = serde_json::to_string(&file_meta_with_partition).unwrap();
+        let deserialized: FileMeta = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(file_meta_with_partition, deserialized);
+
+        // Verify the serialized JSON contains the expected partition expression string
+        let serialized_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert!(serialized_value["partition_expr"].as_str().is_some());
+        let partition_expr_json = serialized_value["partition_expr"].as_str().unwrap();
+        assert!(partition_expr_json.contains("\"Column\":\"a\""));
+        assert!(partition_expr_json.contains("\"op\":\"GtEq\""));
+
+        // Test with None (legacy files)
+        let file_meta_none = FileMeta {
+            partition_expr: None,
+            ..file_meta_with_partition.clone()
+        };
+        let serialized_none = serde_json::to_string(&file_meta_none).unwrap();
+        let deserialized_none: FileMeta = serde_json::from_str(&serialized_none).unwrap();
+        assert_eq!(file_meta_none, deserialized_none);
+    }
+
+    #[test]
+    fn test_file_meta_partition_expr_backward_compatibility() {
+        // Test that we can deserialize old JSON format with partition_expr as string
+        let json_with_partition_expr = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 0,
+            "available_indexes": ["InvertedIndex"],
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0,
+            "sequence": null,
+            "partition_expr": "{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"
+        }"#;
+
+        let file_meta: FileMeta = serde_json::from_str(json_with_partition_expr).unwrap();
+        assert!(file_meta.partition_expr.is_some());
+        let expr = file_meta.partition_expr.unwrap();
+        assert_eq!(format!("{}", expr), "a >= 10");
+
+        // Test empty partition expression string
+        let json_with_empty_expr = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 0,
+            "available_indexes": [],
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0,
+            "sequence": null,
+            "partition_expr": ""
+        }"#;
+
+        let file_meta_empty: FileMeta = serde_json::from_str(json_with_empty_expr).unwrap();
+        assert!(file_meta_empty.partition_expr.is_none());
+
+        // Test null partition expression
+        let json_with_null_expr = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 0,
+            "available_indexes": [],
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0,
+            "sequence": null,
+            "partition_expr": null
+        }"#;
+
+        let file_meta_null: FileMeta = serde_json::from_str(json_with_null_expr).unwrap();
+        assert!(file_meta_null.partition_expr.is_none());
+
+        // Test partition expression doesn't exist
+        let json_with_empty_expr = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [
+                {"value": 0, "unit": "Millisecond"},
+                {"value": 0, "unit": "Millisecond"}
+            ],
+            "level": 0,
+            "file_size": 0,
+            "available_indexes": [],
+            "index_file_size": 0,
+            "num_rows": 0,
+            "num_row_groups": 0,
+            "sequence": null
+        }"#;
+
+        let file_meta_empty: FileMeta = serde_json::from_str(json_with_empty_expr).unwrap();
+        assert!(file_meta_empty.partition_expr.is_none());
     }
 }

@@ -27,13 +27,12 @@ use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::task::yield_now;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
-use crate::sst::file::FileId;
 use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
 
 pub(crate) struct RowGroupBase<'a> {

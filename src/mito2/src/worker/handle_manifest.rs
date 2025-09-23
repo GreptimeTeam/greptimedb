@@ -17,6 +17,7 @@
 //! It updates the manifest and applies the changes to the region in background.
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use common_telemetry::{info, warn};
@@ -203,9 +204,16 @@ impl<S> RegionWorkerLoop<S> {
 
         let RegionEditRequest {
             region_id: _,
-            edit,
+            mut edit,
             tx: sender,
         } = request;
+        let file_sequence = region.version_control.committed_sequence() + 1;
+        edit.committed_sequence = Some(file_sequence);
+
+        // For every file added through region edit, we should fill the file sequence
+        for file in &mut edit.files_to_add {
+            file.sequence = NonZeroU64::new(file_sequence);
+        }
 
         // Marks the region as editing.
         if let Err(e) = region.set_editing() {
@@ -229,6 +237,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                 }),
             };
+
             // We don't set state back as the worker loop is already exited.
             if let Err(res) = request_sender
                 .send(WorkerRequestWithTime::new(notify))
@@ -262,9 +271,11 @@ impl<S> RegionWorkerLoop<S> {
 
         if edit_result.result.is_ok() {
             // Applies the edit to the region.
-            region
-                .version_control
-                .apply_edit(edit_result.edit, &[], region.file_purger.clone());
+            region.version_control.apply_edit(
+                Some(edit_result.edit),
+                &[],
+                region.file_purger.clone(),
+            );
         }
 
         // Sets the region as writable.

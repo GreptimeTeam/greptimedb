@@ -19,8 +19,7 @@ use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
-    RemoveRegionFollowerRequest,
+    ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
 };
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
@@ -77,20 +76,12 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .context(query_error::ProcedureServiceSnafu)
     }
 
-    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> QueryResult<()> {
-        self.procedure_executor
-            .add_region_follower(&ExecutorContext::default(), request)
-            .await
-            .map_err(BoxedError::new)
-            .context(query_error::ProcedureServiceSnafu)
-    }
-
-    async fn remove_region_follower(
+    async fn manage_region_follower(
         &self,
-        request: RemoveRegionFollowerRequest,
+        request: ManageRegionFollowerRequest,
     ) -> QueryResult<()> {
         self.procedure_executor
-            .remove_region_follower(&ExecutorContext::default(), request)
+            .manage_region_follower(&ExecutorContext::default(), request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)

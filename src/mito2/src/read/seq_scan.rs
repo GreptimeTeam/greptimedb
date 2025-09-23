@@ -139,6 +139,27 @@ impl SeqScan {
         Ok(Box::new(reader))
     }
 
+    /// Builds a [BoxedRecordBatchStream] from sequential scan for flat format compaction.
+    ///
+    /// # Panics
+    /// Panics if the compaction flag is not set.
+    pub async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
+        assert!(self.compaction);
+
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
+        debug_assert_eq!(1, self.properties.partitions.len());
+        let partition_ranges = &self.properties.partitions[0];
+
+        let reader = Self::merge_all_flat_ranges_for_compaction(
+            &self.stream_ctx,
+            partition_ranges,
+            &part_metrics,
+        )
+        .await?;
+        Ok(reader)
+    }
+
     /// Builds a merge reader that reads all ranges.
     /// Callers MUST not split ranges before calling this method.
     async fn merge_all_ranges_for_compaction(
@@ -170,6 +191,39 @@ impl SeqScan {
             sources.len()
         );
         Self::build_reader_from_sources(stream_ctx, sources, None).await
+    }
+
+    /// Builds a merge reader that reads all flat ranges.
+    /// Callers MUST not split ranges before calling this method.
+    async fn merge_all_flat_ranges_for_compaction(
+        stream_ctx: &Arc<StreamContext>,
+        partition_ranges: &[PartitionRange],
+        part_metrics: &PartitionMetrics,
+    ) -> Result<BoxedRecordBatchStream> {
+        let mut sources = Vec::new();
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            stream_ctx.input.num_files(),
+        ));
+        for part_range in partition_ranges {
+            build_flat_sources(
+                stream_ctx,
+                part_range,
+                true,
+                part_metrics,
+                range_builder_list.clone(),
+                &mut sources,
+            )
+            .await?;
+        }
+
+        common_telemetry::debug!(
+            "Build flat reader to read all parts, region_id: {}, num_part_ranges: {}, num_sources: {}",
+            stream_ctx.input.mapper.metadata().region_id,
+            partition_ranges.len(),
+            sources.len()
+        );
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None).await
     }
 
     /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel

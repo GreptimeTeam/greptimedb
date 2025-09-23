@@ -103,6 +103,7 @@ pub mod prom_store;
 pub mod prometheus;
 pub mod result;
 mod timeout;
+pub mod utils;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
 

@@ -20,11 +20,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::BloomFilterReader;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 
 const INDEX_TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 

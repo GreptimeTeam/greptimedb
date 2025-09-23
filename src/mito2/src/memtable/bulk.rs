@@ -30,7 +30,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
 use tokio::sync::Semaphore;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -47,7 +47,6 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
-use crate::sst::file::FileId;
 use crate::sst::parquet::format::FIXED_POS_COLUMN_NUM;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};

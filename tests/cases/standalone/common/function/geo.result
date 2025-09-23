@@ -24,11 +24,11 @@ SELECT h3_latlng_to_cell(37.76938, -122.3889, 8), h3_latlng_to_cell_string(37.76
 
 SELECT h3_latlng_to_cell(37.76938, -122.3889, 100), h3_latlng_to_cell_string(37.76938, -122.3889, 100);
 
-Error: 3001(EngineExecuteQuery), H3 error: invalid resolution (got Some(100)): out of range
+Error: 3001(EngineExecuteQuery), Execution error: H3 error: invalid resolution (got Some(100)): out of range
 
 SELECT h3_latlng_to_cell(37.76938, -122.3889, -1), h3_latlng_to_cell_string(37.76938, -122.3889, -1);
 
-Error: 3001(EngineExecuteQuery), H3 error: invalid resolution (got Some(255)): out of range
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -1 to type UInt8
 
 SELECT h3_latlng_to_cell(37.76938, -122.3889, 8::Int8), h3_latlng_to_cell_string(37.76938, -122.3889, 8::Int8);
 
@@ -240,11 +240,11 @@ SELECT geohash(37.76938, -122.3889, 11);
 
 SELECT geohash(37.76938, -122.3889, 100);
 
-Error: 3001(EngineExecuteQuery), Invalid geohash resolution 100, expect value: [1, 12]
+Error: 3001(EngineExecuteQuery), Execution error: Invalid geohash resolution 100, valid value range: [1, 12]
 
 SELECT geohash(37.76938, -122.3889, -1);
 
-Error: 3001(EngineExecuteQuery), Invalid geohash resolution -1, expect value: [1, 12]
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -1 to type UInt8
 
 SELECT geohash(37.76938, -122.3889, 11::Int8);
 

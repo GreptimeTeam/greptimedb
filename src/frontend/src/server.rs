@@ -18,6 +18,7 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_telemetry::info;
 use meta_client::MetaClientOptions;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
@@ -25,6 +26,7 @@ use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
+use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
@@ -113,6 +115,11 @@ where
 
         if opts.jaeger.enable {
             builder = builder.with_jaeger_handler(self.instance.clone());
+        }
+
+        if let Some(configurator) = self.plugins.get::<RouterConfigurator>() {
+            info!("Adding extra router from plugins");
+            builder = builder.with_extra_router(configurator.router());
         }
 
         builder

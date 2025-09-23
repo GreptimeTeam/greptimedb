@@ -26,7 +26,7 @@ use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
@@ -34,7 +34,6 @@ use crate::error::{
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::file::FileId;
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::{

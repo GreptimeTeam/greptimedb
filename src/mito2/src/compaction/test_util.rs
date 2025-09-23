@@ -15,8 +15,9 @@
 use std::num::NonZeroU64;
 
 use common_time::Timestamp;
+use store_api::storage::FileId;
 
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
+use crate::sst::file::{FileHandle, FileMeta, Level};
 use crate::test_util::new_noop_file_purger;
 
 /// Test util to create file handles.
@@ -78,6 +79,7 @@ pub fn new_file_handle_with_size_and_sequence(
             num_rows: 0,
             num_row_groups: 0,
             sequence: NonZeroU64::new(sequence),
+            partition_expr: None,
         },
         file_purger,
     )

@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
+use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
@@ -27,15 +29,17 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion_optimizer::{OptimizerContext, OptimizerRule};
+use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::analyzer::utils::{aliased_columns_for, rewrite_merge_sort_exprs};
 use crate::dist_plan::commutativity::{
     Categorizer, Commutativity, partial_commutative_transformer,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -46,7 +50,7 @@ mod test;
 mod fallback;
 mod utils;
 
-pub(crate) use utils::{AliasMapping, AliasTracker};
+pub(crate) use utils::AliasMapping;
 
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
@@ -98,8 +102,42 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // preprocess the input plan
-        let optimizer_context = OptimizerContext::new();
+        let mut config = config.clone();
+        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
+        config.optimizer.filter_null_join_keys = true;
+        let config = Arc::new(config);
+
+        // The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
+        // planning stage, by executing them directly. For example, the `database()` function.
+        // So the `ConfigOptions` here (which is set from the session context) should be present
+        // in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
+        // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
+        // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
+        // to walk around the issue.
+        struct OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext,
+            config: Arc<ConfigOptions>,
+        }
+
+        impl OptimizerConfig for OptimizerContext {
+            fn query_execution_start_time(&self) -> DateTime<Utc> {
+                self.inner.query_execution_start_time()
+            }
+
+            fn alias_generator(&self) -> &Arc<AliasGenerator> {
+                self.inner.alias_generator()
+            }
+
+            fn options(&self) -> Arc<ConfigOptions> {
+                self.config.clone()
+            }
+        }
+
+        let optimizer_context = OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+        };
+
         let plan = SimplifyExpressions::new()
             .rewrite(plan, &optimizer_context)?
             .data;
@@ -229,8 +267,7 @@ struct PlanRewriter {
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
     /// Partition columns of the table in current pass
-    partition_cols: Option<Vec<String>>,
-    alias_tracker: Option<AliasTracker>,
+    partition_cols: Option<AliasMapping>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
     /// ```ignore
@@ -311,7 +348,7 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns());
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -333,7 +370,7 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(plan, self.get_aliased_partition_columns()) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -427,49 +464,31 @@ impl PlanRewriter {
         self.status = RewriterStatus::Unexpanded;
     }
 
-    /// Maybe update alias for original table columns in the plan
-    fn maybe_update_alias(&mut self, node: &LogicalPlan) {
-        if let Some(alias_tracker) = &mut self.alias_tracker {
-            alias_tracker.update_alias(node);
-            debug!(
-                "Current partition columns are: {:?}",
-                self.get_aliased_partition_columns()
-            );
-        } else if let LogicalPlan::TableScan(table_scan) = node {
-            self.alias_tracker = AliasTracker::new(table_scan);
-            debug!(
-                "Initialize partition columns: {:?} with table={}",
-                self.get_aliased_partition_columns(),
-                table_scan.table_name
-            );
-        }
-    }
+    fn maybe_set_partitions(&mut self, plan: &LogicalPlan) -> DfResult<()> {
+        if let Some(part_cols) = &mut self.partition_cols {
+            // update partition alias
+            let child = plan.inputs().first().cloned().ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(format!(
+                    "PlanRewriter: maybe_set_partitions: plan has no child: {plan}"
+                ))
+            })?;
 
-    fn get_aliased_partition_columns(&self) -> Option<AliasMapping> {
-        if let Some(part_cols) = self.partition_cols.as_ref() {
-            let Some(alias_tracker) = &self.alias_tracker else {
-                // no alias tracker meaning no table scan encountered
-                return None;
-            };
-            let mut aliased = HashMap::new();
-            for part_col in part_cols {
-                let all_alias = alias_tracker
-                    .get_all_alias_for_col(part_col)
-                    .cloned()
-                    .unwrap_or_default();
-
-                aliased.insert(part_col.clone(), all_alias);
+            for (_col_name, alias_set) in part_cols.iter_mut() {
+                let aliased_cols = aliased_columns_for(
+                    &alias_set.clone().into_iter().collect(),
+                    plan,
+                    Some(child),
+                )?;
+                *alias_set = aliased_cols.into_values().flatten().collect();
             }
-            Some(aliased)
-        } else {
-            None
-        }
-    }
 
-    fn maybe_set_partitions(&mut self, plan: &LogicalPlan) {
-        if self.partition_cols.is_some() {
-            // only need to set once
-            return;
+            debug!(
+                "PlanRewriter: maybe_set_partitions: updated partition columns: {:?} at plan: {}",
+                part_cols,
+                plan.display()
+            );
+
+            return Ok(());
         }
 
         if let LogicalPlan::TableScan(table_scan) = plan
@@ -507,9 +526,31 @@ impl PlanRewriter {
                     // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
                     partition_cols.push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
                 }
-                self.partition_cols = Some(partition_cols);
+                self.partition_cols = Some(
+                            partition_cols
+                                .into_iter()
+                                .map(|c| {
+                                    let index =
+                                        plan.schema().index_of_column_by_name(None, &c).ok_or_else(|| {
+                                            datafusion_common::DataFusionError::Internal(
+                                                format!(
+                                                    "PlanRewriter: maybe_set_partitions: column {c} not found in schema of plan: {plan}"
+                                                ),
+                                            )
+                                        })?;
+                                    let column = plan.schema().columns().get(index).cloned().ok_or_else(|| {
+                                        datafusion_common::DataFusionError::Internal(format!(
+                                            "PlanRewriter: maybe_set_partitions: column index {index} out of bounds in schema of plan: {plan}"
+                                        ))
+                                    })?;
+                                    Ok((c.clone(), BTreeSet::from([column])))
+                                })
+                                .collect::<DfResult<AliasMapping>>()?,
+                        );
             }
         }
+
+        Ok(())
     }
 
     /// pop one stack item and reduce the level by 1
@@ -537,9 +578,14 @@ impl PlanRewriter {
             "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
         );
 
+        debug!(
+            "PlanRewriter: expand on node: {on_node} with partition col alias mapping: {:?}",
+            self.partition_cols
+        );
+
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
-            on_node,
+            on_node.clone(),
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None
@@ -549,6 +595,15 @@ impl PlanRewriter {
 
         // expand stages
         for new_stage in self.stage.drain(..) {
+            // tracking alias for merge sort's sort exprs
+            let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
+                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
+            {
+                // TODO(discord9): change `on_node` to `node` once alias tracking is supported for merge scan
+                rewrite_merge_sort_exprs(merge_sort, &on_node)?
+            } else {
+                new_stage
+            };
             node = new_stage
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
@@ -590,6 +645,7 @@ struct EnforceDistRequirementRewriter {
     /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
     /// because the `Projection` node is not in the scope of the `Aggregate` node
     cur_level: usize,
+    plan_per_level: BTreeMap<usize, LogicalPlan>,
 }
 
 impl EnforceDistRequirementRewriter {
@@ -597,7 +653,66 @@ impl EnforceDistRequirementRewriter {
         Self {
             column_requirements,
             cur_level,
+            plan_per_level: BTreeMap::new(),
         }
+    }
+
+    /// Return a mapping from (original column, level) to aliased columns in current node of all
+    /// applicable column requirements
+    /// i.e. only column requirements with level >= `cur_level` will be considered
+    fn get_current_applicable_column_requirements(
+        &self,
+        node: &LogicalPlan,
+    ) -> DfResult<BTreeMap<(Column, usize), BTreeSet<Column>>> {
+        let col_req_per_level = self
+            .column_requirements
+            .iter()
+            .filter(|(_, level)| *level >= self.cur_level)
+            .collect::<Vec<_>>();
+
+        // track alias for columns and use aliased columns instead
+        // aliased col reqs at current level
+        let mut result_alias_mapping = BTreeMap::new();
+        let Some(child) = node.inputs().first().cloned() else {
+            return Ok(Default::default());
+        };
+        for (col_req, level) in col_req_per_level {
+            if let Some(original) = self.plan_per_level.get(level) {
+                // query for alias in current plan
+                let aliased_cols =
+                    aliased_columns_for(&col_req.iter().cloned().collect(), node, Some(original))?;
+                for original_col in col_req {
+                    let aliased_cols = aliased_cols.get(original_col).cloned();
+                    if let Some(cols) = aliased_cols
+                        && !cols.is_empty()
+                    {
+                        result_alias_mapping.insert((original_col.clone(), *level), cols);
+                    } else {
+                        // if no aliased column found in current node, there should be alias in child node as promised by enforce col reqs
+                        // because it should insert required columns in child node
+                        // so we can find the alias in child node
+                        // if not found, it's an internal error
+                        let aliases_in_child = aliased_columns_for(
+                            &[original_col.clone()].into(),
+                            child,
+                            Some(original),
+                        )?;
+                        let Some(aliases) = aliases_in_child
+                            .get(original_col)
+                            .cloned()
+                            .filter(|a| !a.is_empty())
+                        else {
+                            return Err(datafusion_common::DataFusionError::Internal(format!(
+                                "EnforceDistRequirementRewriter: no alias found for required column {original_col} in child plan {child} from original plan {original}",
+                            )));
+                        };
+
+                        result_alias_mapping.insert((original_col.clone(), *level), aliases);
+                    }
+                }
+            }
+        }
+        Ok(result_alias_mapping)
     }
 }
 
@@ -612,6 +727,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                     .to_string(),
             ));
         }
+        self.plan_per_level.insert(self.cur_level, node.clone());
         self.cur_level += 1;
         Ok(Transformed::no(node))
     }
@@ -619,38 +735,41 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         self.cur_level -= 1;
         // first get all applicable column requirements
-        let mut applicable_column_requirements = self
-            .column_requirements
-            .iter()
-            .filter(|(_, level)| *level >= self.cur_level)
-            .map(|(cols, _)| cols.clone())
-            .reduce(|mut acc, cols| {
-                acc.extend(cols);
-                acc
-            })
-            .unwrap_or_default();
-
-        debug!(
-            "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
-            self.cur_level,
-            applicable_column_requirements,
-            node.display()
-        );
 
         // make sure all projection applicable scope has the required columns
         if let LogicalPlan::Projection(ref projection) = node {
+            let mut applicable_column_requirements =
+                self.get_current_applicable_column_requirements(&node)?;
+
+            debug!(
+                "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
+                self.cur_level,
+                applicable_column_requirements,
+                node.display()
+            );
+
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
-                applicable_column_requirements.remove(&column);
+                applicable_column_requirements.retain(|_col_level, alias_set| {
+                    // remove all columns that are already in the projection exprs
+                    !alias_set.contains(&column)
+                });
             }
             if applicable_column_requirements.is_empty() {
                 return Ok(Transformed::no(node));
             }
 
             let mut new_exprs = projection.expr.clone();
-            for col in &applicable_column_requirements {
-                new_exprs.push(Expr::Column(col.clone()));
+            for (col, alias_set) in &applicable_column_requirements {
+                // use the first alias in alias set as the column to add
+                new_exprs.push(Expr::Column(alias_set.first().cloned().ok_or_else(
+                    || {
+                        datafusion_common::DataFusionError::Internal(
+                            format!("EnforceDistRequirementRewriter: alias set is empty, for column {col:?} in node {node}"),
+                        )
+                    },
+                )?));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
@@ -658,6 +777,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 "EnforceDistRequirementRewriter: added missing columns {:?} to projection node from old node: \n{node}\n Making new node: \n{new_node}",
                 applicable_column_requirements
             );
+
+            // update plan for later use
+            self.plan_per_level.insert(self.cur_level, new_node.clone());
 
             // still need to continue for next projection if applicable
             return Ok(Transformed::yes(new_node));
@@ -677,7 +799,6 @@ impl TreeNodeRewriter for PlanRewriter {
         self.stage.clear();
         self.set_unexpanded();
         self.partition_cols = None;
-        self.alias_tracker = None;
         Ok(Transformed::no(node))
     }
 
@@ -698,9 +819,7 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(Transformed::no(node));
         }
 
-        self.maybe_set_partitions(&node);
-
-        self.maybe_update_alias(&node);
+        self.maybe_set_partitions(&node)?;
 
         let Some(parent) = self.get_parent() else {
             debug!("Plan Rewriter: expand now for no parent found for node: {node}");

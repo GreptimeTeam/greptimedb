@@ -26,12 +26,11 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatch
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::timestamp::TimestampMicrosecond;
+use datatypes::timestamp::TimestampSecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
     ConstantVector, Int64Vector, Int64VectorBuilder, MutableVector, StringVector,
-    StringVectorBuilder, TimestampMicrosecondVector, TimestampMicrosecondVectorBuilder,
-    UInt64VectorBuilder,
+    StringVectorBuilder, TimestampSecondVector, TimestampSecondVectorBuilder, UInt64VectorBuilder,
 };
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
@@ -129,17 +128,17 @@ impl InformationSchemaPartitions {
             ColumnSchema::new("data_free", ConcreteDataType::int64_datatype(), true),
             ColumnSchema::new(
                 "create_time",
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new(
                 "update_time",
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new(
                 "check_time",
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                ConcreteDataType::timestamp_second_datatype(),
                 true,
             ),
             ColumnSchema::new("checksum", ConcreteDataType::int64_datatype(), true),
@@ -212,7 +211,7 @@ struct InformationSchemaPartitionsBuilder {
     partition_names: StringVectorBuilder,
     partition_ordinal_positions: Int64VectorBuilder,
     partition_expressions: StringVectorBuilder,
-    create_times: TimestampMicrosecondVectorBuilder,
+    create_times: TimestampSecondVectorBuilder,
     partition_ids: UInt64VectorBuilder,
 }
 
@@ -232,7 +231,7 @@ impl InformationSchemaPartitionsBuilder {
             partition_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ordinal_positions: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             partition_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            create_times: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            create_times: TimestampSecondVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -331,8 +330,8 @@ impl InformationSchemaPartitionsBuilder {
                 .push(Some((index + 1) as i64));
             let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
             self.partition_expressions.push(expression.as_deref());
-            self.create_times.push(Some(TimestampMicrosecond::from(
-                table_info.meta.created_on.timestamp_millis(),
+            self.create_times.push(Some(TimestampSecond::from(
+                table_info.meta.created_on.timestamp(),
             )));
             self.partition_ids.push(Some(partition.id.as_u64()));
         }
@@ -349,8 +348,8 @@ impl InformationSchemaPartitionsBuilder {
             Arc::new(Int64Vector::from(vec![None])),
             rows_num,
         ));
-        let null_timestampmicrosecond_vector = Arc::new(ConstantVector::new(
-            Arc::new(TimestampMicrosecondVector::from(vec![None])),
+        let null_timestamp_second_vector = Arc::new(ConstantVector::new(
+            Arc::new(TimestampSecondVector::from(vec![None])),
             rows_num,
         ));
         let partition_methods = Arc::new(ConstantVector::new(
@@ -380,8 +379,8 @@ impl InformationSchemaPartitionsBuilder {
             null_i64_vector.clone(),
             Arc::new(self.create_times.finish()),
             // TODO(dennis): supports update_time
-            null_timestampmicrosecond_vector.clone(),
-            null_timestampmicrosecond_vector,
+            null_timestamp_second_vector.clone(),
+            null_timestamp_second_vector,
             null_i64_vector,
             null_string_vector.clone(),
             null_string_vector.clone(),

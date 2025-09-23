@@ -12,21 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+pub mod error;
+pub mod information_extension;
+pub mod metadata;
+pub mod options;
+pub mod procedure;
 
-use common_meta::DatanodeId;
-
-pub type NodeExcluderRef = Arc<dyn NodeExcluder>;
-
-/// [NodeExcluder] is used to help decide whether some nodes should be excluded (out of consideration)
-/// in certain situations. For example, in some node selectors.
-pub trait NodeExcluder: Send + Sync {
-    /// Returns the excluded datanode ids.
-    fn excluded_datanode_ids(&self) -> &Vec<DatanodeId>;
-}
-
-impl NodeExcluder for Vec<DatanodeId> {
-    fn excluded_datanode_ids(&self) -> &Vec<DatanodeId> {
-        self
-    }
-}
+pub use information_extension::StandaloneInformationExtension;
+pub use metadata::build_metadata_kvbackend;
+pub use procedure::build_procedure_manager;

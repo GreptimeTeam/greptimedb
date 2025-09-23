@@ -19,12 +19,12 @@ use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
 use serde::{Deserialize, Serialize};
 use store_api::ManifestVersion;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{FileId, RegionId, TableId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::RegionMapRef;
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileRef {
@@ -237,7 +237,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::sst::file::{FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{FileMeta, FileTimeRange, IndexType, RegionFileId};
 
     #[tokio::test]
     async fn test_file_ref_mgr() {
@@ -258,6 +258,7 @@ mod tests {
             num_rows: 1024,
             num_row_groups: 1,
             sequence: NonZeroU64::new(4096),
+            partition_expr: None,
         };
 
         file_ref_mgr.add_file(&file_meta);

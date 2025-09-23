@@ -16,23 +16,20 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::{
-    GeneralDataFusionSnafu, IntoVectorSnafu, InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result,
-};
+use common_query::error::{InvalidFuncArgsSnafu, Result};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, BooleanArray};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
 use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
-use datafusion::logical_expr::{self, Expr, Volatility};
+use datafusion::logical_expr::{self, ColumnarValue, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion_expr::Signature;
+use datafusion_common::DataFusionError;
+use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
-use datatypes::prelude::VectorRef;
-use datatypes::vectors::BooleanVector;
-use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::ConcreteDataType;
+use snafu::{OptionExt, ensure};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
 /// `matches` for full text search.
@@ -67,38 +64,35 @@ impl Function for MatchesFunction {
     }
 
     // TODO: read case-sensitive config
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly 2, have: {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
+        let [data_column, patterns] = extract_args(self.name(), &args)?;
 
-        let data_column = &columns[0];
         if data_column.is_empty() {
-            return Ok(Arc::new(BooleanVector::from(Vec::<bool>::with_capacity(0))));
+            return Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(
+                Vec::<bool>::with_capacity(0),
+            ))));
         }
 
-        let pattern_vector = &columns[1]
-            .cast(&ConcreteDataType::string_datatype())
-            .context(InvalidInputTypeSnafu {
-                err_msg: "cannot cast `pattern` to string",
-            })?;
         // Safety: both length and type are checked before
-        let pattern = pattern_vector.get(0).as_string().unwrap();
+        let pattern = match patterns.data_type() {
+            DataType::Utf8View => patterns.as_string_view().value(0),
+            DataType::Utf8 => patterns.as_string::<i32>().value(0),
+            DataType::LargeUtf8 => patterns.as_string::<i64>().value(0),
+            t => {
+                return Err(DataFusionError::Execution(format!(
+                    "unsupported datatype {t}"
+                )));
+            }
+        };
         self.eval(data_column, pattern)
     }
 }
 
 impl MatchesFunction {
-    fn eval(&self, data: &VectorRef, pattern: String) -> Result<VectorRef> {
+    fn eval(&self, data_array: ArrayRef, pattern: &str) -> DfResult<ColumnarValue> {
         let col_name = "data";
         let parser_context = ParserContext::default();
-        let raw_ast = parser_context.parse_pattern(&pattern)?;
+        let raw_ast = parser_context.parse_pattern(pattern)?;
         let ast = raw_ast.transform_ast()?;
 
         let like_expr = ast.into_like_expr(col_name);
@@ -106,27 +100,17 @@ impl MatchesFunction {
         let input_schema = Self::input_schema();
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
-        let physical_expr = planner
-            .create_physical_expr(&like_expr, &input_schema, &session_state)
-            .context(GeneralDataFusionSnafu)?;
+        let physical_expr =
+            planner.create_physical_expr(&like_expr, &input_schema, &session_state)?;
 
-        let data_array = data.to_arrow_array();
         let arrow_schema = Arc::new(input_schema.as_arrow().clone());
         let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array]).unwrap();
 
         let num_rows = input_record_batch.num_rows();
-        let result = physical_expr
-            .evaluate(&input_record_batch)
-            .context(GeneralDataFusionSnafu)?;
-        let result_array = result
-            .into_array(num_rows)
-            .context(GeneralDataFusionSnafu)?;
-        let result_vector =
-            BooleanVector::try_from_arrow_array(result_array).context(IntoVectorSnafu {
-                data_type: DataType::Boolean,
-            })?;
+        let result = physical_expr.evaluate(&input_record_batch)?;
+        let result_array = result.into_array(num_rows)?;
 
-        Ok(Arc::new(result_vector))
+        Ok(ColumnarValue::Array(Arc::new(result_array)))
     }
 
     fn input_schema() -> DFSchema {
@@ -210,14 +194,12 @@ impl PatternAst {
     /// Transform this AST with preset rules to make it correct.
     fn transform_ast(self) -> Result<Self> {
         self.transform_up(Self::collapse_binary_branch_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)?
             .transform_up(Self::eliminate_optional_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)?
             .transform_down(Self::eliminate_single_child_fn)
-            .context(GeneralDataFusionSnafu)
             .map(|data| data.data)
+            .map_err(Into::into)
     }
 
     /// Collapse binary branch with the same operator. I.e., this transformer
@@ -842,7 +824,9 @@ impl Tokenizer {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::StringVector;
+    use datafusion::arrow::array::StringArray;
+    use datafusion_common::ScalarValue;
+    use datafusion_common::config::ConfigOptions;
 
     use super::*;
 
@@ -1309,7 +1293,7 @@ mod test {
             "The quick brown fox jumps over          dog",
             "The quick brown fox jumps over the      dog",
         ];
-        let input_vector: VectorRef = Arc::new(StringVector::from(input_data));
+        let col: ArrayRef = Arc::new(StringArray::from(input_data));
         let cases = [
             // basic cases
             ("quick", vec![true, false, true, true, true, true, true]),
@@ -1400,9 +1384,22 @@ mod test {
 
         let f = MatchesFunction;
         for (pattern, expected) in cases {
-            let actual: VectorRef = f.eval(&input_vector, pattern.to_string()).unwrap();
-            let expected: VectorRef = Arc::new(BooleanVector::from(expected)) as _;
-            assert_eq!(expected, actual, "{pattern}");
+            let args = ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(col.clone()),
+                    ColumnarValue::Scalar(ScalarValue::Utf8View(Some(pattern.to_string()))),
+                ],
+                arg_fields: vec![],
+                number_rows: col.len(),
+                return_field: Arc::new(Field::new("x", col.data_type().clone(), true)),
+                config_options: Arc::new(ConfigOptions::new()),
+            };
+            let actual = f
+                .invoke_with_args(args)
+                .and_then(|x| x.to_array(col.len()))
+                .unwrap();
+            let expected: ArrayRef = Arc::new(BooleanArray::from(expected));
+            assert_eq!(expected.as_ref(), actual.as_ref(), "{pattern}");
         }
     }
 }

@@ -27,10 +27,10 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util::{VecBatchReader, new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
@@ -128,6 +128,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
+            partition_expr: None,
         },
         file_purger,
     )

@@ -173,6 +173,9 @@ mod tests {
 
     #[test]
     fn test_from_tz_string() {
+        unsafe {
+            std::env::remove_var("TZ");
+        }
         assert_eq!(
             Timezone::Named(Tz::UTC),
             Timezone::from_tz_string("SYSTEM").unwrap()

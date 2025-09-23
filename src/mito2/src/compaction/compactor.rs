@@ -23,6 +23,7 @@ use common_time::TimeToLive;
 use either::Either;
 use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
+use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -34,12 +35,14 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
 use crate::compaction::{CompactionSstReaderBuilder, find_ttl};
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
+use crate::error::{
+    EmptyRegionDirSnafu, InvalidPartitionExprSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result,
+};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics;
-use crate::read::Source;
+use crate::read::{FlatSource, Source};
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
@@ -339,6 +342,9 @@ impl Compactor for DefaultCompactor {
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
+            let flat_format = compaction_region
+                .engine_config
+                .enable_experimental_flat_format;
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             let bloom_filter_index_config =
@@ -349,13 +355,14 @@ impl Compactor for DefaultCompactor {
                 .map(|f| f.meta_ref().sequence)
                 .max()
                 .flatten();
+            let region_metadata_for_filemeta = region_metadata.clone();
             futs.push(async move {
                 let input_file_names = output
                     .inputs
                     .iter()
                     .map(|f| f.file_id().to_string())
                     .join(",");
-                let reader = CompactionSstReaderBuilder {
+                let builder = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
                     cache: cache_manager.clone(),
@@ -364,15 +371,20 @@ impl Compactor for DefaultCompactor {
                     filter_deleted: output.filter_deleted,
                     time_range: output.output_time_range,
                     merge_mode,
-                }
-                .build_sst_reader()
-                .await?;
+                };
+                let source = if flat_format {
+                    let reader = builder.build_flat_sst_reader().await?;
+                    either::Right(FlatSource::Stream(reader))
+                } else {
+                    let reader = builder.build_sst_reader().await?;
+                    either::Left(Source::Reader(reader))
+                };
                 let (sst_infos, metrics) = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
                             metadata: region_metadata,
-                            source: Source::Reader(reader),
+                            source,
                             cache_manager,
                             storage,
                             max_sequence: max_sequence.map(NonZero::get),
@@ -385,6 +397,19 @@ impl Compactor for DefaultCompactor {
                         WriteType::Compaction,
                     )
                     .await?;
+                // Convert partition expression once outside the map
+                let partition_expr = match &region_metadata_for_filemeta.partition_expr {
+                    None => None,
+                    Some(json_str) if json_str.is_empty() => None,
+                    Some(json_str) => {
+                        PartitionExpr::from_json_str(json_str).with_context(|_| {
+                            InvalidPartitionExprSnafu {
+                                expr: json_str.clone(),
+                            }
+                        })?
+                    }
+                };
+
                 let output_files = sst_infos
                     .into_iter()
                     .map(|sst_info| FileMeta {
@@ -398,6 +423,7 @@ impl Compactor for DefaultCompactor {
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
                         sequence: max_sequence,
+                        partition_expr: partition_expr.clone(),
                     })
                     .collect::<Vec<_>>();
                 let output_file_names =
@@ -457,6 +483,7 @@ impl Compactor for DefaultCompactor {
                 .map(|seconds| Duration::from_secs(seconds as u64)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));

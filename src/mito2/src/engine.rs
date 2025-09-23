@@ -23,6 +23,8 @@ mod basic_test;
 #[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
+mod bump_committed_sequence_test;
+#[cfg(test)]
 mod catchup_test;
 #[cfg(test)]
 mod close_test;
@@ -52,6 +54,8 @@ mod projection_test;
 mod prune_test;
 #[cfg(test)]
 mod row_selector_test;
+#[cfg(test)]
+mod scan_corrupt;
 #[cfg(test)]
 mod scan_test;
 #[cfg(test)]
@@ -414,16 +418,20 @@ impl MitoEngine {
     }
 
     /// Lists all SSTs from the manifest of all regions in the engine.
-    pub fn all_ssts_from_manifest(&self) -> impl Iterator<Item = ManifestSstEntry> + use<'_> {
+    pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
-        self.inner
-            .workers
-            .all_regions()
-            .flat_map(|region| region.manifest_sst_entries())
-            .map(move |mut entry| {
-                entry.node_id = node_id;
-                entry
-            })
+        let regions = self.inner.workers.all_regions();
+
+        let mut results = Vec::new();
+        for region in regions {
+            let mut entries = region.manifest_sst_entries().await;
+            for e in &mut entries {
+                e.node_id = node_id;
+            }
+            results.extend(entries);
+        }
+
+        results
     }
 
     /// Lists all SSTs from the storage layer of all regions in the engine.
@@ -465,6 +473,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
+                ..
             }
         )
 }
@@ -658,10 +667,11 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
-    fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
+    /// Returns the sequence of latest committed data.
+    fn get_committed_sequence(&self, region_id: RegionId) -> Result<SequenceNumber> {
         // Reading a region doesn't need to go through the region worker thread.
-        let region = self.find_region(region_id)?;
-        Ok(Some(region.find_committed_sequence()))
+        self.find_region(region_id)
+            .map(|r| r.find_committed_sequence())
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
@@ -685,8 +695,7 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start)
-        // TODO(yingwen): Enable it after flat format is supported.
-        .with_flat_format(false);
+        .with_flat_format(self.config.enable_experimental_flat_format);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -829,12 +838,12 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    async fn get_last_seq_num(
+    async fn get_committed_sequence(
         &self,
         region_id: RegionId,
-    ) -> Result<Option<SequenceNumber>, BoxedError> {
+    ) -> Result<SequenceNumber, BoxedError> {
         self.inner
-            .get_last_seq_num(region_id)
+            .get_committed_sequence(region_id)
             .map_err(BoxedError::new)
     }
 
@@ -1018,6 +1027,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1029,6 +1039,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1040,6 +1051,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1051,6 +1063,7 @@ mod tests {
             compaction_time_window: Some(Duration::from_secs(1)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1060,6 +1073,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: Some(1),
             flushed_sequence: None,
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1069,6 +1083,7 @@ mod tests {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
+            committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
     }
