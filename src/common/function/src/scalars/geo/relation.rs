@@ -12,18 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_query::error::Result;
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
+use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 use geo::algorithm::contains::Contains;
 use geo::algorithm::intersects::Intersects;
 use geo::algorithm::within::Within;
+use geo_types::Geometry;
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Test if spatial relationship: contains
@@ -31,46 +33,11 @@ use crate::scalars::geo::wkt::parse_wkt;
 #[display("{}", self.name())]
 pub struct STContains;
 
-impl Function for STContains {
-    fn name(&self) -> &str {
-        "st_contains"
-    }
+impl StFunction for STContains {
+    const NAME: &'static str = "st_contains";
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Stable)
-    }
-
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let wkt_this_vec = &columns[0];
-        let wkt_that_vec = &columns[1];
-
-        let size = wkt_this_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let wkt_this = wkt_this_vec.get(i).as_string();
-            let wkt_that = wkt_that_vec.get(i).as_string();
-
-            let result = match (wkt_this, wkt_that) {
-                (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?;
-                    let geom_that = parse_wkt(&wkt_that)?;
-
-                    Some(geom_this.contains(&geom_that))
-                }
-                _ => None,
-            };
-
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke(g1: Geometry, g2: Geometry) -> bool {
+        g1.contains(&g2)
     }
 }
 
@@ -79,46 +46,11 @@ impl Function for STContains {
 #[display("{}", self.name())]
 pub struct STWithin;
 
-impl Function for STWithin {
-    fn name(&self) -> &str {
-        "st_within"
-    }
+impl StFunction for STWithin {
+    const NAME: &'static str = "st_within";
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Stable)
-    }
-
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
-
-        let wkt_this_vec = &columns[0];
-        let wkt_that_vec = &columns[1];
-
-        let size = wkt_this_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
-
-        for i in 0..size {
-            let wkt_this = wkt_this_vec.get(i).as_string();
-            let wkt_that = wkt_that_vec.get(i).as_string();
-
-            let result = match (wkt_this, wkt_that) {
-                (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?;
-                    let geom_that = parse_wkt(&wkt_that)?;
-
-                    Some(geom_this.is_within(&geom_that))
-                }
-                _ => None,
-            };
-
-            results.push(result);
-        }
-
-        Ok(results.to_vector())
+    fn invoke(g1: Geometry, g2: Geometry) -> bool {
+        g1.is_within(&g2)
     }
 }
 
@@ -127,9 +59,23 @@ impl Function for STWithin {
 #[display("{}", self.name())]
 pub struct STIntersects;
 
-impl Function for STIntersects {
+impl StFunction for STIntersects {
+    const NAME: &'static str = "st_intersects";
+
+    fn invoke(g1: Geometry, g2: Geometry) -> bool {
+        g1.intersects(&g2)
+    }
+}
+
+trait StFunction {
+    const NAME: &'static str;
+
+    fn invoke(g1: Geometry, g2: Geometry) -> bool;
+}
+
+impl<T: StFunction + Display + Send + Sync> Function for T {
     fn name(&self) -> &str {
-        "st_intersects"
+        T::NAME
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
@@ -140,32 +86,34 @@ impl Function for STIntersects {
         Signature::string(2, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
-        let wkt_this_vec = &columns[0];
-        let wkt_that_vec = &columns[1];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let wkt_this_vec = arg0.as_string_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let wkt_that_vec = arg1.as_string_view();
 
         let size = wkt_this_vec.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
-            let wkt_this = wkt_this_vec.get(i).as_string();
-            let wkt_that = wkt_that_vec.get(i).as_string();
+            let wkt_this = wkt_this_vec.is_valid(i).then(|| wkt_this_vec.value(i));
+            let wkt_that = wkt_that_vec.is_valid(i).then(|| wkt_that_vec.value(i));
 
             let result = match (wkt_this, wkt_that) {
                 (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?;
-                    let geom_that = parse_wkt(&wkt_that)?;
-
-                    Some(geom_this.intersects(&geom_that))
+                    Some(T::invoke(parse_wkt(wkt_this)?, parse_wkt(wkt_that)?))
                 }
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }

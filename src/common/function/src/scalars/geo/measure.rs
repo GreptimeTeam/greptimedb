@@ -12,21 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{Float64VectorBuilder, MutableVector, VectorRef};
+use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 use geo::algorithm::line_measures::metric_spaces::Euclidean;
 use geo::{Area, Distance, Haversine};
 use geo_types::Geometry;
 use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
-use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
+use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
@@ -47,33 +48,38 @@ impl Function for STDistance {
         Signature::string(2, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
-        let wkt_this_vec = &columns[0];
-        let wkt_that_vec = &columns[1];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let wkt_this_vec = arg0.as_string_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let wkt_that_vec = arg1.as_string_view();
 
         let size = wkt_this_vec.len();
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut builder = Float64Builder::with_capacity(size);
 
         for i in 0..size {
-            let wkt_this = wkt_this_vec.get(i).as_string();
-            let wkt_that = wkt_that_vec.get(i).as_string();
+            let wkt_this = wkt_this_vec.is_valid(i).then(|| wkt_this_vec.value(i));
+            let wkt_that = wkt_that_vec.is_valid(i).then(|| wkt_that_vec.value(i));
 
             let result = match (wkt_this, wkt_that) {
                 (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?;
-                    let geom_that = parse_wkt(&wkt_that)?;
+                    let geom_this = parse_wkt(wkt_this)?;
+                    let geom_that = parse_wkt(wkt_that)?;
 
                     Some(Euclidean::distance(&geom_this, &geom_that))
                 }
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -95,23 +101,28 @@ impl Function for STDistanceSphere {
         Signature::string(2, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 2);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
-        let wkt_this_vec = &columns[0];
-        let wkt_that_vec = &columns[1];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let wkt_this_vec = arg0.as_string_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let wkt_that_vec = arg1.as_string_view();
 
         let size = wkt_this_vec.len();
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut builder = Float64Builder::with_capacity(size);
 
         for i in 0..size {
-            let wkt_this = wkt_this_vec.get(i).as_string();
-            let wkt_that = wkt_that_vec.get(i).as_string();
+            let wkt_this = wkt_this_vec.is_valid(i).then(|| wkt_this_vec.value(i));
+            let wkt_that = wkt_that_vec.is_valid(i).then(|| wkt_that_vec.value(i));
 
             let result = match (wkt_this, wkt_that) {
                 (Some(wkt_this), Some(wkt_that)) => {
-                    let geom_this = parse_wkt(&wkt_this)?;
-                    let geom_that = parse_wkt(&wkt_that)?;
+                    let geom_this = parse_wkt(wkt_this)?;
+                    let geom_that = parse_wkt(wkt_that)?;
 
                     match (geom_this, geom_that) {
                         (Geometry::Point(this), Geometry::Point(that)) => {
@@ -128,10 +139,10 @@ impl Function for STDistanceSphere {
                 _ => None,
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -153,27 +164,31 @@ impl Function for STArea {
         Signature::string(1, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure_columns_n!(columns, 1);
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
 
-        let wkt_vec = &columns[0];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let wkt_vec = arg0.as_string_view();
 
         let size = wkt_vec.len();
-        let mut results = Float64VectorBuilder::with_capacity(size);
+        let mut builder = Float64Builder::with_capacity(size);
 
         for i in 0..size {
-            let wkt = wkt_vec.get(i).as_string();
+            let wkt = wkt_vec.is_valid(i).then(|| wkt_vec.value(i));
 
             let result = if let Some(wkt) = wkt {
-                let geom = parse_wkt(&wkt)?;
+                let geom = parse_wkt(wkt)?;
                 Some(geom.unsigned_area())
             } else {
                 None
             };
 
-            results.push(result);
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }

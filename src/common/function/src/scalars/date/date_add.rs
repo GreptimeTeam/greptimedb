@@ -16,13 +16,12 @@ use std::fmt;
 
 use common_query::error::{ArrowComputeSnafu, Result};
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::utils;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::compute::kernels::numeric;
 use datatypes::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 use snafu::ResultExt;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::helper;
 
 /// A function adds an interval value to Timestamp, Date, and return the result.
@@ -63,8 +62,7 @@ impl Function for DateAddFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [left, right] = utils::take_function_args(self.name(), args)?;
+        let [left, right] = extract_args(self.name(), &args)?;
 
         let result = numeric::add(&left, &right).context(ArrowComputeSnafu)?;
         Ok(ColumnarValue::Array(result))
