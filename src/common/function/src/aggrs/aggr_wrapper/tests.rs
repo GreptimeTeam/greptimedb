@@ -744,7 +744,7 @@ async fn test_last_value_order_by_udaf() {
     assert_eq!(merge_state[2], ScalarValue::Boolean(Some(true)));
 
     let merge_eval_res = merge_accum.evaluate().unwrap();
-    // the merge function returns the average, which is 132 / 45
+    // the merge function returns the last value, which is 4
     assert_eq!(merge_eval_res, ScalarValue::Int64(Some(4)));
 }
 

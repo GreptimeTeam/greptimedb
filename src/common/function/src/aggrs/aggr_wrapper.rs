@@ -300,7 +300,7 @@ impl StateWrapper {
 
 /// Fix last value accum so that `state()` 's output actually matches the `state_fields()`.
 ///
-/// it's a bug when `last_value(ts order by <some columns including ts> will omit `ts` in the ordering field in the state.
+/// it's a bug when `last_value(ts order by <some columns including ts>)` will omit `ts` in the ordering field in the state.
 #[derive(Debug)]
 struct FixedFirstLastValueAccum {
     inner: Box<dyn Accumulator>,
@@ -326,8 +326,7 @@ impl FixedFirstLastValueAccum {
             .iter()
             .cloned()
             .enumerate()
-            .find(|p| p.1 == *last_value_col)
-            .clone();
+            .find(|p| p.1 == *last_value_col);
 
         Ok(Self {
             inner,
