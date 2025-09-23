@@ -24,7 +24,6 @@ use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
-use index::target::TargetKeyError;
 use object_store::ErrorKind;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
@@ -956,13 +955,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to encode index target key"))]
-    EncodeTargetKey {
-        source: TargetKeyError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1215,8 +1207,6 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
-
-            EncodeTargetKey { .. } => StatusCode::InvalidArguments,
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
 

@@ -31,7 +31,7 @@ use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, EncodeTargetKeySnafu, IndexOptionsSnafu,
+    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, IndexOptionsSnafu,
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
@@ -382,9 +382,7 @@ impl BloomFilterIndexer {
     ) -> Result<ByteCount> {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
-        let target_key = IndexTarget::ColumnId(*col_id)
-            .encode()
-            .context(EncodeTargetKeySnafu)?;
+        let target_key = IndexTarget::ColumnId(*col_id).encode();
         let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),

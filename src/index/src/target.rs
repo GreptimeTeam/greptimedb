@@ -15,13 +15,9 @@ pub enum IndexTarget {
 
 impl IndexTarget {
     /// Derive a stable target key string for the provided index target.
-    pub fn encode(&self) -> Result<String, TargetKeyError> {
+    pub fn encode(&self) -> String {
         match self {
-            IndexTarget::ColumnId(id) => {
-                let key = id.to_string();
-                validate_column_key(&key)?;
-                Ok(key)
-            }
+            IndexTarget::ColumnId(id) => id.to_string(),
         }
     }
 
@@ -79,7 +75,7 @@ mod tests {
     #[test]
     fn encode_decode_column() {
         let target = IndexTarget::ColumnId(42);
-        let key = target.encode().unwrap();
+        let key = target.encode();
         assert_eq!(key, "42");
         let decoded = IndexTarget::decode(&key).unwrap();
         assert_eq!(decoded, target);

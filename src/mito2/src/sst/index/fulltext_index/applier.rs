@@ -39,8 +39,8 @@ use crate::cache::index::bloom_filter_index::{
 };
 use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
-    ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, EncodeTargetKeySnafu, MetadataSnafu,
-    PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
+    ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
+    PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionFileId;
@@ -172,10 +172,10 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         request: &FulltextRequest,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let blob_key = IndexTarget::ColumnId(column_id)
-            .encode()
-            .map(|key| format!("{INDEX_BLOB_TYPE_TANTIVY}-{key}"))
-            .context(EncodeTargetKeySnafu)?;
+        let blob_key = format!(
+            "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+            IndexTarget::ColumnId(column_id).encode()
+        );
         let dir = self
             .index_source
             .dir(file_id, &blob_key, file_size_hint)
@@ -287,10 +287,10 @@ impl FulltextIndexApplier {
         terms: &[FulltextTerm],
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> Result<bool> {
-        let blob_key = IndexTarget::ColumnId(column_id)
-            .encode()
-            .map(|key| format!("{INDEX_BLOB_TYPE_BLOOM}-{key}"))
-            .context(EncodeTargetKeySnafu)?;
+        let blob_key = format!(
+            "{INDEX_BLOB_TYPE_BLOOM}-{}",
+            IndexTarget::ColumnId(column_id).encode()
+        );
         let Some(reader) = self
             .index_source
             .blob(file_id, &blob_key, file_size_hint)

@@ -37,8 +37,8 @@ use crate::cache::index::bloom_filter_index::{
 };
 use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
-    ApplyBloomFilterIndexSnafu, EncodeTargetKeySnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu,
-    PuffinReadBlobSnafu, Result,
+    ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
+    Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionFileId;
@@ -282,10 +282,10 @@ impl BloomFilterIndexApplier {
 
     // TODO(ruihang): use the same util with the code in creator
     fn column_blob_name(column_id: ColumnId) -> Result<String> {
-        IndexTarget::ColumnId(column_id)
-            .encode()
-            .map(|key| format!("{INDEX_BLOB_TYPE}-{key}"))
-            .context(EncodeTargetKeySnafu)
+        Ok(format!(
+            "{INDEX_BLOB_TYPE}-{}",
+            IndexTarget::ColumnId(column_id).encode()
+        ))
     }
 
     /// Creates a blob reader from the remote index file

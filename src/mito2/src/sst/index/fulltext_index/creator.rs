@@ -34,8 +34,8 @@ use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
     CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
-    EncodeTargetKeySnafu, FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu,
-    OperateAbortedIndexSnafu, Result,
+    FulltextFinishSnafu, FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
+    Result,
 };
 use crate::read::Batch;
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
@@ -386,20 +386,20 @@ impl AltFulltextCreator {
     ) -> Result<ByteCount> {
         match self {
             Self::Tantivy(creator) => {
-                let blob_key = IndexTarget::ColumnId(*column_id)
-                    .encode()
-                    .map(|key| format!("{INDEX_BLOB_TYPE_TANTIVY}-{key}"))
-                    .context(EncodeTargetKeySnafu)?;
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+                    IndexTarget::ColumnId(*column_id).encode()
+                );
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let blob_key = IndexTarget::ColumnId(*column_id)
-                    .encode()
-                    .map(|key| format!("{INDEX_BLOB_TYPE_BLOOM}-{key}"))
-                    .context(EncodeTargetKeySnafu)?;
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
+                    IndexTarget::ColumnId(*column_id).encode()
+                );
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
                     .await
