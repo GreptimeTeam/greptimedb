@@ -24,6 +24,7 @@ workspace = true
 async-trait.workspace = true
 auth.workspace = true
 base64.workspace = true
+colored = "2.0"
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
