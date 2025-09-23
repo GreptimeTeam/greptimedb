@@ -42,7 +42,7 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics;
-use crate::read::Source;
+use crate::read::{FlatSource, Source};
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
@@ -342,6 +342,9 @@ impl Compactor for DefaultCompactor {
                 .clone();
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
+            let flat_format = compaction_region
+                .engine_config
+                .enable_experimental_flat_format;
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             let bloom_filter_index_config =
@@ -359,7 +362,7 @@ impl Compactor for DefaultCompactor {
                     .iter()
                     .map(|f| f.file_id().to_string())
                     .join(",");
-                let reader = CompactionSstReaderBuilder {
+                let builder = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
                     cache: cache_manager.clone(),
@@ -368,15 +371,20 @@ impl Compactor for DefaultCompactor {
                     filter_deleted: output.filter_deleted,
                     time_range: output.output_time_range,
                     merge_mode,
-                }
-                .build_sst_reader()
-                .await?;
+                };
+                let source = if flat_format {
+                    let reader = builder.build_flat_sst_reader().await?;
+                    either::Right(FlatSource::Stream(reader))
+                } else {
+                    let reader = builder.build_sst_reader().await?;
+                    either::Left(Source::Reader(reader))
+                };
                 let (sst_infos, metrics) = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
                             metadata: region_metadata,
-                            source: Source::Reader(reader),
+                            source,
                             cache_manager,
                             storage,
                             max_sequence: max_sequence.map(NonZero::get),
@@ -475,6 +483,7 @@ impl Compactor for DefaultCompactor {
                 .map(|seconds| Duration::from_secs(seconds as u64)),
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         };
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));

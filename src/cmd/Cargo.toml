@@ -54,7 +54,6 @@ common-wal.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 etcd-client.workspace = true
-file-engine.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
 futures.workspace = true
@@ -64,7 +63,6 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true
-mito2.workspace = true
 moka.workspace = true
 nu-ansi-term = "0.46"
 object-store.workspace = true
@@ -75,6 +73,7 @@ query.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+standalone.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
@@ -100,6 +99,8 @@ common-version.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true
+file-engine.workspace = true
+mito2.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"

@@ -17,7 +17,7 @@ use std::fmt::Display;
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::type_coercion::aggregates::BINARYS;
-use datafusion_expr::{Signature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::vector_type_value_to_string;
 use datatypes::value::Value;
@@ -41,7 +41,13 @@ impl Function for VectorToStringFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(1, BINARYS.to_vec(), Volatility::Immutable)
+        Signature::one_of(
+            vec![
+                TypeSignature::Uniform(1, vec![DataType::BinaryView]),
+                TypeSignature::Uniform(1, BINARYS.to_vec()),
+            ],
+            Volatility::Immutable,
+        )
     }
 
     fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {

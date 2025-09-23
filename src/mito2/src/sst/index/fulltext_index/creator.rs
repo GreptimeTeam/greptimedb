@@ -29,7 +29,7 @@ use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
+use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId};
 
 use crate::error::{
     CastVectorSnafu, ComputeArrowSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu,
@@ -37,7 +37,6 @@ use crate::error::{
     Result,
 };
 use crate::read::Batch;
-use crate::sst::file::FileId;
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::{
@@ -436,12 +435,12 @@ mod tests {
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_request::PathType;
-    use store_api::storage::{ConcreteDataType, RegionId};
+    use store_api::storage::{ConcreteDataType, FileId, RegionId};
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
-    use crate::sst::file::{FileId, RegionFileId};
+    use crate::sst::file::RegionFileId;
     use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,

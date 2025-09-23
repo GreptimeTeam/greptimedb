@@ -30,14 +30,14 @@ use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::{ColumnId, FileId, RegionId};
 
 use crate::access_layer::OperationType;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileId, IndexType};
+use crate::sst::file::IndexType;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;

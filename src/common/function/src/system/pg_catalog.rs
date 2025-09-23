@@ -19,20 +19,19 @@ mod version;
 use std::sync::Arc;
 
 use common_query::error::Result;
+use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
 use datafusion::catalog::TableFunction;
-use datafusion_expr::{Signature, Volatility};
+use datafusion::common::ScalarValue;
+use datafusion::common::utils::SingleRowListArrayBuilder;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datafusion_postgres::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::scalars::{Scalar, ScalarVectorBuilder};
-use datatypes::value::ListValue;
-use datatypes::vectors::{ListVectorBuilder, MutableVector, StringVector, VectorRef};
 use derive_more::Display;
 use pg_get_userbyid::PGGetUserByIdFunction;
 use table_is_visible::PGTableIsVisibleFunction;
 use version::PGVersionFunction;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, find_function_context};
 use crate::function_registry::FunctionRegistry;
 
 #[macro_export]
@@ -58,23 +57,55 @@ pub struct CurrentSchemasFunction;
 #[display("{}", self.name())]
 pub struct SessionUserFunction;
 
+// Though "current_schema" can be aliased to "database", to not cause any breaking changes,
+// we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
 impl Function for CurrentSchemaFunction {
     fn name(&self) -> &str {
         CURRENT_SCHEMA_FUNCTION_NAME
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
+    }
+}
+
+impl Function for SessionUserFunction {
+    fn name(&self) -> &str {
+        SESSION_USER_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8View)
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::nullary(Volatility::Immutable)
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
+        let user = func_ctx.query_ctx.current_user();
+
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(
+            user.username().to_string(),
+        ))))
     }
 }
 
@@ -86,7 +117,7 @@ impl Function for CurrentSchemasFunction {
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "x",
-            DataType::Utf8,
+            DataType::Utf8View,
             false,
         ))))
     }
@@ -95,45 +126,27 @@ impl Function for CurrentSchemasFunction {
         Signature::exact(vec![DataType::Boolean], Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        let input = &columns[0];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let input = as_boolean_array(&args[0]);
 
         // Create a UTF8 array with a single value
-        let mut values = vec!["public".into()];
+        let mut values = vec!["public"];
         // include implicit schemas
-        if input.get(0).as_bool().unwrap_or(false) {
-            values.push("information_schema".into());
-            values.push("pg_catalog".into());
-            values.push("greptime_private".into());
+        if input.value(0) {
+            values.push("information_schema");
+            values.push("pg_catalog");
+            values.push("greptime_private");
         }
-        let list_value = ListValue::new(values, ConcreteDataType::string_datatype());
 
-        let mut results =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::string_datatype(), 8);
+        let list_array = SingleRowListArrayBuilder::new(Arc::new(StringArray::from(values)));
 
-        results.push(Some(list_value.as_scalar_ref()));
+        let array: ArrayRef = Arc::new(list_array.build_list_array());
 
-        Ok(results.to_vector())
-    }
-}
-
-impl Function for SessionUserFunction {
-    fn name(&self) -> &str {
-        SESSION_USER_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let user = func_ctx.query_ctx.current_user();
-
-        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
+        Ok(ColumnarValue::Array(array))
     }
 }
 

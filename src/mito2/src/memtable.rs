@@ -33,6 +33,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
@@ -149,6 +150,19 @@ pub struct MemtableRanges {
     pub ranges: BTreeMap<usize, MemtableRange>,
     /// Statistics of the memtable at the query time.
     pub stats: MemtableStats,
+}
+
+impl IterBuilder for MemtableRanges {
+    fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+        UnsupportedOperationSnafu {
+            err_msg: "MemtableRanges does not support build iterator",
+        }
+        .fail()
+    }
+
+    fn is_record_batch(&self) -> bool {
+        self.ranges.values().all(|range| range.is_record_batch())
+    }
 }
 
 /// In memory write buffer.
@@ -312,6 +326,7 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
+    compact_dispatcher: Option<Arc<CompactDispatcher>>,
 }
 
 impl MemtableBuilderProvider {
@@ -319,9 +334,14 @@ impl MemtableBuilderProvider {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: Arc<MitoConfig>,
     ) -> Self {
+        let compact_dispatcher = config
+            .enable_experimental_flat_format
+            .then(|| Arc::new(CompactDispatcher::new(config.max_background_compactions)));
+
         Self {
             write_buffer_manager,
             config,
+            compact_dispatcher,
         }
     }
 
@@ -331,6 +351,22 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
+        if self.config.enable_experimental_flat_format {
+            common_telemetry::info!(
+                "Overriding memtable config, use BulkMemtable under flat format"
+            );
+
+            return Arc::new(
+                BulkMemtableBuilder::new(
+                    self.write_buffer_manager.clone(),
+                    !dedup, // append_mode: true if not dedup, false if dedup
+                    merge_mode,
+                )
+                // Safety: We create the dispatcher if flat_format is enabled.
+                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
+            );
+        }
+
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -354,6 +390,18 @@ impl MemtableBuilderProvider {
     }
 
     fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
+        if self.config.enable_experimental_flat_format {
+            return Arc::new(
+                BulkMemtableBuilder::new(
+                    self.write_buffer_manager.clone(),
+                    !dedup, // append_mode: true if not dedup, false if dedup
+                    merge_mode,
+                )
+                // Safety: We create the dispatcher if flat_format is enabled.
+                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
+            );
+        }
+
         match &self.config.memtable {
             MemtableConfig::PartitionTree(config) => {
                 let mut config = config.clone();
@@ -527,6 +575,11 @@ impl MemtableRange {
 
     pub fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the encoded range if available.
+    pub fn encoded(&self) -> Option<EncodedRange> {
+        self.context.builder.encoded_range()
     }
 }
 

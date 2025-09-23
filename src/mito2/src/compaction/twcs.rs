@@ -350,11 +350,13 @@ fn find_latest_window_in_seconds<'a>(
 mod tests {
     use std::collections::HashSet;
 
+    use store_api::storage::FileId;
+
     use super::*;
     use crate::compaction::test_util::{
         new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
     };
-    use crate::sst::file::{FileId, Level};
+    use crate::sst::file::Level;
 
     #[test]
     fn test_get_latest_window_in_seconds() {

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::RecordBatch;
-use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
 use datatypes::arrow::datatypes::Field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
@@ -49,6 +49,8 @@ pub struct FlatProjectionMapper {
     column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
+    ///
+    /// It doesn't contain internal columns but always contains the time index column.
     batch_schema: Vec<(ColumnId, ConcreteDataType)>,
     /// `true` If the original projection is empty.
     is_empty_projection: bool,
@@ -188,11 +190,13 @@ impl FlatProjectionMapper {
     }
 
     /// Returns ids of columns of the batch that the mapper expects to convert.
-    #[allow(dead_code)]
     pub(crate) fn batch_schema(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_schema
     }
 
+    /// Returns the input arrow schema from sources.
+    ///
+    /// The merge reader can use this schema.
     pub(crate) fn input_arrow_schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
         self.input_arrow_schema.clone()
     }
@@ -212,7 +216,6 @@ impl FlatProjectionMapper {
     /// Converts a flat format [RecordBatch] to a normal [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
-    #[allow(dead_code)]
     pub(crate) fn convert(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
@@ -223,7 +226,15 @@ impl FlatProjectionMapper {
 
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
-            let array = batch.column(*index).clone();
+            let mut array = batch.column(*index).clone();
+            // Casts dictionary values to the target type.
+            if let datatypes::arrow::datatypes::DataType::Dictionary(_key_type, value_type) =
+                array.data_type()
+            {
+                let casted = datatypes::arrow::compute::cast(&array, value_type)
+                    .context(ArrowComputeSnafu)?;
+                array = casted;
+            }
             let vector = Helper::try_into_vector(array)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
@@ -235,11 +246,22 @@ impl FlatProjectionMapper {
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
+///
+/// It adds the time index column if it doesn't present in the projection.
 pub(crate) fn flat_projected_columns(
     metadata: &RegionMetadata,
     format_projection: &FormatProjection,
 ) -> Vec<(ColumnId, ConcreteDataType)> {
-    let mut schema = vec![None; format_projection.column_id_to_projected_index.len()];
+    let time_index = metadata.time_index_column();
+    let num_columns = if format_projection
+        .column_id_to_projected_index
+        .contains_key(&time_index.column_id)
+    {
+        format_projection.column_id_to_projected_index.len()
+    } else {
+        format_projection.column_id_to_projected_index.len() + 1
+    };
+    let mut schema = vec![None; num_columns];
     for (column_id, index) in &format_projection.column_id_to_projected_index {
         // Safety: FormatProjection ensures the id is valid.
         schema[*index] = Some((
@@ -250,6 +272,12 @@ pub(crate) fn flat_projected_columns(
                 .column_schema
                 .data_type
                 .clone(),
+        ));
+    }
+    if num_columns != format_projection.column_id_to_projected_index.len() {
+        schema[num_columns - 1] = Some((
+            time_index.column_id,
+            time_index.column_schema.data_type.clone(),
         ));
     }
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_datasource::compression::CompressionType;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
 
 use crate::error::Error::ChecksumMismatch;
@@ -28,7 +28,7 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::storage::CheckpointMetadata;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::region::{RegionLeaderState, RegionRoleState};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::test_util::TestEnv;
 
 async fn build_manager(
@@ -77,6 +77,7 @@ fn nop_action() -> RegionMetaActionList {
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
+        committed_sequence: None,
     })])
 }
 
@@ -276,6 +277,7 @@ async fn checkpoint_with_different_compression_types() {
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }
@@ -340,6 +342,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         })]);
         actions.push(action);
     }

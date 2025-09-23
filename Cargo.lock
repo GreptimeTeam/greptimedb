@@ -1967,6 +1967,7 @@ dependencies = [
  "session",
  "similar-asserts",
  "snafu 0.8.6",
+ "standalone",
  "stat",
  "store-api",
  "substrait 0.18.0",
@@ -4939,7 +4940,6 @@ dependencies = [
  "humantime-serde",
  "lazy_static",
  "log-query",
- "log-store",
  "meta-client",
  "num_cpus",
  "opentelemetry-proto",
@@ -5353,7 +5353,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36#f9836cf8aab30e672f640c6ef4c1cfd2cf9fbc36"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3e821d0d405e6733690a4e4352812ba2ff780a3e#3e821d0d405e6733690a4e4352812ba2ff780a3e"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7338,8 +7338,7 @@ checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 [[package]]
 name = "memcomparable"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "376101dbd964fc502d5902216e180f92b3d003b5cc3d2e40e044eb5470fca677"
+source = "git+https://github.com/v0y4g3r/memcomparable.git?rev=a07122dc03556bbd88ad66234cbea7efd3b23efb#a07122dc03556bbd88ad66234cbea7efd3b23efb"
 dependencies = [
  "bytes",
  "serde",
@@ -7658,7 +7657,6 @@ dependencies = [
  "itertools 0.14.0",
  "lazy_static",
  "log-store",
- "memcomparable",
  "mito-codec",
  "moka",
  "object-store",
@@ -9513,12 +9511,14 @@ dependencies = [
  "cli",
  "common-base",
  "common-error",
+ "common-meta",
  "datanode",
  "flow",
  "frontend",
  "meta-srv",
  "serde",
  "snafu 0.8.6",
+ "standalone",
 ]
 
 [[package]]
@@ -12368,6 +12368,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "standalone"
+version = "0.18.0"
+dependencies = [
+ "async-trait",
+ "catalog",
+ "client",
+ "common-base",
+ "common-config",
+ "common-error",
+ "common-macro",
+ "common-meta",
+ "common-options",
+ "common-procedure",
+ "common-query",
+ "common-telemetry",
+ "common-time",
+ "common-version",
+ "common-wal",
+ "datanode",
+ "file-engine",
+ "flow",
+ "frontend",
+ "log-store",
+ "mito2",
+ "query",
+ "serde",
+ "servers",
+ "snafu 0.8.6",
+ "store-api",
+ "tokio",
+]
+
+[[package]]
 name = "stat"
 version = "0.18.0"
 dependencies = [
@@ -12415,6 +12448,7 @@ dependencies = [
  "sqlparser 0.55.0-greptime",
  "strum 0.27.1",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -13081,6 +13115,7 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "sqlx",
+ "standalone",
  "store-api",
  "substrait 0.18.0",
  "table",

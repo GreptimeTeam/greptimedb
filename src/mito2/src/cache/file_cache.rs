@@ -30,12 +30,11 @@ use object_store::util::join_path;
 use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::cache::FILE_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
-use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 

@@ -24,6 +24,7 @@ pub mod region_peers;
 mod region_statistics;
 mod runtime_metrics;
 pub mod schemata;
+mod ssts;
 mod table_constraints;
 mod table_names;
 pub mod tables;
@@ -66,6 +67,9 @@ use crate::system_schema::information_schema::partitions::InformationSchemaParti
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::system_schema::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
+use crate::system_schema::information_schema::ssts::{
+    InformationSchemaSstsManifest, InformationSchemaSstsStorage,
+};
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
@@ -253,6 +257,12 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 .process_manager
                 .as_ref()
                 .map(|p| Arc::new(InformationSchemaProcessList::new(p.clone())) as _),
+            SSTS_MANIFEST => Some(Arc::new(InformationSchemaSstsManifest::new(
+                self.catalog_manager.clone(),
+            )) as _),
+            SSTS_STORAGE => Some(Arc::new(InformationSchemaSstsStorage::new(
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
@@ -323,6 +333,14 @@ impl InformationSchemaProvider {
             tables.insert(
                 REGION_STATISTICS.to_string(),
                 self.build_table(REGION_STATISTICS).unwrap(),
+            );
+            tables.insert(
+                SSTS_MANIFEST.to_string(),
+                self.build_table(SSTS_MANIFEST).unwrap(),
+            );
+            tables.insert(
+                SSTS_STORAGE.to_string(),
+                self.build_table(SSTS_STORAGE).unwrap(),
             );
         }
 

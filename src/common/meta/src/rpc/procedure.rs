@@ -23,6 +23,7 @@ use api::v1::meta::{
 use common_error::ext::ErrorExt;
 use common_procedure::{ProcedureId, ProcedureInfo, ProcedureState};
 use snafu::ResultExt;
+use table::metadata::TableId;
 
 use crate::error::{ParseProcedureIdSnafu, Result};
 
@@ -42,6 +43,30 @@ pub struct AddRegionFollowerRequest {
     pub region_id: u64,
     /// The peer id to add follower.
     pub peer_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddTableFollowerRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveTableFollowerRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+}
+
+#[derive(Debug, Clone)]
+pub enum ManageRegionFollowerRequest {
+    AddRegionFollower(AddRegionFollowerRequest),
+    RemoveRegionFollower(RemoveRegionFollowerRequest),
+    AddTableFollower(AddTableFollowerRequest),
+    RemoveTableFollower(RemoveTableFollowerRequest),
 }
 
 /// A request to remove region follower.

@@ -18,8 +18,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_time::{TimeToLive, Timestamp};
+use store_api::storage::FileId;
 
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 
 /// A version of all SSTs in a region.

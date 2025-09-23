@@ -573,6 +573,7 @@ impl MySqlStore {
 #[cfg(test)]
 mod tests {
     use common_telemetry::init_default_ut_logging;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 
     use super::*;
     use crate::kv_backend::test::{
@@ -584,6 +585,7 @@ mod tests {
         text_txn_multi_compare_op, unprepare_kv,
     };
     use crate::maybe_skip_mysql_integration_test;
+    use crate::test_util::test_certs_dir;
 
     async fn build_mysql_kv_backend(table_name: &str) -> Option<MySqlStore> {
         init_default_ut_logging();
@@ -710,5 +712,72 @@ mod tests {
         test_txn_compare_greater(&kv_backend).await;
         test_txn_compare_less(&kv_backend).await;
         test_txn_compare_not_equal(&kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::Required);
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_mtls() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::Required)
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls_verify_ca() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::VerifyCa)
+            .ssl_ca(certs_dir.join("root.crt").to_string_lossy().to_string())
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mysql_with_tls_verify_ident() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_mysql_integration_test!();
+        let endpoint = std::env::var("GT_MYSQL_ENDPOINTS").unwrap();
+        let certs_dir = test_certs_dir();
+
+        let opts = endpoint
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .ssl_mode(MySqlSslMode::VerifyIdentity)
+            .ssl_ca(certs_dir.join("root.crt").to_string_lossy().to_string())
+            .ssl_client_cert(certs_dir.join("client.crt").to_string_lossy().to_string())
+            .ssl_client_key(certs_dir.join("client.key").to_string_lossy().to_string());
+        let pool = MySqlPool::connect_with(opts).await.unwrap();
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
     }
 }

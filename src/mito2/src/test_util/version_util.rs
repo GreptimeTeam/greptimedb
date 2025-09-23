@@ -25,13 +25,13 @@ use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::manifest::action::RegionEdit;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{KeyValues, MemtableBuilderRef};
 use crate::region::version::{Version, VersionBuilder, VersionControl};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::test_util::memtable_util::EmptyMemtableBuilder;
 use crate::test_util::{new_noop_file_purger, ts_ms_value};
@@ -211,6 +211,7 @@ pub(crate) fn apply_edit(
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
         }),
         &[],
         purger,

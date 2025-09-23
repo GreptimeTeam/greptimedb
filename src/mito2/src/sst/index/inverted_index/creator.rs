@@ -29,7 +29,7 @@ use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -38,7 +38,6 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::file::FileId;
 use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,

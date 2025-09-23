@@ -12,64 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-macro_rules! ensure_columns_len {
-    ($columns:ident) => {
-        snafu::ensure!(
-            $columns.windows(2).all(|c| c[0].len() == c[1].len()),
-            common_query::error::InvalidFuncArgsSnafu {
-                err_msg: "The length of input columns are in different size"
-            }
-        )
-    };
-    ($column_a:ident, $column_b:ident, $($column_n:ident),*) => {
-        snafu::ensure!(
-            {
-                let mut result = $column_a.len() == $column_b.len();
-                $(
-                result = result && ($column_a.len() == $column_n.len());
-                )*
-                result
-            }
-            common_query::error::InvalidFuncArgsSnafu {
-                err_msg: "The length of input columns are in different size"
-            }
-        )
-    };
-}
-
-pub(crate) use ensure_columns_len;
-
-macro_rules! ensure_columns_n {
-    ($columns:ident, $n:literal) => {
-        snafu::ensure!(
-            $columns.len() == $n,
-            common_query::error::InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of arguments is not correct, expect {}, provided : {}",
-                    stringify!($n),
-                    $columns.len()
-                ),
-            }
-        );
-
-        if $n > 1 {
-            ensure_columns_len!($columns);
-        }
-    };
-}
-
-pub(crate) use ensure_columns_n;
+use datafusion::arrow::array::{ArrayRef, ArrowPrimitiveType};
+use datafusion::arrow::compute;
 
 macro_rules! ensure_and_coerce {
     ($compare:expr, $coerce:expr) => {{
-        snafu::ensure!(
-            $compare,
-            common_query::error::InvalidFuncArgsSnafu {
-                err_msg: "Argument was outside of acceptable range "
-            }
-        );
-        Ok($coerce)
+        if !$compare {
+            return Err(datafusion_common::DataFusionError::Execution(
+                "argument out of valid range".to_string(),
+            ));
+        }
+        Ok(Some($coerce))
     }};
 }
 
 pub(crate) use ensure_and_coerce;
+
+pub(crate) fn cast<T: ArrowPrimitiveType>(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
+    let x = compute::cast_with_options(
+        array.as_ref(),
+        &T::DATA_TYPE,
+        &compute::CastOptions {
+            safe: false,
+            ..Default::default()
+        },
+    )?;
+    Ok(x)
+}

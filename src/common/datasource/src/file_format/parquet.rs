@@ -196,7 +196,10 @@ pub async fn stream_to_parquet(
     concurrency: usize,
 ) -> Result<usize> {
     let write_props = column_wise_config(
-        WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())),
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_statistics_truncate_length(None)
+            .set_column_index_truncate_length(None),
         schema,
     )
     .build();

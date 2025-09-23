@@ -23,10 +23,9 @@ use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
 use datafusion_expr::{Signature, Volatility};
-use datatypes::vectors::VectorRef;
 pub use rate::RateFunction;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
 use crate::scalars::math::modulo::ModuloFunction;
 
@@ -74,12 +73,5 @@ impl Function for RangeFunction {
     /// In fact, the arguments loaded by `range_fn` are very complicated, and it is difficult to use `Signature` to describe
     fn signature(&self) -> Signature {
         Signature::variadic_any(Volatility::Immutable)
-    }
-
-    fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        Err(DataFusionError::Internal(
-            "range_fn just a empty function used in range select, It should not be eval!".into(),
-        )
-        .into())
     }
 }

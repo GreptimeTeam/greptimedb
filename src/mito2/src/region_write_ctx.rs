@@ -145,13 +145,18 @@ impl RegionWriteCtx {
     }
 
     /// Push mutation to the context.
+    /// This method adopts the sequence number in parameters if present.
     pub(crate) fn push_mutation(
         &mut self,
         op_type: i32,
         rows: Option<Rows>,
         write_hint: Option<WriteHint>,
         tx: OptionOutputTx,
+        sequence: Option<SequenceNumber>,
     ) {
+        if let Some(sequence) = sequence {
+            self.next_sequence = sequence;
+        }
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
         self.wal_entry.mutations.push(Mutation {
             op_type,
@@ -268,7 +273,15 @@ impl RegionWriteCtx {
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
 
-    pub(crate) fn push_bulk(&mut self, sender: OptionOutputTx, mut bulk: BulkPart) -> bool {
+    pub(crate) fn push_bulk(
+        &mut self,
+        sender: OptionOutputTx,
+        mut bulk: BulkPart,
+        sequence: Option<SequenceNumber>,
+    ) -> bool {
+        if let Some(sequence) = sequence {
+            self.next_sequence = sequence;
+        }
         bulk.sequence = self.next_sequence;
         let entry = match BulkWalEntry::try_from(&bulk) {
             Ok(entry) => entry,

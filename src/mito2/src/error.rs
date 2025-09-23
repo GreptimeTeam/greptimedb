@@ -29,13 +29,12 @@ use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::ManifestVersion;
 use store_api::logstore::provider::Provider;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
 use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
-use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
 #[derive(Snafu)]

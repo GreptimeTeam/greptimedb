@@ -36,7 +36,7 @@ use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
@@ -51,7 +51,7 @@ use crate::metrics::{
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;

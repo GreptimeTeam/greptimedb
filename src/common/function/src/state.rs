@@ -37,8 +37,7 @@ impl FunctionState {
         use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
         use common_meta::rpc::procedure::{
-            AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
-            RemoveRegionFollowerRequest,
+            ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
         };
         use common_query::Output;
         use common_query::error::Result;
@@ -75,13 +74,9 @@ impl FunctionState {
                 })
             }
 
-            async fn add_region_follower(&self, _request: AddRegionFollowerRequest) -> Result<()> {
-                Ok(())
-            }
-
-            async fn remove_region_follower(
+            async fn manage_region_follower(
                 &self,
-                _request: RemoveRegionFollowerRequest,
+                _request: ManageRegionFollowerRequest,
             ) -> Result<()> {
                 Ok(())
             }

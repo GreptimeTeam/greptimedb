@@ -36,6 +36,7 @@ pub mod error;
 #[cfg(feature = "enterprise")]
 pub mod extension;
 pub mod flush;
+pub mod gc;
 pub mod manifest;
 pub mod memtable;
 mod metrics;

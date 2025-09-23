@@ -18,8 +18,8 @@ pub mod opener;
 pub mod options;
 pub(crate) mod version;
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -545,46 +545,55 @@ impl MitoRegion {
     }
 
     /// Returns the SST entries of the region.
-    pub fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
+    pub async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
         let table_dir = self.table_dir();
         let path_type = self.access_layer.path_type();
-        self.version()
+
+        let visible_ssts = self
+            .version()
             .ssts
             .levels()
             .iter()
-            .flat_map(|level| {
-                level.files().map(|file| {
-                    let meta = file.meta_ref();
-                    let region_id = self.region_id;
-                    let origin_region_id = meta.region_id;
-                    let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
-                        let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
-                        (Some(index_file_path), Some(meta.index_file_size))
-                    } else {
-                        (None, None)
-                    };
-                    ManifestSstEntry {
-                        table_dir: table_dir.to_string(),
-                        region_id,
-                        table_id: region_id.table_id(),
-                        region_number: region_id.region_number(),
-                        region_group: region_id.region_group(),
-                        region_sequence: region_id.region_sequence(),
-                        file_id: meta.file_id.to_string(),
-                        level: meta.level,
-                        file_path: sst_file_path(table_dir, meta.file_id(), path_type),
-                        file_size: meta.file_size,
-                        index_file_path,
-                        index_file_size,
-                        num_rows: meta.num_rows,
-                        num_row_groups: meta.num_row_groups,
-                        min_ts: meta.time_range.0,
-                        max_ts: meta.time_range.1,
-                        sequence: meta.sequence.map(|s| s.get()),
-                        origin_region_id,
-                        node_id: None,
-                    }
-                })
+            .flat_map(|level| level.files().map(|file| file.file_id().file_id()))
+            .collect::<HashSet<_>>();
+
+        self.manifest_ctx
+            .manifest()
+            .await
+            .files
+            .values()
+            .map(|meta| {
+                let region_id = self.region_id;
+                let origin_region_id = meta.region_id;
+                let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
+                    let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
+                    (Some(index_file_path), Some(meta.index_file_size))
+                } else {
+                    (None, None)
+                };
+                let visible = visible_ssts.contains(&meta.file_id);
+                ManifestSstEntry {
+                    table_dir: table_dir.to_string(),
+                    region_id,
+                    table_id: region_id.table_id(),
+                    region_number: region_id.region_number(),
+                    region_group: region_id.region_group(),
+                    region_sequence: region_id.region_sequence(),
+                    file_id: meta.file_id.to_string(),
+                    level: meta.level,
+                    file_path: sst_file_path(table_dir, meta.file_id(), path_type),
+                    file_size: meta.file_size,
+                    index_file_path,
+                    index_file_size,
+                    num_rows: meta.num_rows,
+                    num_row_groups: meta.num_row_groups,
+                    min_ts: meta.time_range.0,
+                    max_ts: meta.time_range.1,
+                    sequence: meta.sequence.map(|s| s.get()),
+                    origin_region_id,
+                    node_id: None,
+                    visible,
+                }
             })
             .collect()
     }

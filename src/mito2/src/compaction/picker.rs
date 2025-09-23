@@ -147,9 +147,10 @@ pub fn new_picker(
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::FileId;
+
     use super::*;
     use crate::compaction::test_util::new_file_handle;
-    use crate::sst::file::FileId;
     use crate::test_util::new_noop_file_purger;
 
     #[test]

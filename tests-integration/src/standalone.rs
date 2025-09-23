@@ -23,7 +23,6 @@ use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use cmd::error::StartFlownodeSnafu;
-use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
@@ -53,6 +52,7 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use servers::server::ServerHandlers;
 use snafu::ResultExt;
+use standalone::options::StandaloneOptions;
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
@@ -315,13 +315,14 @@ impl GreptimeDbStandaloneBuilder {
 
         let kv_backend_config = KvBackendConfig::default();
         let procedure_config = ProcedureConfig::default();
-        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
+
+        let kv_backend = standalone::build_metadata_kvbackend(
             format!("{}/kv", &opts.storage.data_home),
             kv_backend_config,
-            procedure_config,
         )
-        .await
         .unwrap();
+        let procedure_manager =
+            standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
         let standalone_opts = StandaloneOptions {
             storage: opts.storage,

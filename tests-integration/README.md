@@ -86,13 +86,23 @@ The server certificate includes SANs for `localhost`, `etcd-tls`, `127.0.0.1`, a
 
 ### Regenerating Certificates (Optional)
 
-If you need to regenerate the certificates:
+If you need to regenerate the etcd certificates:
 ```bash
 # Regenerate certificates (overwrites existing ones)
 ./scripts/generate-etcd-tls-certs.sh
 
 # Or generate in custom location
 ./scripts/generate-etcd-tls-certs.sh /path/to/cert/directory
+```
+
+If you need to regenerate the mysql and postgres certificates:
+
+```bash
+# Regenerate certificates (overwrites existing ones)
+./scripts/generate_certs.sh
+
+# Or generate in custom location
+./scripts/generate_certs.sh /path/to/cert/directory
 ```
 
 **Note**: The checked-in certificates are for testing purposes only and should never be used in production.

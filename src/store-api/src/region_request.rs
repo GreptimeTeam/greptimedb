@@ -1377,12 +1377,6 @@ pub struct RegionCatchupRequest {
     pub checkpoint: Option<ReplayCheckpoint>,
 }
 
-/// Get sequences of regions by region ids.
-#[derive(Debug, Clone)]
-pub struct RegionSequencesRequest {
-    pub region_ids: Vec<RegionId>,
-}
-
 #[derive(Debug, Clone)]
 pub struct RegionBulkInsertsRequest {
     pub region_id: RegionId,

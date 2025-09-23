@@ -19,15 +19,13 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::error::{self, Result};
 use datafusion::arrow::array::{
-    Array, ArrayRef, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder,
-    StringViewArray, StringViewBuilder, UInt8Builder, UInt64Builder,
+    Array, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringViewArray,
+    StringViewBuilder, UInt8Builder, UInt64Builder,
 };
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, Float64Type, Int64Type, UInt8Type, UInt64Type,
-};
+use datafusion::arrow::datatypes::{Float64Type, Int64Type, UInt8Type, UInt64Type};
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{DataFusionError, ScalarValue, utils};
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::{DataType, Field};
@@ -35,7 +33,8 @@ use derive_more::Display;
 use h3o::{CellIndex, LatLng, Resolution};
 use snafu::prelude::*;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
+use crate::scalars::geo::helpers;
 
 static CELL_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Int64, DataType::UInt64, DataType::Utf8]);
@@ -86,14 +85,13 @@ impl Function for H3LatLngToCell {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
+        let [lat_vec, lon_vec, resolution_vec] = extract_args(self.name(), &args)?;
 
-        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
         let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
@@ -168,14 +166,13 @@ impl Function for H3LatLngToCellString {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [lat_vec, lon_vec, resolution_vec] = utils::take_function_args(self.name(), args)?;
+        let [lat_vec, lon_vec, resolution_vec] = extract_args(self.name(), &args)?;
 
-        let lat_vec = cast::<Float64Type>(&lat_vec)?;
+        let lat_vec = helpers::cast::<Float64Type>(&lat_vec)?;
         let lat_vec = lat_vec.as_primitive::<Float64Type>();
-        let lon_vec = cast::<Float64Type>(&lon_vec)?;
+        let lon_vec = helpers::cast::<Float64Type>(&lon_vec)?;
         let lon_vec = lon_vec.as_primitive::<Float64Type>();
-        let resolutions = cast::<UInt8Type>(&resolution_vec)?;
+        let resolutions = helpers::cast::<UInt8Type>(&resolution_vec)?;
         let resolution_vec = resolutions.as_primitive::<UInt8Type>();
 
         let size = lat_vec.len();
@@ -234,8 +231,7 @@ impl Function for H3CellToString {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = StringViewBuilder::with_capacity(size);
@@ -273,8 +269,7 @@ impl Function for H3StringToCell {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [string_vec] = utils::take_function_args(self.name(), args)?;
+        let [string_vec] = extract_args(self.name(), &args)?;
         let string_vec = compute::cast(string_vec.as_ref(), &DataType::Utf8View)?;
         let string_vec = datafusion_common::downcast_value!(string_vec, StringViewArray);
 
@@ -324,8 +319,7 @@ impl Function for H3CellCenterLatLng {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = ListBuilder::new(Float64Builder::new());
@@ -369,8 +363,7 @@ impl Function for H3CellResolution {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = UInt8Builder::with_capacity(cell_vec.len());
@@ -407,8 +400,7 @@ impl Function for H3CellBase {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = UInt8Builder::with_capacity(size);
@@ -446,8 +438,7 @@ impl Function for H3CellIsPentagon {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = BooleanBuilder::with_capacity(size);
@@ -545,9 +536,8 @@ impl Function for H3CellToChildren {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
-        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let [cell_vec, res_vec] = extract_args(self.name(), &args)?;
+        let resolutions = helpers::cast::<UInt8Type>(&res_vec)?;
         let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = cell_vec.len();
@@ -639,9 +629,8 @@ fn calculate_cell_child_property<F>(
 where
     F: Fn(CellIndex, Resolution) -> Option<u64>,
 {
-    let args = ColumnarValue::values_to_arrays(&args.args)?;
-    let [cells, resolutions] = utils::take_function_args(name, args)?;
-    let resolutions = cast::<UInt8Type>(&resolutions)?;
+    let [cells, resolutions] = extract_args(name, &args)?;
+    let resolutions = helpers::cast::<UInt8Type>(&resolutions)?;
     let resolutions = resolutions.as_primitive::<UInt8Type>();
 
     let mut builder = UInt64Builder::with_capacity(cells.len());
@@ -696,9 +685,8 @@ impl Function for H3ChildPosToCell {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [pos_vec, cell_vec, res_vec] = utils::take_function_args(self.name(), args)?;
-        let resolutions = cast::<UInt8Type>(&res_vec)?;
+        let [pos_vec, cell_vec, res_vec] = extract_args(self.name(), &args)?;
+        let resolutions = helpers::cast::<UInt8Type>(&res_vec)?;
         let resolutions = resolutions.as_primitive::<UInt8Type>();
 
         let size = cell_vec.len();
@@ -720,18 +708,6 @@ impl Function for H3ChildPosToCell {
 
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
-}
-
-fn cast<T: ArrowPrimitiveType>(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
-    let x = compute::cast_with_options(
-        array.as_ref(),
-        &T::DATA_TYPE,
-        &compute::CastOptions {
-            safe: false,
-            ..Default::default()
-        },
-    )?;
-    Ok(x)
 }
 
 /// Function that returns cells with k distances of given cell
@@ -760,8 +736,7 @@ impl Function for H3GridDisk {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec, k_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec, k_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = ListBuilder::new(UInt64Builder::new());
@@ -810,8 +785,7 @@ impl Function for H3GridDiskDistances {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_vec, k_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_vec, k_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_vec.len();
         let mut builder = ListBuilder::new(UInt64Builder::new());
@@ -855,8 +829,7 @@ impl Function for H3GridDistance {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_this_vec, cell_that_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_this_vec.len();
         let mut builder = Int32Builder::with_capacity(size);
@@ -915,8 +888,7 @@ impl Function for H3GridPathCells {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_this_vec, cell_that_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_this_vec.len();
         let mut builder = ListBuilder::new(UInt64Builder::new());
@@ -985,8 +957,7 @@ impl Function for H3CellContains {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cells_vec, cell_this_vec] = utils::take_function_args(self.name(), args)?;
+        let [cells_vec, cell_this_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_this_vec.len();
         let mut builder = BooleanBuilder::with_capacity(size);
@@ -1040,8 +1011,7 @@ impl Function for H3CellDistanceSphereKm {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_this_vec, cell_that_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_this_vec.len();
         let mut builder = Float64Builder::with_capacity(size);
@@ -1097,8 +1067,7 @@ impl Function for H3CellDistanceEuclideanDegree {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [cell_this_vec, cell_that_vec] = utils::take_function_args(self.name(), args)?;
+        let [cell_this_vec, cell_that_vec] = extract_args(self.name(), &args)?;
 
         let size = cell_this_vec.len();
         let mut builder = Float64Builder::with_capacity(size);
