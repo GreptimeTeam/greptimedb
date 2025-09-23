@@ -1070,15 +1070,15 @@ Affected Rows: 7
 -- `pk_col_1` is a partition key, `pk_col_2` is not.
 -- This should pushdown entire aggregation to datanodes since it's partitioned by `pk_col_1`.
 -- Expected: Full pushdown of aggregation to datanodes.
-SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2;
+SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
 
 +----------+----------+-----------------------------------+
 | pk_col_1 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
 +----------+----------+-----------------------------------+
-| a        | 2        | 200                               |
-| g        | 1        | 300                               |
 | a        | 1        | 100                               |
+| a        | 2        | 200                               |
 | a        | 3        | 100                               |
+| g        | 1        | 300                               |
 | g        | 2        | 400                               |
 | g        | 3        | 300                               |
 | h        | 4        | 500                               |
@@ -1090,17 +1090,21 @@ SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_co
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2;
+EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2 ORDER BY pk_col_1, pk_col_2;
 
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2, sum(step_aggr_extended.val_col_1)_|
+| logical_plan_| MergeSort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: step_aggr_extended.pk_col_1 ASC NULLS LAST, step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Projection: step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2, sum(step_aggr_extended.val_col_1)_|
 |_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2]], aggr=[[sum(step_aggr_extended.val_col_1)]] |
 |_|_TableScan: step_aggr_extended_|
 |_| ]]_|
-| physical_plan | CooperativeExec_|
+| physical_plan | SortPreservingMergeExec: [pk_col_1@0 ASC NULLS LAST, pk_col_2@1 ASC NULLS LAST]_|
+|_|_CooperativeExec_|
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -1151,15 +1155,15 @@ EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
 -- Case 14: Aggregation with a HAVING clause.
 -- The `HAVING` clause filters results after aggregation.
 -- Expected: The `HAVING` filter should be applied on the frontend after the final aggregation is complete, not pushed down to datanodes.
-SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300;
+SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
 
 +----------+-----------------------------------+
 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
 +----------+-----------------------------------+
-| 4        | 500                               |
-| 2        | 600                               |
 | 1        | 400                               |
+| 2        | 600                               |
 | 3        | 400                               |
+| 4        | 500                               |
 +----------+-----------------------------------+
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -1168,18 +1172,21 @@ SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300;
+EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300 ORDER BY pk_col_2;
 
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Filter: sum(step_aggr_extended.val_col_1) > Int64(300)_|
+| logical_plan_| Sort: step_aggr_extended.pk_col_2 ASC NULLS LAST_|
+|_|_Filter: sum(step_aggr_extended.val_col_1) > Int64(300)_|
 |_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1)]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_state(step_aggr_extended.val_col_1)]]_|
 |_|_TableScan: step_aggr_extended_|
 |_| ]]_|
-| physical_plan | CoalesceBatchesExec: target_batch_size=8192_|
+| physical_plan | SortPreservingMergeExec: [pk_col_2@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[pk_col_2@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: sum(step_aggr_extended.val_col_1)@1 > 300_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[pk_col_2@0 as pk_col_2], aggr=[sum(step_aggr_extended.val_col_1)]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
