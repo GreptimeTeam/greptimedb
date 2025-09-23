@@ -335,15 +335,16 @@ impl PlanRewriter {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        if DFLogicalSubstraitConvertor
-            .encode(plan, DefaultSerializer)
-            .is_err()
-        {
+        if let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer) {
+            debug!(
+                "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
+            );
             return Ok(true);
         }
 
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
+            debug!("PlanRewriter: expand_on_next_call is true, expanding now");
             return Ok(true);
         }
 
@@ -364,6 +365,9 @@ impl PlanRewriter {
                     // again a new node that can be push down, we should just
                     // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
+                    debug!(
+                        "PlanRewriter: meet a new conditional/transformed commutative plan, expanding now: {plan}"
+                    );
                     return Ok(true);
                 }
                 _ => (),
@@ -423,6 +427,7 @@ impl PlanRewriter {
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
+                debug!("PlanRewriter: meet a non-commutative plan, expanding now: {plan}");
                 return Ok(true);
             }
         }
