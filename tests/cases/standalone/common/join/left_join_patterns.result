@@ -37,8 +37,8 @@ ORDER BY transaction_count DESC;
 | acc_name   | balance | transaction_count | total_activity |
 +------------+---------+-------------------+----------------+
 | Checking   | 1500.0  | 3                 | 375.0          |
-| Savings    | 5000.0  | 1                 | 1000.0         |
 | Credit     | -250.0  | 1                 | -50.0          |
+| Savings    | 5000.0  | 1                 | 1000.0         |
 | Investment | 10000.0 | 0                 | 0.0            |
 +------------+---------+-------------------+----------------+
 
