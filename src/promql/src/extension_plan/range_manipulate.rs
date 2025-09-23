@@ -606,13 +606,11 @@ impl RangeManipulateStream {
         // shorten the range to calculate
         let first_ts = ts_column.value(0);
         // Preserve the query's alignment pattern when optimizing start time
-        let query_offset = self.start % self.interval;
-        let candidate_start =
-            ((first_ts - query_offset) / self.interval) * self.interval + query_offset;
-        let first_ts_aligned = if candidate_start < first_ts {
-            candidate_start + self.interval
+        let remainder = (first_ts - self.start).rem_euclid(self.interval);
+        let first_ts_aligned = if remainder == 0 {
+            first_ts
         } else {
-            candidate_start
+            first_ts + (self.interval - remainder)
         };
         let last_ts = ts_column.value(ts_column.len() - 1);
         let last_ts_aligned = ((last_ts + self.range) / self.interval) * self.interval;
