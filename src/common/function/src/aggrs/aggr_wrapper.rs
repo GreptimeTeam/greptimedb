@@ -207,15 +207,13 @@ impl StateMergeHelper {
         // update aggregate's output schema
         let lower_plan = lower_plan.recompute_schema()?;
 
-        let mut upper = aggr.clone();
+        let upper = Aggregate::try_new(
+            Arc::new(lower_plan.clone()),
+            upper_group_exprs,
+            upper_aggr_exprs.clone(),
+        )?;
         let aggr_plan = LogicalPlan::Aggregate(aggr);
 
-        upper.aggr_expr = upper_aggr_exprs;
-
-        // change group expr to refer to the output group exprs of lower plan
-        upper.group_expr = upper_group_exprs;
-
-        upper.input = Arc::new(lower_plan.clone());
         // upper schema's output schema should be the same as the original aggregate plan's output schema
         let upper_check = upper;
         let upper_plan = LogicalPlan::Aggregate(upper_check).recompute_schema()?;
@@ -429,7 +427,7 @@ pub struct MergeWrapper {
     merge_signature: Signature,
     /// The original physical expression of the aggregate function, can't store the original aggregate function directly, as PhysicalExpr didn't implement Any
     original_phy_expr: Arc<AggregateFunctionExpr>,
-    original_input_types: Vec<DataType>,
+    return_type: DataType,
 }
 impl MergeWrapper {
     pub fn new(
@@ -440,13 +438,14 @@ impl MergeWrapper {
         let name = aggr_merge_func_name(inner.name());
         // the input type is actually struct type, which is the state fields of the original aggregate function.
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
+        let return_type = inner.return_type(&original_input_types)?;
 
         Ok(Self {
             inner,
             name,
             merge_signature,
             original_phy_expr,
-            original_input_types,
+            return_type,
         })
     }
 
@@ -498,8 +497,7 @@ impl AggregateUDFImpl for MergeWrapper {
     /// so return fixed return type instead of using `arg_types` to determine the return type.
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         // The return type is the same as the original aggregate function's return type.
-        let ret_type = self.inner.return_type(&self.original_input_types)?;
-        Ok(ret_type)
+        Ok(self.return_type.clone())
     }
     fn signature(&self) -> &Signature {
         &self.merge_signature
