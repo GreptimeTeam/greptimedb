@@ -137,6 +137,8 @@ impl StateMergeHelper {
         let mut lower_aggr_exprs = vec![];
         let mut upper_aggr_exprs = vec![];
 
+        // group exprs for upper plan should refer to the output group expr as column from lower plan
+        // to avoid re-compute group exprs again.
         let upper_group_exprs = aggr
             .group_expr
             .iter()

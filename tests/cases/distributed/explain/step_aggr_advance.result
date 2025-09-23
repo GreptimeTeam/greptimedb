@@ -1037,3 +1037,266 @@ drop table aggr_optimize_not;
 
 Affected Rows: 0
 
+--
+-- Additional test cases for step aggregation pushdown
+--
+CREATE TABLE step_aggr_extended (
+    pk_col_1 STRING,
+    pk_col_2 BIGINT,
+    val_col_1 BIGINT,
+    val_col_2 STRING,
+    val_col_3 BIGINT,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(pk_col_1, pk_col_2)
+) PARTITION ON COLUMNS (pk_col_1) (
+    pk_col_1 < 'f',
+    pk_col_1 >= 'f'
+);
+
+Affected Rows: 0
+
+INSERT INTO step_aggr_extended VALUES
+    ('a', 1, 100, 'v1', 10, 1672531200000),
+    ('a', 2, 200, 'v2', NULL, 1672531201000),
+    ('g', 1, 300, 'v1', 30, 1672531202000),
+    ('g', 2, 400, 'v2', 40, 1672531203000),
+    ('a', 3, 100, 'v3', 10, 1672531204000),
+    ('g', 3, 300, 'v3', 30, 1672531205000),
+    ('h', 4, 500, NULL, 50, 1672531206000);
+
+Affected Rows: 7
+
+-- Case 12: GROUP BY includes a mix of partition key and non-partition key.
+-- `pk_col_1` is a partition key, `pk_col_2` is not.
+-- This should still trigger step aggregation because of `pk_col_2`.
+-- Expected: Partial aggregation on datanode, Repartition and Final aggregation on frontend.
+SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2;
+
++----------+----------+-----------------------------------+
+| pk_col_1 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+----------+-----------------------------------+
+| a        | 3        | 100                               |
+| h        | 4        | 500                               |
+| a        | 2        | 200                               |
+| a        | 1        | 100                               |
+| g        | 2        | 400                               |
+| g        | 3        | 300                               |
+| g        | 1        | 300                               |
++----------+----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2, sum(step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2]], aggr=[[sum(step_aggr_extended.val_col_1)]] |
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 13: COUNT(DISTINCT) aggregation.
+-- `DISTINCT` aggregation is more complex and requires a two-phase distinct calculation in a distributed environment.
+-- Expected: A plan that handles distinct values correctly across nodes, likely involving `Partial` and `Final` stages for the distinct aggregation.
+SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++----------------------------------------------+
+| count(DISTINCT step_aggr_extended.val_col_1) |
++----------------------------------------------+
+| 5                                            |
++----------------------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: count(alias1) AS count(DISTINCT step_aggr_extended.val_col_1)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(alias1)]]_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.val_col_1 AS alias1]], aggr=[[]]_|
+|_|_Projection: step_aggr_extended.val_col_1_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[count(alias1)@0 as count(DISTINCT step_aggr_extended.val_col_1)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[count(alias1)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(alias1)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[alias1@0 as alias1], aggr=[]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[val_col_1@0 as alias1], aggr=[]_|
+|_|_ProjectionExec: expr=[val_col_1@2 as val_col_1]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 14: Aggregation with a HAVING clause.
+-- The `HAVING` clause filters results after aggregation.
+-- Expected: The `HAVING` filter should be applied on the frontend after the final aggregation is complete, not pushed down to datanodes.
+SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300;
+
++----------+-----------------------------------+
+| pk_col_2 | sum(step_aggr_extended.val_col_1) |
++----------+-----------------------------------+
+| 2        | 600                               |
+| 3        | 400                               |
+| 1        | 400                               |
+| 4        | 500                               |
++----------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING sum(val_col_1) > 300;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Filter: sum(step_aggr_extended.val_col_1) > Int64(300)_|
+|_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1)]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[step_aggr_extended.pk_col_2]], aggr=[[__sum_state(step_aggr_extended.val_col_1)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | CoalesceBatchesExec: target_batch_size=8192_|
+|_|_FilterExec: sum(step_aggr_extended.val_col_1)@1 > 300_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[pk_col_2@0 as pk_col_2], aggr=[sum(step_aggr_extended.val_col_1)]_|
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[pk_col_2@0 as pk_col_2], aggr=[sum(step_aggr_extended.val_col_1)]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 15: Aggregation on a column with NULL values.
+-- `SUM` should ignore NULLs. `COUNT(val_col_2)` should count non-nulls, `COUNT(*)` should count all rows.
+-- Expected: Correct aggregation results, proving NULLs are handled properly in a distributed context.
+SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+-- FIXME: wtf?
+Error: 3001(EngineExecuteQuery), DataFusion error: Execution error: [return_type] SUM not supported for Utf8
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_3)) AS sum(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.val_col_2)) AS count(step_aggr_extended.val_col_2), __count_merge(__count_state(step_aggr_extended.val_col_3)) AS count(step_aggr_extended.val_col_3), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.val_col_2), __count_state(step_aggr_extended.val_col_3), __count_state(step_aggr_extended.ts)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_3)@0 as sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2)@1 as count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3)@2 as count(step_aggr_extended.val_col_3), count(Int64(1))@3 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(step_aggr_extended.val_col_3), count(step_aggr_extended.val_col_2), count(step_aggr_extended.val_col_3), count(Int64(1))]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 16: Aggregation on STRING columns.
+-- `MIN` and `MAX` can operate on strings.
+-- Expected: Correct lexicographical min/max results.
+SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++----------------------------------+-----------------------------------+
+| min(step_aggr_extended.pk_col_1) | max(step_aggr_extended.val_col_2) |
++----------------------------------+-----------------------------------+
+| a                                | v3                                |
++----------------------------------+-----------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(step_aggr_extended.pk_col_1)) AS min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) AS max(step_aggr_extended.val_col_2)]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__min_state(step_aggr_extended.pk_col_1), __max_state(step_aggr_extended.val_col_2)]]_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[min(step_aggr_extended.pk_col_1), max(step_aggr_extended.val_col_2)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[min(step_aggr_extended.pk_col_1), max(step_aggr_extended.val_col_2)]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- Case 17: Aggregation on an empty input set.
+-- `WHERE` clause filters out all rows.
+-- Expected: Aggregation should return correct default values (e.g., COUNT is 0, SUM is NULL).
+SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-----------------------------------+----------+
+| sum(step_aggr_extended.val_col_1) | count(*) |
++-----------------------------------+----------+
+|                                   | 0        |
++-----------------------------------+----------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 = 'non_existent';
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: sum(step_aggr_extended.val_col_1), count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]] |
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_1), __count_state(step_aggr_extended.ts)]]_|
+|_|_Filter: step_aggr_extended.pk_col_1 = Utf8("non_existent")_|
+|_|_TableScan: step_aggr_extended_|
+|_| ]]_|
+| physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_1)@0 as sum(step_aggr_extended.val_col_1), count(Int64(1))@1 as count(*)]_|
+|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(step_aggr_extended.val_col_1), count(Int64(1))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(step_aggr_extended.val_col_1), count(Int64(1))]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE step_aggr_extended;
+
+Affected Rows: 0
+
