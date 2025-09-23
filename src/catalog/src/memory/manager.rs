@@ -28,8 +28,8 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
 use snafu::OptionExt;
-use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
+use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
@@ -419,7 +419,7 @@ pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
 mod tests {
     use common_catalog::consts::*;
     use futures_util::TryStreamExt;
-    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
+    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
 
@@ -454,18 +454,16 @@ mod tests {
             tables[0].table_info().table_id()
         );
 
-        assert!(
-            catalog_list
-                .table(
-                    DEFAULT_CATALOG_NAME,
-                    DEFAULT_SCHEMA_NAME,
-                    "not_exists",
-                    None
-                )
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(catalog_list
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "not_exists",
+                None
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -488,13 +486,11 @@ mod tests {
             table: NumbersTable::table(2333),
         };
         catalog.register_table_sync(register_table_req).unwrap();
-        assert!(
-            catalog
-                .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(catalog
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
+            .await
+            .unwrap()
+            .is_some());
 
         let deregister_table_req = DeregisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -502,12 +498,10 @@ mod tests {
             table_name: table_name.to_string(),
         };
         catalog.deregister_table_sync(deregister_table_req).unwrap();
-        assert!(
-            catalog
-                .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(catalog
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name, None)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

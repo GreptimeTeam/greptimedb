@@ -12,18 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod pg_catalog_memory_table;
-mod pg_class;
-mod pg_database;
-mod pg_namespace;
-mod table_names;
-
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
-use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, PG_CATALOG_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME, PG_CATALOG_TABLE_ID_START};
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
@@ -31,52 +25,26 @@ use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
-use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion_postgres::pg_catalog::catalog_info::CatalogInfo;
-use datafusion_postgres::pg_catalog::ArrowTable;
-use datatypes::schema::ColumnSchema;
-use lazy_static::lazy_static;
-use paste::paste;
-use pg_catalog_memory_table::get_schema_columns;
-use pg_class::PGClass;
-use pg_database::PGDatabase;
-use pg_namespace::PGNamespace;
-use session::context::{Channel, QueryContext};
+use datafusion_postgres::pg_catalog::{
+    PgCatalogSchemaProvider, PgCatalogStaticTables, PgCatalogTable,
+};
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::metadata::TableId;
 use table::TableRef;
-pub use table_names::*;
-
-use self::pg_namespace::oid_map::{PGNamespaceOidMap, PGNamespaceOidMapRef};
-use crate::error::{InternalSnafu, ProjectSchemaSnafu, Result};
-use crate::system_schema::memory_table::MemoryTable;
-use crate::system_schema::utils::tables::u32_column;
-use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
-use crate::CatalogManager;
 
 use super::SystemTable;
-
-lazy_static! {
-    static ref MEMORY_TABLES: &'static [&'static str] = &[table_names::PG_TYPE];
-}
-
-/// The column name for the OID column.
-/// The OID column is a unique identifier of type u32 for each object in the database.
-const OID_COLUMN_NAME: &str = "oid";
-
-fn oid_column() -> ColumnSchema {
-    u32_column(OID_COLUMN_NAME)
-}
+use crate::error::{InternalSnafu, ProjectSchemaSnafu, Result};
+use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
+use crate::CatalogManager;
 
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
     catalog_name: String,
-    catalog_manager: Weak<dyn CatalogManager>,
+    inner: PgCatalogSchemaProvider<CatalogManagerWrapper>,
     tables: HashMap<String, TableRef>,
-
-    // Workaround to store mapping of schema_name to a numeric id
-    namespace_oid_map: PGNamespaceOidMapRef,
+    table_ids: HashMap<&'static str, u32>,
 }
 
 impl SystemSchemaProvider for PGCatalogProvider {
@@ -87,30 +55,31 @@ impl SystemSchemaProvider for PGCatalogProvider {
     }
 }
 
-// TODO(j0hn50n133): Not sure whether to avoid duplication with `information_schema` or not.
-macro_rules! setup_memory_table {
-    ($name: expr) => {
-        paste! {
-            {
-                let (schema, columns) = get_schema_columns($name);
-                Some(Arc::new(MemoryTable::new(
-                    consts::[<PG_CATALOG_ $name  _TABLE_ID>],
-                    $name,
-                    schema,
-                    columns
-                )) as _)
-            }
-        }
-    };
-}
-
 impl PGCatalogProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+        let static_tables =
+            PgCatalogStaticTables::try_new().expect("Failed to initialize static tables");
+        let inner = PgCatalogSchemaProvider::try_new(
+            CatalogManagerWrapper {
+                catalog_name: catalog_name.clone(),
+                catalog_manager,
+            },
+            Arc::new(static_tables),
+        )
+        .expect("Failed to initialize PgCatalogSchemaProvider");
+
+        let mut table_ids = HashMap::new();
+        let mut table_id = PG_CATALOG_TABLE_ID_START;
+        for name in datafusion_postgres::pg_catalog::PG_CATALOG_TABLES {
+            table_ids.insert(*name, table_id);
+            table_id += 1;
+        }
+
         let mut provider = Self {
             catalog_name,
-            catalog_manager,
+            inner,
             tables: HashMap::new(),
-            namespace_oid_map: Arc::new(PGNamespaceOidMap::new()),
+            table_ids,
         };
         provider.build_tables();
         provider
@@ -120,23 +89,13 @@ impl PGCatalogProvider {
         // SECURITY NOTE:
         // Must follow the same security rules as [`InformationSchemaProvider::build_tables`].
         let mut tables = HashMap::new();
-        // TODO(J0HN50N133): modeling the table_name as a enum type to get rid of expect/unwrap here
         // It's safe to unwrap here because we are sure that the constants have been handle correctly inside system_table.
-        for name in MEMORY_TABLES.iter() {
-            tables.insert(name.to_string(), self.build_table(name).expect(name));
+        for name in datafusion_postgres::pg_catalog::PG_CATALOG_TABLES {
+            if let Some(table) = self.build_table(name) {
+                tables.insert(name.to_string(), table);
+            }
         }
-        tables.insert(
-            PG_NAMESPACE.to_string(),
-            self.build_table(PG_NAMESPACE).expect(PG_NAMESPACE),
-        );
-        tables.insert(
-            PG_CLASS.to_string(),
-            self.build_table(PG_CLASS).expect(PG_CLASS),
-        );
-        tables.insert(
-            PG_DATABASE.to_string(),
-            self.build_table(PG_DATABASE).expect(PG_DATABASE),
-        );
+
         self.tables = tables;
     }
 }
@@ -147,24 +106,23 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
     }
 
     fn system_table(&self, name: &str) -> Option<SystemTableRef> {
-        match name {
-            table_names::PG_TYPE => setup_memory_table!(PG_TYPE),
-            table_names::PG_NAMESPACE => Some(Arc::new(PGNamespace::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-                self.namespace_oid_map.clone(),
-            ))),
-            table_names::PG_CLASS => Some(Arc::new(PGClass::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-                self.namespace_oid_map.clone(),
-            ))),
-            table_names::PG_DATABASE => Some(Arc::new(PGDatabase::new(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-                self.namespace_oid_map.clone(),
-            ))),
-            _ => None,
+        if let Some((table_name, table_id)) = self.table_ids.get_key_value(name) {
+            let table = self.inner.build_table_by_name(name).expect(name);
+
+            if let Some(table) = table {
+                let system_table = DFTableProviderAsSystemTable::try_new(
+                    *table_id,
+                    table_name,
+                    table::metadata::TableType::Temporary,
+                    table,
+                )
+                .expect(name);
+                Some(Arc::new(system_table))
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
 
@@ -173,17 +131,19 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
     }
 }
 
-/// Provide query context to call the [`CatalogManager`]'s method.
-static PG_QUERY_CTX: LazyLock<QueryContext> = LazyLock::new(|| {
-    QueryContext::with_channel(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Channel::Postgres)
-});
-
-fn query_ctx() -> Option<&'static QueryContext> {
-    Some(&PG_QUERY_CTX)
+#[derive(Clone)]
+pub struct CatalogManagerWrapper {
+    catalog_name: String,
+    catalog_manager: Weak<dyn CatalogManager>,
 }
 
-#[derive(Clone)]
-pub struct CatalogManagerWrapper(Arc<dyn CatalogManager>);
+impl CatalogManagerWrapper {
+    fn catalog_manager(&self) -> std::result::Result<Arc<dyn CatalogManager>, DataFusionError> {
+        self.catalog_manager.upgrade().ok_or_else(|| {
+            DataFusionError::Internal("Failed to access catalog manager".to_string())
+        })
+    }
+}
 
 impl std::fmt::Debug for CatalogManagerWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -191,20 +151,23 @@ impl std::fmt::Debug for CatalogManagerWrapper {
     }
 }
 
-// TODO(sunng87): address query_context
 #[async_trait]
 impl CatalogInfo for CatalogManagerWrapper {
     async fn catalog_names(&self) -> std::result::Result<Vec<String>, DataFusionError> {
-        CatalogManager::catalog_names(self.0.as_ref())
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))
+        if self.catalog_name == DEFAULT_CATALOG_NAME {
+            CatalogManager::catalog_names(self.catalog_manager()?.as_ref())
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))
+        } else {
+            Ok(vec![self.catalog_name.to_string()])
+        }
     }
 
     async fn schema_names(
         &self,
         catalog_name: &str,
     ) -> std::result::Result<Option<Vec<String>>, DataFusionError> {
-        self.0
+        self.catalog_manager()?
             .schema_names(catalog_name, None)
             .await
             .map(Some)
@@ -216,7 +179,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         catalog_name: &str,
         schema_name: &str,
     ) -> std::result::Result<Option<Vec<String>>, DataFusionError> {
-        self.0
+        self.catalog_manager()?
             .table_names(catalog_name, schema_name, None)
             .await
             .map(Some)
@@ -230,7 +193,7 @@ impl CatalogInfo for CatalogManagerWrapper {
         table_name: &str,
     ) -> std::result::Result<Option<SchemaRef>, DataFusionError> {
         let table = self
-            .0
+            .catalog_manager()?
             .table(catalog_name, schema_name, table_name, None)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -245,26 +208,12 @@ impl CatalogInfo for CatalogManagerWrapper {
         table_name: &str,
     ) -> std::result::Result<Option<TableType>, DataFusionError> {
         let table = self
-            .0
+            .catalog_manager()?
             .table(catalog_name, schema_name, table_name, None)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         Ok(table.map(|t| t.table_type().into()))
-    }
-}
-
-enum PgCatalogTable {
-    Static(Arc<ArrowTable>),
-    Dynamic(Arc<dyn PartitionStream>),
-}
-
-impl PgCatalogTable {
-    fn schema(&self) -> SchemaRef {
-        match self {
-            Self::Static(table) => table.schema().clone(),
-            Self::Dynamic(table) => table.schema().clone(),
-        }
     }
 }
 
@@ -283,12 +232,8 @@ impl DFTableProviderAsSystemTable {
         table_type: table::metadata::TableType,
         table_provider: PgCatalogTable,
     ) -> Result<Self> {
-        let schema = Arc::new(
-            table_provider
-                .schema()
-                .try_into()
-                .context(ProjectSchemaSnafu)?,
-        );
+        let arrow_schema = table_provider.schema();
+        let schema = Arc::new(arrow_schema.try_into().context(ProjectSchemaSnafu)?);
         Ok(Self {
             table_id,
             table_name,
@@ -322,7 +267,7 @@ impl SystemTable for DFTableProviderAsSystemTable {
                 let schema = self.schema.arrow_schema().clone();
                 let data = table
                     .data()
-                    .into_iter()
+                    .iter()
                     .map(|rb| Ok(rb.clone()))
                     .collect::<Vec<_>>();
                 let stream = Box::pin(DfRecordBatchStreamAdapter::new(
@@ -338,6 +283,19 @@ impl SystemTable for DFTableProviderAsSystemTable {
 
             PgCatalogTable::Dynamic(table) => {
                 let stream = table.execute(Arc::new(TaskContext::default()));
+                Ok(Box::pin(
+                    RecordBatchStreamAdapter::try_new(stream)
+                        .map_err(BoxedError::new)
+                        .context(InternalSnafu)?,
+                ))
+            }
+
+            PgCatalogTable::Empty(_) => {
+                let schema = self.schema.arrow_schema().clone();
+                let stream = Box::pin(DfRecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::iter(vec![]),
+                ));
                 Ok(Box::pin(
                     RecordBatchStreamAdapter::try_new(stream)
                         .map_err(BoxedError::new)

@@ -108,11 +108,8 @@ pub const INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID: u32 = 36;
 // ----- End of information_schema tables -----
 
 /// ----- Begin of pg_catalog tables -----
-pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
-pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
-pub const PG_CATALOG_PG_NAMESPACE_TABLE_ID: u32 = 258;
-pub const PG_CATALOG_PG_DATABASE_TABLE_ID: u32 = 259;
-
+pub const PG_CATALOG_TABLE_ID_START: u32 = 256;
+// Please leave at 128 table ids for Postgres
 // ----- End of pg_catalog tables -----
 
 pub const MITO_ENGINE: &str = "mito";

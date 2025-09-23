@@ -131,7 +131,7 @@ datafusion-optimizer = "49"
 datafusion-orc = { git = "https://github.com/GreptimeTeam/datafusion-orc", rev = "a0a5f902158f153119316eaeec868cff3fc8a99d" }
 datafusion-physical-expr = "49"
 datafusion-physical-plan = "49"
-datafusion-postgres = { git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "15ad307b8cdea73cb38d8424372de74aab367a89" }
+datafusion-postgres = { git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "75632ad9f3b30167005d42f14afb4297d3cfb4f8" }
 datafusion-sql = "49"
 datafusion-substrait = "49"
 deadpool = "0.12"
