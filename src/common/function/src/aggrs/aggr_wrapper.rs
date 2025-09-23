@@ -38,6 +38,7 @@ use datafusion_expr::{
     Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, Expr, ExprSchemable, LogicalPlan,
     Signature,
 };
+use datafusion_physical_expr::PhysicalExprRef;
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
@@ -298,13 +299,45 @@ impl StateWrapper {
 }
 
 /// Fix last value accum so that `state()` 's output actually matches the `state_fields()`.
+///
+/// it's a bug when `last_value(ts order by <some columns including ts> will omit `ts` in the ordering field in the state.
 #[derive(Debug)]
-struct FixedLastValueAccum {
+struct FixedFirstLastValueAccum {
     inner: Box<dyn Accumulator>,
     ordering: Vec<FieldRef>,
+    // `last` expr found in ordering fields at index
+    found: Option<(usize, Arc<Field>)>,
 }
 
-impl Accumulator for FixedLastValueAccum {
+impl FixedFirstLastValueAccum {
+    fn new(
+        inner: Box<dyn Accumulator>,
+        expr_fields: Vec<FieldRef>,
+        ordering: Vec<FieldRef>,
+    ) -> datafusion_common::Result<Self> {
+        let last_value_col = expr_fields.first().ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal(
+                "Expected at least one expr field for last_value".to_string(),
+            )
+        })?;
+        // todo: workaround the bug
+        // check the location in ordering fields
+        let found = ordering
+            .iter()
+            .cloned()
+            .enumerate()
+            .find(|p| p.1 == *last_value_col)
+            .clone();
+
+        Ok(Self {
+            inner,
+            ordering,
+            found,
+        })
+    }
+}
+
+impl Accumulator for FixedFirstLastValueAccum {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         self.inner.evaluate()
     }
@@ -323,37 +356,53 @@ impl Accumulator for FixedLastValueAccum {
 
     fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
         let unfixed_state = self.inner.state()?;
-        if unfixed_state.len() == 2 && self.ordering.len() == 1 {
-            // meaning it's order by the same field as the value field, so just duplicate the value field as the ordering field
-            let mut fixed_states = Vec::with_capacity(unfixed_state.len() + 1);
-            fixed_states.push(unfixed_state[0].clone());
-            fixed_states.push(unfixed_state[0].clone());
-            fixed_states.push(unfixed_state[1].clone());
-            Ok(fixed_states)
+        if let Some((found_index, _found_field)) = &self.found {
+            if unfixed_state.len() == 2 + self.ordering.len() {
+                // already fixed
+                return Ok(unfixed_state);
+            }
+            let mut fixed = unfixed_state.clone();
+            // fixing by insert the missing ordering field(that's also `last` expr) at the correct index
+            // 0: `last`
+            // 1..n-1: ordering fields(supposed to be in the same order as `self.ordering`), but missing the `last` field
+            // n: is_set bool
+            fixed.insert(1 + found_index, unfixed_state[0].clone());
+
+            Ok(fixed)
         } else {
+            // no ordering field found, just return the original state
             Ok(unfixed_state)
         }
     }
 }
 
 fn maybe_fix_accum(
-    inner: Box<dyn Accumulator>,
+    accum: Box<dyn Accumulator>,
     udf: &AggregateUDF,
+    schema: &arrow_schema::Schema,
+    exprs: &[PhysicalExprRef],
     ordering: &[FieldRef],
-) -> Box<dyn Accumulator> {
-    if let Some(_last_value) =
-        udf.inner()
+) -> datafusion_common::Result<Box<dyn Accumulator>> {
+    // both first_value and last_value need fix(same issue)
+    if (udf
+        .inner()
+        .as_any()
+        .is::<datafusion::functions_aggregate::first_last::LastValue>()
+        || udf
+            .inner()
             .as_any()
-            .downcast_ref::<datafusion::functions_aggregate::first_last::LastValue>()
+            .is::<datafusion::functions_aggregate::first_last::FirstValue>())
         && !ordering.is_empty()
     {
+        let expr_fields = exprs
+            .iter()
+            .map(|e| e.return_field(schema))
+            .collect::<Result<Vec<_>, _>>()?;
         // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
-        Box::new(FixedLastValueAccum {
-            inner,
-            ordering: ordering.to_vec(),
-        })
+        FixedFirstLastValueAccum::new(accum, expr_fields, ordering.to_vec())
+            .map(|f| Box::new(f) as _)
     } else {
-        inner
+        Ok(accum)
     }
 }
 
@@ -377,7 +426,13 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
-        let inner = maybe_fix_accum(inner, self.inner(), &self.ordering);
+        let inner = maybe_fix_accum(
+            inner,
+            self.inner(),
+            acc_args.schema,
+            acc_args.exprs,
+            &self.ordering,
+        )?;
         // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
