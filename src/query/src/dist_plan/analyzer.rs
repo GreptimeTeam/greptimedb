@@ -114,6 +114,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
         // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
         // to walk around the issue.
+        // TODO(LFC): Maybe use DataFusion's `OptimizerContext` again
+        //   once https://github.com/apache/datafusion/pull/17742 is merged.
         struct OptimizerContext {
             inner: datafusion_optimizer::OptimizerContext,
             config: Arc<ConfigOptions>,
