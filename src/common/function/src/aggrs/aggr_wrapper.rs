@@ -320,7 +320,7 @@ impl FixedFirstLastValueAccum {
                 "Expected at least one expr field for last_value".to_string(),
             )
         })?;
-        // todo: workaround the bug
+        // workaround the bug
         // check the location in ordering fields
         let found = ordering
             .iter()
@@ -376,6 +376,8 @@ impl Accumulator for FixedFirstLastValueAccum {
     }
 }
 
+/// Workaround for first_value/last_value which need to have ordering field in state
+/// but sometimes omit it.
 fn maybe_fix_accum(
     accum: Box<dyn Accumulator>,
     udf: &AggregateUDF,
@@ -398,7 +400,7 @@ fn maybe_fix_accum(
             .iter()
             .map(|e| e.return_field(schema))
             .collect::<Result<Vec<_>, _>>()?;
-        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
+        // special fix for last_value which sometimes omit ordering field in state
         FixedFirstLastValueAccum::new(accum, expr_fields, ordering.to_vec())
             .map(|f| Box::new(f) as _)
     } else {
@@ -433,7 +435,6 @@ impl AggregateUDFImpl for StateWrapper {
             acc_args.exprs,
             &self.ordering,
         )?;
-        // TODO(discord9): special fix for last_value which sometimes omit ordering field in state
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
 
@@ -492,11 +493,7 @@ impl AggregateUDFImpl for StateWrapper {
             ordering_fields: args.ordering_fields,
             is_distinct: args.is_distinct,
         };
-        let fields = self.inner.state_fields(state_fields_args)?;
-
-        // TODO(discord9): maybe fix in here?
-
-        Ok(fields)
+        self.inner.state_fields(state_fields_args)
     }
 
     /// The state function's signature is the same as the original aggregate function's signature,
