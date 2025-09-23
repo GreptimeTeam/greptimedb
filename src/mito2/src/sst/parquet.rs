@@ -162,6 +162,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             file_path,
+            None
         )
         .await;
 
@@ -219,6 +220,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            None
         )
         .await;
 

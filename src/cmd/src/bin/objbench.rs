@@ -134,9 +134,8 @@ impl Command {
         let total_rows = reader.parquet_metadata().file_metadata().num_rows();
 
         // Prepare target access layer for writing
-        let (tgt_region_dir, _tgt_file_id_hint) = split_sst_path(&self.target)?;
         let (tgt_access_layer, tgt_cache_manager) =
-            build_access_layer_simple(tgt_region_dir.clone(), object_store.clone()).await?;
+            build_access_layer_simple(self.target.clone(), object_store.clone()).await?;
 
         // Build write request
         let write_opts = WriteOptions::default();
@@ -164,9 +163,13 @@ impl Command {
                 .build()
             })?;
 
+        assert_eq!(infos.len(), 1);
+        let dst_file_id = infos[0].file_id;
+        let dts_file_path = format!("{}/{}", self.target, dst_file_id.as_parquet(),);
         // Report results
         println!(
-            "Read completed: rows={}, size={} bytes, build_reader={:?}, metrics: {:?}",
+            "Write complete, dest file: {}, rows={}, size={} bytes, build_reader={:?}, metrics: {:?}",
+            dts_file_path,
             total_rows, file_size, reader_build_elapsed, metrics
         );
         Ok(())
