@@ -6096,6 +6096,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
+ "store-api",
  "tantivy",
  "tantivy-jieba",
  "tempfile",
