@@ -20,7 +20,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 
 use crate::Tool;
-use crate::metadata::common::StoreConfig;
+use crate::common::StoreConfig;
 use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
 
 /// Delete key-value pairs logically from the metadata store.

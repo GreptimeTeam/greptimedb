@@ -26,7 +26,7 @@ use servers::tls::{TlsMode, TlsOption};
 use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
 
 #[derive(Debug, Default, Parser)]
-pub(crate) struct StoreConfig {
+pub struct StoreConfig {
     /// The endpoint of store. one of etcd, postgres or mysql.
     ///
     /// For postgres store, the format is:
@@ -38,48 +38,48 @@ pub(crate) struct StoreConfig {
     /// For mysql store, the format is:
     /// "mysql://user:password@ip:port/dbname"
     #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
-    store_addrs: Vec<String>,
+    pub store_addrs: Vec<String>,
 
     /// The maximum number of operations in a transaction. Only used when using [etcd-store].
     #[clap(long, default_value = "128")]
-    max_txn_ops: usize,
+    pub max_txn_ops: usize,
 
     /// The metadata store backend.
     #[clap(long, value_enum, default_value = "etcd-store")]
-    backend: BackendImpl,
+    pub backend: BackendImpl,
 
     /// The key prefix of the metadata store.
     #[clap(long, default_value = "")]
-    store_key_prefix: String,
+    pub store_key_prefix: String,
 
     /// The table name in RDS to store metadata. Only used when using [postgres-store] or [mysql-store].
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
-    meta_table_name: String,
+    pub meta_table_name: String,
 
     /// Optional PostgreSQL schema for metadata table (defaults to current search_path if unset).
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
-    meta_schema_name: Option<String>,
+    pub meta_schema_name: Option<String>,
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
     #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
-    backend_tls_mode: TlsMode,
+    pub backend_tls_mode: TlsMode,
 
     /// Path to TLS certificate file for backend store connections
     #[clap(long = "backend-tls-cert-path", default_value = "")]
-    backend_tls_cert_path: String,
+    pub backend_tls_cert_path: String,
 
     /// Path to TLS private key file for backend store connections
     #[clap(long = "backend-tls-key-path", default_value = "")]
-    backend_tls_key_path: String,
+    pub backend_tls_key_path: String,
 
     /// Path to TLS CA certificate file for backend store connections
     #[clap(long = "backend-tls-ca-cert-path", default_value = "")]
-    backend_tls_ca_cert_path: String,
+    pub backend_tls_ca_cert_path: String,
 
     /// Enable watching TLS certificate files for changes
     #[clap(long = "backend-tls-watch")]
-    backend_tls_watch: bool,
+    pub backend_tls_watch: bool,
 }
 
 impl StoreConfig {
@@ -104,6 +104,11 @@ impl StoreConfig {
         if store_addrs.is_empty() {
             EmptyStoreAddrsSnafu.fail().map_err(BoxedError::new)
         } else {
+            common_telemetry::info!(
+                "Building kvbackend with store addrs: {:?}, backend: {:?}",
+                store_addrs,
+                self.backend
+            );
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
                     let tls_config = self.tls_config();

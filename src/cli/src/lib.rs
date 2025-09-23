@@ -14,6 +14,7 @@
 
 #![allow(clippy::print_stdout)]
 mod bench;
+mod common;
 mod data;
 mod database;
 pub mod error;

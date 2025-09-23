@@ -28,8 +28,8 @@ use common_meta::rpc::store::RangeRequest;
 use futures::TryStreamExt;
 
 use crate::Tool;
+use crate::common::StoreConfig;
 use crate::error::InvalidArgumentsSnafu;
-use crate::metadata::common::StoreConfig;
 use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_fromatter};
 
 /// Getting metadata from metadata store.

@@ -1800,6 +1800,7 @@ dependencies = [
  "nu-ansi-term",
  "object-store",
  "operator",
+ "paste",
  "query",
  "rand 0.9.1",
  "reqwest",
