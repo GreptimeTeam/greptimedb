@@ -22,6 +22,7 @@ use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
@@ -36,8 +37,8 @@ use crate::cache::index::bloom_filter_index::{
 };
 use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
-    ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
-    Result,
+    ApplyBloomFilterIndexSnafu, EncodeTargetKeySnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu,
+    PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::RegionFileId;
@@ -263,12 +264,14 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
+        let blob_name = Self::column_blob_name(column_id)?;
+
         let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()
@@ -278,8 +281,11 @@ impl BloomFilterIndexApplier {
     }
 
     // TODO(ruihang): use the same util with the code in creator
-    fn column_blob_name(column_id: ColumnId) -> String {
-        format!("{INDEX_BLOB_TYPE}-{column_id}")
+    fn column_blob_name(column_id: ColumnId) -> Result<String> {
+        IndexTarget::ColumnId(column_id)
+            .encode()
+            .map(|key| format!("{INDEX_BLOB_TYPE}-{key}"))
+            .context(EncodeTargetKeySnafu)
     }
 
     /// Creates a blob reader from the remote index file
@@ -297,12 +303,14 @@ impl BloomFilterIndexApplier {
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
+        let blob_name = Self::column_blob_name(column_id)?;
+
         puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()

@@ -21,6 +21,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SkippingIndexType;
 use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
+use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
@@ -30,7 +31,7 @@ use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, IndexOptionsSnafu,
+    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, EncodeTargetKeySnafu, IndexOptionsSnafu,
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
@@ -381,7 +382,10 @@ impl BloomFilterIndexer {
     ) -> Result<ByteCount> {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
-        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
+        let target_key = IndexTarget::ColumnId(*col_id)
+            .encode()
+            .context(EncodeTargetKeySnafu)?;
+        let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
             puffin_writer.put_blob(

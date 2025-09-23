@@ -1,3 +1,8 @@
+use std::any::Any;
+
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use serde::{Deserialize, Serialize};
 use snafu::{Snafu, ensure};
 use store_api::storage::ColumnId;
@@ -33,7 +38,8 @@ impl IndexTarget {
 }
 
 /// Errors that can occur when working with index target keys.
-#[derive(Debug, Snafu, Clone, PartialEq, Eq)]
+#[derive(Snafu, Clone, PartialEq, Eq)]
+#[stack_trace_debug]
 pub enum TargetKeyError {
     #[snafu(display("target key cannot be empty"))]
     Empty,
@@ -43,6 +49,16 @@ pub enum TargetKeyError {
 
     #[snafu(display("failed to parse column id from '{value}'"))]
     InvalidColumnId { value: String },
+}
+
+impl ErrorExt for TargetKeyError {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::InvalidArguments
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 fn validate_column_key(key: &str) -> Result<(), TargetKeyError> {
