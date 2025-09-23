@@ -19,8 +19,8 @@ use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME, PG_CATALOG_TABLE_ID_START};
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
@@ -31,13 +31,13 @@ use datafusion_postgres::pg_catalog::{
 };
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
-use table::metadata::TableId;
 use table::TableRef;
+use table::metadata::TableId;
 
 use super::SystemTable;
+use crate::CatalogManager;
 use crate::error::{InternalSnafu, ProjectSchemaSnafu, Result};
 use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
-use crate::CatalogManager;
 
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {
