@@ -259,7 +259,20 @@ impl StateWrapper {
         &self,
         acc_args: &datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<FieldRef> {
-        self.inner.return_field(acc_args.schema.fields())
+        let input_fields = acc_args
+            .exprs
+            .iter()
+            .map(|e| e.return_field(acc_args.schema))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.return_field(&input_fields).inspect_err(|e| {
+            common_telemetry::error!(
+                "StateWrapper: {:#?}\nacc_args:{:?}\nerror:{:?} at {}",
+                &self,
+                &acc_args,
+                e,
+                snafu::location!()
+            );
+        })
     }
 }
 

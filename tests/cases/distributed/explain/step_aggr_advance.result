@@ -1068,20 +1068,20 @@ Affected Rows: 7
 
 -- Case 12: GROUP BY includes a mix of partition key and non-partition key.
 -- `pk_col_1` is a partition key, `pk_col_2` is not.
--- This should still trigger step aggregation because of `pk_col_2`.
--- Expected: Partial aggregation on datanode, Repartition and Final aggregation on frontend.
+-- This should pushdown entire aggregation to datanodes since it's partitioned by `pk_col_1`.
+-- Expected: Full pushdown of aggregation to datanodes.
 SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_1, pk_col_2;
 
 +----------+----------+-----------------------------------+
 | pk_col_1 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
 +----------+----------+-----------------------------------+
-| a        | 3        | 100                               |
-| h        | 4        | 500                               |
 | a        | 2        | 200                               |
+| g        | 1        | 300                               |
 | a        | 1        | 100                               |
+| a        | 3        | 100                               |
 | g        | 2        | 400                               |
 | g        | 3        | 300                               |
-| g        | 1        | 300                               |
+| h        | 4        | 500                               |
 +----------+----------+-----------------------------------+
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -1106,8 +1106,8 @@ EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP 
 +-+-+
 
 -- Case 13: COUNT(DISTINCT) aggregation.
--- `DISTINCT` aggregation is more complex and requires a two-phase distinct calculation in a distributed environment.
--- Expected: A plan that handles distinct values correctly across nodes, likely involving `Partial` and `Final` stages for the distinct aggregation.
+-- `DISTINCT` aggregation is more complex and requires a two-phase distinct calculation in a distributed environment. Currently not supported for pushdown.
+-- Expected: datanode only do table scan, actual aggregation happens on frontend.
 SELECT COUNT(DISTINCT val_col_1) FROM step_aggr_extended;
 
 +----------------------------------------------+
@@ -1156,10 +1156,10 @@ SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_2 HAVING
 +----------+-----------------------------------+
 | pk_col_2 | sum(step_aggr_extended.val_col_1) |
 +----------+-----------------------------------+
-| 2        | 600                               |
-| 3        | 400                               |
-| 1        | 400                               |
 | 4        | 500                               |
+| 2        | 600                               |
+| 1        | 400                               |
+| 3        | 400                               |
 +----------+-----------------------------------+
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -1194,8 +1194,12 @@ EXPLAIN SELECT pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP BY pk_col_
 -- `SUM` should ignore NULLs. `COUNT(val_col_2)` should count non-nulls, `COUNT(*)` should count all rows.
 -- Expected: Correct aggregation results, proving NULLs are handled properly in a distributed context.
 SELECT SUM(val_col_3), COUNT(val_col_2), COUNT(val_col_3), COUNT(*) FROM step_aggr_extended;
--- FIXME: wtf?
-Error: 3001(EngineExecuteQuery), DataFusion error: Execution error: [return_type] SUM not supported for Utf8
+
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| sum(step_aggr_extended.val_col_3) | count(step_aggr_extended.val_col_2) | count(step_aggr_extended.val_col_3) | count(*) |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
+| 170                               | 6                                   | 6                                   | 7        |
++-----------------------------------+-------------------------------------+-------------------------------------+----------+
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
