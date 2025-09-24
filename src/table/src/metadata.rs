@@ -35,8 +35,8 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, Re
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, COLUMN_COMMENT_PREFIX, COMMENT_KEY, ModifyColumnTypeRequest,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetDefaultRequest, SetIndexOption,
+    TableOptions, UnsetIndexOption,
 };
 use crate::table_reference::TableReference;
 
@@ -241,8 +241,8 @@ impl TableMeta {
             }
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
-            AlterKind::SetTableOptions { options } => self.set_table_options(table_name, options),
-            AlterKind::UnsetTableOptions { keys } => self.unset_table_options(table_name, keys),
+            AlterKind::SetTableOptions { options } => self.set_table_options(options),
+            AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
@@ -251,14 +251,8 @@ impl TableMeta {
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
-    fn set_table_options(
-        &self,
-        table_name: &str,
-        requests: &[SetRegionOption],
-    ) -> Result<TableMetaBuilder> {
+    fn set_table_options(&self, requests: &[SetRegionOption]) -> Result<TableMetaBuilder> {
         let mut new_options = self.options.clone();
-        let table_schema = &self.schema;
-        let mut column_comment_updates = HashMap::new();
 
         for request in requests {
             match request {
@@ -280,96 +274,17 @@ impl TableMeta {
                         new_options.extra_options.remove(key.as_str());
                     }
                 }
-                SetRegionOption::Extra(key, value) => {
-                    if key.starts_with(COLUMN_COMMENT_PREFIX) {
-                        let column_name = key[COLUMN_COMMENT_PREFIX.len()..].to_string();
-                        let update = if value.is_empty() {
-                            None
-                        } else {
-                            Some(value.to_string())
-                        };
-                        column_comment_updates.insert(column_name, update);
-                    } else if value.is_empty() {
-                        new_options.extra_options.remove(key);
-                    } else {
-                        new_options
-                            .extra_options
-                            .insert(key.to_string(), value.to_string());
-                    }
-                }
             }
         }
-
-        if let Some(comment) = new_options.extra_options.get(COMMENT_KEY)
-            && comment.is_empty()
-        {
-            new_options.extra_options.remove(COMMENT_KEY);
-        }
-
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
-
-        if !column_comment_updates.is_empty() {
-            let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
-            let mut remaining = column_comment_updates;
-
-            for mut column in table_schema.column_schemas().iter().cloned() {
-                if let Some(update) = remaining.remove(&column.name) {
-                    match update {
-                        Some(comment) => {
-                            column
-                                .mut_metadata()
-                                .insert(datatypes::schema::COMMENT_KEY.to_string(), comment);
-                        }
-                        None => {
-                            column.mut_metadata().remove(datatypes::schema::COMMENT_KEY);
-                        }
-                    }
-                }
-                columns.push(column);
-            }
-
-            if let Some((missing, _)) = remaining.into_iter().next() {
-                return error::ColumnNotExistsSnafu {
-                    column_name: &missing,
-                    table_name,
-                }
-                .fail();
-            }
-
-            let mut schema_builder = SchemaBuilder::try_from_columns(columns)
-                .with_context(|_| error::SchemaBuildSnafu {
-                    msg: format!(
-                        "Failed to rebuild schema for table {table_name} when updating column comments",
-                    ),
-                })?
-                .version(table_schema.version() + 1);
-
-            for (k, v) in table_schema.metadata().iter() {
-                schema_builder = schema_builder.add_metadata(k, v);
-            }
-
-            let new_schema = schema_builder
-                .build()
-                .with_context(|_| error::SchemaBuildSnafu {
-                    msg: format!("Table {table_name} cannot update column comments",),
-                })?;
-
-            let _ = builder
-                .schema(Arc::new(new_schema))
-                .primary_key_indices(self.primary_key_indices.clone());
-        }
 
         Ok(builder)
     }
 
-    fn unset_table_options(
-        &self,
-        table_name: &str,
-        requests: &[UnsetRegionOption],
-    ) -> Result<TableMetaBuilder> {
+    fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
         let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
-        self.set_table_options(table_name, &requests)
+        self.set_table_options(&requests)
     }
 
     fn set_indexes(
@@ -1981,110 +1896,6 @@ mod tests {
             .err()
             .unwrap();
         assert_matches!(err, Error::RemovePartitionColumn { .. });
-    }
-
-    #[test]
-    fn test_set_column_comment_via_table_options() {
-        let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::empty()
-            .schema(schema)
-            .primary_key_indices(vec![0])
-            .engine("engine")
-            .next_column_id(3)
-            .build()
-            .unwrap();
-
-        let alter_kind = AlterKind::SetTableOptions {
-            options: vec![SetRegionOption::Extra(
-                format!("{}{}", COLUMN_COMMENT_PREFIX, "col1"),
-                "first column".to_string(),
-            )],
-        };
-
-        let new_meta = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let col_schema = new_meta.schema.column_schema_by_name("col1").unwrap();
-        assert_eq!(
-            Some(&"first column".to_string()),
-            col_schema.metadata().get(datatypes::schema::COMMENT_KEY)
-        );
-        assert_eq!(meta.schema.version() + 1, new_meta.schema.version());
-    }
-
-    #[test]
-    fn test_remove_column_comment_via_table_options() {
-        let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::empty()
-            .schema(schema)
-            .primary_key_indices(vec![0])
-            .engine("engine")
-            .next_column_id(3)
-            .build()
-            .unwrap();
-
-        let add_comment = AlterKind::SetTableOptions {
-            options: vec![SetRegionOption::Extra(
-                format!("{}{}", COLUMN_COMMENT_PREFIX, "col1"),
-                "first column".to_string(),
-            )],
-        };
-        let meta_with_comment = meta
-            .builder_with_alter_kind("my_table", &add_comment)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let remove_comment = AlterKind::SetTableOptions {
-            options: vec![SetRegionOption::Extra(
-                format!("{}{}", COLUMN_COMMENT_PREFIX, "col1"),
-                String::new(),
-            )],
-        };
-        let meta_without_comment = meta_with_comment
-            .builder_with_alter_kind("my_table", &remove_comment)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let col_schema = meta_without_comment
-            .schema
-            .column_schema_by_name("col1")
-            .unwrap();
-        assert!(
-            col_schema
-                .metadata()
-                .get(datatypes::schema::COMMENT_KEY)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_set_column_comment_unknown_column() {
-        let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::empty()
-            .schema(schema)
-            .primary_key_indices(vec![0])
-            .engine("engine")
-            .next_column_id(3)
-            .build()
-            .unwrap();
-
-        let alter_kind = AlterKind::SetTableOptions {
-            options: vec![SetRegionOption::Extra(
-                format!("{}{}", COLUMN_COMMENT_PREFIX, "unknown"),
-                "comment".to_string(),
-            )],
-        };
-
-        let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind)
-            .err()
-            .unwrap();
-        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
     }
 
     #[test]

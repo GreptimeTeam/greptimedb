@@ -13,16 +13,36 @@
 // limitations under the License.
 
 use chrono::Utc;
+use common_catalog::format_full_table_name;
+use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::Context;
+use common_meta::instruction::CacheIdent;
+use common_meta::key::DeserializedValueWithBytes;
+use common_meta::key::table_info::TableInfoValue;
 use common_query::Output;
 use session::context::QueryContextRef;
+use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::{Ident, ObjectName, ObjectNamePartExt};
-use sql::statements::alter::{AlterTable, AlterTableOperation, KeyValueOption};
 use sql::statements::comment::{Comment, CommentObject};
-use table::requests::{COLUMN_COMMENT_PREFIX, COMMENT_KEY};
+use table::metadata::TableId;
+use table::requests::COMMENT_KEY;
+use table::table_name::TableName;
 
-use crate::error::{FlowNotFoundSnafu, InvalidSqlSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{
+    CatalogSnafu, ColumnNotFoundSnafu, ExternalSnafu, FlowNotFoundSnafu, InvalidSqlSnafu,
+    InvalidateTableCacheSnafu, Result, TableMetadataManagerSnafu, TableNotFoundSnafu,
+};
 use crate::statement::StatementExecutor;
+
+struct ResolvedTable {
+    catalog: String,
+    schema: String,
+    table: String,
+    table_id: TableId,
+    table_name: TableName,
+    table_info: DeserializedValueWithBytes<TableInfoValue>,
+}
 
 impl StatementExecutor {
     pub async fn comment(&self, stmt: Comment, query_ctx: QueryContextRef) -> Result<Output> {
@@ -44,17 +64,25 @@ impl StatementExecutor {
         comment: Option<String>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let value = comment.unwrap_or_default();
-        let alter = AlterTable {
-            table_name: table,
-            alter_operation: AlterTableOperation::SetTableOptions {
-                options: vec![KeyValueOption {
-                    key: COMMENT_KEY.to_string(),
-                    value,
-                }],
-            },
-        };
-        self.alter_table(alter, query_ctx).await
+        let ResolvedTable {
+            table_id,
+            table_name,
+            table_info,
+            ..
+        } = self.resolve_table_for_comment(&table, &query_ctx).await?;
+
+        let mut new_table_info = table_info.table_info.clone();
+        new_table_info.desc = comment;
+
+        self.table_metadata_manager
+            .update_table_info(&table_info, None, new_table_info)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        self.invalidate_table_cache_by_name(table_id, table_name)
+            .await?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn comment_on_column(
@@ -64,23 +92,49 @@ impl StatementExecutor {
         comment: Option<String>,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        // Ensure the column reference resolves so we can produce better error messages later
-        // by leveraging existing alter table validation.
-        let mut column_name = column.value.clone();
-        if column_name.is_empty() {
-            column_name = column.to_string();
+        let ResolvedTable {
+            catalog,
+            schema,
+            table,
+            table_id,
+            table_name,
+            table_info,
+        } = self.resolve_table_for_comment(&table, &query_ctx).await?;
+
+        let full_table_name = format_full_table_name(&catalog, &schema, &table);
+        let mut new_table_info = table_info.table_info.clone();
+
+        let column_name = column.value.clone();
+        let column_schema = new_table_info
+            .meta
+            .schema
+            .column_schemas
+            .iter_mut()
+            .find(|col| col.name == column_name)
+            .with_context(|| ColumnNotFoundSnafu {
+                msg: format!("{} column `{}`", full_table_name, column_name),
+            })?;
+
+        match comment {
+            Some(value) => {
+                column_schema
+                    .mut_metadata()
+                    .insert(COMMENT_KEY.to_string(), value);
+            }
+            None => {
+                column_schema.mut_metadata().remove(COMMENT_KEY);
+            }
         }
 
-        let key = format!("{}{}", COLUMN_COMMENT_PREFIX, column_name);
-        let value = comment.unwrap_or_default();
+        self.table_metadata_manager
+            .update_table_info(&table_info, None, new_table_info)
+            .await
+            .context(TableMetadataManagerSnafu)?;
 
-        let alter = AlterTable {
-            table_name: table,
-            alter_operation: AlterTableOperation::SetTableOptions {
-                options: vec![KeyValueOption { key, value }],
-            },
-        };
-        self.alter_table(alter, query_ctx).await
+        self.invalidate_table_cache_by_name(table_id, table_name)
+            .await?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn comment_on_flow(
@@ -146,5 +200,62 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    async fn resolve_table_for_comment(
+        &self,
+        table: &ObjectName,
+        query_ctx: &QueryContextRef,
+    ) -> Result<ResolvedTable> {
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(table, query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        let full_table_name = format_full_table_name(&catalog_name, &schema_name, &table_name);
+
+        let table_ref = self
+            .catalog_manager
+            .table(&catalog_name, &schema_name, &table_name, Some(query_ctx))
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: full_table_name.clone(),
+            })?;
+
+        let table_id = table_ref.table_info().table_id();
+        let table_info = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: full_table_name,
+            })?;
+
+        Ok(ResolvedTable {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+            table: table_name.clone(),
+            table_id,
+            table_name: TableName::new(catalog_name, schema_name, table_name),
+            table_info,
+        })
+    }
+
+    async fn invalidate_table_cache_by_name(
+        &self,
+        table_id: TableId,
+        table_name: TableName,
+    ) -> Result<()> {
+        let cache_ident = [
+            CacheIdent::TableId(table_id),
+            CacheIdent::TableName(table_name),
+        ];
+        self.cache_invalidator
+            .invalidate(&Context::default(), &cache_ident)
+            .await
+            .context(InvalidateTableCacheSnafu)?;
+        Ok(())
     }
 }

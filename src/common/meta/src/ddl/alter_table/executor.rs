@@ -25,10 +25,9 @@ use common_telemetry::{debug, info};
 use futures::future;
 use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::SetRegionOption;
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, TableInfo};
-use table::requests::{AlterKind, COMMENT_KEY};
+use table::requests::AlterKind;
 use table::table_name::TableName;
 
 use crate::cache_invalidator::{CacheInvalidatorRef, Context};
@@ -298,24 +297,12 @@ fn build_new_table_info(
         }
         AlterKind::DropColumns { .. }
         | AlterKind::ModifyColumnTypes { .. }
+        | AlterKind::SetTableOptions { .. }
         | AlterKind::UnsetTableOptions { .. }
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
-        | AlterKind::DropDefaults { .. } => {}
-        AlterKind::SetTableOptions { options } => {
-            for option in options {
-                if let SetRegionOption::Extra(key, value) = option {
-                    if key == COMMENT_KEY {
-                        new_info.desc = if value.is_empty() {
-                            None
-                        } else {
-                            Some(value.clone())
-                        };
-                    }
-                }
-            }
-        }
-        AlterKind::SetDefaults { .. } => {}
+        | AlterKind::DropDefaults { .. }
+        | AlterKind::SetDefaults { .. } => {}
     }
 
     info!(
@@ -323,71 +310,4 @@ fn build_new_table_info(
         new_info.meta, table_name, table_id
     );
     Ok(new_info)
-}
-
-#[cfg(test)]
-mod tests {
-    use api::v1::alter_table_expr::Kind;
-    use api::v1::{AlterTableExpr, CreateTableExpr, Option as PbOption, SetTableOptions};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-
-    use super::*;
-    use crate::ddl::test_util::create_table::{
-        TestCreateTableExprBuilder, build_raw_table_info_from_expr,
-    };
-
-    #[test]
-    fn test_build_new_table_info_updates_table_comment() {
-        let create_expr: CreateTableExpr = TestCreateTableExprBuilder::default()
-            .catalog_name(DEFAULT_CATALOG_NAME)
-            .schema_name(DEFAULT_SCHEMA_NAME)
-            .table_name("test")
-            .build()
-            .unwrap()
-            .into();
-        let raw_table_info = build_raw_table_info_from_expr(&create_expr);
-
-        let alter_expr = AlterTableExpr {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "test".to_string(),
-            kind: Some(Kind::SetTableOptions(SetTableOptions {
-                table_options: vec![PbOption {
-                    key: COMMENT_KEY.to_string(),
-                    value: "hello".to_string(),
-                }],
-            })),
-        };
-
-        let table_info = build_new_table_info(&raw_table_info, alter_expr).unwrap();
-        assert_eq!(Some("hello".to_string()), table_info.desc);
-    }
-
-    #[test]
-    fn test_build_new_table_info_clears_table_comment() {
-        let mut create_expr: CreateTableExpr = TestCreateTableExprBuilder::default()
-            .catalog_name(DEFAULT_CATALOG_NAME)
-            .schema_name(DEFAULT_SCHEMA_NAME)
-            .table_name("test")
-            .build()
-            .unwrap()
-            .into();
-        create_expr.desc = "initial".to_string();
-        let raw_table_info = build_raw_table_info_from_expr(&create_expr);
-
-        let alter_expr = AlterTableExpr {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: "test".to_string(),
-            kind: Some(Kind::SetTableOptions(SetTableOptions {
-                table_options: vec![PbOption {
-                    key: COMMENT_KEY.to_string(),
-                    value: String::new(),
-                }],
-            })),
-        };
-
-        let table_info = build_new_table_info(&raw_table_info, alter_expr).unwrap();
-        assert_eq!(None, table_info.desc);
-    }
 }
