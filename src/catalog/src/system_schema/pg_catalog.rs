@@ -21,6 +21,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME, PG_CATALOG_T
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_telemetry::warn;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
@@ -111,14 +112,17 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
             let table = self.inner.build_table_by_name(name).expect(name);
 
             if let Some(table) = table {
-                let system_table = DFTableProviderAsSystemTable::try_new(
+                if let Ok(system_table) = DFTableProviderAsSystemTable::try_new(
                     *table_id,
                     table_name,
                     table::metadata::TableType::Temporary,
                     table,
-                )
-                .expect(name);
-                Some(Arc::new(system_table))
+                ) {
+                    Some(Arc::new(system_table))
+                } else {
+                    warn!("failed to create pg_catalog system table {}", name);
+                    None
+                }
             } else {
                 None
             }
