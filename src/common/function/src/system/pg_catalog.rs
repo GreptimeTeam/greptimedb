@@ -159,6 +159,9 @@ impl PGCatalogFunction {
             "has_schema_privilege",
         ));
         registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
+        "has_database_privilege",
+        ));
+        registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
             "has_any_column_privilege",
         ));
         registry.register_table_function(TableFunction::new(
@@ -169,5 +172,8 @@ impl PGCatalogFunction {
         registry.register(pg_catalog::create_pg_get_statisticsobjdef_columns_udf());
         registry.register(pg_catalog::create_pg_get_userbyid_udf());
         registry.register(pg_catalog::create_pg_table_is_visible());
+        registry.register(pg_catalog::pg_get_expr_udf::create_pg_get_expr_udf());
+        // TODO(sunng87): upgrade datafusion to add
+        //registry.register(pg_catalog::create_pg_encoding_to_char_udf());
     }
 }
