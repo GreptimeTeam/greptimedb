@@ -325,7 +325,7 @@ impl PlanRewriter {
     }
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
-    fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
+    fn should_expand(&mut self, plan: &LogicalPlan) -> DfResult<bool> {
         debug!(
             "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
@@ -335,20 +335,21 @@ impl PlanRewriter {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        if DFLogicalSubstraitConvertor
-            .encode(plan, DefaultSerializer)
-            .is_err()
-        {
-            return true;
+        if let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer) {
+            debug!(
+                "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
+            );
+            return Ok(true);
         }
 
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
-            return true;
+            debug!("PlanRewriter: expand_on_next_call is true, expanding now");
+            return Ok(true);
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone())?;
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -364,13 +365,16 @@ impl PlanRewriter {
                     // again a new node that can be push down, we should just
                     // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
-                    return true;
+                    debug!(
+                        "PlanRewriter: meet a new conditional/transformed commutative plan, expanding now: {plan}"
+                    );
+                    return Ok(true);
                 }
                 _ => (),
             }
         }
 
-        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone())? {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -391,9 +395,8 @@ impl PlanRewriter {
                 }
             }
             Commutativity::TransformedCommutative { transformer } => {
-                if let Some(transformer) = transformer
-                    && let Some(transformer_actions) = transformer(plan)
-                {
+                if let Some(transformer) = transformer {
+                    let transformer_actions = transformer(plan)?;
                     debug!(
                         "PlanRewriter: transformed plan: {}\n from {plan}",
                         transformer_actions
@@ -424,11 +427,12 @@ impl PlanRewriter {
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
-                return true;
+                debug!("PlanRewriter: meet a non-commutative plan, expanding now: {plan}");
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Update the column requirements for the current plan, plan_level is the level of the plan
@@ -838,8 +842,7 @@ impl TreeNodeRewriter for PlanRewriter {
 
         let parent = parent.clone();
 
-        // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent) {
+        if self.should_expand(&parent)? {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
                 "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",
