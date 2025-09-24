@@ -22,6 +22,7 @@ mod metadata;
 
 use async_trait::async_trait;
 use clap::Parser;
+pub use common::{ObjectStoreConfig, StoreConfig};
 use common_error::ext::BoxedError;
 pub use database::DatabaseClient;
 use error::Result;
