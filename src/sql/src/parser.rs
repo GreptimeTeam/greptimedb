@@ -163,6 +163,8 @@ impl ParserContext<'_> {
 
                 Keyword::TRUNCATE => self.parse_truncate(),
 
+                Keyword::COMMENT => self.parse_comment(),
+
                 Keyword::SET => self.parse_set_variables(),
 
                 Keyword::ADMIN => self.parse_admin_command(),

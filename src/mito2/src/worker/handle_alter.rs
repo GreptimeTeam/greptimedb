@@ -186,6 +186,9 @@ impl<S> RegionWorkerLoop<S> {
                         region.region_id,
                     )?;
                 }
+                SetRegionOption::Extra(_, _) => {
+                    // Extra options are handled at metadata layer; no region side effect.
+                }
             }
         }
         region.version_control.alter_options(current_options);

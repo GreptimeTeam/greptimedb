@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod admin;
+mod comment;
 mod copy_database;
 mod copy_query_to;
 mod copy_table_from;
@@ -381,6 +382,7 @@ impl StatementExecutor {
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
             Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
+            Statement::Comment(stmt) => self.comment(stmt, query_ctx).await,
             Statement::ShowColumns(show_columns) => {
                 self.show_columns(show_columns, query_ctx).await
             }

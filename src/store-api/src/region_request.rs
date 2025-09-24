@@ -1246,6 +1246,8 @@ pub enum SetRegionOption {
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
+    /// Extra table options forwarded to metadata only.
+    Extra(String, String),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1263,7 +1265,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
                 Ok(Self::Twsc(key.to_string(), value.to_string()))
             }
-            _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
+            _ => Ok(Self::Extra(key.to_string(), value.to_string())),
         }
     }
 }

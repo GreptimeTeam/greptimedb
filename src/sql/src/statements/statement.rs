@@ -22,6 +22,7 @@ use sqlparser_derive::{Visit, VisitMut};
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::admin::Admin;
 use crate::statements::alter::{AlterDatabase, AlterTable};
+use crate::statements::comment::Comment;
 use crate::statements::copy::Copy;
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
@@ -135,6 +136,8 @@ pub enum Statement {
     SetVariables(SetVariables),
     // SHOW VARIABLES
     ShowVariables(ShowVariables),
+    // COMMENT ON
+    Comment(Comment),
     // USE
     Use(String),
     // Admin statement(extension)
@@ -200,6 +203,7 @@ impl Statement {
             | Statement::Copy(_)
             | Statement::TruncateTable(_)
             | Statement::SetVariables(_)
+            | Statement::Comment(_)
             | Statement::Use(_)
             | Statement::DeclareCursor(_)
             | Statement::CloseCursor(_)
@@ -261,6 +265,7 @@ impl Display for Statement {
             Statement::TruncateTable(s) => s.fmt(f),
             Statement::SetVariables(s) => s.fmt(f),
             Statement::ShowVariables(s) => s.fmt(f),
+            Statement::Comment(s) => s.fmt(f),
             Statement::ShowCharset(kind) => {
                 write!(f, "SHOW CHARSET {kind}")
             }

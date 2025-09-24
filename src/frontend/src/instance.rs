@@ -83,6 +83,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -903,6 +904,12 @@ pub fn check_permission(
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
         // show charset and show collation won't be checked
         Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
+
+        Statement::Comment(comment) => match &comment.object {
+            CommentObject::Table(table) => validate_param(table, query_ctx)?,
+            CommentObject::Column { table, .. } => validate_param(table, query_ctx)?,
+            CommentObject::Flow(flow) => validate_param(flow, query_ctx)?,
+        },
 
         Statement::Insert(insert) => {
             let name = insert.table_name().context(ParseSqlSnafu)?;
