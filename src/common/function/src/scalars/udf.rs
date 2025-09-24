@@ -107,12 +107,11 @@ mod tests {
 
     use common_query::prelude::ScalarValue;
     use datafusion::arrow::array::BooleanArray;
+    use datafusion_common::arrow::array::AsArray;
+    use datafusion_common::arrow::datatypes::DataType as ArrowDataType;
     use datafusion_common::config::ConfigOptions;
     use datatypes::arrow::datatypes::Field;
     use datatypes::data_type::{ConcreteDataType, DataType};
-    use datatypes::prelude::VectorRef;
-    use datatypes::value::Value;
-    use datatypes::vectors::{BooleanVector, ConstantVector};
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -124,20 +123,31 @@ mod tests {
         let f = Arc::new(TestAndFunction);
         let query_ctx = QueryContextBuilder::default().build().into();
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(ConstantVector::new(
-                Arc::new(BooleanVector::from(vec![true])),
-                3,
-            )),
-            Arc::new(BooleanVector::from(vec![true, false, true])),
-        ];
+        let args = ScalarFunctionArgs {
+            args: vec![
+                datafusion_expr::ColumnarValue::Array(Arc::new(BooleanArray::from(vec![
+                    true, true, true,
+                ]))),
+                datafusion_expr::ColumnarValue::Array(Arc::new(BooleanArray::from(vec![
+                    true, false, true,
+                ]))),
+            ],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", ArrowDataType::Boolean, true)),
+            config_options: Arc::new(Default::default()),
+        };
 
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
+        let result = f
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
+            .unwrap();
+        let vector = result.as_boolean();
         assert_eq!(3, vector.len());
 
-        for i in 0..3 {
-            assert!(matches!(vector.get(i), Value::Boolean(b) if b == (i == 0 || i == 2)));
-        }
+        assert!(vector.value(0));
+        assert!(!vector.value(1));
+        assert!(vector.value(2));
 
         // create a udf and test it again
         let udf = create_udf(f.clone(), query_ctx, Arc::new(FunctionState::default()));

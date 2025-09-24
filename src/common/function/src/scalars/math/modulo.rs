@@ -15,19 +15,14 @@
 use std::fmt;
 use std::fmt::Display;
 
-use common_query::error;
-use common_query::error::{ArrowComputeSnafu, InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::datatypes::DataType;
+use common_query::error::Result;
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::compute::kernels::numeric;
+use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::type_coercion::aggregates::NUMERICS;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::numeric;
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{Helper, VectorRef};
-use snafu::{ResultExt, ensure};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 const NAME: &str = "mod";
 
@@ -60,38 +55,24 @@ impl Function for ModuloFunction {
         Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let nums = &columns[0];
-        let divs = &columns[1];
-        let nums_arrow_array = &nums.to_arrow_array();
-        let divs_arrow_array = &divs.to_arrow_array();
-        let array = numeric::rem(nums_arrow_array, divs_arrow_array).context(ArrowComputeSnafu)?;
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [nums, divs] = extract_args(self.name(), &args)?;
+        let array = numeric::rem(&nums, &divs)?;
 
         let result = match nums.data_type() {
-            ConcreteDataType::Int8(_)
-            | ConcreteDataType::Int16(_)
-            | ConcreteDataType::Int32(_)
-            | ConcreteDataType::Int64(_) => compute::cast(&array, &ArrowDataType::Int64),
-            ConcreteDataType::UInt8(_)
-            | ConcreteDataType::UInt16(_)
-            | ConcreteDataType::UInt32(_)
-            | ConcreteDataType::UInt64(_) => compute::cast(&array, &ArrowDataType::UInt64),
-            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-                compute::cast(&array, &ArrowDataType::Float64)
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                compute::cast(&array, &DataType::Int64)
             }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                compute::cast(&array, &DataType::UInt64)
+            }
+            DataType::Float32 | DataType::Float64 => compute::cast(&array, &DataType::Float64),
             _ => unreachable!("unexpected datatype: {:?}", nums.data_type()),
-        }
-        .context(ArrowComputeSnafu)?;
-        Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)
+        }?;
+        Ok(ColumnarValue::Array(result))
     }
 }
 
@@ -99,9 +80,11 @@ impl Function for ModuloFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_error::ext::ErrorExt;
-    use datatypes::value::Value;
-    use datatypes::vectors::{Float64Vector, Int32Vector, StringVector, UInt32Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{
+        AsArray, Float64Array, Int32Array, StringViewArray, UInt32Array,
+    };
+    use datafusion_common::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
 
     use super::*;
     #[test]
@@ -120,15 +103,23 @@ mod tests {
         let nums = vec![18, -17, 5, -6];
         let divs = vec![4, 8, -5, -5];
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(Int32Vector::from_vec(nums.clone())),
-            Arc::new(Int32Vector::from_vec(divs.clone())),
-        ];
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Int32Array::from(nums.clone()))),
+                ColumnarValue::Array(Arc::new(Int32Array::from(divs.clone()))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_primitive::<Int64Type>();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: i64 = (nums[i] % divs[i]) as i64;
-            assert!(matches!(result.get(i), Value::Int64(v) if v == p));
+            assert_eq!(result.value(i), p);
         }
     }
 
@@ -148,15 +139,23 @@ mod tests {
         let nums: Vec<u32> = vec![18, 17, 5, 6];
         let divs: Vec<u32> = vec![4, 8, 5, 5];
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_vec(nums.clone())),
-            Arc::new(UInt32Vector::from_vec(divs.clone())),
-        ];
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(UInt32Array::from(nums.clone()))),
+                ColumnarValue::Array(Arc::new(UInt32Array::from(divs.clone()))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_primitive::<UInt64Type>();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: u64 = (nums[i] % divs[i]) as u64;
-            assert!(matches!(result.get(i), Value::UInt64(v) if v == p));
+            assert_eq!(result.value(i), p);
         }
     }
 
@@ -176,15 +175,23 @@ mod tests {
         let nums = vec![18.0, 17.0, 5.0, 6.0];
         let divs = vec![4.0, 8.0, 5.0, 5.0];
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(Float64Vector::from_vec(nums.clone())),
-            Arc::new(Float64Vector::from_vec(divs.clone())),
-        ];
-        let result = function.eval(&FunctionContext::default(), &args).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Float64Array::from(nums.clone()))),
+                ColumnarValue::Array(Arc::new(Float64Array::from(divs.clone()))),
+            ],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_primitive::<Float64Type>();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: f64 = nums[i] % divs[i];
-            assert!(matches!(result.get(i), Value::Float64(v) if v == p));
+            assert_eq!(result.value(i), p);
         }
     }
 
@@ -195,37 +202,53 @@ mod tests {
         let nums = vec![27];
         let divs = vec![0];
 
-        let args: Vec<VectorRef> = vec![
-            Arc::new(Int32Vector::from_vec(nums.clone())),
-            Arc::new(Int32Vector::from_vec(divs.clone())),
-        ];
-        let result = function.eval(&FunctionContext::default(), &args);
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(Int32Array::from(nums))),
+                ColumnarValue::Array(Arc::new(Int32Array::from(divs))),
+            ],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args);
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().output_msg();
-        assert_eq!(
-            err_msg,
-            "Failed to perform compute operation on arrow arrays: Divide by zero error"
-        );
+        let err_msg = result.unwrap_err().to_string();
+        assert_eq!(err_msg, "Arrow error: Divide by zero error");
 
         let nums = vec![27];
 
-        let args: Vec<VectorRef> = vec![Arc::new(Int32Vector::from_vec(nums.clone()))];
-        let result = function.eval(&FunctionContext::default(), &args);
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(Int32Array::from(nums)))],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args);
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().output_msg();
-        assert!(
-            err_msg.contains("The length of the args is not correct, expect exactly two, have: 1")
+        let err_msg = result.unwrap_err().to_string();
+        assert_eq!(
+            err_msg,
+            "Execution error: mod function requires 2 arguments, got 1"
         );
 
         let nums = vec!["27"];
         let divs = vec!["4"];
-        let args: Vec<VectorRef> = vec![
-            Arc::new(StringVector::from(nums.clone())),
-            Arc::new(StringVector::from(divs.clone())),
-        ];
-        let result = function.eval(&FunctionContext::default(), &args);
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(StringViewArray::from(nums))),
+                ColumnarValue::Array(Arc::new(StringViewArray::from(divs))),
+            ],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = function.invoke_with_args(args);
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().output_msg();
+        let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Invalid arithmetic operation"));
     }
 }

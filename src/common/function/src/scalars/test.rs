@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion_expr::{Signature, Volatility};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::VectorRef;
+use datatypes::vectors::{Helper, Vector};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 use crate::scalars::expression::{EvalContext, scalar_binary_op};
 
 #[derive(Clone, Default)]
@@ -42,14 +42,19 @@ impl Function for TestAndFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
+        let columns = Helper::try_into_vectors(&[arg0, arg1]).unwrap();
         let col = scalar_binary_op::<bool, bool, bool, _>(
             &columns[0],
             &columns[1],
             scalar_and,
             &mut EvalContext::default(),
         )?;
-        Ok(Arc::new(col))
+        Ok(ColumnarValue::Array(col.to_arrow_array()))
     }
 }
 

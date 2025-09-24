@@ -14,18 +14,21 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_common::types;
-use datafusion_expr::{Coercion, Signature, TypeSignature, TypeSignatureClass, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::Value;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{MutableVector, StringVectorBuilder, VectorRef};
+use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::{DataType, UInt8Type};
+use datafusion_common::{DataFusionError, types};
+use datafusion_expr::{
+    Coercion, ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, TypeSignatureClass,
+    Volatility,
+};
 use derive_more::Display;
 use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 
 /// Function that converts an IPv4 address string to CIDR notation.
 ///
@@ -46,7 +49,7 @@ impl Function for Ipv4ToCidr {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
@@ -62,19 +65,29 @@ impl Function for Ipv4ToCidr {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1 || columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 or 2 arguments, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        if args.args.len() != 1 && args.args.len() != 2 {
+            return Err(DataFusionError::Execution(format!(
+                "expecting 1 or 2 arguments, got {}",
+                args.args.len()
+            )));
+        }
+        let columns = ColumnarValue::values_to_arrays(&args.args)?;
 
         let ip_vec = &columns[0];
-        let mut results = StringVectorBuilder::with_capacity(ip_vec.len());
+        let mut builder = StringViewBuilder::with_capacity(ip_vec.len());
+        let arg0 = compute::cast(ip_vec, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
 
-        let has_subnet_arg = columns.len() == 2;
-        let subnet_vec = if has_subnet_arg {
+        let maybe_arg1 = if columns.len() > 1 {
+            Some(compute::cast(&columns[1], &DataType::UInt8)?)
+        } else {
+            None
+        };
+        let subnets = if let Some(arg1) = maybe_arg1.as_ref() {
             ensure!(
                 columns[1].len() == ip_vec.len(),
                 InvalidFuncArgsSnafu {
@@ -83,23 +96,19 @@ impl Function for Ipv4ToCidr {
                             .to_string()
                 }
             );
-            Some(&columns[1])
+            Some(arg1.as_primitive::<UInt8Type>())
         } else {
             None
         };
 
         for i in 0..ip_vec.len() {
-            let ip_str = ip_vec.get(i);
-            let subnet = subnet_vec.map(|v| v.get(i));
+            let ip_str = ip_vec.is_valid(i).then(|| ip_vec.value(i));
+            let subnet = subnets.and_then(|v| v.is_valid(i).then(|| v.value(i)));
 
             let cidr = match (ip_str, subnet) {
-                (Value::String(s), Some(Value::UInt8(mask))) => {
-                    let ip_str = s.as_utf8().trim();
+                (Some(ip_str), Some(mask)) => {
                     if ip_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "Empty IPv4 address".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution("empty IPv4 address".to_string()));
                     }
 
                     let ip_addr = complete_and_parse_ipv4(ip_str)?;
@@ -109,13 +118,9 @@ impl Function for Ipv4ToCidr {
 
                     Some(format!("{}/{}", masked_ip, mask))
                 }
-                (Value::String(s), None) => {
-                    let ip_str = s.as_utf8().trim();
+                (Some(ip_str), None) => {
                     if ip_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "Empty IPv4 address".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution("empty IPv4 address".to_string()));
                     }
 
                     let ip_addr = complete_and_parse_ipv4(ip_str)?;
@@ -149,10 +154,10 @@ impl Function for Ipv4ToCidr {
                 _ => None,
             };
 
-            results.push(cidr.as_deref());
+            builder.append_option(cidr.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -175,7 +180,7 @@ impl Function for Ipv6ToCidr {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
@@ -188,37 +193,41 @@ impl Function for Ipv6ToCidr {
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1 || columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 or 2 arguments, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        if args.args.len() != 1 && args.args.len() != 2 {
+            return Err(DataFusionError::Execution(format!(
+                "expecting 1 or 2 arguments, got {}",
+                args.args.len()
+            )));
+        }
+        let columns = ColumnarValue::values_to_arrays(&args.args)?;
 
         let ip_vec = &columns[0];
         let size = ip_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
+        let arg0 = compute::cast(ip_vec, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
 
-        let has_subnet_arg = columns.len() == 2;
-        let subnet_vec = if has_subnet_arg {
-            Some(&columns[1])
+        let maybe_arg1 = if columns.len() > 1 {
+            Some(compute::cast(&columns[1], &DataType::UInt8)?)
         } else {
             None
         };
+        let subnets = maybe_arg1
+            .as_ref()
+            .map(|arg1| arg1.as_primitive::<UInt8Type>());
 
         for i in 0..size {
-            let ip_str = ip_vec.get(i);
-            let subnet = subnet_vec.map(|v| v.get(i));
+            let ip_str = ip_vec.is_valid(i).then(|| ip_vec.value(i));
+            let subnet = subnets.and_then(|v| v.is_valid(i).then(|| v.value(i)));
 
             let cidr = match (ip_str, subnet) {
-                (Value::String(s), Some(Value::UInt8(mask))) => {
-                    let ip_str = s.as_utf8().trim();
+                (Some(ip_str), Some(mask)) => {
                     if ip_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "Empty IPv6 address".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution("empty IPv6 address".to_string()));
                     }
 
                     let ip_addr = complete_and_parse_ipv6(ip_str)?;
@@ -228,13 +237,9 @@ impl Function for Ipv6ToCidr {
 
                     Some(format!("{}/{}", masked_ip, mask))
                 }
-                (Value::String(s), None) => {
-                    let ip_str = s.as_utf8().trim();
+                (Some(ip_str), None) => {
                     if ip_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "Empty IPv6 address".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution("empty IPv6 address".to_string()));
                     }
 
                     let ip_addr = complete_and_parse_ipv6(ip_str)?;
@@ -250,10 +255,10 @@ impl Function for Ipv6ToCidr {
                 _ => None,
             };
 
-            results.push(cidr.as_deref());
+            builder.append_option(cidr.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -375,108 +380,148 @@ fn auto_detect_ipv6_subnet(addr: &Ipv6Addr) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{StringVector, UInt8Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{StringViewArray, UInt8Array};
 
     use super::*;
 
     #[test]
     fn test_ipv4_to_cidr_auto() {
         let func = Ipv4ToCidr;
-        let ctx = FunctionContext::default();
 
         // Test data with auto subnet detection
         let values = vec!["192.168.1.0", "10.0.0.0", "172.16", "192"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "192.168.1.0/24");
-        assert_eq!(result.get_data(1).unwrap(), "10.0.0.0/8");
-        assert_eq!(result.get_data(2).unwrap(), "172.16.0.0/16");
-        assert_eq!(result.get_data(3).unwrap(), "192.0.0.0/8");
+        assert_eq!(result.value(0), "192.168.1.0/24");
+        assert_eq!(result.value(1), "10.0.0.0/8");
+        assert_eq!(result.value(2), "172.16.0.0/16");
+        assert_eq!(result.value(3), "192.0.0.0/8");
     }
 
     #[test]
     fn test_ipv4_to_cidr_with_subnet() {
         let func = Ipv4ToCidr;
-        let ctx = FunctionContext::default();
 
         // Test data with explicit subnet
         let ip_values = vec!["192.168.1.1", "10.0.0.1", "172.16.5.5"];
         let subnet_values = vec![24u8, 16u8, 12u8];
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let subnet_input = Arc::new(UInt8Vector::from_vec(subnet_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(UInt8Array::from(subnet_values)));
 
-        let result = func.eval(&ctx, &[ip_input, subnet_input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(3).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "192.168.1.0/24");
-        assert_eq!(result.get_data(1).unwrap(), "10.0.0.0/16");
-        assert_eq!(result.get_data(2).unwrap(), "172.16.0.0/12");
+        assert_eq!(result.value(0), "192.168.1.0/24");
+        assert_eq!(result.value(1), "10.0.0.0/16");
+        assert_eq!(result.value(2), "172.16.0.0/12");
     }
 
     #[test]
     fn test_ipv6_to_cidr_auto() {
         let func = Ipv6ToCidr;
-        let ctx = FunctionContext::default();
 
         // Test data with auto subnet detection
         let values = vec!["2001:db8::", "2001:db8", "fe80::1", "::1"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "2001:db8::/32");
-        assert_eq!(result.get_data(1).unwrap(), "2001:db8::/32");
-        assert_eq!(result.get_data(2).unwrap(), "fe80::/16");
-        assert_eq!(result.get_data(3).unwrap(), "::1/128"); // Special case for ::1
+        assert_eq!(result.value(0), "2001:db8::/32");
+        assert_eq!(result.value(1), "2001:db8::/32");
+        assert_eq!(result.value(2), "fe80::/16");
+        assert_eq!(result.value(3), "::1/128"); // Special case for ::1
     }
 
     #[test]
     fn test_ipv6_to_cidr_with_subnet() {
         let func = Ipv6ToCidr;
-        let ctx = FunctionContext::default();
 
         // Test data with explicit subnet
         let ip_values = vec!["2001:db8::", "fe80::1", "2001:db8:1234::"];
         let subnet_values = vec![48u8, 10u8, 56u8];
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let subnet_input = Arc::new(UInt8Vector::from_vec(subnet_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(UInt8Array::from(subnet_values)));
 
-        let result = func.eval(&ctx, &[ip_input, subnet_input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(3).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "2001:db8::/48");
-        assert_eq!(result.get_data(1).unwrap(), "fe80::/10");
-        assert_eq!(result.get_data(2).unwrap(), "2001:db8:1234::/56");
+        assert_eq!(result.value(0), "2001:db8::/48");
+        assert_eq!(result.value(1), "fe80::/10");
+        assert_eq!(result.value(2), "2001:db8:1234::/56");
     }
 
     #[test]
     fn test_invalid_inputs() {
         let ipv4_func = Ipv4ToCidr;
         let ipv6_func = Ipv6ToCidr;
-        let ctx = FunctionContext::default();
 
         // Empty string should fail
         let empty_values = vec![""];
-        let empty_input = Arc::new(StringVector::from_slice(&empty_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&empty_values)));
 
-        let ipv4_result = ipv4_func.eval(&ctx, std::slice::from_ref(&empty_input));
-        let ipv6_result = ipv6_func.eval(&ctx, std::slice::from_ref(&empty_input));
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let ipv4_result = ipv4_func.invoke_with_args(args.clone());
+        let ipv6_result = ipv6_func.invoke_with_args(args);
 
         assert!(ipv4_result.is_err());
         assert!(ipv6_result.is_err());
 
         // Invalid IP formats should fail
         let invalid_values = vec!["not an ip", "192.168.1.256", "zzzz::ffff"];
-        let invalid_input = Arc::new(StringVector::from_slice(&invalid_values)) as VectorRef;
+        let arg0 =
+            ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&invalid_values)));
 
-        let ipv4_result = ipv4_func.eval(&ctx, std::slice::from_ref(&invalid_input));
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let ipv4_result = ipv4_func.invoke_with_args(args);
 
         assert!(ipv4_result.is_err());
     }
