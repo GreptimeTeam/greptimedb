@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use auth::UserProviderRef;
+use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use common_base::Plugins;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
@@ -29,6 +29,9 @@ pub async fn setup_frontend_plugins(
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
         let provider =
             auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
+        let permission_checker = DefaultPermissionChecker::arc();
+
+        plugins.insert::<PermissionCheckerRef>(permission_checker);
         plugins.insert::<UserProviderRef>(provider);
     }
     Ok(())

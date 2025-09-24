@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -24,12 +23,12 @@ use snafu::{ResultExt, ensure};
 
 use crate::error::{FileWatchSnafu, InvalidConfigSnafu, Result};
 use crate::user_info::DefaultUserInfo;
-use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
+use crate::user_provider::{UserInfoMap, authenticate_with_credential, load_credential_from_file};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const WATCH_FILE_USER_PROVIDER: &str = "watch_file_user_provider";
 
-type WatchedCredentialRef = Arc<Mutex<Option<HashMap<String, Vec<u8>>>>>;
+type WatchedCredentialRef = Arc<Mutex<Option<UserInfoMap>>>;
 
 /// A user provider that reads user credential from a file and watches the file for changes.
 ///
