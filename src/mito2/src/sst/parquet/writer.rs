@@ -172,7 +172,9 @@ where
             match res {
                 Ok(mut batch) => {
                     stats.update(&batch);
+                    let index_start = Instant::now();
                     self.get_or_create_indexer().await.update(&mut batch).await;
+                    metrics.index += index_start.elapsed();
                 }
                 Err(e) => {
                     self.get_or_create_indexer().await.abort().await;
@@ -250,7 +252,9 @@ where
         };
         metrics.read += read_start.elapsed();
 
+        let convert_start = Instant::now();
         let arrow_batch = write_format.convert_batch(&batch)?;
+        metrics.convert += convert_start.elapsed();
 
         let write_start = Instant::now();
         self.maybe_init_writer(write_format.arrow_schema(), opts)

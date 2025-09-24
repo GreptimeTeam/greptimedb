@@ -47,7 +47,8 @@ pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 pub struct Metrics {
     pub read: Duration,
     pub write: Duration,
-
+    pub convert: Duration,
+    pub index: Duration,
     pub close: Duration,
 }
 
