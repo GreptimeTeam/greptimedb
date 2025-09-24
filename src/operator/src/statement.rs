@@ -640,6 +640,41 @@ fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest
     })
 }
 
+// Verifies time related format is valid
+fn verify_time_related_format(with: &OptionMap) -> Result<()> {
+    let time_format = with.get(common_datasource::file_format::TIME_FORMAT);
+    let date_format = with.get(common_datasource::file_format::DATE_FORMAT);
+    let timestamp_format = with.get(common_datasource::file_format::TIMESTAMP_FORMAT);
+    let file_format = with.get(common_datasource::file_format::FORMAT_TYPE);
+
+    if !matches!(file_format, Some(f) if f.eq_ignore_ascii_case("csv")) {
+        ensure!(
+            time_format.is_none() && date_format.is_none() && timestamp_format.is_none(),
+            error::TimestampFormatNotSupportedSnafu {
+                format: "<unknown>".to_string(),
+                file_format: file_format.cloned().unwrap_or_default(),
+            }
+        );
+    }
+
+    for (key, format_opt) in [
+        (common_datasource::file_format::TIME_FORMAT, time_format),
+        (common_datasource::file_format::DATE_FORMAT, date_format),
+        (
+            common_datasource::file_format::TIMESTAMP_FORMAT,
+            timestamp_format,
+        ),
+    ] {
+        if let Some(format) = format_opt {
+            chrono::format::strftime::StrftimeItems::new(format)
+                .parse()
+                .map_err(|_| error::InvalidCopyParameterSnafu { key, value: format }.build())?;
+        }
+    }
+
+    Ok(())
+}
+
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
     let direction = match stmt {
         CopyTable::To(_) => CopyDirection::Export,
@@ -663,6 +698,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
             .context(ExternalSnafu)?;
 
     let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
+
+    verify_time_related_format(&with)?;
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
@@ -828,7 +865,7 @@ mod tests {
     use crate::statement::copy_database::{
         COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
     };
-    use crate::statement::timestamp_range_from_option_map;
+    use crate::statement::{timestamp_range_from_option_map, verify_time_related_format};
 
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
@@ -862,6 +899,64 @@ mod tests {
         assert_matches!(
             check_timestamp_range(("2022-04-11 08:00:00", "2022-04-11 07:00:00")).unwrap_err(),
             error::Error::InvalidTimestampRange { .. }
+        );
+    }
+
+    #[test]
+    fn test_verify_timestamp_format() {
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        assert!(verify_time_related_format(&map).is_ok());
+
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::TimestampFormatNotSupported { .. }
+        );
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%111112".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::InvalidCopyParameter { .. }
         );
     }
 }
