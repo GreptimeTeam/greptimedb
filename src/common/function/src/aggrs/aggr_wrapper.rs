@@ -264,11 +264,10 @@ impl StateWrapper {
             .collect::<Result<Vec<_>, _>>()?;
         self.inner.return_field(&input_fields).inspect_err(|e| {
             common_telemetry::error!(
-                "StateWrapper: {:#?}\nacc_args:{:?}\nerror:{:?} at {}",
+                "StateWrapper: {:#?}\nacc_args:{:?}\nerror:{:?}",
                 &self,
                 &acc_args,
-                e,
-                snafu::location!()
+                e
             );
         })
     }
