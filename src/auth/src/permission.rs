@@ -47,7 +47,14 @@ impl<'a> PermissionReq<'a> {
             | PermissionReq::LogQuery
             | PermissionReq::PromStoreRead => true,
             PermissionReq::SqlStatement(stmt) => stmt.is_readonly(),
-            _ => false,
+
+            PermissionReq::GrpcRequest(_)
+            | PermissionReq::Opentsdb
+            | PermissionReq::LineProtocol
+            | PermissionReq::PromStoreWrite
+            | PermissionReq::Otlp
+            | PermissionReq::LogWrite
+            | PermissionReq::BulkInsert => false,
         }
     }
 
