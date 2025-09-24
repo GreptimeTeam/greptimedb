@@ -119,7 +119,7 @@ impl ParserContext<'_> {
                 }
 
                 let mut exprs_iter = exprs.into_iter();
-                // Safety: safe to call next, because we already check the param_count above.
+                // Safety: safe to call next and unwrap, because we already check the param_count above.
                 let start = Self::parse_expr_to_literal_or_ts(
                     exprs_iter.next().unwrap(),
                     require_now_expr,
