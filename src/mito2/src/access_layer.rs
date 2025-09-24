@@ -48,8 +48,15 @@ pub struct Metrics {
     pub read: Duration,
     pub write: Duration,
     pub convert: Duration,
-    pub index: Duration,
+    pub index_update: Duration,
+    pub index_finish: Duration,
     pub close: Duration,
+}
+
+impl Metrics {
+    pub fn sum(&self) -> Duration {
+        self.read + self.write + self.convert + self.index_update + self.index_finish + self.close
+    }
 }
 
 /// A layer to access SST files under the same directory.

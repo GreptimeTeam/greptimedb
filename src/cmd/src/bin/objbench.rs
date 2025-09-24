@@ -227,10 +227,15 @@ impl Command {
             "Reader build time".bold(),
             reader_build_elapsed
         );
-        println!("  {}: {:?}", "Write time".bold(), write_elapsed);
+        println!("  {}: {:?}", "Total time".bold(), write_elapsed);
 
         // Print metrics in a formatted way
-        println!("  {}: {:?}", "Metrics".bold(), metrics);
+        println!(
+            "  {}: {:?}, sum: {:?}",
+            "Metrics".bold(),
+            metrics,
+            metrics.sum()
+        );
 
         // Cleanup
         println!("\n{}", "Cleaning up...".yellow());

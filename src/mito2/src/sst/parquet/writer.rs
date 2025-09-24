@@ -174,7 +174,7 @@ where
                     stats.update(&batch);
                     let index_start = Instant::now();
                     self.get_or_create_indexer().await.update(&mut batch).await;
-                    metrics.index += index_start.elapsed();
+                    metrics.index_update += index_start.elapsed();
                 }
                 Err(e) => {
                     self.get_or_create_indexer().await.abort().await;
@@ -183,7 +183,9 @@ where
             }
         }
 
+        let index_finish_start = Instant::now();
         let index_output = self.get_or_create_indexer().await.finish().await;
+        metrics.index_finish += index_finish_start.elapsed();
 
         if stats.num_rows == 0 {
             return Ok(smallvec![]);
