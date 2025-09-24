@@ -638,8 +638,8 @@ impl Accumulator for MergeAccum {
         let fields = struct_arr.fields();
         if fields != &self.state_fields {
             debug!(
-                "State fields mismatch, expected: {:?}, got: {:?} for accum: {:?}",
-                self.state_fields, fields, self
+                "State fields mismatch, expected: {:?}, got: {:?}",
+                self.state_fields, fields
             );
             // state fields mismatch might be acceptable by datafusion, continue
         }
