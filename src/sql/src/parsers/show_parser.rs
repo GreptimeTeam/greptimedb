@@ -86,6 +86,11 @@ impl ParserContext<'_> {
             // SHOW REGIONS
             self.parse_show_regions()
         } else if self.consume_token("CREATE") {
+            #[cfg(feature = "enterprise")]
+            if self.consume_token("TRIGGER") {
+                return self.parse_show_create_trigger();
+            }
+
             if self.consume_token("DATABASE") || self.consume_token("SCHEMA") {
                 self.parse_show_create_database()
             } else if self.consume_token("TABLE") {
@@ -595,6 +600,10 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
     use crate::statements::show::ShowDatabases;
+    #[cfg(feature = "enterprise")]
+    use crate::statements::show::trigger::ShowCreateTrigger;
+    #[cfg(feature = "enterprise")]
+    use crate::statements::show::trigger::ShowTriggers;
 
     #[test]
     pub fn test_show_database_all() {
@@ -1256,6 +1265,74 @@ mod tests {
             stmts[0],
             Statement::ShowProcesslist(ShowProcessList { full: true })
         );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_create_trigger() {
+        let sql = "SHOW CREATE TRIGGER test_trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowCreateTrigger(ShowCreateTrigger {
+                trigger_name: ObjectName::from(vec![Ident::new("test_trigger")]),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers() {
+        let sql = "SHOW TRIGGERS";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::All,
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers_like() {
+        let sql = "SHOW TRIGGERS LIKE 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::Like(Ident::with_quote('\'', "test_trigger")),
+            })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    pub fn test_parse_show_triggers_where() {
+        let sql = "SHOW TRIGGERS WHERE name = 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert!(matches!(
+            &stmts[0],
+            Statement::ShowTriggers(ShowTriggers {
+                kind: ShowKind::Where(_)
+            })
+        ));
         assert_eq!(sql, stmts[0].to_string());
     }
 }
