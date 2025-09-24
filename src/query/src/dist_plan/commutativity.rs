@@ -79,8 +79,11 @@ pub fn step_aggr_to_upper_aggr(
 pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
     aggr_exprs.iter().all(|expr| {
         if let Some(aggr_func) = get_aggr_func(expr) {
-            if aggr_func.params.distinct {
-                // Distinct aggregate functions are not steppable(yet).
+            if aggr_func.params.distinct
+                | !aggr_func.params.order_by.is_empty()
+                | aggr_func.params.filter.is_some()
+            {
+                // Distinct aggregate functions/order by/filter in aggr args are not steppable(yet).
                 return false;
             }
 
