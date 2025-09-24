@@ -232,23 +232,33 @@ impl MetadataSnapshotManager {
     }
 
     /// Dumps the metadata to the backup file.
-    pub async fn dump(&self, file_path: &str) -> Result<(String, u64)> {
+    pub async fn dump(&self, file_path_str: &str) -> Result<(String, u64)> {
         let format = FileFormat::FlexBuffers;
 
-        let file_name = Path::new(file_path)
+        let path = Path::new(file_path_str)
+            .parent()
+            .context(InvalidFilePathSnafu {
+                file_path: file_path_str,
+            })?;
+        let raw_file_name = Path::new(file_path_str)
             .file_name()
             .and_then(|s| s.to_str())
-            .context(InvalidFilePathSnafu { file_path })?;
-
-        let parsed_file_name = FileName::try_from(file_name).unwrap_or_else(|_| {
+            .context(InvalidFilePathSnafu {
+                file_path: file_path_str,
+            })?;
+        let parsed_file_name = FileName::try_from(raw_file_name).unwrap_or_else(|_| {
             FileName::new(
-                file_name.to_string(),
+                raw_file_name.to_string(),
                 FileExtension {
                     format,
                     data_type: DataType::Metadata,
                 },
             )
         });
+        let file_path = path.join(parsed_file_name.to_string());
+        let file_path = file_path.to_str().context(InvalidFilePathSnafu {
+            file_path: file_path_str,
+        })?;
 
         // Ensure the file does not exist
         ensure!(

@@ -36,9 +36,9 @@ pub enum SnapshotCommand {
 impl SnapshotCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            SnapshotCommand::Save(cmd) => cmd.build().await,
-            SnapshotCommand::Restore(cmd) => cmd.build().await,
-            SnapshotCommand::Info(cmd) => cmd.build().await,
+            SnapshotCommand::Save(cmd) => Ok(Box::new(cmd.build().await?)),
+            SnapshotCommand::Restore(cmd) => Ok(Box::new(cmd.build().await?)),
+            SnapshotCommand::Info(cmd) => Ok(Box::new(cmd.build().await?)),
         }
     }
 }
@@ -68,23 +68,18 @@ pub struct SaveCommand {
 }
 
 impl SaveCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+    async fn build(&self) -> Result<MetaSnapshotTool, BoxedError> {
         let kvbackend = self.store.build().await?;
-        let object_store = self.object_store.build().map_err(BoxedError::new)?;
-        let object_store = match object_store {
-            Some(object_store) => object_store,
-            None => new_fs_object_store(&self.dir)?,
-        };
-        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
-            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
-        } else {
-            self.file_path.to_string()
-        };
+        let (object_store, file_path) = build_object_store_and_resolve_file_path(
+            self.object_store.clone(),
+            &self.dir,
+            &self.file_path,
+        )?;
         let tool = MetaSnapshotTool {
             inner: MetadataSnapshotManager::new(kvbackend, object_store),
             file_path,
         };
-        Ok(Box::new(tool))
+        Ok(tool)
     }
 }
 
@@ -132,24 +127,20 @@ pub struct RestoreCommand {
 }
 
 impl RestoreCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+    async fn build(&self) -> Result<MetaRestoreTool, BoxedError> {
         let kvbackend = self.store.build().await?;
-        let object_store = self.object_store.build().map_err(BoxedError::new)?;
-        let object_store = match object_store {
-            Some(object_store) => object_store,
-            None => new_fs_object_store(&self.dir)?,
-        };
-        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
-            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
-        } else {
-            self.file_path.to_string()
-        };
+        let (object_store, file_path) = build_object_store_and_resolve_file_path(
+            self.object_store.clone(),
+            &self.dir,
+            &self.file_path,
+        )
+        .map_err(BoxedError::new)?;
         let tool = MetaRestoreTool::new(
             MetadataSnapshotManager::new(kvbackend, object_store),
             file_path,
             self.force,
         );
-        Ok(Box::new(tool))
+        Ok(tool)
     }
 }
 
@@ -257,23 +248,90 @@ impl Tool for MetaInfoTool {
 }
 
 impl InfoCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        let object_store = self.object_store.build().map_err(BoxedError::new)?;
-        let object_store = match object_store {
-            Some(object_store) => object_store,
-            None => new_fs_object_store(&self.dir)?,
-        };
-        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
-            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
-        } else {
-            self.file_path.to_string()
-        };
+    async fn build(&self) -> Result<MetaInfoTool, BoxedError> {
+        let (object_store, file_path) = build_object_store_and_resolve_file_path(
+            self.object_store.clone(),
+            &self.dir,
+            &self.file_path,
+        )?;
         let tool = MetaInfoTool {
             inner: object_store,
             file_path,
             inspect_key: self.inspect_key.clone(),
             limit: self.limit,
         };
-        Ok(Box::new(tool))
+        Ok(tool)
+    }
+}
+
+/// Builds the object store and resolves the file path.
+fn build_object_store_and_resolve_file_path(
+    object_store: ObjectStoreConfig,
+    fs_root: &str,
+    file_path: &str,
+) -> Result<(ObjectStore, String), BoxedError> {
+    let object_store = object_store.build().map_err(BoxedError::new)?;
+    let object_store = match object_store {
+        Some(object_store) => object_store,
+        None => new_fs_object_store(fs_root)?,
+    };
+
+    let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
+        resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?
+    } else {
+        file_path.to_string()
+    };
+
+    Ok((object_store, file_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use clap::Parser;
+
+    use crate::metadata::snapshot::RestoreCommand;
+
+    #[tokio::test]
+    async fn test_cmd_resolve_file_path() {
+        common_telemetry::init_default_ut_logging();
+        let cmd = RestoreCommand::parse_from([
+            "",
+            "--file_name",
+            "metadata_snapshot.metadata.fb",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+        let tool = cmd.build().await.unwrap();
+        let current_dir = env::current_dir().unwrap();
+        let file_path = current_dir.join("metadata_snapshot.metadata.fb");
+        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+
+        let cmd = RestoreCommand::parse_from([
+            "",
+            "--file_name",
+            "metadata_snapshot.metadata.fb",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+        let tool = cmd.build().await.unwrap();
+        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+
+        let cmd = RestoreCommand::parse_from([
+            "",
+            "--file_name",
+            "metadata_snapshot.metadata.fb",
+            "--backend",
+            "memory-store",
+            "--store-addrs",
+            "memory://",
+        ]);
+        let tool = cmd.build().await.unwrap();
+        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
     }
 }
