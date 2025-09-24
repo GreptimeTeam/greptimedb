@@ -152,6 +152,49 @@ explain select last_value(ts order by ts) from t;
 explain analyze
     select last_value(ts order by ts) from t;
 
+
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t
+group by time_window
+order by time_window, ordered_host;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain 
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t
+group by time_window
+order by time_window, ordered_host;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+explain analyze
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t
+group by time_window
+order by time_window, ordered_host;
+
 drop table t;
 
 CREATE TABLE phy (ts timestamp time index, val double, host string primary key)
@@ -234,6 +277,48 @@ select
 from t1
 group by host
 order by ordered_host;
+
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t1
+group by time_window
+order by time_window, ordered_host;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t1
+group by time_window
+order by time_window, ordered_host;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+explain analyze
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(val order by ts),
+    last_value(ts order by ts),
+    date_bin('5ms'::INTERVAL, ts) as time_window
+from t1
+group by time_window
+order by time_window, ordered_host;
 
 drop table t1;
 drop table phy;
