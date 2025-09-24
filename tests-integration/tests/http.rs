@@ -208,7 +208,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-    // 4. writeonly user cannot read
+    // 5. writeonly user cannot read
     let res = client
         .get("/v1/sql?db=public&sql=show tables;")
         .header(
