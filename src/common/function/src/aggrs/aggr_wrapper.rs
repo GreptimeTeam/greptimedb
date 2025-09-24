@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use arrow::array::StructArray;
 use arrow_schema::{FieldRef, Fields};
-use common_telemetry::{debug, warn};
+use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -637,7 +637,7 @@ impl Accumulator for MergeAccum {
             })?;
         let fields = struct_arr.fields();
         if fields != &self.state_fields {
-            warn!(
+            debug!(
                 "State fields mismatch, expected: {:?}, got: {:?} for accum: {:?}",
                 self.state_fields, fields, self
             );
