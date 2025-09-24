@@ -126,7 +126,7 @@ impl RestoreCommand {
         let file_path = Path::new(input_dir).join(&self.file_name);
         let file_path = file_path
             .to_str()
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 msg: format!(
                     "Invalid file path, input dir: {}, file name: {}",
                     input_dir, &self.file_name
@@ -249,7 +249,7 @@ impl InfoCommand {
         let file_path = Path::new(&self.dir).join(&self.file_name);
         let file_path = file_path
             .to_str()
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 msg: format!(
                     "Invalid file path, input dir: {}, file name: {}",
                     &self.dir, &self.file_name
