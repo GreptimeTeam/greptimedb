@@ -49,7 +49,6 @@ paste.workspace = true
 prometheus.workspace = true
 promql-parser.workspace = true
 rand.workspace = true
-rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true

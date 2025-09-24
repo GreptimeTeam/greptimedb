@@ -175,10 +175,10 @@ opentelemetry-proto = { version = "0.30", features = [
     "with-serde",
     "logs",
 ] }
+ordered-float = { version = "4.3", features = ["serde"] }
 otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
     "server",
 ] }
-ordered-float = { version = "4.3", features = ["serde"] }
 parking_lot = "0.12"
 parquet = { version = "56.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"

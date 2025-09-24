@@ -34,10 +34,11 @@ use store_api::storage::ScanRequest;
 use table::TableRef;
 use table::metadata::TableId;
 
-use super::SystemTable;
 use crate::CatalogManager;
 use crate::error::{InternalSnafu, ProjectSchemaSnafu, Result};
-use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
+use crate::system_schema::{
+    SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
+};
 
 /// [`PGCatalogProvider`] is the provider for a schema named `pg_catalog`, it is not a catalog.
 pub struct PGCatalogProvider {

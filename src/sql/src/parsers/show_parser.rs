@@ -15,7 +15,7 @@
 #[cfg(feature = "enterprise")]
 pub mod trigger;
 
-use snafu::{ResultExt, ensure};
+use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
@@ -125,7 +125,14 @@ impl ParserContext<'_> {
         } else if self.consume_token("PROCESSLIST") {
             self.parse_show_processlist(false)
         } else {
-            self.unsupported(self.peek_token_as_string())
+            // follow postgres dialect and assume the next token is the variable
+            let variable = self
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a variable name",
+                    actual: self.peek_token_as_string(),
+                })?;
+            Ok(Statement::ShowVariables(ShowVariables { variable }))
         }
     }
 
