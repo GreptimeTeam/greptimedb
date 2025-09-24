@@ -842,7 +842,6 @@ impl TreeNodeRewriter for PlanRewriter {
 
         let parent = parent.clone();
 
-        // TODO(ruihang): avoid this clone
         if self.should_expand(&parent)? {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
