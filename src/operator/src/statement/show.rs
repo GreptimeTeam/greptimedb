@@ -246,8 +246,8 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let obj_name = &show.flow_name;
         let (catalog_name, flow_name) = match &obj_name.0[..] {
-            [table] => (query_ctx.current_catalog().to_string(), table.to_string_unquoted()),
-            [catalog, table] => (catalog.to_string_unquoted(), table.to_string_unquoted()),
+            [flow] => (query_ctx.current_catalog().to_string(), flow.to_string_unquoted()),
+            [catalog, flow] => (catalog.to_string_unquoted(), flow.to_string_unquoted()),
             _ => {
                 return InvalidSqlSnafu {
                     err_msg: format!(
@@ -280,6 +280,36 @@ impl StatementExecutor {
 
         query::sql::show_create_flow(obj_name.clone(), flow_val, query_ctx)
             .context(error::ExecuteStatementSnafu)
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tracing::instrument(skip_all)]
+    pub async fn show_create_trigger(
+        &self,
+        show: sql::statements::show::trigger::ShowCreateTrigger,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let Some(trigger_querier) = self.trigger_querier.as_ref() else {
+            return error::MissingTriggerQuerierSnafu.fail();
+        };
+
+        let obj_name = &show.trigger_name;
+        let (catalog_name, trigger_name) = match &obj_name.0[..] {
+            [trigger] => (query_ctx.current_catalog().to_string(), trigger.to_string_unquoted()),
+            [catalog, trigger] => (catalog.to_string_unquoted(), trigger.to_string_unquoted()),
+            _ => {
+                return InvalidSqlSnafu {
+                    err_msg: format!(
+                        "expect trigger name to be <catalog>.<trigger_name> or <trigger_name>, actual: {obj_name}",
+                    ),
+                }
+                .fail()
+            }
+        };
+        trigger_querier
+            .show_create_trigger(&catalog_name, &trigger_name)
+            .await
+            .context(error::TriggerQuerierSnafu)
     }
 
     #[tracing::instrument(skip_all)]

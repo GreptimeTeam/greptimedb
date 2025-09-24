@@ -877,6 +877,11 @@ pub fn check_permission(
         Statement::ShowCreateFlow(stmt) => {
             validate_param(&stmt.flow_name, query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowCreateTrigger(stmt) => {
+            // FIXME(fys): validate param is not fit with flow or trigger.
+            validate_param(&stmt.trigger_name, query_ctx)?;
+        }
         Statement::ShowCreateView(stmt) => {
             validate_param(&stmt.view_name, query_ctx)?;
         }

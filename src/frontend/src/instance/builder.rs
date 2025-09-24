@@ -32,7 +32,7 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-use operator::statement::{StatementExecutor, StatementExecutorRef};
+use operator::statement::{StatementExecutor, StatementExecutorRef, TriggerQuerierRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
@@ -176,7 +176,7 @@ impl FrontendBuilder {
         )
         .query_engine();
 
-        let statement_executor = Arc::new(StatementExecutor::new(
+        let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
             self.procedure_executor,
@@ -185,7 +185,15 @@ impl FrontendBuilder {
             inserter.clone(),
             table_route_cache,
             Some(process_manager.clone()),
-        ));
+        );
+        #[cfg(feature = "enterprise")]
+        let statement_executor = if let Some(trigger_querier) = plugins.get::<TriggerQuerierRef>() {
+            statement_executor.with_trigger_querier(trigger_querier.clone())
+        } else {
+            statement_executor
+        };
+
+        let statement_executor = Arc::new(statement_executor);
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
             inserter.clone(),

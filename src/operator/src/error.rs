@@ -872,6 +872,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Not trigger querier is specified"))]
+    MissingTriggerQuerier {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Trigger querier error"))]
+    TriggerQuerier {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -917,10 +932,6 @@ impl ErrorExt for Error {
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
-            #[cfg(feature = "enterprise")]
-            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
-            #[cfg(feature = "enterprise")]
-            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
@@ -1003,6 +1014,14 @@ impl ErrorExt for Error {
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::PathNotFound { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
+            #[cfg(feature = "enterprise")]
+            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::MissingTriggerQuerier { .. } => StatusCode::Internal,
+            #[cfg(feature = "enterprise")]
+            Error::TriggerQuerier { source, .. } => source.status_code(),
         }
     }
 

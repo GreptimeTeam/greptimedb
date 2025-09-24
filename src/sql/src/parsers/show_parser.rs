@@ -86,6 +86,11 @@ impl ParserContext<'_> {
             // SHOW REGIONS
             self.parse_show_regions()
         } else if self.consume_token("CREATE") {
+            #[cfg(feature = "enterprise")]
+            if self.consume_token("TRIGGER") {
+                return self.parse_show_create_trigger();
+            }
+
             if self.consume_token("DATABASE") || self.consume_token("SCHEMA") {
                 self.parse_show_create_database()
             } else if self.consume_token("TABLE") {
