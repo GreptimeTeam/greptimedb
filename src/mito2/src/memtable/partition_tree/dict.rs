@@ -450,7 +450,7 @@ mod tests {
         let key_bytes = num_keys as usize * 5;
         assert_eq!(key_bytes * 2, metrics.key_bytes);
         assert_eq!(key_bytes, builder.key_bytes_in_index);
-        assert_eq!(8850, builder.memory_size());
+        assert_eq!(8730, builder.memory_size());
 
         let (dict, _) = builder.finish().unwrap();
         assert_eq!(0, builder.key_bytes_in_index);

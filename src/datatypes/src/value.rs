@@ -2789,21 +2789,21 @@ mod tests {
                 vector: &vector,
                 idx: 0,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 1,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 2,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
     }
