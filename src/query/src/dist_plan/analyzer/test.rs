@@ -15,6 +15,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use arrow::datatypes::IntervalDayTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -25,7 +26,9 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion_common::JoinType;
+use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
+use datafusion_functions::datetime::date_bin;
 use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -1448,6 +1451,44 @@ fn transform_sort_subquery_alias() {
         "SubqueryAlias: a",
         "  Sort: t.number ASC NULLS LAST",
         "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn date_bin_ts_group_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let date_bin_call = Expr::ScalarFunction(ScalarFunction::new_udf(
+        date_bin(),
+        vec![
+            lit(datafusion_common::ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(0, 60 * 1000), // 1 minute in millis
+            ))),
+            col("ts"),
+        ],
+    ));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![date_bin_call], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        r#"Projection: date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"),t.ts), min(t.number)"#,
+        r#"  Aggregate: groupBy=[[date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"),t.ts)]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]"#,
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        r#"Aggregate: groupBy=[[date_bin(IntervalDayTime("IntervalDayTime { days: 0, milliseconds: 60000 }"), t.ts)]], aggr=[[__min_state(t.number)]]"#,
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");

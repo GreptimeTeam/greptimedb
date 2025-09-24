@@ -24,6 +24,7 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
@@ -548,6 +549,7 @@ async fn test_udaf_correct_eval_result() {
         input_schema: SchemaRef,
         input: Vec<ArrayRef>,
         expected_output: Option<ScalarValue>,
+        // extra check function on the final array result
         expected_fn: Option<ExpectedFn>,
         distinct: bool,
         filter: Option<Box<Expr>>,
@@ -572,6 +574,27 @@ async fn test_udaf_correct_eval_result() {
                 Some(3),
             ]))],
             expected_output: Some(ScalarValue::Int64(Some(6))),
+            expected_fn: None,
+            distinct: false,
+            filter: None,
+            order_by: vec![],
+            null_treatment: None,
+        },
+        TestCase {
+            func: count_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "str_val",
+                DataType::Utf8,
+                true,
+            )])),
+            args: vec![Expr::Column(Column::new_unqualified("str_val"))],
+            input: vec![Arc::new(StringArray::from(vec![
+                Some("hello"),
+                Some("world"),
+                None,
+                Some("what"),
+            ]))],
+            expected_output: Some(ScalarValue::Int64(Some(3))),
             expected_fn: None,
             distinct: false,
             filter: None,
