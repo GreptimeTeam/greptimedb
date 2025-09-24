@@ -26,6 +26,7 @@ use mito2::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
 use mito2::sst::parquet::{WriteOptions, PARQUET_METADATA_KEY};
 use mito2::{build_access_layer, Metrics, OperationType, SstWriteRequest};
 use object_store::ObjectStore;
+use serde::{Deserialize, Serialize};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 #[tokio::main]
@@ -36,6 +37,22 @@ pub async fn main() {
         eprintln!("{}: {}", "Error".red().bold(), e);
         std::process::exit(1);
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StorageConfigWrapper {
+    storage: StorageConfig,
+}
+
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// The working directory of database
+    pub data_home: String,
+    #[serde(flatten)]
+    pub store: ObjectStoreConfig,
 }
 
 #[derive(Debug, Parser)]
@@ -72,14 +89,14 @@ impl Command {
             }
             .build()
         })?;
-        let store_cfg: ObjectStoreConfig = toml::from_str(&cfg_str).map_err(|e| {
+        let store_cfg: StorageConfigWrapper = toml::from_str(&cfg_str).map_err(|e| {
             error::IllegalConfigSnafu {
                 msg: format!("failed to parse config {}: {e}", self.config.display()),
             }
             .build()
         })?;
 
-        let object_store = build_object_store(&store_cfg).await?;
+        let object_store = build_object_store(&store_cfg.storage).await?;
         println!("{} Object store initialized", "✓".green());
 
         // Prepare source identifiers
@@ -289,12 +306,13 @@ fn extract_region_metadata(
     Ok(std::sync::Arc::new(region))
 }
 
-async fn build_object_store(cfg: &ObjectStoreConfig) -> Result<ObjectStore> {
+async fn build_object_store(sc: &StorageConfig) -> Result<ObjectStore> {
     use datanode::config::ObjectStoreConfig::*;
-    match cfg {
+    let oss = &sc.store;
+    match oss {
         File(_) => {
             use object_store::services::Fs;
-            let builder = Fs::default();
+            let builder = Fs::default().root(&sc.data_home);
             Ok(ObjectStore::new(builder)
                 .map_err(|e| {
                     error::IllegalConfigSnafu {
@@ -485,5 +503,17 @@ async fn load_parquet_metadata(
             .to_vec();
         let meta = ParquetMetaDataReader::decode_metadata(&data)?;
         Ok(meta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::objbench::{StorageConfig, StorageConfigWrapper};
+
+    #[test]
+    fn test_decode() {
+        let cfg = std::fs::read_to_string("/home/lei/datanode-bulk.toml").unwrap();
+        let storage: StorageConfigWrapper = toml::from_str(&cfg).unwrap();
+        println!("{:?}", storage);
     }
 }
