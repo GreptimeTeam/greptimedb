@@ -921,7 +921,7 @@ impl Display for PostgresqlFormatter {
             PgRow::RowDescription(desc) => Arc::new(Schema::new(
                 desc.iter()
                     .map(|column| {
-                        ColumnSchema::new(column.name(), ConcreteDataType::string_datatype(), false)
+                        ColumnSchema::new(column.name(), ConcreteDataType::string_datatype(), true)
                     })
                     .collect(),
             )),
