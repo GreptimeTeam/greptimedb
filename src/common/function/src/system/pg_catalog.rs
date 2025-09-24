@@ -17,17 +17,17 @@ mod version;
 use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::{as_boolean_array, ArrayRef, StringArray};
+use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
 use datafusion::catalog::TableFunction;
-use datafusion::common::utils::SingleRowListArrayBuilder;
 use datafusion::common::ScalarValue;
+use datafusion::common::utils::SingleRowListArrayBuilder;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datafusion_postgres::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
 use derive_more::Display;
 use version::PGVersionFunction;
 
-use crate::function::{find_function_context, Function};
+use crate::function::{Function, find_function_context};
 use crate::function_registry::FunctionRegistry;
 
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
