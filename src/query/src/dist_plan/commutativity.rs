@@ -151,7 +151,7 @@ impl Categorizer {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
                             ret.inspect_err(|err| {
-                                common_telemetry::error!("Failed to step aggregate plan: {err}");
+                                common_telemetry::error!("Failed to step aggregate plan: {err:?}");
                             })
                             .map(|s| TransformerAction {
                                 extra_parent_plans: s.extra_parent_plans,
