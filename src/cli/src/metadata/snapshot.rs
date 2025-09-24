@@ -16,16 +16,14 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
-use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
 use object_store::ObjectStore;
-use object_store::services::{Fs, S3};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::Tool;
-use crate::error::{InvalidFilePathSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
-use crate::metadata::common::StoreConfig;
+use crate::common::{ObjectStoreConfig, StoreConfig};
+use crate::error::UnexpectedSnafu;
 
 /// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
 #[derive(Subcommand)]
@@ -48,65 +46,6 @@ impl SnapshotCommand {
     }
 }
 
-// TODO(qtang): Abstract a generic s3 config for export import meta snapshot restore
-#[derive(Debug, Default, Parser)]
-struct S3Config {
-    /// whether to use s3 as the output directory. default is false.
-    #[clap(long, default_value = "false")]
-    s3: bool,
-    /// The s3 bucket name.
-    #[clap(long)]
-    s3_bucket: Option<String>,
-    /// The s3 region.
-    #[clap(long)]
-    s3_region: Option<String>,
-    /// The s3 access key.
-    #[clap(long)]
-    s3_access_key: Option<SecretString>,
-    /// The s3 secret key.
-    #[clap(long)]
-    s3_secret_key: Option<SecretString>,
-    /// The s3 endpoint. we will automatically use the default s3 decided by the region if not set.
-    #[clap(long)]
-    s3_endpoint: Option<String>,
-}
-
-impl S3Config {
-    pub fn build(&self, root: &str) -> Result<Option<ObjectStore>, BoxedError> {
-        if !self.s3 {
-            Ok(None)
-        } else {
-            if self.s3_region.is_none()
-                || self.s3_access_key.is_none()
-                || self.s3_secret_key.is_none()
-                || self.s3_bucket.is_none()
-            {
-                return S3ConfigNotSetSnafu.fail().map_err(BoxedError::new);
-            }
-            // Safety, unwrap is safe because we have checked the options above.
-            let mut config = S3::default()
-                .bucket(self.s3_bucket.as_ref().unwrap())
-                .region(self.s3_region.as_ref().unwrap())
-                .access_key_id(self.s3_access_key.as_ref().unwrap().expose_secret())
-                .secret_access_key(self.s3_secret_key.as_ref().unwrap().expose_secret());
-
-            if !root.is_empty() && root != "." {
-                config = config.root(root);
-            }
-
-            if let Some(endpoint) = &self.s3_endpoint {
-                config = config.endpoint(endpoint);
-            }
-            Ok(Some(
-                ObjectStore::new(config)
-                    .context(OpenDalSnafu)
-                    .map_err(BoxedError::new)?
-                    .finish(),
-            ))
-        }
-    }
-}
-
 /// Export metadata snapshot tool.
 /// This tool is used to export metadata snapshot from etcd, pg or mysql.
 /// It will dump the metadata snapshot to local file or s3 bucket.
@@ -116,60 +55,41 @@ pub struct SaveCommand {
     /// The store configuration.
     #[clap(flatten)]
     store: StoreConfig,
-    /// The s3 config.
+    /// The object store configuration.
     #[clap(flatten)]
-    s3_config: S3Config,
+    object_store: ObjectStoreConfig,
     /// The name of the target snapshot file. we will add the file extension automatically.
     #[clap(long, default_value = "metadata_snapshot")]
     file_name: String,
     /// The directory to store the snapshot file.
-    /// if target output is s3 bucket, this is the root directory in the bucket.
-    /// if target output is local file, this is the local directory.
-    #[clap(long, default_value = "")]
-    output_dir: String,
-}
-
-fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError> {
-    let root = if root.is_empty() { "." } else { root };
-    let object_store = ObjectStore::new(Fs::default().root(root))
-        .context(OpenDalSnafu)
-        .map_err(BoxedError::new)?
-        .finish();
-    Ok(object_store)
+    #[clap(long, default_value = "", alias = "output_dir")]
+    dir: String,
 }
 
 impl SaveCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.store.build().await?;
-        let output_dir = &self.output_dir;
-        let object_store = self.s3_config.build(output_dir).map_err(BoxedError::new)?;
-        if let Some(store) = object_store {
-            let tool = MetaSnapshotTool {
-                inner: MetadataSnapshotManager::new(kvbackend, store),
-                target_file: self.file_name.clone(),
-            };
-            Ok(Box::new(tool))
-        } else {
-            let object_store = create_local_file_object_store(output_dir)?;
-            let tool = MetaSnapshotTool {
-                inner: MetadataSnapshotManager::new(kvbackend, object_store),
-                target_file: self.file_name.clone(),
-            };
-            Ok(Box::new(tool))
-        }
+        let object_store = self.object_store.build().map_err(BoxedError::new)?;
+        let tool = MetaSnapshotTool {
+            inner: MetadataSnapshotManager::new(kvbackend, object_store),
+            path: self.dir.clone(),
+            file_name: self.file_name.clone(),
+        };
+        Ok(Box::new(tool))
     }
 }
 
 struct MetaSnapshotTool {
     inner: MetadataSnapshotManager,
-    target_file: String,
+    path: String,
+    file_name: String,
 }
 
 #[async_trait]
 impl Tool for MetaSnapshotTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         self.inner
-            .dump("", &self.target_file)
+            .dump(&self.path, &self.file_name)
             .await
             .map_err(BoxedError::new)?;
         Ok(())
@@ -186,15 +106,15 @@ pub struct RestoreCommand {
     /// The store configuration.
     #[clap(flatten)]
     store: StoreConfig,
-    /// The s3 config.
+    /// The object store config.
     #[clap(flatten)]
-    s3_config: S3Config,
+    object_store: ObjectStoreConfig,
     /// The name of the target snapshot file.
     #[clap(long, default_value = "metadata_snapshot.metadata.fb")]
     file_name: String,
     /// The directory to store the snapshot file.
-    #[clap(long, default_value = ".")]
-    input_dir: String,
+    #[clap(long, default_value = ".", alias = "input_dir")]
+    dir: String,
     #[clap(long, default_value = "false")]
     force: bool,
 }
@@ -202,38 +122,39 @@ pub struct RestoreCommand {
 impl RestoreCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.store.build().await?;
-        let input_dir = &self.input_dir;
-        let object_store = self.s3_config.build(input_dir).map_err(BoxedError::new)?;
-        if let Some(store) = object_store {
-            let tool = MetaRestoreTool::new(
-                MetadataSnapshotManager::new(kvbackend, store),
-                self.file_name.clone(),
-                self.force,
-            );
-            Ok(Box::new(tool))
-        } else {
-            let object_store = create_local_file_object_store(input_dir)?;
-            let tool = MetaRestoreTool::new(
-                MetadataSnapshotManager::new(kvbackend, object_store),
-                self.file_name.clone(),
-                self.force,
-            );
-            Ok(Box::new(tool))
-        }
+        let input_dir = &self.dir;
+        let file_path = Path::new(input_dir).join(&self.file_name);
+        let file_path = file_path
+            .to_str()
+            .with_context(|| UnexpectedSnafu {
+                msg: format!(
+                    "Invalid file path, input dir: {}, file name: {}",
+                    input_dir, &self.file_name
+                ),
+            })
+            .map_err(BoxedError::new)?;
+
+        let object_store = self.object_store.build().map_err(BoxedError::new)?;
+        let tool = MetaRestoreTool::new(
+            MetadataSnapshotManager::new(kvbackend, object_store),
+            file_path.to_string(),
+            self.force,
+        );
+        Ok(Box::new(tool))
     }
 }
 
 struct MetaRestoreTool {
     inner: MetadataSnapshotManager,
-    source_file: String,
+    file_path: String,
     force: bool,
 }
 
 impl MetaRestoreTool {
-    pub fn new(inner: MetadataSnapshotManager, source_file: String, force: bool) -> Self {
+    pub fn new(inner: MetadataSnapshotManager, file_path: String, force: bool) -> Self {
         Self {
             inner,
-            source_file,
+            file_path,
             force,
         }
     }
@@ -252,7 +173,7 @@ impl Tool for MetaRestoreTool {
                 "The target source is clean, we will restore the metadata snapshot."
             );
             self.inner
-                .restore(&self.source_file)
+                .restore(&self.file_path)
                 .await
                 .map_err(BoxedError::new)?;
             Ok(())
@@ -266,7 +187,7 @@ impl Tool for MetaRestoreTool {
                 "The target source is not clean, We will restore the metadata snapshot with --force."
             );
             self.inner
-                .restore(&self.source_file)
+                .restore(&self.file_path)
                 .await
                 .map_err(BoxedError::new)?;
             Ok(())
@@ -280,12 +201,15 @@ impl Tool for MetaRestoreTool {
 /// It prints the filtered metadata to the console.
 #[derive(Debug, Default, Parser)]
 pub struct InfoCommand {
-    /// The s3 config.
+    /// The object store config.
     #[clap(flatten)]
-    s3_config: S3Config,
+    object_store: ObjectStoreConfig,
     /// The name of the target snapshot file. we will add the file extension automatically.
     #[clap(long, default_value = "metadata_snapshot")]
     file_name: String,
+    /// The directory to store the snapshot file.
+    #[clap(long, default_value = ".", alias = "input_dir")]
+    dir: String,
     /// The query string to filter the metadata.
     #[clap(long, default_value = "*")]
     inspect_key: String,
@@ -296,7 +220,7 @@ pub struct InfoCommand {
 
 struct MetaInfoTool {
     inner: ObjectStore,
-    source_file: String,
+    file_path: String,
     inspect_key: String,
     limit: Option<usize>,
 }
@@ -306,7 +230,7 @@ impl Tool for MetaInfoTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         let result = MetadataSnapshotManager::info(
             &self.inner,
-            &self.source_file,
+            &self.file_path,
             &self.inspect_key,
             self.limit,
         )
@@ -320,45 +244,24 @@ impl Tool for MetaInfoTool {
 }
 
 impl InfoCommand {
-    fn decide_object_store_root_for_local_store(
-        file_path: &str,
-    ) -> Result<(&str, &str), BoxedError> {
-        let path = Path::new(file_path);
-        let parent = path
-            .parent()
-            .and_then(|p| p.to_str())
-            .context(InvalidFilePathSnafu { msg: file_path })
-            .map_err(BoxedError::new)?;
-        let file_name = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .context(InvalidFilePathSnafu { msg: file_path })
-            .map_err(BoxedError::new)?;
-        let root = if parent.is_empty() { "." } else { parent };
-        Ok((root, file_name))
-    }
-
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        let object_store = self.s3_config.build("").map_err(BoxedError::new)?;
-        if let Some(store) = object_store {
-            let tool = MetaInfoTool {
-                inner: store,
-                source_file: self.file_name.clone(),
-                inspect_key: self.inspect_key.clone(),
-                limit: self.limit,
-            };
-            Ok(Box::new(tool))
-        } else {
-            let (root, file_name) =
-                Self::decide_object_store_root_for_local_store(&self.file_name)?;
-            let object_store = create_local_file_object_store(root)?;
-            let tool = MetaInfoTool {
-                inner: object_store,
-                source_file: file_name.to_string(),
-                inspect_key: self.inspect_key.clone(),
-                limit: self.limit,
-            };
-            Ok(Box::new(tool))
-        }
+        let object_store = self.object_store.build().map_err(BoxedError::new)?;
+        let file_path = Path::new(&self.dir).join(&self.file_name);
+        let file_path = file_path
+            .to_str()
+            .with_context(|| UnexpectedSnafu {
+                msg: format!(
+                    "Invalid file path, input dir: {}, file name: {}",
+                    &self.dir, &self.file_name
+                ),
+            })
+            .map_err(BoxedError::new)?;
+        let tool = MetaInfoTool {
+            inner: object_store,
+            file_path: file_path.to_string(),
+            inspect_key: self.inspect_key.clone(),
+            limit: self.limit,
+        };
+        Ok(Box::new(tool))
     }
 }

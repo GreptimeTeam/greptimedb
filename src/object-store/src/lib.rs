@@ -27,6 +27,8 @@ mod metrics;
 pub mod test_util;
 pub mod util;
 
+pub use config::{AzblobConnection, GcsConnection, OssConnection, S3Connection};
+
 /// The default object cache directory name.
 pub const OBJECT_CACHE_DIR: &str = "object_cache";
 

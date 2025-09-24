@@ -38,10 +38,10 @@ use snafu::{ResultExt, ensure};
 use store_api::storage::TableId;
 
 use crate::Tool;
+use crate::common::StoreConfig;
 use crate::error::{
     InvalidArgumentsSnafu, Result, SendRequestToDatanodeSnafu, TableMetadataSnafu, UnexpectedSnafu,
 };
-use crate::metadata::common::StoreConfig;
 use crate::metadata::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
 
 /// Repair metadata of logical tables.

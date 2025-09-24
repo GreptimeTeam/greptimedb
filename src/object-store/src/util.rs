@@ -17,7 +17,9 @@ use std::path;
 use std::time::Duration;
 
 use common_telemetry::{debug, error, info, warn};
-use opendal::layers::{LoggingInterceptor, LoggingLayer, RetryInterceptor, TracingLayer};
+use opendal::layers::{
+    LoggingInterceptor, LoggingLayer, RetryInterceptor, RetryLayer, TracingLayer,
+};
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
 use opendal::{Error, ErrorKind};
 use snafu::ResultExt;
@@ -130,6 +132,15 @@ pub fn with_instrument_layers(object_store: ObjectStore, path_label: bool) -> Ob
         .layer(LoggingLayer::new(DefaultLoggingInterceptor))
         .layer(TracingLayer)
         .layer(crate::layers::build_prometheus_metrics_layer(path_label))
+}
+
+/// Adds retry layer to the object store.
+pub fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {
+    object_store.layer(
+        RetryLayer::new()
+            .with_jitter()
+            .with_notify(PrintDetailedError),
+    )
 }
 
 static LOGGING_TARGET: &str = "opendal::services";

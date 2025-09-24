@@ -244,9 +244,11 @@ impl MetadataSnapshotManager {
         let file_path_buf = [path, filename.to_string().as_str()]
             .iter()
             .collect::<PathBuf>();
-        let file_path = file_path_buf.to_str().context(InvalidFileNameSnafu {
-            reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
-        })?;
+        let file_path = file_path_buf
+            .to_str()
+            .with_context(|| InvalidFileNameSnafu {
+                reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
+            })?;
         // Ensure the file does not exist
         ensure!(
             !self

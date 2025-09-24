@@ -14,6 +14,7 @@
 
 #![allow(clippy::print_stdout)]
 mod bench;
+mod common;
 mod data;
 mod database;
 pub mod error;
@@ -21,6 +22,7 @@ mod metadata;
 
 use async_trait::async_trait;
 use clap::Parser;
+pub use common::{ObjectStoreConfig, StoreConfig};
 use common_error::ext::BoxedError;
 pub use database::DatabaseClient;
 use error::Result;

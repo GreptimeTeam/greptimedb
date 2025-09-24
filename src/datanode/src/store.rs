@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use common_telemetry::info;
 use object_store::factory::new_raw_object_store;
-use object_store::layers::{LruCacheLayer, RetryLayer};
+use object_store::layers::LruCacheLayer;
 use object_store::services::Fs;
-use object_store::util::{PrintDetailedError, clean_temp_dir, join_dir, with_instrument_layers};
+use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, with_retry_layers};
 use object_store::{
     ATOMIC_WRITE_DIR, Access, OLD_ATOMIC_WRITE_DIR, ObjectStore, ObjectStoreBuilder,
 };
@@ -29,14 +29,6 @@ use snafu::prelude::*;
 
 use crate::config::{DEFAULT_OBJECT_STORE_CACHE_SIZE, ObjectStoreConfig};
 use crate::error::{self, CreateDirSnafu, Result};
-
-fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {
-    object_store.layer(
-        RetryLayer::new()
-            .with_jitter()
-            .with_notify(PrintDetailedError),
-    )
-}
 
 pub(crate) async fn new_object_store_without_cache(
     store: &ObjectStoreConfig,

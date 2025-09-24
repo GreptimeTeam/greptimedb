@@ -188,9 +188,12 @@ mod tests {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
                     "SecretBox<alloc::string::String>([REDACTED])".to_string(),
-                    format!("{:?}", cfg.access_key_id)
+                    format!("{:?}", cfg.connection.access_key_id)
                 );
-                assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
+                assert_eq!(
+                    "access_key_id",
+                    cfg.connection.access_key_id.expose_secret()
+                );
             }
             _ => unreachable!(),
         }

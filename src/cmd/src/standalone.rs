@@ -740,7 +740,7 @@ mod tests {
             object_store::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "SecretBox<alloc::string::String>([REDACTED])".to_string(),
-                    format!("{:?}", s3_config.access_key_id)
+                    format!("{:?}", s3_config.connection.access_key_id)
                 );
             }
             _ => {

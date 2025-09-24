@@ -24,8 +24,8 @@ use common_meta::kv_backend::KvBackendRef;
 use store_api::storage::TableId;
 
 use crate::Tool;
+use crate::common::StoreConfig;
 use crate::error::{InvalidArgumentsSnafu, TableNotFoundSnafu};
-use crate::metadata::common::StoreConfig;
 use crate::metadata::control::del::CLI_TOMBSTONE_PREFIX;
 use crate::metadata::control::utils::get_table_id_by_name;
 
@@ -48,6 +48,7 @@ pub struct DelTableCommand {
     #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
     catalog_name: String,
 
+    /// The store config.
     #[clap(flatten)]
     store: StoreConfig,
 }
