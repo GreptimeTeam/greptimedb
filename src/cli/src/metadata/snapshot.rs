@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
-
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
-use object_store::ObjectStore;
-use snafu::OptionExt;
+use object_store::{ObjectStore, Scheme};
 
 use crate::Tool;
-use crate::common::{ObjectStoreConfig, StoreConfig};
-use crate::error::UnexpectedSnafu;
+use crate::common::{ObjectStoreConfig, StoreConfig, new_fs_object_store};
+use crate::utils::resolve_relative_path_with_current_dir;
 
 /// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
 #[derive(Subcommand)]
@@ -58,11 +55,15 @@ pub struct SaveCommand {
     /// The object store configuration.
     #[clap(flatten)]
     object_store: ObjectStoreConfig,
-    /// The name of the target snapshot file. we will add the file extension automatically.
-    #[clap(long, default_value = "metadata_snapshot")]
-    file_name: String,
-    /// The directory to store the snapshot file.
-    #[clap(long, default_value = "", alias = "output_dir")]
+    /// The path of the target snapshot file.
+    #[clap(
+        long,
+        default_value = "metadata_snapshot.metadata.fb",
+        alias = "file_name"
+    )]
+    file_path: String,
+    /// Specifies the root directory used for I/O operations.
+    #[clap(long, default_value = "/", alias = "output_dir")]
     dir: String,
 }
 
@@ -70,10 +71,18 @@ impl SaveCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.store.build().await?;
         let object_store = self.object_store.build().map_err(BoxedError::new)?;
+        let object_store = match object_store {
+            Some(object_store) => object_store,
+            None => new_fs_object_store(&self.dir)?,
+        };
+        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
+            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
+        } else {
+            self.file_path.to_string()
+        };
         let tool = MetaSnapshotTool {
             inner: MetadataSnapshotManager::new(kvbackend, object_store),
-            path: self.dir.clone(),
-            file_name: self.file_name.clone(),
+            file_path,
         };
         Ok(Box::new(tool))
     }
@@ -81,15 +90,14 @@ impl SaveCommand {
 
 struct MetaSnapshotTool {
     inner: MetadataSnapshotManager,
-    path: String,
-    file_name: String,
+    file_path: String,
 }
 
 #[async_trait]
 impl Tool for MetaSnapshotTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         self.inner
-            .dump(&self.path, &self.file_name)
+            .dump(&self.file_path)
             .await
             .map_err(BoxedError::new)?;
         Ok(())
@@ -109,11 +117,15 @@ pub struct RestoreCommand {
     /// The object store config.
     #[clap(flatten)]
     object_store: ObjectStoreConfig,
-    /// The name of the target snapshot file.
-    #[clap(long, default_value = "metadata_snapshot.metadata.fb")]
-    file_name: String,
-    /// The directory to store the snapshot file.
-    #[clap(long, default_value = ".", alias = "input_dir")]
+    /// The path of the target snapshot file.
+    #[clap(
+        long,
+        default_value = "metadata_snapshot.metadata.fb",
+        alias = "file_name"
+    )]
+    file_path: String,
+    /// Specifies the root directory used for I/O operations.
+    #[clap(long, default_value = "/", alias = "input_dir")]
     dir: String,
     #[clap(long, default_value = "false")]
     force: bool,
@@ -122,22 +134,19 @@ pub struct RestoreCommand {
 impl RestoreCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.store.build().await?;
-        let input_dir = &self.dir;
-        let file_path = Path::new(input_dir).join(&self.file_name);
-        let file_path = file_path
-            .to_str()
-            .with_context(|| UnexpectedSnafu {
-                msg: format!(
-                    "Invalid file path, input dir: {}, file name: {}",
-                    input_dir, &self.file_name
-                ),
-            })
-            .map_err(BoxedError::new)?;
-
         let object_store = self.object_store.build().map_err(BoxedError::new)?;
+        let object_store = match object_store {
+            Some(object_store) => object_store,
+            None => new_fs_object_store(&self.dir)?,
+        };
+        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
+            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
+        } else {
+            self.file_path.to_string()
+        };
         let tool = MetaRestoreTool::new(
             MetadataSnapshotManager::new(kvbackend, object_store),
-            file_path.to_string(),
+            file_path,
             self.force,
         );
         Ok(Box::new(tool))
@@ -204,11 +213,15 @@ pub struct InfoCommand {
     /// The object store config.
     #[clap(flatten)]
     object_store: ObjectStoreConfig,
-    /// The name of the target snapshot file. we will add the file extension automatically.
-    #[clap(long, default_value = "metadata_snapshot")]
-    file_name: String,
-    /// The directory to store the snapshot file.
-    #[clap(long, default_value = ".", alias = "input_dir")]
+    /// The path of the target snapshot file.
+    #[clap(
+        long,
+        default_value = "metadata_snapshot.metadata.fb",
+        alias = "file_name"
+    )]
+    file_path: String,
+    /// Specifies the root directory used for I/O operations.
+    #[clap(long, default_value = "/", alias = "input_dir")]
     dir: String,
     /// The query string to filter the metadata.
     #[clap(long, default_value = "*")]
@@ -246,19 +259,18 @@ impl Tool for MetaInfoTool {
 impl InfoCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let object_store = self.object_store.build().map_err(BoxedError::new)?;
-        let file_path = Path::new(&self.dir).join(&self.file_name);
-        let file_path = file_path
-            .to_str()
-            .with_context(|| UnexpectedSnafu {
-                msg: format!(
-                    "Invalid file path, input dir: {}, file name: {}",
-                    &self.dir, &self.file_name
-                ),
-            })
-            .map_err(BoxedError::new)?;
+        let object_store = match object_store {
+            Some(object_store) => object_store,
+            None => new_fs_object_store(&self.dir)?,
+        };
+        let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
+            resolve_relative_path_with_current_dir(&self.file_path).map_err(BoxedError::new)?
+        } else {
+            self.file_path.to_string()
+        };
         let tool = MetaInfoTool {
             inner: object_store,
-            file_path: file_path.to_string(),
+            file_path,
             inspect_key: self.inspect_key.clone(),
             limit: self.limit,
         };

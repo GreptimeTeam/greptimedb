@@ -14,8 +14,7 @@
 
 use common_base::secrets::SecretString;
 use common_error::ext::BoxedError;
-use object_store::config::FileConfig;
-use object_store::services::{Azblob, Gcs, Oss, S3};
+use object_store::services::{Azblob, Fs, Gcs, Oss, S3};
 use object_store::util::{with_instrument_layers, with_retry_layers};
 use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
 use paste::paste;
@@ -164,18 +163,19 @@ pub struct ObjectStoreConfig {
 }
 
 /// Creates a new file system object store.
-pub fn new_fs_object_store_in_current_dir() -> std::result::Result<ObjectStore, BoxedError> {
-    let data_home = ".";
-    let object_store =
-        object_store::factory::new_fs_object_store(data_home, &FileConfig::default())
-            .map_err(BoxedError::new)?;
+pub fn new_fs_object_store(root: &str) -> std::result::Result<ObjectStore, BoxedError> {
+    let builder = Fs::default().root(root);
+    let object_store = ObjectStore::new(builder)
+        .context(error::InitBackendSnafu)
+        .map_err(BoxedError::new)?
+        .finish();
 
     Ok(with_instrument_layers(object_store, false))
 }
 
 impl ObjectStoreConfig {
     /// Builds the object store from the config.
-    pub fn build(&self) -> Result<ObjectStore, BoxedError> {
+    pub fn build(&self) -> Result<Option<ObjectStore>, BoxedError> {
         let object_store = if self.enable_s3 {
             let s3 = S3Connection::from(self.s3.clone());
             common_telemetry::info!("Building object store with s3: {:?}", s3);
@@ -219,12 +219,6 @@ impl ObjectStoreConfig {
         let object_store = object_store
             .map(|object_store| with_instrument_layers(with_retry_layers(object_store), false));
 
-        match object_store {
-            Some(object_store) => Ok(object_store),
-            None => Ok(with_instrument_layers(
-                new_fs_object_store_in_current_dir()?,
-                false,
-            )),
-        }
+        Ok(object_store)
     }
 }

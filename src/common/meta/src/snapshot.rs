@@ -16,7 +16,7 @@ pub mod file;
 
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use common_telemetry::info;
@@ -232,23 +232,24 @@ impl MetadataSnapshotManager {
     }
 
     /// Dumps the metadata to the backup file.
-    pub async fn dump(&self, path: &str, filename_str: &str) -> Result<(String, u64)> {
+    pub async fn dump(&self, file_path: &str) -> Result<(String, u64)> {
         let format = FileFormat::FlexBuffers;
-        let filename = FileName::new(
-            filename_str.to_string(),
-            FileExtension {
-                format,
-                data_type: DataType::Metadata,
-            },
-        );
-        let file_path_buf = [path, filename.to_string().as_str()]
-            .iter()
-            .collect::<PathBuf>();
-        let file_path = file_path_buf
-            .to_str()
-            .with_context(|| InvalidFileNameSnafu {
-                reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
-            })?;
+
+        let file_name = Path::new(file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context(InvalidFilePathSnafu { file_path })?;
+
+        let parsed_file_name = FileName::try_from(file_name).unwrap_or_else(|_| {
+            FileName::new(
+                file_name.to_string(),
+                FileExtension {
+                    format,
+                    data_type: DataType::Metadata,
+                },
+            )
+        });
+
         // Ensure the file does not exist
         ensure!(
             !self
@@ -295,7 +296,7 @@ impl MetadataSnapshotManager {
             now.elapsed()
         );
 
-        Ok((filename.to_string(), num_keyvalues as u64))
+        Ok((parsed_file_name.to_string(), num_keyvalues as u64))
     }
 
     fn format_output(key: Cow<'_, str>, value: Cow<'_, str>) -> String {
@@ -411,19 +412,19 @@ mod tests {
         }
         let dump_path = temp_path.join("snapshot");
         manager
-            .dump(
-                &dump_path.as_path().display().to_string(),
-                "metadata_snapshot",
-            )
+            .dump(&format!(
+                "{}/metadata_snapshot",
+                &dump_path.as_path().display().to_string()
+            ))
             .await
             .unwrap();
         // Clean up the kv backend
         kv_backend.clear();
         let err = manager
-            .dump(
-                &dump_path.as_path().display().to_string(),
-                "metadata_snapshot",
-            )
+            .dump(&format!(
+                "{}/metadata_snapshot.metadata.fb",
+                &dump_path.as_path().display().to_string()
+            ))
             .await
             .unwrap_err();
         assert_matches!(err, Error::Unexpected { .. });
