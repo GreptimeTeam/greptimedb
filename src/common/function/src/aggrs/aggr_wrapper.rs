@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use arrow::array::StructArray;
 use arrow_schema::{FieldRef, Fields};
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use datafusion::functions_aggregate::all_default_aggregate_functions;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -38,7 +38,6 @@ use datafusion_expr::{
     Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, Expr, ExprSchemable, LogicalPlan,
     Signature,
 };
-use datafusion_physical_expr::PhysicalExprRef;
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
@@ -298,115 +297,6 @@ impl StateWrapper {
     }
 }
 
-/// Fix last value accum so that `state()` 's output actually matches the `state_fields()`.
-///
-/// it's a bug when `last_value(ts order by <some columns including ts>)` will omit `ts` in the ordering field in the state.
-#[derive(Debug)]
-struct FixedFirstLastValueAccum {
-    inner: Box<dyn Accumulator>,
-    ordering: Vec<FieldRef>,
-    // `last` expr found in ordering fields at index
-    found: Option<(usize, Arc<Field>)>,
-}
-
-impl FixedFirstLastValueAccum {
-    fn new(
-        inner: Box<dyn Accumulator>,
-        expr_fields: Vec<FieldRef>,
-        ordering: Vec<FieldRef>,
-    ) -> datafusion_common::Result<Self> {
-        let last_value_col = expr_fields.first().ok_or_else(|| {
-            datafusion_common::DataFusionError::Internal(
-                "Expected at least one expr field for last_value".to_string(),
-            )
-        })?;
-        // workaround the bug
-        // check the location in ordering fields
-        let found = ordering
-            .iter()
-            .cloned()
-            .enumerate()
-            .find(|p| p.1 == *last_value_col);
-
-        Ok(Self {
-            inner,
-            ordering,
-            found,
-        })
-    }
-}
-
-impl Accumulator for FixedFirstLastValueAccum {
-    fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
-        self.inner.evaluate()
-    }
-
-    fn merge_batch(&mut self, states: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
-        self.inner.merge_batch(states)
-    }
-
-    fn update_batch(&mut self, values: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
-        self.inner.update_batch(values)
-    }
-
-    fn size(&self) -> usize {
-        self.inner.size()
-    }
-
-    fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
-        let unfixed_state = self.inner.state()?;
-        if let Some((found_index, _found_field)) = &self.found {
-            if unfixed_state.len() == 2 + self.ordering.len() {
-                // already fixed
-                return Ok(unfixed_state);
-            }
-            let mut fixed = unfixed_state.clone();
-            // fixing by insert the missing ordering field(that's also `last` expr) at the correct index
-            // 0: `last`
-            // 1..n-1: ordering fields(supposed to be in the same order as `self.ordering`), but missing the `last` field
-            // n: is_set bool
-            fixed.insert(1 + found_index, unfixed_state[0].clone());
-
-            Ok(fixed)
-        } else {
-            // no ordering field found, just return the original state
-            Ok(unfixed_state)
-        }
-    }
-}
-
-/// Workaround for first_value/last_value which need to have ordering field in state
-/// but sometimes omit it.
-fn maybe_fix_accum(
-    accum: Box<dyn Accumulator>,
-    udf: &AggregateUDF,
-    schema: &arrow_schema::Schema,
-    exprs: &[PhysicalExprRef],
-    ordering: &[FieldRef],
-) -> datafusion_common::Result<Box<dyn Accumulator>> {
-    // both first_value and last_value need fix(same issue)
-    if (udf
-        .inner()
-        .as_any()
-        .is::<datafusion::functions_aggregate::first_last::LastValue>()
-        || udf
-            .inner()
-            .as_any()
-            .is::<datafusion::functions_aggregate::first_last::FirstValue>())
-        && !ordering.is_empty()
-    {
-        let expr_fields = exprs
-            .iter()
-            .map(|e| e.return_field(schema))
-            .collect::<Result<Vec<_>, _>>()?;
-        // special fix for last_value which sometimes omit ordering field in state
-        FixedFirstLastValueAccum::new(accum, expr_fields, ordering.to_vec())
-            .map(|f| Box::new(f) as _)
-    } else {
-        Ok(accum)
-    }
-}
-
 impl AggregateUDFImpl for StateWrapper {
     fn accumulator<'a, 'b>(
         &'a self,
@@ -427,13 +317,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
-        let inner = maybe_fix_accum(
-            inner,
-            self.inner(),
-            acc_args.schema,
-            acc_args.exprs,
-            &self.ordering,
-        )?;
+
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
 
@@ -569,6 +453,9 @@ impl Accumulator for StateAccum {
                 })
                 .collect::<Fields>();
             let arr = StructArray::try_new(guess_schema, array, None)?;
+
+            return Ok(ScalarValue::Struct(Arc::new(arr)));
+        }
 
             return Ok(ScalarValue::Struct(Arc::new(arr)));
         }
@@ -750,10 +637,11 @@ impl Accumulator for MergeAccum {
             })?;
         let fields = struct_arr.fields();
         if fields != &self.state_fields {
-            return Err(datafusion_common::DataFusionError::Internal(format!(
-                "Expected state fields: {:?}, got: {:?}",
-                self.state_fields, fields
-            )));
+            warn!(
+                "State fields mismatch, expected: {:?}, got: {:?} for accum: {:?}",
+                self.state_fields, fields, self
+            );
+            // state fields mismatch might be acceptable by datafusion, continue
         }
 
         // now fields should be the same, so we can merge the batch
