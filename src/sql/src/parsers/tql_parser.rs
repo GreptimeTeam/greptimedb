@@ -105,7 +105,7 @@ impl ParserContext<'_> {
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let mut exprs = parser
+                let exprs = parser
                     .parse_comma_separated(Parser::parse_expr)
                     .context(ParserSnafu)?;
 
@@ -118,13 +118,23 @@ impl ParserContext<'_> {
                     .context(ParserSnafu);
                 }
 
-                // Safety: safe to remove, because we already check the param_count above.
-                let start = Self::parse_expr_to_literal_or_ts(exprs.remove(0), require_now_expr)?;
-                let end = Self::parse_expr_to_literal_or_ts(exprs.remove(0), require_now_expr)?;
-                let step = Self::parse_expr_to_literal_or_ts(exprs.remove(0), false)?;
+                let mut exprs_iter = exprs.into_iter();
+                // Safety: safe to call next, because we already check the param_count above.
+                let start = Self::parse_expr_to_literal_or_ts(
+                    exprs_iter.next().unwrap(),
+                    require_now_expr,
+                )?;
+                let end = Self::parse_expr_to_literal_or_ts(
+                    exprs_iter.next().unwrap(),
+                    require_now_expr,
+                )?;
+                let step = Self::parse_expr_to_literal_or_ts(exprs_iter.next().unwrap(), false)?;
 
                 let lookback = if param_count == 4 {
-                    Some(Self::parse_expr_to_literal_or_ts(exprs.remove(0), false)?)
+                    Some(Self::parse_expr_to_literal_or_ts(
+                        exprs_iter.next().unwrap(),
+                        false,
+                    )?)
                 } else {
                     None
                 };
@@ -185,6 +195,7 @@ impl ParserContext<'_> {
         }
     }
 
+    /// Parse the expression to a literal string or a timestamp in seconds.
     fn parse_expr_to_literal_or_ts(
         parser_expr: sqlparser::ast::Expr,
         require_now_expr: bool,
@@ -221,7 +232,7 @@ impl ParserContext<'_> {
         parser_expr: sqlparser::ast::Expr,
         require_now_expr: bool,
     ) -> std::result::Result<String, TQLError> {
-        let lit = utils::parser_expr_to_scalar_value_literal(parser_expr.clone(), require_now_expr)
+        let lit = utils::parser_expr_to_scalar_value_literal(parser_expr, require_now_expr)
             .map_err(Box::new)
             .context(ConvertToLogicalExpressionSnafu)?;
 
