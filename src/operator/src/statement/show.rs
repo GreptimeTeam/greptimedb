@@ -307,7 +307,7 @@ impl StatementExecutor {
             }
         };
         trigger_querier
-            .show_create_trigger(&catalog_name, &trigger_name)
+            .show_create_trigger(&catalog_name, &trigger_name, &query_ctx)
             .await
             .context(error::TriggerQuerierSnafu)
     }

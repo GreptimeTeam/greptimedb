@@ -99,6 +99,7 @@ pub struct StatementExecutor {
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
+    #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
 }
 
@@ -108,13 +109,18 @@ pub type StatementExecutorRef = Arc<StatementExecutor>;
 #[cfg(feature = "enterprise")]
 #[async_trait::async_trait]
 pub trait TriggerQuerier {
+    // Query the `SHOW CREATE TRIGGER` statement for the given trigger.
     async fn show_create_trigger(
         &self,
         catalog: &str,
         trigger: &str,
+        query_ctx: &QueryContextRef,
     ) -> std::result::Result<Output, BoxedError>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
+#[cfg(feature = "enterprise")]
 pub type TriggerQuerierRef = Arc<dyn TriggerQuerier + Send + Sync>;
 
 impl StatementExecutor {
@@ -140,10 +146,12 @@ impl StatementExecutor {
             cache_invalidator,
             inserter,
             process_manager,
+            #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
     }
 
+    #[cfg(feature = "enterprise")]
     pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
         self.trigger_querier = Some(querier);
         self

@@ -32,7 +32,7 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
-use operator::statement::{StatementExecutor, StatementExecutorRef, TriggerQuerierRef};
+use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
@@ -187,7 +187,9 @@ impl FrontendBuilder {
             Some(process_manager.clone()),
         );
         #[cfg(feature = "enterprise")]
-        let statement_executor = if let Some(trigger_querier) = plugins.get::<TriggerQuerierRef>() {
+        let statement_executor = if let Some(trigger_querier) =
+            plugins.get::<operator::statement::TriggerQuerierRef>()
+        {
             statement_executor.with_trigger_querier(trigger_querier.clone())
         } else {
             statement_executor
