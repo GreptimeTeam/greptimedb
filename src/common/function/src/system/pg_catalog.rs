@@ -12,34 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod pg_get_userbyid;
-mod table_is_visible;
 mod version;
 
 use std::sync::Arc;
 
 use common_query::error::Result;
-use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
+use datafusion::arrow::array::{as_boolean_array, ArrayRef, StringArray};
 use datafusion::catalog::TableFunction;
-use datafusion::common::ScalarValue;
 use datafusion::common::utils::SingleRowListArrayBuilder;
+use datafusion::common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datafusion_postgres::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
 use derive_more::Display;
-use pg_get_userbyid::PGGetUserByIdFunction;
-use table_is_visible::PGTableIsVisibleFunction;
 use version::PGVersionFunction;
 
-use crate::function::{Function, find_function_context};
+use crate::function::{find_function_context, Function};
 use crate::function_registry::FunctionRegistry;
-
-#[macro_export]
-macro_rules! pg_catalog_func_fullname {
-    ($name:literal) => {
-        concat!("pg_catalog.", $name)
-    };
-}
 
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
 const CURRENT_SCHEMAS_FUNCTION_NAME: &str = "current_schemas";
@@ -157,8 +146,6 @@ impl PGCatalogFunction {
         let static_tables =
             Arc::new(PgCatalogStaticTables::try_new().expect("load postgres static tables"));
 
-        registry.register_scalar(PGTableIsVisibleFunction);
-        registry.register_scalar(PGGetUserByIdFunction);
         registry.register_scalar(PGVersionFunction);
         registry.register_scalar(CurrentSchemaFunction);
         registry.register_scalar(CurrentSchemasFunction);
@@ -180,5 +167,7 @@ impl PGCatalogFunction {
         ));
         registry.register(pg_catalog::create_pg_relation_is_publishable_udf());
         registry.register(pg_catalog::create_pg_get_statisticsobjdef_columns_udf());
+        registry.register(pg_catalog::create_pg_get_userbyid_udf());
+        registry.register(pg_catalog::create_pg_table_is_visible());
     }
 }
