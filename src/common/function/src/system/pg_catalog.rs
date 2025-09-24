@@ -159,7 +159,7 @@ impl PGCatalogFunction {
             "has_schema_privilege",
         ));
         registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
-        "has_database_privilege",
+            "has_database_privilege",
         ));
         registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(
             "has_any_column_privilege",
