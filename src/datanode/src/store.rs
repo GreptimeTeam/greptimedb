@@ -22,9 +22,7 @@ use object_store::factory::new_raw_object_store;
 use object_store::layers::LruCacheLayer;
 use object_store::services::Fs;
 use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, with_retry_layers};
-use object_store::{
-    ATOMIC_WRITE_DIR, Access, OLD_ATOMIC_WRITE_DIR, ObjectStore, ObjectStoreBuilder,
-};
+use object_store::{ATOMIC_WRITE_DIR, Access, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::ObjectStoreConfig;
@@ -89,10 +87,6 @@ async fn build_cache_layer(
 
     let atomic_temp_dir = join_dir(&cache_config.cache_path, ATOMIC_WRITE_DIR);
     clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
-
-    // Compatible code. Remove this after a major release.
-    let old_atomic_temp_dir = join_dir(&cache_config.cache_path, OLD_ATOMIC_WRITE_DIR);
-    clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
     let cache_store = Fs::default()
         .root(&cache_config.cache_path)
