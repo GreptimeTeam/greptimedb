@@ -1222,12 +1222,13 @@ impl PromPlanner {
                 let mut exprs = Vec::with_capacity(labels.labels.len());
                 for label in &labels.labels {
                     // nonexistence label will be ignored
-                    if let Ok(field) = input_schema.field_with_unqualified_name(label) {
-                        exprs.push(DfExpr::Column(Column::from(field.name())));
+                    if let Some(column_name) = Self::find_case_sensitive_column(input_schema, label)
+                    {
+                        exprs.push(DfExpr::Column(Column::from_name(column_name.clone())));
 
                         if update_ctx {
                             // update the tag columns in context
-                            self.ctx.tag_columns.push(label.clone());
+                            self.ctx.tag_columns.push(column_name);
                         }
                     }
                 }
@@ -1290,13 +1291,12 @@ impl PromPlanner {
                 continue;
             }
 
-            let col = if table_schema
-                .field_with_unqualified_name(&matcher.name)
-                .is_err()
-            {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None).alias(matcher.name)
+            let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
+            let col = if let Some(column_name) = column_name {
+                DfExpr::Column(Column::from_name(column_name))
             } else {
-                DfExpr::Column(Column::from_name(matcher.name))
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
+                    .alias(matcher.name.clone())
             };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {
@@ -1351,6 +1351,14 @@ impl PromPlanner {
         }
 
         Ok(exprs)
+    }
+
+    fn find_case_sensitive_column(schema: &DFSchemaRef, column: &str) -> Option<String> {
+        schema
+            .fields()
+            .iter()
+            .find(|field| field.name() == column)
+            .map(|field| field.name().clone())
     }
 
     fn table_ref(&self) -> Result<TableReference> {
