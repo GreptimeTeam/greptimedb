@@ -15,7 +15,7 @@
 #[cfg(feature = "enterprise")]
 pub mod trigger;
 
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 
