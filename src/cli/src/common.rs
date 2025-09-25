@@ -15,5 +15,5 @@
 mod object_store;
 mod store;
 
-pub use object_store::ObjectStoreConfig;
+pub use object_store::{ObjectStoreConfig, new_fs_object_store};
 pub use store::StoreConfig;

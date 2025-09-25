@@ -23,7 +23,7 @@ use meta_srv::metasrv::BackendImpl;
 use meta_srv::utils::etcd::create_etcd_client_with_tls;
 use servers::tls::{TlsMode, TlsOption};
 
-use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
+use crate::error::EmptyStoreAddrsSnafu;
 
 #[derive(Debug, Default, Parser)]
 pub struct StoreConfig {
@@ -154,9 +154,20 @@ impl StoreConfig {
                     .await
                     .map_err(BoxedError::new)?)
                 }
-                BackendImpl::MemoryStore => UnsupportedMemoryBackendSnafu
-                    .fail()
-                    .map_err(BoxedError::new),
+                #[cfg(not(test))]
+                BackendImpl::MemoryStore => {
+                    use crate::error::UnsupportedMemoryBackendSnafu;
+
+                    UnsupportedMemoryBackendSnafu
+                        .fail()
+                        .map_err(BoxedError::new)
+                }
+                #[cfg(test)]
+                BackendImpl::MemoryStore => {
+                    use common_meta::kv_backend::memory::MemoryKvBackend;
+
+                    Ok(Arc::new(MemoryKvBackend::default()) as _)
+                }
             };
             if self.store_key_prefix.is_empty() {
                 kvbackend
