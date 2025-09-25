@@ -23,7 +23,7 @@ use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::init_default_ut_logging;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::functions_aggregate::expr_fn::avg;
+use datafusion::functions_aggregate::expr_fn::{avg, last_value};
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion_common::JoinType;
 use datafusion_expr::expr::ScalarFunction;
@@ -1492,5 +1492,38 @@ fn date_bin_ts_group_by() {
         "]]",
     ]
     .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// check that `last_value(ts order by ts)` won't be push down
+#[test]
+fn test_not_push_down_aggr_order_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![last_value(col("ts"), vec![col("ts").sort(true, false)])],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Aggregate: groupBy=[[]], aggr=[[last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]]",
+        "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+
     assert_eq!(expected, result.to_string());
 }

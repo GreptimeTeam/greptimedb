@@ -323,6 +323,17 @@ impl AggregateUDFImpl for StateWrapper {
             is_distinct: false,
         };
         let state_fields = self.inner.state_fields(state_fields_args)?;
+
+        let state_fields = state_fields
+            .into_iter()
+            .map(|f| {
+                let mut f = f.as_ref().clone();
+                // since state can be null when no input rows, so make all fields nullable
+                f.set_nullable(true);
+                Arc::new(f)
+            })
+            .collect::<Vec<_>>();
+
         let struct_field = DataType::Struct(state_fields.into());
         Ok(struct_field)
     }
@@ -387,6 +398,38 @@ impl Accumulator for StateAccum {
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
+        let array_type = array
+            .iter()
+            .map(|a| a.data_type().clone())
+            .collect::<Vec<_>>();
+        let expected_type: Vec<_> = self
+            .state_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        if array_type != expected_type {
+            debug!(
+                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
+                self.state_fields.len(),
+                array.len(),
+                self.state_fields,
+                array_type,
+            );
+            let guess_schema = array
+                .iter()
+                .enumerate()
+                .map(|(index, array)| {
+                    Field::new(
+                        format!("col_{index}[mismatch_state]").as_str(),
+                        array.data_type().clone(),
+                        true,
+                    )
+                })
+                .collect::<Fields>();
+            let arr = StructArray::try_new(guess_schema, array, None)?;
+
+            return Ok(ScalarValue::Struct(Arc::new(arr)));
+        }
         let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
