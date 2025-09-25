@@ -26,9 +26,9 @@ use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
-use datafusion_postgres::pg_catalog::catalog_info::CatalogInfo;
-use datafusion_postgres::pg_catalog::{
-    PgCatalogSchemaProvider, PgCatalogStaticTables, PgCatalogTable,
+use datafusion_pg_catalog::pg_catalog::catalog_info::CatalogInfo;
+use datafusion_pg_catalog::pg_catalog::{
+    PG_CATALOG_TABLES, PgCatalogSchemaProvider, PgCatalogStaticTables, PgCatalogTable,
 };
 use snafu::ResultExt;
 use store_api::storage::ScanRequest;
@@ -74,7 +74,7 @@ impl PGCatalogProvider {
 
         let mut table_ids = HashMap::new();
         let mut table_id = PG_CATALOG_TABLE_ID_START;
-        for name in datafusion_postgres::pg_catalog::PG_CATALOG_TABLES {
+        for name in PG_CATALOG_TABLES {
             table_ids.insert(*name, table_id);
             table_id += 1;
         }
@@ -94,7 +94,7 @@ impl PGCatalogProvider {
         // Must follow the same security rules as [`InformationSchemaProvider::build_tables`].
         let mut tables = HashMap::new();
         // It's safe to unwrap here because we are sure that the constants have been handle correctly inside system_table.
-        for name in datafusion_postgres::pg_catalog::PG_CATALOG_TABLES {
+        for name in PG_CATALOG_TABLES {
             if let Some(table) = self.build_table(name) {
                 tables.insert(name.to_string(), table);
             }
