@@ -50,6 +50,9 @@ mod utils;
 
 pub(crate) use utils::AliasMapping;
 
+/// Placeholder for other physical partition columns that are not in logical table
+const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
+
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
@@ -493,13 +496,16 @@ impl PlanRewriter {
                             // as subset of phy part cols can still be used for certain optimization, and it works as if
                             // those columns are always null
                             // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
-                            partition_cols
-                                .push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
+                            partition_cols.push(OTHER_PHY_PART_COL_PLACEHOLDER.to_string());
                         }
                         self.partition_cols = Some(
                             partition_cols
                                 .into_iter()
                                 .map(|c| {
+                                    if c == OTHER_PHY_PART_COL_PLACEHOLDER {
+                                        // for placeholder, just return a empty alias
+                                        return Ok((c.clone(), BTreeSet::new()));
+                                    }
                                     let index =
                                         plan.schema().index_of_column_by_name(None, &c).ok_or_else(|| {
                                             datafusion_common::DataFusionError::Internal(
