@@ -113,7 +113,7 @@ impl ParserContext<'_> {
 
                 if param_count != 3 && param_count != 4 {
                     return Err(ParserError::ParserError(
-                        "Expected 3 or 4 expressions in TQL parameters".to_string(),
+                        format!("Expected 3 or 4 expressions in TQL parameters (start, end, step, [lookback]), but found {}", param_count)
                     ))
                     .context(ParserSnafu);
                 }
@@ -130,14 +130,10 @@ impl ParserContext<'_> {
                 )?;
                 let step = Self::parse_expr_to_literal_or_ts(exprs_iter.next().unwrap(), false)?;
 
-                let lookback = if param_count == 4 {
-                    Some(Self::parse_expr_to_literal_or_ts(
-                        exprs_iter.next().unwrap(),
-                        false,
-                    )?)
-                } else {
-                    None
-                };
+                let lookback = exprs_iter
+                    .next()
+                    .map(|expr| Self::parse_expr_to_literal_or_ts(expr, false))
+                    .transpose()?;
 
                 if !parser.consume_token(&Token::RParen) {
                     return Err(ParserError::ParserError(format!(
