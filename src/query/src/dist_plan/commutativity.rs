@@ -15,8 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_function::aggrs::aggr_wrapper::{StateMergeHelper, aggr_state_func_name};
-use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
@@ -70,41 +69,6 @@ pub fn step_aggr_to_upper_aggr(
         new_child_plan: Some(step_aggr_plan.lower_state.clone()),
     };
     Ok(ret)
-}
-
-/// Check if the given aggregate expression is steppable.
-/// As in if it can be split into multiple steps:
-/// i.e. on datanode first call `state(input)` then
-/// on frontend call `calc(merge(state))` to get the final result.
-pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
-    aggr_exprs.iter().all(|expr| {
-        if let Some(aggr_func) = get_aggr_func(expr) {
-            if aggr_func.params.distinct
-                || !aggr_func.params.order_by.is_empty()
-                || aggr_func.params.filter.is_some()
-            {
-                // Distinct aggregate functions/order by/filter in aggr args are not steppable(yet).
-                return false;
-            }
-
-            // whether the corresponding state function exists in the registry
-            FUNCTION_REGISTRY.is_aggr_func_exist(&aggr_state_func_name(aggr_func.func.name()))
-        } else {
-            false
-        }
-    })
-}
-
-pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
-    let mut expr_ref = expr;
-    while let Expr::Alias(alias) = expr_ref {
-        expr_ref = &alias.expr;
-    }
-    if let Expr::AggregateFunction(aggr_func) = expr_ref {
-        Some(aggr_func)
-    } else {
-        None
-    }
 }
 
 #[allow(dead_code)]

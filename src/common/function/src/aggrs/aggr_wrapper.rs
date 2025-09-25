@@ -42,7 +42,7 @@ use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
 use crate::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
-use crate::function_registry::FunctionRegistry;
+use crate::function_registry::{FUNCTION_REGISTRY, FunctionRegistry};
 
 pub mod fix_order;
 #[cfg(test)]
@@ -62,6 +62,38 @@ pub fn aggr_merge_func_name(aggr_name: &str) -> String {
     format!("__{}_merge", aggr_name)
 }
 
+/// Check if the given aggregate expression is steppable.
+/// As in if it can be split into multiple steps:
+/// i.e. on datanode first call `state(input)` then
+/// on frontend call `calc(merge(state))` to get the final result.
+pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
+    aggr_exprs.iter().all(|expr| {
+        if let Some(aggr_func) = get_aggr_func(expr) {
+            if aggr_func.params.distinct {
+                // Distinct aggregate functions are not steppable(yet).
+                return false;
+            }
+
+            // whether the corresponding state function exists in the registry
+            FUNCTION_REGISTRY.is_aggr_func_exist(&aggr_state_func_name(aggr_func.func.name()))
+        } else {
+            false
+        }
+    })
+}
+
+pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
+    let mut expr_ref = expr;
+    while let Expr::Alias(alias) = expr_ref {
+        expr_ref = &alias.expr;
+    }
+    if let Expr::AggregateFunction(aggr_func) = expr_ref {
+        Some(aggr_func)
+    } else {
+        None
+    }
+}
+
 /// A wrapper to make an aggregate function out of the state and merge functions of the original aggregate function.
 /// It contains the original aggregate function, the state functions, and the merge function.
 ///
@@ -77,18 +109,6 @@ pub struct StepAggrPlan {
     pub upper_merge: LogicalPlan,
     /// Lower state plan, which is the aggregate plan that computes the state of the aggregate function.
     pub lower_state: LogicalPlan,
-}
-
-pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
-    let mut expr_ref = expr;
-    while let Expr::Alias(alias) = expr_ref {
-        expr_ref = &alias.expr;
-    }
-    if let Expr::AggregateFunction(aggr_func) = expr_ref {
-        Some(aggr_func)
-    } else {
-        None
-    }
 }
 
 impl StateMergeHelper {
@@ -458,8 +478,6 @@ impl Accumulator for StateAccum {
             return Ok(ScalarValue::Struct(Arc::new(arr)));
         }
 
-            return Ok(ScalarValue::Struct(Arc::new(arr)));
-        }
         let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
