@@ -29,8 +29,8 @@ use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
 use datafusion_common::JoinType;
-use datafusion_expr::expr::{AggregateFunction, ScalarFunction};
-use datafusion_expr::{Aggregate, AggregateUDF, Expr, LogicalPlanBuilder, col, lit};
+use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::{AggregateUDF, Expr, LogicalPlanBuilder, col, lit};
 use datafusion_functions::datetime::date_bin;
 use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
@@ -159,13 +159,18 @@ impl Stream for EmptyStream {
 }
 
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
-    let sub_plan = substrait::DFLogicalSubstraitConvertor
+    let sub_plan_bytes = substrait::DFLogicalSubstraitConvertor
         .encode(plan, crate::query_engine::DefaultSerializer)
         .unwrap();
+    let inner = sub_plan_bytes.clone();
     let decoded_plan = futures::executor::block_on(async move {
         substrait::DFLogicalSubstraitConvertor
-            .decode(sub_plan, state)
+            .decode(inner, state)
             .await
+    }).inspect_err(|e|{
+use prost::Message;
+        let sub_plan = substrait::substrait_proto_df::proto::Plan::decode(sub_plan_bytes).unwrap();
+        common_telemetry::error!("Failed to decode substrait plan: {e},substrait plan: {sub_plan:#?}\nlogical plan: {plan:#?}");
     })
     .unwrap();
 
@@ -1530,7 +1535,7 @@ fn test_last_value_order_by() {
         .unwrap(),
     ));
 
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
         .unwrap()
         .aggregate(
             Vec::<Expr>::new(),
@@ -1567,4 +1572,60 @@ fn test_last_value_order_by() {
     let split = StateMergeHelper::split_aggr_node(aggr_plan).unwrap();
 
     try_encode_decode_substrait(&split.lower_state, ctx.state());
+}
+
+/// try remove the order by to see if it still works
+#[test]
+fn test_last_value_no_order_by() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+    ctx.register_udaf(AggregateUDF::new_from_impl(
+        StateWrapper::new(
+            datafusion::functions_aggregate::first_last::last_value_udaf()
+                .as_ref()
+                .clone(),
+        )
+        .unwrap(),
+    ));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![datafusion::functions_aggregate::first_last::last_value(
+                col("ts"),
+                vec![],
+            )],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let LogicalPlan::Aggregate(aggr_plan) = plan.clone() else {
+        panic!("expect Aggregate plan");
+    };
+    let split = StateMergeHelper::split_aggr_node(aggr_plan).unwrap();
+
+    try_encode_decode_substrait(&split.lower_state, ctx.state());
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+
+    let expected = [
+        "Projection: last_value(t.ts)",
+        "  Aggregate: groupBy=[[]], aggr=[[__last_value_merge(__last_value_state(t.ts)) AS last_value(t.ts)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__last_value_state(t.ts)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
 }

@@ -23,9 +23,10 @@ use datafusion_expr::{AggregateUDF, Expr, ExprSchemable, LogicalPlan};
 use crate::aggrs::aggr_wrapper::StateWrapper;
 
 /// Traverse the plan, found all `__<aggr_name>_state` and fix their ordering fields
-/// if their input aggr is with order by
+/// if their input aggr is with order by, this is currently only useful for `first_value` and `last_value` udaf
 ///
 /// should be applied to datanode's query engine
+/// TODO(discord9): proper way to extend substrait's serde ability to allow carry more info for custom udaf with more info
 #[derive(Debug, Default)]
 pub struct FixStateUdafOrderingAnalyzer;
 
@@ -39,7 +40,28 @@ impl AnalyzerRule for FixStateUdafOrderingAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        plan.rewrite_with_subqueries(&mut FixOrderingRewriter::new())
+        plan.rewrite_with_subqueries(&mut FixOrderingRewriter::new(true))
+            .map(|t| t.data)
+    }
+}
+
+/// Traverse the plan, found all `__<aggr_name>_state` and remove their ordering fields
+/// this is currently only useful for `first_value` and `last_value` udaf when need to encode to substrait
+///
+#[derive(Debug, Default)]
+pub struct UnFixStateUdafOrderingAnalyzer;
+
+impl AnalyzerRule for UnFixStateUdafOrderingAnalyzer {
+    fn name(&self) -> &str {
+        "UnFixStateUdafOrderingAnalyzer"
+    }
+
+    fn analyze(
+        &self,
+        plan: LogicalPlan,
+        _config: &ConfigOptions,
+    ) -> datafusion_common::Result<LogicalPlan> {
+        plan.rewrite_with_subqueries(&mut FixOrderingRewriter::new(false))
             .map(|t| t.data)
     }
 }
@@ -47,11 +69,17 @@ impl AnalyzerRule for FixStateUdafOrderingAnalyzer {
 struct FixOrderingRewriter {
     /// once fixed, mark dirty, and always recompute schema from bottom up
     is_dirty: bool,
+    /// if true, will add the ordering field from outer aggr expr
+    /// if false, will remove the ordering field
+    is_fix: bool,
 }
 
 impl FixOrderingRewriter {
-    pub fn new() -> Self {
-        Self { is_dirty: false }
+    pub fn new(is_fix: bool) -> Self {
+        Self {
+            is_dirty: false,
+            is_fix,
+        }
     }
 }
 
@@ -96,23 +124,28 @@ impl TreeNodeRewriter for FixOrderingRewriter {
                 };
 
                 let mut state_wrapper = old_state_wrapper.clone();
+                if self.is_fix{
+                    // then always fix the ordering field&distinct flag and more
+                    let order_by = aggregate_function.params.order_by.clone();
+                    let ordering_fields: Vec<_> = order_by
+                        .iter()
+                        .map(|sort_expr| {
+                            sort_expr
+                                .expr
+                                .to_field(&aggregate.input.schema())
+                                .map(|(_, f)| f)
+                        })
+                        .collect::<datafusion_common::Result<Vec<_>>>()?;
+                    let distinct = aggregate_function.params.distinct;
 
-                // then always fix the ordering field&distinct flag and more
-                let order_by = aggregate_function.params.order_by.clone();
-                let ordering_fields: Vec<_> = order_by
-                    .iter()
-                    .map(|sort_expr| {
-                        sort_expr
-                            .expr
-                            .to_field(&aggregate.input.schema())
-                            .map(|(_, f)| f)
-                    })
-                    .collect::<datafusion_common::Result<Vec<_>>>()?;
-                let distinct = aggregate_function.params.distinct;
-
-                // fixing up
-                state_wrapper.ordering = ordering_fields;
-                state_wrapper.distinct = distinct;
+                    // fixing up
+                    state_wrapper.ordering = ordering_fields;
+                    state_wrapper.distinct = distinct;
+                } else {
+                    // remove the ordering field & distinct flag
+                    state_wrapper.ordering = vec![];
+                    state_wrapper.distinct = false;
+                }
 
                 debug!(
                     "FixStateUdafOrderingAnalyzer: fix state udaf from {old_state_wrapper:?} to {:?}",
@@ -129,10 +162,6 @@ impl TreeNodeRewriter for FixOrderingRewriter {
             })?;
 
             if new_aggr_expr.transformed {
-                debug!(
-                    "FixStateUdafOrderingAnalyzer: fix state udaf from {aggr_expr} to {}",
-                    new_aggr_expr.data
-                );
                 *aggr_expr = new_aggr_expr.data;
                 self.is_dirty = true;
             }
@@ -140,7 +169,10 @@ impl TreeNodeRewriter for FixOrderingRewriter {
 
         if self.is_dirty {
             let node = LogicalPlan::Aggregate(aggregate).recompute_schema()?;
-            debug!("FixStateUdafOrderingAnalyzer: plan changed to {node}");
+            debug!(
+                "FixStateUdafOrderingAnalyzer: plan schema's field changed to {:?}",
+                node.schema().fields()
+            );
 
             Ok(Transformed::yes(node))
         } else {

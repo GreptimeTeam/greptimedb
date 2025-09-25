@@ -218,12 +218,13 @@ impl StateMergeHelper {
         // update aggregate's output schema
         let lower_plan = lower_plan.recompute_schema()?;
 
-        // fix the ordering and distinct info of the state function, as they are not set in the wrapper.
-        let lower_plan =
-            FixStateUdafOrderingAnalyzer {}.analyze(lower_plan, &Default::default())?;
+        // should only affect two udaf `first_value/last_value`
+        // which only them have meaningful order by field
+        let fixed_lower_plan =
+            FixStateUdafOrderingAnalyzer.analyze(lower_plan, &Default::default())?;
 
         let upper = Aggregate::try_new(
-            Arc::new(lower_plan.clone()),
+            Arc::new(fixed_lower_plan.clone()),
             upper_group_exprs,
             upper_aggr_exprs.clone(),
         )?;
@@ -241,7 +242,7 @@ impl StateMergeHelper {
         }
 
         Ok(StepAggrPlan {
-            lower_state: lower_plan,
+            lower_state: fixed_lower_plan,
             upper_merge: upper_plan,
         })
     }
