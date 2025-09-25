@@ -76,7 +76,7 @@ curl -X POST localhost:4000/debug/prof/mem/deactivate
 `curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=true'`
 
 # Deactivate gdump.
-curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=true'
+curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=false'
 
 # Retrieve current gdump status.
 curl -X GET localhost:4000/debug/prof/mem/gdump
