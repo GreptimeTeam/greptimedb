@@ -56,8 +56,8 @@ impl Function for VectorAddFunction {
 
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
-            vec![DataType::Utf8, DataType::Binary],
-            vec![DataType::Utf8, DataType::Binary],
+            vec![DataType::Utf8, DataType::Binary, DataType::BinaryView],
+            vec![DataType::Utf8, DataType::Binary, DataType::BinaryView],
         )
     }
 

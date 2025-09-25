@@ -96,6 +96,41 @@ pub fn get_string_from_params<'a>(
     Ok(s)
 }
 
+macro_rules! with_match_timestamp_types {
+    ($data_type:expr, | $_t:tt $T:ident | $body:tt) => {{
+        macro_rules! __with_ty__ {
+            ( $_t $T:ident ) => {
+                $body
+            };
+        }
+
+        use datafusion_common::DataFusionError;
+        use datafusion_common::arrow::datatypes::{
+            TimeUnit, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+            TimestampSecondType,
+        };
+
+        match $data_type {
+            DataType::Timestamp(TimeUnit::Second, _) => Ok(__with_ty__! { TimestampSecondType }),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                Ok(__with_ty__! { TimestampMillisecondType })
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                Ok(__with_ty__! { TimestampMicrosecondType })
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                Ok(__with_ty__! { TimestampNanosecondType })
+            }
+            _ => Err(DataFusionError::Execution(format!(
+                "not expected data type: '{}'",
+                $data_type
+            ))),
+        }
+    }};
+}
+
+pub(crate) use with_match_timestamp_types;
+
 #[cfg(test)]
 mod tests {
     use super::*;

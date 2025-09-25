@@ -15,15 +15,18 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
+use common_query::error::Result;
 use common_time::{Date, Timestamp};
-use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::{DataType, TimeUnit};
-use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{Int64Vector, VectorRef};
-use snafu::ensure;
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{
+    Array, ArrayRef, AsArray, Date32Array, Int64Array, Int64Builder,
+};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::{ArrowTimestampType, DataType, Date32Type, TimeUnit};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext, extract_args, find_function_context};
+use crate::helper::with_match_timestamp_types;
 
 /// A function to convert the column into the unix timestamp in seconds.
 #[derive(Clone, Debug, Default)]
@@ -44,15 +47,23 @@ fn convert_to_seconds(arg: &str, func_ctx: &FunctionContext) -> Option<i64> {
     None
 }
 
-fn convert_timestamps_to_seconds(vector: &VectorRef) -> Vec<Option<i64>> {
-    (0..vector.len())
-        .map(|i| vector.get(i).as_timestamp().map(|ts| ts.split().0))
-        .collect::<Vec<Option<i64>>>()
+fn convert_timestamps_to_seconds(array: &ArrayRef) -> datafusion_common::Result<Vec<Option<i64>>> {
+    with_match_timestamp_types!(array.data_type(), |$S| {
+        let array = array.as_primitive::<$S>();
+        array
+            .iter()
+            .map(|x| x.map(|i| Timestamp::new(i, $S::UNIT.into()).split().0))
+            .collect::<Vec<_>>()
+    })
 }
 
-fn convert_dates_to_seconds(vector: &VectorRef) -> Vec<Option<i64>> {
+fn convert_dates_to_seconds(vector: &Date32Array) -> Vec<Option<i64>> {
     (0..vector.len())
-        .map(|i| vector.get(i).as_date().map(|dt| dt.to_secs()))
+        .map(|i| {
+            vector
+                .is_valid(i)
+                .then(|| Date::from(vector.value(i)).to_secs())
+        })
         .collect::<Vec<Option<i64>>>()
 }
 
@@ -82,43 +93,43 @@ impl Function for ToUnixtimeFunction {
         )
     }
 
-    fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                ),
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let ctx = find_function_context(&args)?;
+        let [arg0] = extract_args(self.name(), &args)?;
+        let result: ArrayRef = match arg0.data_type() {
+            DataType::Utf8 => {
+                let arg0 = arg0.as_string::<i32>();
+                let mut builder = Int64Builder::with_capacity(arg0.len());
+                for i in 0..arg0.len() {
+                    builder.append_option(
+                        arg0.is_valid(i)
+                            .then(|| convert_to_seconds(arg0.value(i), ctx))
+                            .flatten(),
+                    );
+                }
+                Arc::new(builder.finish())
             }
-        );
-
-        let vector = &columns[0];
-
-        match columns[0].data_type() {
-            ConcreteDataType::String(_) => Ok(Arc::new(Int64Vector::from(
-                (0..vector.len())
-                    .map(|i| convert_to_seconds(&vector.get(i).to_string(), ctx))
-                    .collect::<Vec<_>>(),
-            ))),
-            ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
-                // Safety: cast always successfully at here
-                Ok(vector.cast(&ConcreteDataType::int64_datatype()).unwrap())
-            }
-            ConcreteDataType::Date(_) => {
+            DataType::Int64 | DataType::Int32 => compute::cast(&arg0, &DataType::Int64)?,
+            DataType::Date32 => {
+                let vector = arg0.as_primitive::<Date32Type>();
                 let seconds = convert_dates_to_seconds(vector);
-                Ok(Arc::new(Int64Vector::from(seconds)))
+                Arc::new(Int64Array::from(seconds))
             }
-            ConcreteDataType::Timestamp(_) => {
-                let seconds = convert_timestamps_to_seconds(vector);
-                Ok(Arc::new(Int64Vector::from(seconds)))
+            DataType::Timestamp(_, _) => {
+                let seconds = convert_timestamps_to_seconds(&arg0)?;
+                Arc::new(Int64Array::from(seconds))
             }
-            _ => UnsupportedInputDataTypeSnafu {
-                function: NAME,
-                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
+            x => {
+                return Err(DataFusionError::Execution(format!(
+                    "{}: unsupported input data type {x}",
+                    self.name()
+                )));
             }
-            .fail(),
-        }
+        };
+        Ok(ColumnarValue::Array(result))
     }
 }
 
@@ -130,13 +141,40 @@ impl fmt::Display for ToUnixtimeFunction {
 
 #[cfg(test)]
 mod tests {
-    use datafusion_expr::TypeSignature;
-    use datatypes::value::Value;
-    use datatypes::vectors::{
-        DateVector, StringVector, TimestampMillisecondVector, TimestampSecondVector,
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{
+        StringArray, TimestampMillisecondArray, TimestampSecondArray,
     };
+    use datafusion_common::arrow::datatypes::Int64Type;
+    use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::TypeSignature;
 
     use super::{ToUnixtimeFunction, *};
+
+    fn test_invoke(arg0: ArrayRef, expects: &[Option<i64>]) {
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(FunctionContext::default());
+        let config_options = Arc::new(config_options);
+
+        let number_rows = arg0.len();
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(arg0)],
+            arg_fields: vec![],
+            number_rows,
+            return_field: Arc::new(Field::new("", DataType::Int64, true)),
+            config_options,
+        };
+        let result = ToUnixtimeFunction
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(number_rows))
+            .unwrap();
+        let result = result.as_primitive::<Int64Type>();
+
+        assert_eq!(result.len(), expects.len());
+        for (actual, expect) in result.iter().zip(expects) {
+            assert_eq!(&actual, expect);
+        }
+    }
 
     #[test]
     fn test_string_to_unixtime() {
@@ -167,115 +205,36 @@ mod tests {
             Some("invalid_time_stamp"),
         ];
         let results = [Some(1677652502), None, Some(1656633600), None];
-        let args: Vec<VectorRef> = vec![Arc::new(StringVector::from(times.clone()))];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Int64(ts) => {
-                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let arg0 = Arc::new(StringArray::from(times));
+        test_invoke(arg0, &results);
     }
 
     #[test]
     fn test_int_to_unixtime() {
-        let f = ToUnixtimeFunction;
-
         let times = vec![Some(3_i64), None, Some(5_i64), None];
         let results = [Some(3), None, Some(5), None];
-        let args: Vec<VectorRef> = vec![Arc::new(Int64Vector::from(times.clone()))];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Int64(ts) => {
-                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let arg0 = Arc::new(Int64Array::from(times));
+        test_invoke(arg0, &results);
     }
 
     #[test]
     fn test_date_to_unixtime() {
-        let f = ToUnixtimeFunction;
-
         let times = vec![Some(123), None, Some(42), None];
         let results = [Some(10627200), None, Some(3628800), None];
-        let date_vector = DateVector::from(times.clone());
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Int64(ts) => {
-                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let arg0 = Arc::new(Date32Array::from(times));
+        test_invoke(arg0, &results);
     }
 
     #[test]
     fn test_timestamp_to_unixtime() {
-        let f = ToUnixtimeFunction;
-
         let times = vec![Some(123), None, Some(42), None];
         let results = [Some(123), None, Some(42), None];
-        let ts_vector = TimestampSecondVector::from(times.clone());
-        let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Int64(ts) => {
-                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let arg0 = Arc::new(TimestampSecondArray::from(times));
+        test_invoke(arg0, &results);
 
         let times = vec![Some(123000), None, Some(42000), None];
         let results = [Some(123), None, Some(42), None];
-        let ts_vector = TimestampMillisecondVector::from(times.clone());
-        let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
-        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
-        assert_eq!(4, vector.len());
-        for (i, _t) in times.iter().enumerate() {
-            let v = vector.get(i);
-            if i == 1 || i == 3 {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::Int64(ts) => {
-                    assert_eq!(ts, (*results.get(i).unwrap()).unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
+        let arg0 = Arc::new(TimestampMillisecondArray::from(times));
+        test_invoke(arg0, &results);
     }
 }

@@ -13,17 +13,15 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVectorBuilder, MutableVector};
-use snafu::ensure;
+use common_query::error::Result;
+use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 /// Checks if the input is a JSON object of the given type.
 macro_rules! json_is {
@@ -43,50 +41,36 @@ macro_rules! json_is {
 
                 fn signature(&self) -> Signature {
                     // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-                    Signature::exact(vec![DataType::Binary], Volatility::Immutable)
+                    Signature::uniform(
+                        1,
+                        vec![DataType::Binary, DataType::BinaryView],
+                        Volatility::Immutable,
+                    )
                 }
 
-                fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-                    ensure!(
-                        columns.len() == 1,
-                        InvalidFuncArgsSnafu {
-                            err_msg: format!(
-                                "The length of the args is not correct, expect exactly one, have: {}",
-                                columns.len()
-                            ),
-                        }
-                    );
+                fn invoke_with_args(
+                    &self,
+                    args: ScalarFunctionArgs,
+                ) -> datafusion_common::Result<ColumnarValue> {
+                    let [arg0] = extract_args(self.name(), &args)?;
 
-                    let jsons = &columns[0];
+                    let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                    let jsons = arg0.as_binary_view();
                     let size = jsons.len();
-                    let datatype = jsons.data_type();
-                    let mut results = BooleanVectorBuilder::with_capacity(size);
+                    let mut builder = BooleanBuilder::with_capacity(size);
 
-                    match datatype {
-                        // JSON data type uses binary vector
-                        ConcreteDataType::Binary(_) => {
-                            for i in 0..size {
-                                let json = jsons.get_ref(i);
-                                let json = json.as_binary();
-                                let result = match json {
-                                    Ok(Some(json)) => {
-                                        Some(jsonb::[<is_ $json_type>](json))
-                                    }
-                                    _ => None,
-                                };
-                                results.push(result);
+                    for i in 0..size {
+                        let json = jsons.is_valid(i).then(|| jsons.value(i));
+                        let result = match json {
+                            Some(json) => {
+                                Some(jsonb::[<is_ $json_type>](json))
                             }
-                        }
-                        _ => {
-                            return UnsupportedInputDataTypeSnafu {
-                                function: stringify!([<$name:snake>]),
-                                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                            }
-                            .fail();
-                        }
+                            _ => None,
+                        };
+                        builder.append_option(result);
                     }
 
-                    Ok(results.to_vector())
+                    Ok(ColumnarValue::Array(Arc::new(builder.finish())))
                 }
             }
 
@@ -96,7 +80,7 @@ macro_rules! json_is {
                 }
             }
         }
-    }
+    };
 }
 
 json_is!(JsonIsNull, null, "Checks if the input JSONB is null");
@@ -135,8 +119,8 @@ json_is!(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::BinaryVector;
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{AsArray, BinaryArray};
 
     use super::*;
 
@@ -166,7 +150,11 @@ mod tests {
             );
             assert_eq!(
                 func.signature(),
-                Signature::exact(vec![DataType::Binary], Volatility::Immutable)
+                Signature::uniform(
+                    1,
+                    vec![DataType::Binary, DataType::BinaryView],
+                    Volatility::Immutable
+                )
             );
         }
 
@@ -195,16 +183,26 @@ mod tests {
                 value.to_vec()
             })
             .collect::<Vec<_>>();
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector)];
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(
+                BinaryArray::from_iter_values(jsonbs),
+            ))],
+            arg_fields: vec![],
+            number_rows: 6,
+            return_field: Arc::new(Field::new("", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
 
         for (func, expected_result) in json_is_functions.iter().zip(expected_results.iter()) {
-            let vector = func.eval(&FunctionContext::default(), &args).unwrap();
+            let result = func
+                .invoke_with_args(args.clone())
+                .and_then(|x| x.to_array(6))
+                .unwrap();
+            let vector = result.as_boolean();
             assert_eq!(vector.len(), json_strings.len());
 
             for (i, expected) in expected_result.iter().enumerate() {
-                let result = vector.get_ref(i);
-                let result = result.as_boolean().unwrap().unwrap();
+                let result = vector.value(i);
                 assert_eq!(result, *expected);
             }
         }
