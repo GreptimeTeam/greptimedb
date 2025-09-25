@@ -59,6 +59,8 @@ impl SystemSchemaProvider for PGCatalogProvider {
 
 impl PGCatalogProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+        // safe to expect/unwrap because it contains only schema read, this can
+        // be ensured by sqlness tests
         let static_tables =
             PgCatalogStaticTables::try_new().expect("Failed to initialize static tables");
         let inner = PgCatalogSchemaProvider::try_new(
