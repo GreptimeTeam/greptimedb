@@ -24,7 +24,7 @@ pub fn resolve_relative_path(current_dir: impl AsRef<Path>, path_str: &str) -> S
     let path = Path::new(path_str);
     if path.is_relative() {
         let path = current_dir.as_ref().join(path);
-        common_telemetry::info!("Resolved relative path: {}", path.to_string_lossy());
+        common_telemetry::debug!("Resolved relative path: {}", path.to_string_lossy());
         path.to_string_lossy().to_string()
     } else {
         path_str.to_string()
