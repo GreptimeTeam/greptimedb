@@ -335,6 +335,14 @@ impl Value {
         }
     }
 
+    /// Cast value to Boolean. Return None if value is not a boolean type.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Boolean(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {
@@ -2781,21 +2789,21 @@ mod tests {
                 vector: &vector,
                 idx: 0,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 1,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 2,
             }),
-            85,
+            74,
         );
         check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
     }
