@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{FromUtf8Snafu, InvalidConfigSnafu, Result};
-use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
+use crate::user_provider::{
+    UserInfoMap, authenticate_with_credential, load_credential_from_file, parse_credential_line,
+};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
 pub struct StaticUserProvider {
-    users: HashMap<String, Vec<u8>>,
+    users: UserInfoMap,
 }
 
 impl StaticUserProvider {
@@ -45,13 +45,12 @@ impl StaticUserProvider {
             "cmd" => content
                 .split(',')
                 .map(|kv| {
-                    let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
+                   parse_credential_line(kv).context(InvalidConfigSnafu {
                         value: kv.to_string(),
                         msg: "StaticUserProviderOption cmd values must be in format `user=pwd[,user=pwd]`",
-                    })?;
-                    Ok((k.to_string(), v.as_bytes().to_vec()))
+                    })
                 })
-                .collect::<Result<HashMap<String, Vec<u8>>>>()
+                .collect::<Result<UserInfoMap>>()
                 .map(|users| StaticUserProvider { users }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
@@ -69,7 +68,7 @@ impl StaticUserProvider {
             msg: "Expect at least one pair of username and password",
         })?;
         let username = kv.0;
-        let pwd = String::from_utf8(kv.1.clone()).context(FromUtf8Snafu)?;
+        let pwd = String::from_utf8(kv.1.0.clone()).context(FromUtf8Snafu)?;
         Ok((username.clone(), pwd))
     }
 }

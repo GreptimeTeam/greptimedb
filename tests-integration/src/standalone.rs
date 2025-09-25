@@ -109,7 +109,6 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn with_plugin(self, plugin: Plugins) -> Self {
         Self {

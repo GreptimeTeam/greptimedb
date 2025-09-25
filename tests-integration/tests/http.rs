@@ -150,7 +150,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+        &"static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd".to_string(),
     )
     .unwrap();
 
@@ -187,6 +187,65 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. readonly user cannot write
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 5. writeonly user cannot read
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=select * from auth_test;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     guard.remove_all().await;
 }
 
