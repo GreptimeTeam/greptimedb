@@ -63,27 +63,24 @@ pub struct SeqScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
-    /// The scanner is used for compaction.
-    compaction: bool,
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: PartitionMetricsList,
 }
 
 impl SeqScan {
-    /// Creates a new [SeqScan] with the given input and compaction flag.
-    /// If `compaction` is true, the scanner will not attempt to split ranges.
-    pub(crate) fn new(input: ScanInput, compaction: bool) -> Self {
+    /// Creates a new [SeqScan] with the given input.
+    /// If `input.compaction` is true, the scanner will not attempt to split ranges.
+    pub(crate) fn new(input: ScanInput) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, compaction));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
             properties,
             stream_ctx,
-            compaction,
             metrics_list: PartitionMetricsList::default(),
         }
     }
@@ -123,7 +120,7 @@ impl SeqScan {
     /// # Panics
     /// Panics if the compaction flag is not set.
     pub async fn build_reader_for_compaction(&self) -> Result<BoxedBatchReader> {
-        assert!(self.compaction);
+        assert!(self.stream_ctx.input.compaction);
 
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
@@ -144,7 +141,7 @@ impl SeqScan {
     /// # Panics
     /// Panics if the compaction flag is not set.
     pub async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
-        assert!(self.compaction);
+        assert!(self.stream_ctx.input.compaction);
 
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
@@ -288,7 +285,7 @@ impl SeqScan {
         }
 
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
-        let schema = mapper.input_arrow_schema();
+        let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
 
         let reader = FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE).await?;
 
@@ -379,7 +376,7 @@ impl SeqScan {
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.new_semaphore();
         let partition_ranges = self.properties.partitions[partition].clone();
-        let compaction = self.compaction;
+        let compaction = self.stream_ctx.input.compaction;
         let distinguish_range = self.properties.distinguish_partition_range;
 
         let stream = try_stream! {
@@ -477,7 +474,7 @@ impl SeqScan {
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.new_semaphore();
         let partition_ranges = self.properties.partitions[partition].clone();
-        let compaction = self.compaction;
+        let compaction = self.stream_ctx.input.compaction;
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -556,13 +553,13 @@ impl SeqScan {
         let metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
-            get_scanner_type(self.compaction),
+            get_scanner_type(self.stream_ctx.input.compaction),
             self.stream_ctx.query_start,
             explain_verbose,
             metrics_set,
         );
 
-        if !self.compaction {
+        if !self.stream_ctx.input.compaction {
             self.metrics_list.set(partition, metrics.clone());
         }
 
