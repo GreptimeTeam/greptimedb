@@ -119,6 +119,7 @@ impl<S> RegionWorkerLoop<S> {
             cache_manager: self.cache_manager.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
+            flush_semaphore: self.flush_semaphore.clone(),
         }
     }
 }

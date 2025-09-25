@@ -28,7 +28,7 @@ use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::access_layer::{
     AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
@@ -250,6 +250,8 @@ pub(crate) struct RegionFlushTask {
 
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,
+    /// Semaphore to control flush concurrency.
+    pub(crate) flush_semaphore: Arc<Semaphore>,
 }
 
 impl RegionFlushTask {
@@ -586,7 +588,9 @@ impl RegionFlushTask {
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
+            let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let _permit = semaphore.acquire().await.unwrap();
                 access_layer
                     .write_sst(write_request, &write_opts, WriteType::Flush)
                     .await
@@ -597,7 +601,9 @@ impl RegionFlushTask {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
+            let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
@@ -1251,6 +1257,7 @@ mod tests {
                 .mock_manifest_context(version_control.current().version.metadata.clone())
                 .await,
             index_options: IndexOptions::default(),
+            flush_semaphore: Arc::new(Semaphore::new(2)),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1292,6 +1299,7 @@ mod tests {
                 cache_manager: Arc::new(CacheManager::default()),
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
+                flush_semaphore: Arc::new(Semaphore::new(2)),
             })
             .collect();
         // Schedule first task.
