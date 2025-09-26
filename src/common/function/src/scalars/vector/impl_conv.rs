@@ -20,7 +20,9 @@ use datafusion_common::ScalarValue;
 /// Convert a string or binary literal to a vector literal.
 pub fn as_veclit(arg: &ScalarValue) -> Result<Option<Cow<'_, [f32]>>> {
     match arg {
-        ScalarValue::Binary(b) => b.as_ref().map(|x| binlit_as_veclit(x)).transpose(),
+        ScalarValue::Binary(b) | ScalarValue::BinaryView(b) => {
+            b.as_ref().map(|x| binlit_as_veclit(x)).transpose()
+        }
         ScalarValue::Utf8(s) | ScalarValue::Utf8View(s) => s
             .as_ref()
             .map(|x| parse_veclit_from_strlit(x).map(Cow::Owned))

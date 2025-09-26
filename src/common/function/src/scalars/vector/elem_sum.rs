@@ -44,6 +44,7 @@ impl Function for ElemSumFunction {
             vec![
                 TypeSignature::Uniform(1, STRINGS.to_vec()),
                 TypeSignature::Uniform(1, BINARYS.to_vec()),
+                TypeSignature::Uniform(1, vec![DataType::BinaryView]),
             ],
             Volatility::Immutable,
         )

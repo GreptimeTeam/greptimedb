@@ -13,16 +13,17 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, InvalidVectorStringSnafu, Result};
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
+use common_query::error::{InvalidVectorStringSnafu, Result};
+use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::types::parse_string_to_vector_type_value;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 const NAME: &str = "parse_vec";
 
@@ -35,40 +36,36 @@ impl Function for ParseVectorFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+        Ok(DataType::BinaryView)
     }
 
     fn signature(&self) -> Signature {
         Signature::string(1, Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let column = arg0.as_string_view();
 
-        let column = &columns[0];
         let size = column.len();
 
-        let mut result = BinaryVectorBuilder::with_capacity(size);
+        let mut builder = BinaryViewBuilder::with_capacity(size);
         for i in 0..size {
-            let value = column.get(i).as_string();
+            let value = column.is_valid(i).then(|| column.value(i));
             if let Some(value) = value {
-                let res = parse_string_to_vector_type_value(&value, None)
-                    .context(InvalidVectorStringSnafu { vec_str: &value })?;
-                result.push(Some(&res));
+                let result = parse_string_to_vector_type_value(value, None)
+                    .context(InvalidVectorStringSnafu { vec_str: value })?;
+                builder.append_value(result);
             } else {
-                result.push_null();
+                builder.append_null();
             }
         }
 
-        Ok(result.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -82,9 +79,9 @@ impl Display for ParseVectorFunction {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::Field;
     use common_base::bytes::Bytes;
-    use datatypes::value::Value;
-    use datatypes::vectors::StringVector;
+    use datafusion_common::arrow::array::StringViewArray;
 
     use super::*;
 
@@ -92,66 +89,84 @@ mod tests {
     fn test_parse_vector() {
         let func = ParseVectorFunction;
 
-        let input = Arc::new(StringVector::from(vec![
+        let arg0 = Arc::new(StringViewArray::from_iter([
             Some("[1.0,2.0,3.0]".to_string()),
             Some("[4.0,5.0,6.0]".to_string()),
             None,
         ]));
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(arg0)],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("", DataType::BinaryView, false)),
+            config_options: Arc::new(Default::default()),
+        };
 
-        let result = func.eval(&FunctionContext::default(), &[input]).unwrap();
+        let result = func
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
+            .unwrap();
+        let result = result.as_binary_view();
 
-        let result = result.as_ref();
         assert_eq!(result.len(), 3);
         assert_eq!(
-            result.get(0),
-            Value::Binary(Bytes::from(
+            result.value(0),
+            &Bytes::from(
                 [1.0f32, 2.0, 3.0]
                     .iter()
                     .flat_map(|e| e.to_le_bytes())
                     .collect::<Vec<u8>>()
-            ))
+            )
         );
         assert_eq!(
-            result.get(1),
-            Value::Binary(Bytes::from(
+            result.value(1),
+            &Bytes::from(
                 [4.0f32, 5.0, 6.0]
                     .iter()
                     .flat_map(|e| e.to_le_bytes())
                     .collect::<Vec<u8>>()
-            ))
+            )
         );
-        assert!(result.get(2).is_null());
+        assert!(result.is_null(2));
     }
 
     #[test]
     fn test_parse_vector_error() {
         let func = ParseVectorFunction;
 
-        let input = Arc::new(StringVector::from(vec![
-            Some("[1.0,2.0,3.0]".to_string()),
-            Some("[4.0,5.0,6.0]".to_string()),
-            Some("[7.0,8.0,9.0".to_string()),
-        ]));
+        let inputs = [
+            StringViewArray::from_iter([
+                Some("[1.0,2.0,3.0]".to_string()),
+                Some("[4.0,5.0,6.0]".to_string()),
+                Some("[7.0,8.0,9.0".to_string()),
+            ]),
+            StringViewArray::from_iter([
+                Some("[1.0,2.0,3.0]".to_string()),
+                Some("[4.0,5.0,6.0]".to_string()),
+                Some("7.0,8.0,9.0]".to_string()),
+            ]),
+            StringViewArray::from_iter([
+                Some("[1.0,2.0,3.0]".to_string()),
+                Some("[4.0,5.0,6.0]".to_string()),
+                Some("[7.0,hello,9.0]".to_string()),
+            ]),
+        ];
+        let expected = [
+            "External error: Invalid vector string: [7.0,8.0,9.0",
+            "External error: Invalid vector string: 7.0,8.0,9.0]",
+            "External error: Invalid vector string: [7.0,hello,9.0]",
+        ];
 
-        let result = func.eval(&FunctionContext::default(), &[input]);
-        assert!(result.is_err());
-
-        let input = Arc::new(StringVector::from(vec![
-            Some("[1.0,2.0,3.0]".to_string()),
-            Some("[4.0,5.0,6.0]".to_string()),
-            Some("7.0,8.0,9.0]".to_string()),
-        ]));
-
-        let result = func.eval(&FunctionContext::default(), &[input]);
-        assert!(result.is_err());
-
-        let input = Arc::new(StringVector::from(vec![
-            Some("[1.0,2.0,3.0]".to_string()),
-            Some("[4.0,5.0,6.0]".to_string()),
-            Some("[7.0,hello,9.0]".to_string()),
-        ]));
-
-        let result = func.eval(&FunctionContext::default(), &[input]);
-        assert!(result.is_err());
+        for (input, expected) in inputs.into_iter().zip(expected.into_iter()) {
+            let args = ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(Arc::new(input))],
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("", DataType::BinaryView, false)),
+                config_options: Arc::new(Default::default()),
+            };
+            let result = func.invoke_with_args(args);
+            assert_eq!(result.unwrap_err().to_string(), expected);
+        }
     }
 }

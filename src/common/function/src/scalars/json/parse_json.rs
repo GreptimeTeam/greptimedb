@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector};
-use snafu::ensure;
+use common_query::error::Result;
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 /// Parses the `String` into `JSONB`.
 #[derive(Clone, Debug, Default)]
@@ -37,64 +36,37 @@ impl Function for ParseJsonFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+        Ok(DataType::BinaryView)
     }
 
     fn signature(&self) -> Signature {
         Signature::string(1, Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let json_strings = &columns[0];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let json_strings = arg0.as_string_view();
 
         let size = json_strings.len();
-        let datatype = json_strings.data_type();
-        let mut results = BinaryVectorBuilder::with_capacity(size);
+        let mut builder = BinaryViewBuilder::with_capacity(size);
 
-        match datatype {
-            ConcreteDataType::String(_) => {
-                for i in 0..size {
-                    let json_string = json_strings.get_ref(i);
-
-                    let json_string = json_string.as_string();
-                    let result = match json_string {
-                        Ok(Some(json_string)) => match jsonb::parse_value(json_string.as_bytes()) {
-                            Ok(json) => Some(json.to_vec()),
-                            Err(_) => {
-                                return InvalidFuncArgsSnafu {
-                                    err_msg: format!(
-                                        "Cannot convert the string to json, have: {}",
-                                        json_string
-                                    ),
-                                }
-                                .fail();
-                            }
-                        },
-                        _ => None,
-                    };
-
-                    results.push(result.as_deref());
-                }
-            }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                }
-                .fail();
-            }
+        for i in 0..size {
+            let s = json_strings.is_valid(i).then(|| json_strings.value(i));
+            let result = s
+                .map(|s| {
+                    jsonb::parse_value(s.as_bytes())
+                        .map(|x| x.to_vec())
+                        .map_err(|e| DataFusionError::Execution(format!("cannot parse '{s}': {e}")))
+                })
+                .transpose()?;
+            builder.append_option(result.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -108,8 +80,8 @@ impl Display for ParseJsonFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::StringVector;
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::StringViewArray;
 
     use super::*;
 
@@ -119,7 +91,7 @@ mod tests {
 
         assert_eq!("parse_json", parse_json.name());
         assert_eq!(
-            DataType::Binary,
+            DataType::BinaryView,
             parse_json.return_type(&[DataType::Binary]).unwrap()
         );
 
@@ -137,14 +109,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_string_vector = StringVector::from_vec(json_strings.to_vec());
-        let args: Vec<VectorRef> = vec![Arc::new(json_string_vector)];
-        let vector = parse_json.eval(&FunctionContext::default(), &args).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(
+                StringViewArray::from_iter_values(json_strings),
+            ))],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = parse_json
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
+            .unwrap();
+        let vector = result.as_binary_view();
 
         assert_eq!(3, vector.len());
         for (i, gt) in jsonbs.iter().enumerate() {
-            let result = vector.get_ref(i);
-            let result = result.as_binary().unwrap().unwrap();
+            let result = vector.value(i);
             assert_eq!(gt, result);
         }
     }

@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVectorBuilder, MutableVector};
-use snafu::ensure;
+use arrow::compute;
+use common_query::error::Result;
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
+use crate::helper;
 
 /// Check if the given JSON data contains the given JSON path.
 #[derive(Clone, Debug, Default)]
@@ -42,48 +42,41 @@ impl Function for JsonPathExistsFunction {
 
     fn signature(&self) -> Signature {
         // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        Signature::one_of(
-            vec![
-                TypeSignature::Exact(vec![DataType::Binary, DataType::Utf8]),
-                TypeSignature::Exact(vec![DataType::Null, DataType::Utf8]),
-                TypeSignature::Exact(vec![DataType::Binary, DataType::Null]),
-                TypeSignature::Exact(vec![DataType::Null, DataType::Null]),
-            ],
-            Volatility::Immutable,
+        helper::one_of_sigs2(
+            vec![DataType::Binary, DataType::BinaryView, DataType::Null],
+            vec![DataType::Utf8, DataType::Utf8View, DataType::Null],
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let jsons = &columns[0];
-        let paths = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [jsons, paths] = extract_args(self.name(), &args)?;
 
         let size = jsons.len();
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         match (jsons.data_type(), paths.data_type()) {
-            (ConcreteDataType::Binary(_), ConcreteDataType::String(_)) => {
+            (DataType::Null, _) | (_, DataType::Null) => builder.append_nulls(size),
+            _ => {
+                let jsons = compute::cast(&jsons, &DataType::BinaryView)?;
+                let jsons = jsons.as_binary_view();
+                let paths = compute::cast(&paths, &DataType::Utf8View)?;
+                let paths = paths.as_string_view();
                 for i in 0..size {
-                    let result = match (jsons.get_ref(i).as_binary(), paths.get_ref(i).as_string())
-                    {
-                        (Ok(Some(json)), Ok(Some(path))) => {
+                    let json = jsons.is_valid(i).then(|| jsons.value(i));
+                    let path = paths.is_valid(i).then(|| paths.value(i));
+                    let result = match (json, path) {
+                        (Some(json), Some(path)) => {
                             // Get `JsonPath`.
                             let json_path = match jsonb::jsonpath::parse_json_path(path.as_bytes())
                             {
                                 Ok(json_path) => json_path,
-                                Err(_) => {
-                                    return InvalidFuncArgsSnafu {
-                                        err_msg: format!("Illegal json path: {:?}", path),
-                                    }
-                                    .fail();
+                                Err(e) => {
+                                    return Err(DataFusionError::Execution(format!(
+                                        "invalid json path '{path}': {e}"
+                                    )));
                                 }
                             };
                             jsonb::path_exists(json, json_path).ok()
@@ -91,25 +84,12 @@ impl Function for JsonPathExistsFunction {
                         _ => None,
                     };
 
-                    results.push(result);
+                    builder.append_option(result);
                 }
-            }
-
-            // Any null args existence causes the result to be NULL.
-            (ConcreteDataType::Null(_), ConcreteDataType::String(_)) => results.push_nulls(size),
-            (ConcreteDataType::Binary(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
-            (ConcreteDataType::Null(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
-
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: NAME,
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                }
-                .fail();
             }
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -123,8 +103,8 @@ impl Display for JsonPathExistsFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::prelude::ScalarVector;
-    use datatypes::vectors::{BinaryVector, NullVector, StringVector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{BinaryArray, NullArray, StringArray};
 
     use super::*;
 
@@ -137,31 +117,6 @@ mod tests {
             DataType::Boolean,
             json_path_exists.return_type(&[DataType::Binary]).unwrap()
         );
-
-        assert!(matches!(json_path_exists.signature(),
-                         Signature {
-                             type_signature: TypeSignature::OneOf(valid_types),
-                             volatility: Volatility::Immutable
-                         } if valid_types ==
-            vec![
-                TypeSignature::Exact(vec![
-                    DataType::Binary,
-                    DataType::Utf8,
-                ]),
-                TypeSignature::Exact(vec![
-                    DataType::Null,
-                    DataType::Utf8,
-                ]),
-                TypeSignature::Exact(vec![
-                    DataType::Binary,
-                    DataType::Null,
-                ]),
-                TypeSignature::Exact(vec![
-                    DataType::Null,
-                    DataType::Null,
-                ]),
-            ],
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
@@ -186,51 +141,83 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_path_exists
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 8,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_path_exists
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(8))
             .unwrap();
+        let vector = result.as_boolean();
 
         // Test for non-nulls.
         assert_eq!(8, vector.len());
         for (i, real) in expected.iter().enumerate() {
-            let result = vector.get_ref(i);
-            assert!(!result.is_null());
-            let val = result.as_boolean().unwrap().unwrap();
+            let val = vector.value(i);
             assert_eq!(val, *real);
         }
 
         // Test for path error.
         let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
-        let json = BinaryVector::from_vec(vec![json_bytes]);
-        let illegal_path = StringVector::from_vec(vec!["$..a"]);
+        let illegal_path = "$..a";
 
-        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(illegal_path)];
-        let err = json_path_exists.eval(&FunctionContext::default(), &args);
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(vec![json_bytes]))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(vec![illegal_path]))),
+            ],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let err = json_path_exists.invoke_with_args(args);
         assert!(err.is_err());
 
         // Test for nulls.
         let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
-        let json = BinaryVector::from_vec(vec![json_bytes]);
-        let null_json = NullVector::new(1);
+        let json = Arc::new(BinaryArray::from_iter_values(vec![json_bytes]));
+        let null_json = Arc::new(NullArray::new(1));
 
-        let path = StringVector::from_vec(vec!["$.a"]);
-        let null_path = NullVector::new(1);
+        let path = Arc::new(StringArray::from_iter_values(vec!["$.a"]));
+        let null_path = Arc::new(NullArray::new(1));
 
-        let args: Vec<VectorRef> = vec![Arc::new(null_json), Arc::new(path)];
-        let result1 = json_path_exists
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(null_json), ColumnarValue::Array(path)],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_path_exists
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(1))
             .unwrap();
-        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(null_path)];
-        let result2 = json_path_exists
-            .eval(&FunctionContext::default(), &args)
+        let result1 = result.as_boolean();
+
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(json), ColumnarValue::Array(null_path)],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_path_exists
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(1))
             .unwrap();
+        let result2 = result.as_boolean();
 
         assert_eq!(result1.len(), 1);
-        assert!(result1.get_ref(0).is_null());
+        assert!(result1.is_null(0));
         assert_eq!(result2.len(), 1);
-        assert!(result2.get_ref(0).is_null());
+        assert!(result2.is_null(0));
     }
 }

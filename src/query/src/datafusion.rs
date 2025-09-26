@@ -579,6 +579,12 @@ impl QueryEngine for DatafusionQueryEngine {
                 state: self.engine_state().function_state(),
             });
 
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+
         QueryEngineContext::new(state, query_ctx)
     }
 
