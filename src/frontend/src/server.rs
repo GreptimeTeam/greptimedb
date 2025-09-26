@@ -24,7 +24,7 @@ use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcOptions, GrpcServer};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::event::LogValidatorRef;
 use servers::http::utils::router::RouterConfigurator;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -68,9 +68,15 @@ where
         }
     }
 
-    pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
-        let builder = GrpcServerBuilder::new(opts.as_config(), common_runtime::global_runtime())
-            .with_tls_config(opts.tls.clone())
+    fn grpc_server_builder(&self, opts: &GrpcOptions, external: bool) -> Result<GrpcServerBuilder> {
+        let config = if external {
+            opts.as_config()
+        } else {
+            GrpcServerConfig::default()
+        };
+
+        let builder = GrpcServerBuilder::new(config.clone(), common_runtime::global_runtime())
+            .with_tls_config(config.tls)
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)
     }
@@ -149,7 +155,7 @@ where
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
-            self.grpc_server_builder(grpc)?
+            self.grpc_server_builder(grpc, external)?
         };
 
         let user_provider = if external {
