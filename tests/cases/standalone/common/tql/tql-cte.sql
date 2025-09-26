@@ -33,13 +33,13 @@ WITH tql (the_timestamp, the_value) as (
 SELECT * FROM tql;
 
 -- Hybrid CTEs (TQL + SQL)
-WITH 
+WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),
     filtered AS (SELECT * FROM tql_data WHERE val > 5)
 SELECT count(*) FROM filtered;
 
 -- TQL CTE with complex PromQL expressions
-WITH 
+WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
     filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
 SELECT sum(val) FROM filtered;
@@ -63,13 +63,13 @@ WITH host_metrics AS (
 SELECT host_metrics.ts, host_metrics.host FROM host_metrics;
 
 -- Multiple TQL CTEs referencing different tables
-WITH 
+WITH
     metric_data(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
     label_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host2"})
-SELECT 
+SELECT
     m.val as metric_val,
     l.cpu as label_val
-FROM metric_data m, label_data l 
+FROM metric_data m, label_data l
 WHERE m.ts = l.ts
 ORDER BY m.ts
 LIMIT 3;
@@ -84,7 +84,7 @@ SELECT min(val) as min_computed, max(val) as max_computed FROM computed;
 WITH tql_base(ts, val) AS (
     TQL EVAL (0, 40, '10s') metric
 )
-SELECT 
+SELECT
     ts,
     val,
     LAG(val, 1) OVER (ORDER BY ts) as prev_value
@@ -95,16 +95,16 @@ ORDER BY ts;
 WITH tql_grouped(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') labels
 )
-SELECT 
+SELECT
     DATE_TRUNC('minute', ts) as minute,
     count(*) as point_count
-FROM tql_grouped 
+FROM tql_grouped
 GROUP BY minute
 HAVING count(*) > 1;
 
 -- TQL CTE with UNION
 -- SQLNESS SORT_RESULT 3 1
-WITH 
+WITH
     host1_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host1"}),
     host2_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host2"})
 SELECT 'host1' as source, ts, cpu FROM host1_data
@@ -112,11 +112,11 @@ UNION ALL
 SELECT 'host2' as source, ts, cpu FROM host2_data;
 
 -- Nested CTEs with TQL
-WITH 
+WITH
     base_tql(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
     processed(ts, percent) AS (
-        SELECT ts, val * 100 as percent 
-        FROM base_tql 
+        SELECT ts, val * 100 as percent
+        FROM base_tql
         WHERE val > 0
     ),
     final(ts, percent) AS (
@@ -135,7 +135,7 @@ SELECT * FROM time_shifted;
 WITH tql_summary(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
 )
-SELECT 
+SELECT
     t.ts,
     t.cpu as avg_value,
     l.host
@@ -151,7 +151,7 @@ WITH tql_analyze AS (
 )
 SELECT * FROM tql_analyze limit 1;
 
--- Error case - TQL EXPLAIN should fail  
+-- Error case - TQL EXPLAIN should fail
 WITH tql_explain AS (
     TQL EXPLAIN (0, 40, '10s') metric
 )
@@ -159,7 +159,7 @@ SELECT * FROM tql_explain limit 1;
 
 -- TQL CTE with lookback parameter
 WITH tql_lookback AS (
-    TQL EVAL (0, 40, '10s', 15s) metric
+    TQL EVAL (0, 40, '10s', '15s') metric
 )
 SELECT count(*) FROM tql_lookback;
 
