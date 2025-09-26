@@ -1715,4 +1715,86 @@ mod tests {
 
         assert_eq!(expected_batch, result);
     }
+
+    #[test]
+    fn test_flat_compat_batch_compact_sparse() {
+        let mut actual_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        );
+        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let actual_metadata = Arc::new(actual_metadata);
+
+        let mut expected_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        );
+        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let expected_metadata = Arc::new(expected_metadata);
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [0, 2, 3].into_iter(),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let format_projection = read_format.format_projection();
+
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, true)
+                .unwrap()
+                .unwrap();
+
+        let sparse_k1 = encode_sparse_key(&[]);
+        let input_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let output_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
 }
