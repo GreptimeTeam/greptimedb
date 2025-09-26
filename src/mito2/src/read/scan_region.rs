@@ -961,6 +961,7 @@ impl ScanInput {
                     mapper,
                     flat_format.metadata(),
                     flat_format.format_projection(),
+                    self.compaction,
                 )?
                 .map(CompatBatch::Flat)
             } else {

@@ -22,7 +22,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, DictionaryArray, UInt32Array,
 };
 use datatypes::arrow::compute::{TakeOptions, take};
-use datatypes::arrow::datatypes::{Schema, SchemaRef};
+use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -33,12 +33,13 @@ use mito_codec::row_converter::{
     build_primary_key_codec_with_fields,
 };
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
@@ -199,10 +200,12 @@ impl FlatCompatBatch {
     /// - `mapper` is built from the metadata users expect to see.
     /// - `actual` is the [RegionMetadata] of the input parquet.
     /// - `format_projection` is the projection of the read format for the input parquet.
+    /// - `compaction` indicates whether the reader is for compaction.
     pub(crate) fn try_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
+        compaction: bool,
     ) -> Result<Option<Self>> {
         let actual_schema = flat_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
@@ -212,6 +215,89 @@ impl FlatCompatBatch {
             return Ok(None);
         }
 
+        if actual.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
+            // Special handling for sparse encoding in compaction.
+            return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
+        }
+
+        // // Maps column id to the index and data type in the actual schema.
+        // let actual_schema_index: HashMap<_, _> = actual_schema
+        //     .iter()
+        //     .enumerate()
+        //     .map(|(idx, (column_id, data_type))| (*column_id, (idx, data_type)))
+        //     .collect();
+
+        // let mut index_or_defaults = Vec::with_capacity(expect_schema.len());
+        // let mut fields = Vec::with_capacity(expect_schema.len());
+        // for (column_id, expect_data_type) in expect_schema {
+        //     // Safety: expect_schema comes from the same mapper.
+        //     let column_index = mapper.metadata().column_index_by_id(*column_id).unwrap();
+        //     let expect_column = &mapper.metadata().column_metadatas[column_index];
+        //     let column_field = &mapper.metadata().schema.arrow_schema().fields()[column_index];
+        //     // For tag columns, we need to create a dictionary field.
+        //     if expect_column.semantic_type == SemanticType::Tag {
+        //         fields.push(tag_maybe_to_dictionary_field(
+        //             &expect_column.column_schema.data_type,
+        //             column_field,
+        //         ));
+        //     } else {
+        //         fields.push(column_field.clone());
+        //     };
+
+        //     if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
+        //         let mut cast_type = None;
+
+        //         // Same column different type.
+        //         if expect_data_type != *actual_data_type {
+        //             cast_type = Some(expect_data_type.clone())
+        //         }
+        //         // Source has this column.
+        //         index_or_defaults.push(IndexOrDefault::Index {
+        //             pos: *index,
+        //             cast_type,
+        //         });
+        //     } else {
+        //         // Create a default vector with 1 element for that column.
+        //         let default_vector = expect_column
+        //             .column_schema
+        //             .create_default_vector(1)
+        //             .context(CreateDefaultSnafu {
+        //                 region_id: mapper.metadata().region_id,
+        //                 column: &expect_column.column_schema.name,
+        //             })?
+        //             .with_context(|| CompatReaderSnafu {
+        //                 region_id: mapper.metadata().region_id,
+        //                 reason: format!(
+        //                     "column {} does not have a default value to read",
+        //                     expect_column.column_schema.name
+        //                 ),
+        //             })?;
+        //         index_or_defaults.push(IndexOrDefault::DefaultValue {
+        //             column_id: expect_column.column_id,
+        //             default_vector,
+        //             semantic_type: expect_column.semantic_type,
+        //         });
+        //     };
+        // }
+        // fields.extend_from_slice(&internal_fields());
+
+        let (index_or_defaults, fields) =
+            Self::compute_index_and_fields(&actual_schema, expect_schema, &mapper.metadata())?;
+
+        let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
+
+        Ok(Some(Self {
+            index_or_defaults,
+            arrow_schema: Arc::new(Schema::new(fields)),
+            compat_pk,
+        }))
+    }
+
+    fn compute_index_and_fields(
+        actual_schema: &[(ColumnId, ConcreteDataType)],
+        expect_schema: &[(ColumnId, ConcreteDataType)],
+        expect_metadata: &RegionMetadata,
+    ) -> Result<(Vec<IndexOrDefault>, Vec<FieldRef>)> {
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
             .iter()
@@ -223,9 +309,9 @@ impl FlatCompatBatch {
         let mut fields = Vec::with_capacity(expect_schema.len());
         for (column_id, expect_data_type) in expect_schema {
             // Safety: expect_schema comes from the same mapper.
-            let column_index = mapper.metadata().column_index_by_id(*column_id).unwrap();
-            let expect_column = &mapper.metadata().column_metadatas[column_index];
-            let column_field = &mapper.metadata().schema.arrow_schema().fields()[column_index];
+            let column_index = expect_metadata.column_index_by_id(*column_id).unwrap();
+            let expect_column = &expect_metadata.column_metadatas[column_index];
+            let column_field = &expect_metadata.schema.arrow_schema().fields()[column_index];
             // For tag columns, we need to create a dictionary field.
             if expect_column.semantic_type == SemanticType::Tag {
                 fields.push(tag_maybe_to_dictionary_field(
@@ -254,11 +340,11 @@ impl FlatCompatBatch {
                     .column_schema
                     .create_default_vector(1)
                     .context(CreateDefaultSnafu {
-                        region_id: mapper.metadata().region_id,
+                        region_id: expect_metadata.region_id,
                         column: &expect_column.column_schema.name,
                     })?
                     .with_context(|| CompatReaderSnafu {
-                        region_id: mapper.metadata().region_id,
+                        region_id: expect_metadata.region_id,
                         reason: format!(
                             "column {} does not have a default value to read",
                             expect_column.column_schema.name
@@ -273,7 +359,38 @@ impl FlatCompatBatch {
         }
         fields.extend_from_slice(&internal_fields());
 
-        let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
+        Ok((index_or_defaults, fields))
+    }
+
+    fn try_new_compact_sparse(
+        mapper: &FlatProjectionMapper,
+        actual: &RegionMetadataRef,
+    ) -> Result<Option<Self>> {
+        // Currently, we don't support converting sparse encoding back to dense encoding in
+        // flat format.
+        ensure!(
+            mapper.metadata().primary_key_encoding == PrimaryKeyEncoding::Sparse,
+            UnsupportedOperationSnafu {
+                err_msg: "Flat format doesn't support converting sparse encoding back to dense encoding"
+            }
+        );
+
+        // For sparse encoding, we don't need to check the primary keys.
+        // Since this is for compaction, we always read all columns.
+        let actual_schema: Vec<_> = actual
+            .field_columns()
+            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
+            .collect();
+        let expect_schema: Vec<_> = mapper
+            .metadata()
+            .field_columns()
+            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
+            .collect();
+
+        let (index_or_defaults, fields) =
+            Self::compute_index_and_fields(&actual_schema, &expect_schema, &mapper.metadata())?;
+
+        let compat_pk = FlatCompatPrimaryKey::default();
 
         Ok(Some(Self {
             index_or_defaults,
@@ -765,6 +882,7 @@ impl FlatRewritePrimaryKey {
 }
 
 /// Helper to make primary key compatible for flat format.
+#[derive(Default)]
 struct FlatCompatPrimaryKey {
     /// Primary key rewriter.
     rewriter: Option<FlatRewritePrimaryKey>,
@@ -1452,9 +1570,10 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
-            .unwrap()
-            .unwrap();
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
+                .unwrap()
+                .unwrap();
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1543,9 +1662,10 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection)
-            .unwrap()
-            .unwrap();
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
+                .unwrap()
+                .unwrap();
 
         // Tag array.
         let mut tag1_builder = StringDictionaryBuilder::<UInt32Type>::new();
