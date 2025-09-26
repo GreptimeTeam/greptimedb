@@ -62,6 +62,7 @@ humantime.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
 parquet = "53"
+pprof = "0.14"
 meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true

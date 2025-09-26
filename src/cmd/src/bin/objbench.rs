@@ -72,6 +72,10 @@ pub struct Command {
     /// Verbose output
     #[clap(short, long, default_value_t = false)]
     pub verbose: bool,
+
+    /// Output file path for pprof flamegraph (enables profiling)
+    #[clap(long, value_name = "FILE")]
+    pub pprof_file: Option<PathBuf>,
 }
 
 impl Command {
@@ -197,6 +201,35 @@ impl Command {
         // Write SST
         println!("{}", "Writing SST...".yellow());
         let mut metrics = Metrics::default();
+
+        // Start profiling if pprof_file is specified
+        #[cfg(unix)]
+        let profiler_guard = if self.pprof_file.is_some() {
+            println!("{} Starting profiling...", "⚡".yellow());
+            Some(
+                pprof::ProfilerGuardBuilder::default()
+                    .frequency(99)
+                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                    .build()
+                    .map_err(|e| {
+                        error::IllegalConfigSnafu {
+                            msg: format!("Failed to start profiler: {e}"),
+                        }
+                        .build()
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        #[cfg(not(unix))]
+        if self.pprof_file.is_some() {
+            eprintln!(
+                "{}: Profiling is not supported on this platform",
+                "Warning".yellow()
+            );
+        }
+
         let write_start = Instant::now();
         let infos = tgt_access_layer
             .write_sst(write_req, &write_opts, &mut metrics)
@@ -209,6 +242,44 @@ impl Command {
             })?;
 
         let write_elapsed = write_start.elapsed();
+
+        // Stop profiling and generate flamegraph if enabled
+        #[cfg(unix)]
+        if let (Some(guard), Some(pprof_file)) = (profiler_guard, &self.pprof_file) {
+            println!("{} Generating flamegraph...", "🔥".yellow());
+            match guard.report().build() {
+                Ok(report) => {
+                    let mut flamegraph_data = Vec::new();
+                    if let Err(e) = report.flamegraph(&mut flamegraph_data) {
+                        eprintln!(
+                            "{}: Failed to generate flamegraph: {}",
+                            "Warning".yellow(),
+                            e
+                        );
+                    } else if let Err(e) = std::fs::write(pprof_file, flamegraph_data) {
+                        eprintln!(
+                            "{}: Failed to write flamegraph to {}: {}",
+                            "Warning".yellow(),
+                            pprof_file.display(),
+                            e
+                        );
+                    } else {
+                        println!(
+                            "{} Flamegraph saved to {}",
+                            "✓".green(),
+                            pprof_file.display().to_string().cyan()
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}: Failed to generate pprof report: {}",
+                        "Warning".yellow(),
+                        e
+                    );
+                }
+            }
+        }
         assert_eq!(infos.len(), 1);
         let dst_file_id = infos[0].file_id;
         let dst_file_path = format!("{}{}", self.target, dst_file_id.as_parquet(),);
@@ -513,7 +584,7 @@ async fn load_parquet_metadata(
 
 #[cfg(test)]
 mod tests {
-    use crate::objbench::{StorageConfig, StorageConfigWrapper};
+    use super::StorageConfigWrapper;
 
     #[test]
     fn test_decode() {

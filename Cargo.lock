@@ -1829,6 +1829,7 @@ dependencies = [
  "object-store",
  "parquet",
  "plugins",
+ "pprof",
  "prometheus",
  "prost 0.13.3",
  "query",
