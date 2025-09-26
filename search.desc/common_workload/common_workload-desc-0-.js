@@ -1,0 +1,1 @@
+searchState.loadedDescShard("common_workload", 0, "The workload type of the datanode.\nThe datanode can handle all workloads.\nReturns the argument unchanged.\nConvert from <code>i32</code> to <code>DatanodeWorkloadType</code>.\nCalls <code>U::from(self)</code>.\nSanitize the workload types.\nConvert from <code>DatanodeWorkloadType</code> to <code>i32</code>.")

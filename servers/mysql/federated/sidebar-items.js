@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check","check_others","check_select_variable","check_show_variables","select_function","select_variable","show_variables"],"static":["MYSQL_CONN_JAVA_PATTERN","OTHER_NOT_SUPPORTED_STMT","SELECT_TIME_DIFF_FUNC_PATTERN","SELECT_VAR_PATTERN","SHOW_LOWER_CASE_PATTERN","SHOW_SQL_MODE_PATTERN","SHOW_VARIABLES_LIKE_PATTERN","VAR_VALUES"]};
