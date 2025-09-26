@@ -17,8 +17,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
+use common_telemetry::init_default_ut_logging;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
@@ -32,7 +34,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
-use datafusion_common::arrow::array::{ArrayRef, AsArray, Float64Array, Int64Array, UInt64Array};
+use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::AggregateFunction;
@@ -543,6 +545,210 @@ async fn test_avg_udaf() {
     let merge_eval_res = merge_accum.evaluate().unwrap();
     // the merge function returns the average, which is 132 / 45
     assert_eq!(merge_eval_res, ScalarValue::Float64(Some(132. / 45_f64)));
+}
+
+#[tokio::test]
+async fn test_last_value_order_by_udaf() {
+    init_default_ut_logging();
+    let ctx = SessionContext::new();
+
+    let last_value = datafusion::functions_aggregate::first_last::last_value_udaf();
+    let last_value = (*last_value).clone();
+
+    let original_aggr = Aggregate::try_new(
+        Arc::new(dummy_table_scan()),
+        vec![],
+        vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+            Arc::new(last_value.clone()),
+            vec![Expr::Column(Column::new_unqualified("number"))],
+            false,
+            None,
+            vec![datafusion_expr::expr::Sort::new(
+                Expr::Column(Column::new_unqualified("number")),
+                true,
+                true,
+            )],
+            None,
+        ))],
+    )
+    .unwrap();
+    let res = StateMergeHelper::split_aggr_node(original_aggr).unwrap();
+
+    let state_func: Arc<AggregateUDF> =
+        Arc::new(StateWrapper::new(last_value.clone()).unwrap().into());
+
+    let expected_aggr_state_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(dummy_table_scan()),
+            vec![],
+            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                state_func,
+                vec![Expr::Column(Column::new_unqualified("number"))],
+                false,
+                None,
+                vec![datafusion_expr::expr::Sort::new(
+                    Expr::Column(Column::new_unqualified("number")),
+                    true,
+                    true,
+                )],
+                None,
+            ))],
+        )
+        .unwrap(),
+    );
+    // fix the ordering & distinct info of the state udaf, as they are not set in the wrapper.
+    let fixed_aggr_state_plan = FixStateUdafOrderingAnalyzer {}
+        .analyze(expected_aggr_state_plan.clone(), &Default::default())
+        .unwrap();
+
+    assert_eq!(&res.lower_state, &fixed_aggr_state_plan);
+
+    // schema is the state fields of the last_value udaf
+    assert_eq!(
+        res.lower_state.schema().as_arrow(),
+        &arrow_schema::Schema::new(vec![Field::new(
+            "__last_value_state(number) ORDER BY [number ASC NULLS FIRST]",
+            DataType::Struct(
+                vec![
+                    Field::new("last_value[last_value]", DataType::Int64, true),
+                    Field::new("number", DataType::Int64, true), // ordering field is added to state fields too
+                    Field::new("is_set", DataType::Boolean, true)
+                ]
+                .into()
+            ),
+            true,
+        )])
+    );
+
+    let expected_merge_fn = MergeWrapper::new(
+        last_value.clone(),
+        Arc::new(
+            AggregateExprBuilder::new(
+                Arc::new(last_value.clone()),
+                vec![Arc::new(
+                    datafusion::physical_expr::expressions::Column::new("number", 0),
+                )],
+            )
+            .schema(Arc::new(dummy_table_scan().schema().as_arrow().clone()))
+            .alias("last_value(number) ORDER BY [number ASC NULLS FIRST]")
+            .build()
+            .unwrap(),
+        ),
+        vec![DataType::Int64],
+    )
+    .unwrap();
+
+    let expected_merge_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(fixed_aggr_state_plan.clone()),
+            vec![],
+            vec![
+                Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(expected_merge_fn.into()),
+                    vec![Expr::Column(Column::new_unqualified(
+                        "__last_value_state(number) ORDER BY [number ASC NULLS FIRST]",
+                    ))],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                ))
+                .alias("last_value(number) ORDER BY [number ASC NULLS FIRST]"),
+            ],
+        )
+        .unwrap(),
+    );
+    assert_eq!(&res.upper_merge, &expected_merge_plan);
+
+    let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&fixed_aggr_state_plan, &ctx.state())
+        .await
+        .unwrap();
+    let aggr_exec = phy_aggr_state_plan
+        .as_any()
+        .downcast_ref::<AggregateExec>()
+        .unwrap();
+    let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+
+    let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
+
+    // evaluate the state function
+    let input = Int64Array::from(vec![Some(1), Some(2), None, Some(3)]);
+    let values = vec![Arc::new(input) as arrow::array::ArrayRef];
+
+    state_accum.update_batch(&values).unwrap();
+
+    let state = state_accum.state().unwrap();
+
+    // FIXME(discord9): once datafusion fixes the issue that last_value udaf state fields are not correctly(missing ordering field if `last` field is part of ordering field)
+    // then change it back to 3 fields
+    assert_eq!(state.len(), 2); // last value weird optimization(or maybe bug?) that it only has 2 state fields now
+    assert_eq!(state[0], ScalarValue::Int64(Some(3)));
+    assert_eq!(state[1], ScalarValue::Boolean(Some(true)));
+
+    let eval_res = state_accum.evaluate().unwrap();
+    let expected = Arc::new(
+        StructArray::try_new(
+            vec![
+                Field::new("col_0[mismatch_state]", DataType::Int64, true),
+                Field::new("col_1[mismatch_state]", DataType::Boolean, true),
+                // Field::new("last_value[last_value]", DataType::Int64, true),
+                // Field::new("number", DataType::Int64, true),
+                // Field::new("is_set", DataType::Boolean, true),
+            ]
+            .into(),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(3)])),
+                // Arc::new(Int64Array::from(vec![Some(3)])),
+                Arc::new(BooleanArray::from(vec![Some(true)])),
+            ],
+            None,
+        )
+        .unwrap(),
+    );
+    assert_eq!(eval_res, ScalarValue::Struct(expected));
+
+    let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&res.upper_merge, &ctx.state())
+        .await
+        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan
+        .as_any()
+        .downcast_ref::<AggregateExec>()
+        .unwrap();
+    let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+
+    let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
+
+    let merge_input = vec![
+        Arc::new(Int64Array::from(vec![Some(3), Some(4)])) as arrow::array::ArrayRef,
+        Arc::new(Int64Array::from(vec![Some(3), Some(4)])),
+        Arc::new(BooleanArray::from(vec![Some(true), Some(true)])),
+    ];
+    let merge_input_struct_arr = StructArray::try_new(
+        vec![
+            Field::new("last_value[last_value]", DataType::Int64, true),
+            Field::new("number", DataType::Int64, true),
+            Field::new("is_set", DataType::Boolean, true),
+        ]
+        .into(),
+        merge_input,
+        None,
+    )
+    .unwrap();
+
+    merge_accum
+        .update_batch(&[Arc::new(merge_input_struct_arr)])
+        .unwrap();
+    let merge_state = merge_accum.state().unwrap();
+    assert_eq!(merge_state.len(), 3);
+    assert_eq!(merge_state[0], ScalarValue::Int64(Some(4)));
+    assert_eq!(merge_state[1], ScalarValue::Int64(Some(4)));
+    assert_eq!(merge_state[2], ScalarValue::Boolean(Some(true)));
+
+    let merge_eval_res = merge_accum.evaluate().unwrap();
+    // the merge function returns the last value, which is 4
+    assert_eq!(merge_eval_res, ScalarValue::Int64(Some(4)));
 }
 
 /// For testing whether the UDAF state fields are correctly implemented.
