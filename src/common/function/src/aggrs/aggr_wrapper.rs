@@ -199,6 +199,7 @@ impl StateMergeHelper {
 
             lower_aggr_exprs.push(expr);
 
+            // then create the merge function using the physical expression of the original aggregate function
             let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
                 aggr_expr,
                 aggr.input.schema(),
@@ -215,6 +216,8 @@ impl StateMergeHelper {
             let expr = AggregateFunction {
                 func: Arc::new(merge_func.into()),
                 // notice filter/order_by is not supported in the merge function, as it's not meaningful to have them in the merge phase.
+                // do notice this order by is only removed in the outer logical plan, the physical plan still have order by and hence
+                // can create correct accumulator with order by.
                 params: AggregateFunctionParams {
                     args: vec![arg],
                     distinct: aggr_func.params.distinct,
