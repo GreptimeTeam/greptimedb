@@ -185,7 +185,7 @@ impl Command {
 
         // Build write request
         let fulltext_index_config = FulltextIndexConfig {
-            create_on_flush: Mode::Disable,
+            create_on_compaction: Mode::Disable,
             ..Default::default()
         };
         let write_opts = WriteOptions::default();
