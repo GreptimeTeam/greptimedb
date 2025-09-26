@@ -56,13 +56,40 @@ pub struct Instance {
     frontend: Frontend,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+
+    // The components of frontend, which make it easier to expand based
+    // on the components.
+    #[cfg(feature = "enterprise")]
+    components: Option<Components>,
+}
+
+#[cfg(feature = "enterprise")]
+pub struct Components {
+    pub kv_backend: common_meta::kv_backend::KvBackendRef,
+    pub plugins: Plugins,
 }
 
 pub const APP_NAME: &str = "greptime-frontend";
 
 impl Instance {
     pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
-        Self { frontend, _guard }
+        Self {
+            frontend,
+            _guard,
+            #[cfg(feature = "enterprise")]
+            components: None,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn with_components(mut self, components: Components) -> Self {
+        self.components = Some(components);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn components(&self) -> Option<&Components> {
+        self.components.as_ref()
     }
 
     pub fn inner(&self) -> &Frontend {
@@ -448,7 +475,7 @@ impl StartCommand {
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
 
-        let servers = Services::new(opts, instance.clone(), plugins)
+        let servers = Services::new(opts, instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
 
@@ -459,7 +486,15 @@ impl StartCommand {
             export_metrics_task,
         };
 
-        Ok(Instance::new(frontend, guard))
+        let instance = Instance::new(frontend, guard);
+
+        #[cfg(feature = "enterprise")]
+        let instance = instance.with_components(Components {
+            kv_backend: cached_meta_backend,
+            plugins,
+        });
+
+        Ok(instance)
     }
 }
 

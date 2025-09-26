@@ -9,7 +9,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
 use crate::statements::OptionMap;
-use crate::statements::create::{COMMA_SEP, INDENT, LINE_SEP};
+use crate::statements::create::{COMMA_SEP, INDENT};
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateTrigger {
@@ -28,22 +28,24 @@ impl Display for CreateTrigger {
             write!(f, "IF NOT EXISTS ")?;
         }
         writeln!(f, "{}", self.trigger_name)?;
-        writeln!(f, "{}", self.trigger_on)?;
+        writeln!(f, "  {}", self.trigger_on)?;
 
         if !self.labels.is_empty() {
             let labels = self.labels.kv_pairs();
-            writeln!(f, "LABELS ({})", format_list_comma!(labels))?;
+            writeln!(f, "  LABELS ({})", format_list_comma!(labels))?;
         }
 
         if !self.annotations.is_empty() {
             let annotations = self.annotations.kv_pairs();
-            writeln!(f, "ANNOTATIONS ({})", format_list_comma!(annotations))?;
+            writeln!(f, "  ANNOTATIONS ({})", format_list_comma!(annotations))?;
         }
 
         if !self.channels.is_empty() {
-            writeln!(f, "NOTIFY(")?;
-            write!(f, "{}", format_list_indent!(self.channels))?;
-            write!(f, ")")?;
+            writeln!(f, "  NOTIFY(")?;
+            for channel in self.channels.iter() {
+                writeln!(f, "  {},", format_indent!(channel))?;
+            }
+            write!(f, "  )")?;
         }
 
         Ok(())
@@ -123,7 +125,10 @@ ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) E
 LABELS (label_name=label_val)
 ANNOTATIONS (annotation_name=annotation_val)
 NOTIFY
-(WEBHOOK alert_manager URL 'http://127.0.0.1:9093' WITH (timeout='1m'))"#;
+(
+WEBHOOK alert_manager1 URL 'http://127.0.0.1:9093' WITH (timeout='1m'),
+WEBHOOK alert_manager2 URL 'http://127.0.0.1:9093' WITH (timeout='1m')
+)"#;
 
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -135,11 +140,13 @@ NOTIFY
         };
         let formatted = format!("{}", trigger);
         let expected = r#"CREATE TRIGGER IF NOT EXISTS cpu_monitor
-ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
-LABELS (label_name = 'label_val')
-ANNOTATIONS (annotation_name = 'annotation_val')
-NOTIFY(
-  WEBHOOK alert_manager URL 'http://127.0.0.1:9093' WITH (timeout = '1m'))"#;
+  ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '1day 5 minute'::INTERVAL
+  LABELS (label_name = 'label_val')
+  ANNOTATIONS (annotation_name = 'annotation_val')
+  NOTIFY(
+    WEBHOOK alert_manager1 URL 'http://127.0.0.1:9093' WITH (timeout = '1m'),
+    WEBHOOK alert_manager2 URL 'http://127.0.0.1:9093' WITH (timeout = '1m'),
+  )"#;
         assert_eq!(expected, formatted);
     }
 }
