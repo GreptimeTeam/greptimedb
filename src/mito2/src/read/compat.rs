@@ -90,7 +90,6 @@ pub(crate) enum CompatBatch {
     /// Adapter for primary key format.
     PrimaryKey(PrimaryKeyCompatBatch),
     /// Adapter for flat format.
-    #[allow(dead_code)]
     Flat(FlatCompatBatch),
 }
 
@@ -104,7 +103,6 @@ impl CompatBatch {
     }
 
     /// Returns the inner flat batch adapter if this is a Flat format.
-    #[allow(dead_code)]
     pub(crate) fn as_flat(&self) -> Option<&FlatCompatBatch> {
         match self {
             CompatBatch::Flat(batch) => Some(batch),
@@ -186,7 +184,6 @@ pub(crate) fn has_same_columns_and_pk_encoding(
 }
 
 /// A helper struct to adapt schema of the batch to an expected schema.
-#[allow(dead_code)]
 pub(crate) struct FlatCompatBatch {
     /// Indices to convert actual fields to expect fields.
     index_or_defaults: Vec<IndexOrDefault>,
@@ -286,7 +283,6 @@ impl FlatCompatBatch {
     }
 
     /// Make columns of the `batch` compatible.
-    #[allow(dead_code)]
     pub(crate) fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
         let len = batch.num_rows();
         let columns = self
