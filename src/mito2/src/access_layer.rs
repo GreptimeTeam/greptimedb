@@ -51,6 +51,7 @@ pub struct Metrics {
     pub index_update: Duration,
     pub index_finish: Duration,
     pub close: Duration,
+    pub num_series: usize,
 }
 
 impl Metrics {

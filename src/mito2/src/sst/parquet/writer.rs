@@ -163,6 +163,7 @@ where
         let write_format =
             WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
+        let mut last_key = None;
 
         while let Some(res) = self
             .write_next_batch(&mut source, &write_format, opts, metrics)
@@ -171,6 +172,15 @@ where
         {
             match res {
                 Ok(mut batch) => {
+                    if let Some(last) = &last_key {
+                        if last != batch.primary_key() {
+                            metrics.num_series += 1;
+                            last_key = Some(batch.primary_key().to_vec());
+                        }
+                    } else {
+                        metrics.num_series += 1;
+                    }
+
                     stats.update(&batch);
                     let index_start = Instant::now();
                     self.get_or_create_indexer().await.update(&mut batch).await;
