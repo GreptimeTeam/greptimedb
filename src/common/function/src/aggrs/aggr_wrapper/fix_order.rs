@@ -122,7 +122,7 @@ impl TreeNodeRewriter for FixOrderingRewriter {
 
             Ok(Transformed::yes(node))
         } else {
-            Ok(Transformed::yes(LogicalPlan::Aggregate(aggregate)))
+            Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)))
         }
     }
 }
