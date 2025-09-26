@@ -184,9 +184,9 @@ create table t (
     val double,
 )
 PARTITION ON COLUMNS (host) (
-    host < '550-A',
-    host >= '550-A' AND host < '550-W',
-    host >= '550-W'
+    host < 'b',
+    host >= 'b' AND host < 'd',
+    host >= 'd'
 );
 
 Affected Rows: 0
@@ -498,9 +498,9 @@ Affected Rows: 0
 
 CREATE TABLE phy (ts timestamp time index, val double, host string primary key)
 PARTITION ON COLUMNS (host) (
-    host < '550-A',
-    host >= '550-A' AND host < '550-W',
-    host >= '550-W'
+    host < 'b',
+    host >= 'b' AND host < 'd',
+    host >= 'd'
 ) engine=metric with ("physical_metric_table" = "");
 
 Affected Rows: 0
