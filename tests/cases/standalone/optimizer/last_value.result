@@ -20,6 +20,47 @@ insert into t values
 
 Affected Rows: 9
 
+select
+    last_value(host order by ts) as ordered_host,
+    last_value(not_pk order by ts),
+    last_value(val order by ts)
+from t
+group by host
+order by ordered_host;
+
++--------------+-----------------------------------------------------+--------------------------------------------------+
+| ordered_host | last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST] | last_value(t.val) ORDER BY [t.ts ASC NULLS LAST] |
++--------------+-----------------------------------------------------+--------------------------------------------------+
+| a            | 🌓                                                  | 7.0                                              |
+| b            | 🌒                                                  | 6.0                                              |
+| c            | 🌔                                                  | 8.0                                              |
+| d            | 🌕                                                  | 9.0                                              |
++--------------+-----------------------------------------------------+--------------------------------------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+explain select
+        last_value(host order by ts),
+        last_value(not_pk order by ts),
+        last_value(val order by ts)
+    from t
+    group by host;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]_|
+|_|_Aggregate: groupBy=[[t.host]], aggr=[[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]]] |
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
@@ -51,6 +92,59 @@ explain analyze
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
++-+-+-+
+
+select last_value(ts order by ts) from t;
+
++-------------------------------------------------+
+| last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST] |
++-------------------------------------------------+
+| 1970-01-01T00:00:00.008                         |
++-------------------------------------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+explain select last_value(ts order by ts) from t;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]_|
+|_|_Aggregate: groupBy=[[]], aggr=[[last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]]] |
+|_|_TableScan: t_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze
+    select last_value(ts order by ts) from t;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[last_value(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow" REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
 +-+-+-+
 
 drop table t;

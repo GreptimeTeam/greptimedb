@@ -81,3 +81,50 @@ drop schema "AnotherSchema";
 
 Affected Rows: 0
 
+create table metric (ts timestamp(3) time index, `AbCdE` string primary key, val double);
+
+Affected Rows: 0
+
+insert into metric values
+    (0, 'host1', 1),
+    (5000, 'host1', 2),
+    (10000, 'host1', 3),
+    (0, 'host2', 4),
+    (5000, 'host2', 5),
+    (10000, 'host2', 6);
+
+Affected Rows: 6
+
+-- which is actually group by nothing (invalid label name)
+tql eval (0,10,'5s') sum by (abcde) (metric);
+
++---------------------+-----------------+
+| ts                  | sum(metric.val) |
++---------------------+-----------------+
+| 1970-01-01T00:00:00 | 5.0             |
+| 1970-01-01T00:00:05 | 7.0             |
+| 1970-01-01T00:00:10 | 9.0             |
++---------------------+-----------------+
+
+tql eval (0,10,'5s') sum by (AbCdE) (metric);
+
++-------+---------------------+-----------------+
+| AbCdE | ts                  | sum(metric.val) |
++-------+---------------------+-----------------+
+| host1 | 1970-01-01T00:00:00 | 1.0             |
+| host1 | 1970-01-01T00:00:05 | 2.0             |
+| host1 | 1970-01-01T00:00:10 | 3.0             |
+| host2 | 1970-01-01T00:00:00 | 4.0             |
+| host2 | 1970-01-01T00:00:05 | 5.0             |
+| host2 | 1970-01-01T00:00:10 | 6.0             |
++-------+---------------------+-----------------+
+
+-- not allowed by the parser
+tql eval (0,10,'5s') sum by (`AbCdE`) (metric);
+
+Error: 2000(InvalidSyntax), invalid promql query
+
+drop table metric;
+
+Affected Rows: 0
+

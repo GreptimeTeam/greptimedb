@@ -386,6 +386,35 @@ select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 |_|_|
 +-+-+
 
+select * from logical_table_4;
+
++-----------------------+-----+------+-------------------+---------------------+
+| another_partition_key | cpu | host | one_partition_key | ts                  |
++-----------------------+-----+------+-------------------+---------------------+
+|                       | 1.0 |      |                   | 2023-01-01T00:00:00 |
+|                       | 2.0 |      |                   | 2023-01-01T00:00:01 |
+|                       | 3.0 |      |                   | 2023-01-01T00:00:02 |
++-----------------------+-----+------+-------------------+---------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN select * from logical_table_4;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: logical_table_4.another_partition_key, logical_table_4.cpu, logical_table_4.host, logical_table_4.one_partition_key, logical_table_4.ts |
+|_|_TableScan: logical_table_4_|
+|_| ]]_|
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 drop table logical_table_2;
 
 Affected Rows: 0
