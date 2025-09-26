@@ -480,20 +480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrow-pg"
-version = "0.5.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=412dad6b88ca83d11498338896044319ddac676c#412dad6b88ca83d11498338896044319ddac676c"
-dependencies = [
- "bytes",
- "chrono",
- "datafusion",
- "futures",
- "pgwire",
- "postgres-types",
- "rust_decimal",
-]
-
-[[package]]
 name = "arrow-row"
 version = "56.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1465,7 +1451,7 @@ dependencies = [
  "common-workload",
  "dashmap",
  "datafusion",
- "datafusion-postgres",
+ "datafusion-pg-catalog",
  "datatypes",
  "futures",
  "futures-util",
@@ -2197,8 +2183,8 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions-aggregate-common",
+ "datafusion-pg-catalog",
  "datafusion-physical-expr",
- "datafusion-postgres",
  "datatypes",
  "derive_more",
  "futures",
@@ -3728,6 +3714,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-pg-catalog"
+version = "0.9.0"
+source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=3d1b7c7d5b82dd49bafc2803259365e633f654fa#3d1b7c7d5b82dd49bafc2803259365e633f654fa"
+dependencies = [
+ "async-trait",
+ "datafusion",
+ "futures",
+ "log",
+ "postgres-types",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-physical-expr"
 version = "49.0.0"
 source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7d5214512740b4dfb742b6b3d91ed9affcc2c9d0#7d5214512740b4dfb742b6b3d91ed9affcc2c9d0"
@@ -3808,28 +3807,6 @@ dependencies = [
  "parking_lot 0.12.4",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "datafusion-postgres"
-version = "0.9.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=412dad6b88ca83d11498338896044319ddac676c#412dad6b88ca83d11498338896044319ddac676c"
-dependencies = [
- "arrow-pg",
- "async-trait",
- "bytes",
- "chrono",
- "datafusion",
- "futures",
- "getset",
- "log",
- "pgwire",
- "postgres-types",
- "rust_decimal",
- "rustls-pemfile",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
@@ -5312,18 +5289,6 @@ dependencies = [
  "r-efi",
  "wasi 0.14.2+wasi-0.2.4",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "getset"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf0fc11e47561d47397154977bc219f4cf809b2974facc3ccb3b89e2436f912"
-dependencies = [
- "proc-macro-error2",
- "proc-macro2",
- "quote",
- "syn 2.0.104",
 ]
 
 [[package]]
@@ -9216,7 +9181,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddf403a6ee31cf7f2217b2bd8447cb13dbb6c268d7e81501bc78a4d3daafd294"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "bytes",
  "chrono",
  "derive-new",
@@ -9229,12 +9193,10 @@ dependencies = [
  "ring",
  "rust_decimal",
  "rustls-pki-types",
- "stringprep",
  "thiserror 2.0.12",
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "x509-certificate 0.24.0",
 ]
 
 [[package]]
@@ -11601,7 +11563,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
- "datafusion-postgres",
+ "datafusion-pg-catalog",
  "datatypes",
  "derive_builder 0.20.2",
  "futures",
@@ -13421,7 +13383,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-rustls",
- "x509-certificate 0.23.1",
+ "x509-certificate",
 ]
 
 [[package]]
@@ -15048,25 +15010,6 @@ name = "x509-certificate"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66534846dec7a11d7c50a74b7cdb208b9a581cad890b7866430d438455847c85"
-dependencies = [
- "bcder",
- "bytes",
- "chrono",
- "der",
- "hex",
- "pem",
- "ring",
- "signature",
- "spki",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "x509-certificate"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e57b9f8bcae7c1f36479821ae826d75050c60ce55146fd86d3553ed2573e2762"
 dependencies = [
  "bcder",
  "bytes",
