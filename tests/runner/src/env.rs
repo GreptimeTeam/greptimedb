@@ -67,12 +67,28 @@ pub enum WalConfig {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ServiceProvider {
+    Create,
+    External(String),
+}
+
+impl From<&str> for ServiceProvider {
+    fn from(value: &str) -> Self {
+        if value.is_empty() {
+            Self::Create
+        } else {
+            Self::External(value.to_string())
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
-    pub setup_pg: bool,
-    pub setup_mysql: bool,
+    pub(crate) setup_pg: Option<ServiceProvider>,
+    pub(crate) setup_mysql: Option<ServiceProvider>,
 }
 
 #[derive(Clone)]
@@ -91,6 +107,8 @@ pub struct Env {
     pull_version_on_need: bool,
     /// Store address for metasrv metadata
     store_config: StoreConfig,
+    /// Extra command line arguments when starting GreptimeDB binaries.
+    extra_args: Vec<String>,
 }
 
 #[async_trait]
@@ -126,6 +144,7 @@ impl Env {
         pull_version_on_need: bool,
         bins_dir: Option<PathBuf>,
         store_config: StoreConfig,
+        extra_args: Vec<String>,
     ) -> Self {
         Self {
             sqlness_home: data_home,
@@ -138,6 +157,7 @@ impl Env {
                 bins_dir.clone().unwrap_or(util::get_binary_dir("debug")),
             )]))),
             store_config,
+            extra_args,
         }
     }
 
@@ -524,7 +544,7 @@ impl Env {
 
     /// Setup PostgreSql if needed.
     fn setup_pg(&self) {
-        if self.store_config.setup_pg {
+        if matches!(self.store_config.setup_pg, Some(ServiceProvider::Create)) {
             let client_ports = self
                 .store_config
                 .store_addrs
@@ -538,7 +558,7 @@ impl Env {
 
     /// Setup MySql if needed.
     async fn setup_mysql(&self) {
-        if self.store_config.setup_mysql {
+        if matches!(self.store_config.setup_mysql, Some(ServiceProvider::Create)) {
             let client_ports = self
                 .store_config
                 .store_addrs
@@ -585,6 +605,10 @@ impl Env {
             .lock()
             .unwrap()
             .insert(util::get_binary_dir("debug"));
+    }
+
+    pub(crate) fn extra_args(&self) -> &Vec<String> {
+        &self.extra_args
     }
 }
 
