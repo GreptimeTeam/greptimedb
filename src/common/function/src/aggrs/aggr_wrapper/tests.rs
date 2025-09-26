@@ -704,12 +704,14 @@ async fn test_last_value_order_by_udaf() {
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
     // evaluate the state function
-    let input = TimestampMillisecondArray::from(vec![Some(1), Some(2), None, Some(3)]);
-    // notice since sort exist, the input must have two columns, one for the value, one for the ordering
-    let values = vec![
-        Arc::new(input.clone()) as arrow::array::ArrayRef,
-        Arc::new(input) as arrow::array::ArrayRef,
-    ];
+    let input = Arc::new(TimestampMillisecondArray::from(vec![
+        Some(1),
+        Some(2),
+        None,
+        Some(3),
+    ])) as arrow::array::ArrayRef;
+    // notice since sorting exist, the input must have two columns, one for the value, one for the ordering
+    let values = vec![input.clone(), input];
 
     state_accum.update_batch(&values).unwrap();
 
