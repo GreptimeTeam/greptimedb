@@ -68,11 +68,15 @@ pub trait UserProvider: Send + Sync {
 /// Key is username, value is (password, permission_mode)
 pub type UserInfoMap = HashMap<String, (Vec<u8>, PermissionMode)>;
 
-fn load_credential_from_file(filepath: &str) -> Result<Option<UserInfoMap>> {
+fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
     // check valid path
     let path = Path::new(filepath);
     if !path.exists() {
-        return Ok(None);
+        return InvalidConfigSnafu {
+            value: filepath.to_string(),
+            msg: "UserProvider file must exist",
+        }
+        .fail();
     }
 
     ensure!(
@@ -109,7 +113,7 @@ fn load_credential_from_file(filepath: &str) -> Result<Option<UserInfoMap>> {
         }
     );
 
-    Ok(Some(credential))
+    Ok(credential)
 }
 
 /// Parse a line of credential in the format of `username=password` or `username:permission_mode=password`

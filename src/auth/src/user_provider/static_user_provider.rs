@@ -35,11 +35,7 @@ impl StaticUserProvider {
         })?;
         match mode {
             "file" => {
-                let users = load_credential_from_file(content)?
-                    .context(InvalidConfigSnafu {
-                        value: content.to_string(),
-                        msg: "StaticFileUserProvider must be a valid file path",
-                    })?;
+                let users = load_credential_from_file(content)?;
                 Ok(StaticUserProvider { users })
             }
             "cmd" => content
