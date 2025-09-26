@@ -99,9 +99,29 @@ pub struct StatementExecutor {
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
+    #[cfg(feature = "enterprise")]
+    trigger_querier: Option<TriggerQuerierRef>,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
+
+/// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait TriggerQuerier {
+    // Query the `SHOW CREATE TRIGGER` statement for the given trigger.
+    async fn show_create_trigger(
+        &self,
+        catalog: &str,
+        trigger: &str,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierRef = Arc<dyn TriggerQuerier + Send + Sync>;
 
 impl StatementExecutor {
     #[allow(clippy::too_many_arguments)]
@@ -126,7 +146,15 @@ impl StatementExecutor {
             cache_invalidator,
             inserter,
             process_manager,
+            #[cfg(feature = "enterprise")]
+            trigger_querier: None,
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
+        self.trigger_querier = Some(querier);
+        self
     }
 
     #[cfg(feature = "testing")]
@@ -379,6 +407,8 @@ impl StatementExecutor {
             }
             Statement::ShowCreateFlow(show) => self.show_create_flow(show, query_ctx).await,
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
             Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::ShowColumns(show_columns) => {

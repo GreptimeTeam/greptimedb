@@ -108,6 +108,8 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // SHOW CREATE FLOW
     ShowCreateFlow(ShowCreateFlow),
+    #[cfg(feature = "enterprise")]
+    ShowCreateTrigger(crate::statements::show::trigger::ShowCreateTrigger),
     /// SHOW FLOWS
     ShowFlows(ShowFlows),
     // SHOW TRIGGERS
@@ -180,6 +182,8 @@ impl Statement {
             | Statement::Tql(_) => true,
 
             #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(_) => true,
+            #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
 
             // Write operations
@@ -246,6 +250,8 @@ impl Display for Statement {
             Statement::ShowRegion(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(s) => s.fmt(f),

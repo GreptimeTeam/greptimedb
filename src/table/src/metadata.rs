@@ -101,6 +101,16 @@ impl std::fmt::Display for TableType {
     }
 }
 
+impl From<TableType> for datafusion::datasource::TableType {
+    fn from(t: TableType) -> datafusion::datasource::TableType {
+        match t {
+            TableType::Base => datafusion::datasource::TableType::Base,
+            TableType::View => datafusion::datasource::TableType::View,
+            TableType::Temporary => datafusion::datasource::TableType::Temporary,
+        }
+    }
+}
+
 /// Identifier of the table.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableIdent {

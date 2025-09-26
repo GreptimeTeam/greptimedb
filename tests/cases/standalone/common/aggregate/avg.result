@@ -1,0 +1,102 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_avg.test
+-- Test AVG aggregate function
+-- scalar average
+SELECT AVG(3);
+
++---------------+
+| avg(Int64(3)) |
++---------------+
+| 3.0           |
++---------------+
+
+-- FIXME(dennis): unsupported type
+-- SELECT AVG(NULL);
+SELECT AVG(3::SMALLINT), AVG(NULL::SMALLINT);
+
++---------------+-----------+
+| avg(Int64(3)) | avg(NULL) |
++---------------+-----------+
+| 3.0           |           |
++---------------+-----------+
+
+SELECT AVG(3::DOUBLE), AVG(NULL::DOUBLE);
+
++---------------+-----------+
+| avg(Int64(3)) | avg(NULL) |
++---------------+-----------+
+| 3.0           |           |
++---------------+-----------+
+
+-- test average with table
+CREATE TABLE integers(i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (1, 1000), (2, 2000), (3, 3000);
+
+Affected Rows: 3
+
+SELECT AVG(i), AVG(1), AVG(DISTINCT i), AVG(NULL) FROM integers;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: The function \"avg\" does not support inputs of type Null." No function matches the given name and argument types 'avg(Null)'. You might need to add explicit type casts.
+	Candidate functions:
+	avg(UserDefined)
+
+SELECT AVG(i) FROM integers WHERE i > 100;
+
++-----------------+
+| avg(integers.i) |
++-----------------+
+|                 |
++-----------------+
+
+-- empty average
+CREATE TABLE vals(i INTEGER, j DOUBLE, k BIGINT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO vals VALUES (NULL, NULL, NULL, 1000);
+
+Affected Rows: 1
+
+SELECT AVG(i), AVG(j), AVG(k) FROM vals;
+
++-------------+-------------+-------------+
+| avg(vals.i) | avg(vals.j) | avg(vals.k) |
++-------------+-------------+-------------+
+|             |             |             |
++-------------+-------------+-------------+
+
+-- test with mixed values
+DROP TABLE vals;
+
+Affected Rows: 0
+
+CREATE TABLE vals(i INTEGER, j DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO vals VALUES (1, 1.5, 1000), (2, 2.5, 2000), (3, 3.5, 3000), (NULL, NULL, 4000);
+
+Affected Rows: 4
+
+SELECT AVG(i), AVG(j) FROM vals;
+
++-------------+-------------+
+| avg(vals.i) | avg(vals.j) |
++-------------+-------------+
+| 2.0         | 2.5         |
++-------------+-------------+
+
+-- FIXME(dennis): AVG(DISTINCT) not supported
+-- https://github.com/apache/datafusion/issues/2408
+-- SELECT AVG(DISTINCT i), AVG(DISTINCT j) FROM vals;
+-- cleanup
+DROP TABLE integers;
+
+Affected Rows: 0
+
+DROP TABLE vals;
+
+Affected Rows: 0
+

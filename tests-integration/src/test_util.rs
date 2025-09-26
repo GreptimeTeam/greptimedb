@@ -17,9 +17,10 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use auth::UserProviderRef;
+use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use common_base::Plugins;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -373,6 +374,18 @@ async fn setup_standalone_instance(
         .await
 }
 
+async fn setup_standalone_instance_with_plugins(
+    test_name: &str,
+    store_type: StorageType,
+    plugins: Plugins,
+) -> GreptimeDbStandalone {
+    GreptimeDbStandaloneBuilder::new(test_name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .build()
+        .await
+}
+
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -406,7 +419,13 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (Router, TestGuard) {
-    let instance = setup_standalone_instance(name, store_type).await;
+    let plugins = Plugins::new();
+    if let Some(user_provider) = user_provider.clone() {
+        plugins.insert::<UserProviderRef>(user_provider.clone());
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+    }
+
+    let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
 
     create_test_table(instance.fe_instance(), "demo").await;
 
@@ -587,7 +606,13 @@ pub async fn setup_mysql_server_with_user_provider(
     name: &str,
     user_provider: Option<UserProviderRef>,
 ) -> (TestGuard, Arc<Box<dyn Server>>) {
-    let instance = setup_standalone_instance(name, store_type).await;
+    let plugins = Plugins::new();
+    if let Some(user_provider) = user_provider.clone() {
+        plugins.insert::<UserProviderRef>(user_provider.clone());
+        plugins.insert::<PermissionCheckerRef>(DefaultPermissionChecker::arc());
+    }
+
+    let instance = setup_standalone_instance_with_plugins(name, store_type, plugins).await;
 
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)

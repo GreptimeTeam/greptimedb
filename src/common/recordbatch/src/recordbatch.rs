@@ -17,6 +17,9 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datafusion_common::arrow::array::ArrayRef;
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
 use datatypes::arrow::array::RecordBatchOptions;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
@@ -28,8 +31,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::DfRecordBatch;
 use crate::error::{
-    self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
-    Result,
+    self, ArrowComputeSnafu, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu,
+    ProjectArrowRecordBatchSnafu, Result,
 };
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -49,6 +52,15 @@ impl RecordBatch {
         let columns: Vec<_> = columns.into_iter().collect();
         let arrow_arrays = columns.iter().map(|v| v.to_arrow_array()).collect();
 
+        // Casting the arrays here to match the schema, is a temporary solution to support Arrow's
+        // view array types (`StringViewArray` and `BinaryViewArray`).
+        // As to "support": the arrays here are created from vectors, which do not have types
+        // corresponding to view arrays. What we can do is to only cast them.
+        // As to "temporary": we are planing to use Arrow's RecordBatch directly in the read path.
+        // the casting here will be removed in the end.
+        // TODO(LFC): Remove the casting here once `Batch` is no longer used.
+        let arrow_arrays = Self::cast_view_arrays(schema.arrow_schema(), arrow_arrays)?;
+
         let df_record_batch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
 
@@ -57,6 +69,24 @@ impl RecordBatch {
             columns,
             df_record_batch,
         })
+    }
+
+    fn cast_view_arrays(
+        schema: &ArrowSchemaRef,
+        mut arrays: Vec<ArrayRef>,
+    ) -> Result<Vec<ArrayRef>> {
+        for (f, a) in schema.fields().iter().zip(arrays.iter_mut()) {
+            let expected = f.data_type();
+            let actual = a.data_type();
+            if matches!(
+                (expected, actual),
+                (ArrowDataType::Utf8View, ArrowDataType::Utf8)
+                    | (ArrowDataType::BinaryView, ArrowDataType::Binary)
+            ) {
+                *a = compute::cast(a, expected).context(ArrowComputeSnafu)?;
+            }
+        }
+        Ok(arrays)
     }
 
     /// Create an empty [`RecordBatch`] from `schema`.

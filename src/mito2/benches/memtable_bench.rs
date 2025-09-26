@@ -455,11 +455,15 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
         }
 
         // Pre-create BulkIterContext
-        let context = Arc::new(BulkIterContext::new(
-            metadata.clone(),
-            &None, // No projection
-            None,  // No predicate
-        ));
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
 
         group.bench_with_input(
             format!("{}_parts_1024_hosts", num_parts),
@@ -519,11 +523,15 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     group.bench_function("4096_rows_with_hostname_filter", |b| {
         b.iter(|| {
             // Create context for BulkPartRecordBatchIter with predicate
-            let context = Arc::new(BulkIterContext::new(
-                metadata.clone(),
-                &None,                   // No projection
-                Some(predicate.clone()), // With hostname filter
-            ));
+            let context = Arc::new(
+                BulkIterContext::new(
+                    metadata.clone(),
+                    None,                    // No projection
+                    Some(predicate.clone()), // With hostname filter
+                    false,
+                )
+                .unwrap(),
+            );
 
             // Create and iterate over BulkPartRecordBatchIter with filter
             let iter =
@@ -540,11 +548,15 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     group.bench_function("4096_rows_no_filter", |b| {
         b.iter(|| {
             // Create context for BulkPartRecordBatchIter without predicate
-            let context = Arc::new(BulkIterContext::new(
-                metadata.clone(),
-                &None, // No projection
-                None,  // No predicate
-            ));
+            let context = Arc::new(
+                BulkIterContext::new(
+                    metadata.clone(),
+                    None, // No projection
+                    None, // No predicate
+                    false,
+                )
+                .unwrap(),
+            );
 
             // Create and iterate over BulkPartRecordBatchIter
             let iter = BulkPartRecordBatchIter::new(record_batch_no_filter.clone(), context, None);

@@ -27,13 +27,13 @@ pub(crate) struct PGVersionFunction;
 
 impl fmt::Display for PGVersionFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, crate::pg_catalog_func_fullname!("VERSION"))
+        write!(f, "pg_catalog.VERSION")
     }
 }
 
 impl Function for PGVersionFunction {
     fn name(&self) -> &str {
-        crate::pg_catalog_func_fullname!("version")
+        "pg_catalog.version"
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {

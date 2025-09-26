@@ -19,6 +19,7 @@ mod data;
 mod database;
 pub mod error;
 mod metadata;
+pub mod utils;
 
 use async_trait::async_trait;
 use clap::Parser;

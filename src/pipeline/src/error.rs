@@ -584,12 +584,6 @@ pub enum Error {
     TableSuffixRequiredForDispatcherRule,
     #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
-    #[snafu(display("Reached max nested levels when flattening JSON object: {max_nested_levels}"))]
-    ReachedMaxNestedLevels {
-        max_nested_levels: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Pipeline table not found"))]
     PipelineTableNotFound {
@@ -887,7 +881,6 @@ impl ErrorExt for Error {
             | FieldRequiredForDispatcher
             | TableSuffixRequiredForDispatcherRule
             | ValueRequiredForDispatcherRule
-            | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
             | CompileVrl { .. }

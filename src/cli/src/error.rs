@@ -313,6 +313,14 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to get current directory"))]
+    GetCurrentDir {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -362,7 +370,9 @@ impl ErrorExt for Error {
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
-            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. }
+            | Error::BuildCacheRegistry { .. }
+            | Error::GetCurrentDir { .. } => StatusCode::Internal,
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,

@@ -16,14 +16,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_error::ext::BoxedError;
-use common_function::function::{FunctionContext, FunctionRef};
+use common_function::function::FunctionRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion_expr::{Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
 use substrait::substrait_proto_df as substrait_proto;
@@ -31,7 +29,7 @@ use substrait_proto::proto::extensions::SimpleExtensionDeclaration;
 use substrait_proto::proto::extensions::simple_extension_declaration::MappingType;
 
 use crate::adapter::FlownodeContext;
-use crate::error::{Error, NotImplementedSnafu, UnexpectedSnafu};
+use crate::error::{Error, NotImplementedSnafu};
 use crate::expr::{TUMBLE_END, TUMBLE_START};
 /// a simple macro to generate a not implemented error
 macro_rules! not_impl_err {
@@ -148,19 +146,6 @@ impl common_function::function::Function for TumbleFunction {
 
     fn signature(&self) -> Signature {
         Signature::variadic_any(Volatility::Immutable)
-    }
-
-    fn eval(
-        &self,
-        _func_ctx: &FunctionContext,
-        _columns: &[datatypes::prelude::VectorRef],
-    ) -> common_query::error::Result<datatypes::prelude::VectorRef> {
-        UnexpectedSnafu {
-            reason: "Tumbler function is not implemented for datafusion executor",
-        }
-        .fail()
-        .map_err(BoxedError::new)
-        .context(common_query::error::ExecuteSnafu)
     }
 }
 
