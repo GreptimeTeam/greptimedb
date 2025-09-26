@@ -379,11 +379,13 @@ impl FlatCompatBatch {
         // Since this is for compaction, we always read all columns.
         let actual_schema: Vec<_> = actual
             .field_columns()
+            .chain([actual.time_index_column()])
             .map(|col| (col.column_id, col.column_schema.data_type.clone()))
             .collect();
         let expect_schema: Vec<_> = mapper
             .metadata()
             .field_columns()
+            .chain([mapper.metadata().time_index_column()])
             .map(|col| (col.column_id, col.column_schema.data_type.clone()))
             .collect();
 
