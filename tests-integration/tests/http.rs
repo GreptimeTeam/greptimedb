@@ -1594,6 +1594,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",
+        "enable_read_cache =",
     ];
 
     input

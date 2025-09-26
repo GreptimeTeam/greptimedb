@@ -274,6 +274,9 @@ type = "File"
 ## @toml2docs:none-default
 #+ cache_path = ""
 
+## Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage.
+#+ enable_read_cache = true
+
 ## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default
 cache_capacity = "5GiB"

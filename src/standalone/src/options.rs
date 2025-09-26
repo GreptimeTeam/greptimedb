@@ -155,4 +155,15 @@ impl StandaloneOptions {
             ..Default::default()
         }
     }
+
+    /// Sanitize the `StandaloneOptions` to ensure the config is valid.
+    pub fn sanitize(&mut self) {
+        if self.storage.is_object_storage() {
+            self.storage
+                .store
+                .cache_config_mut()
+                .unwrap()
+                .sanitize(&self.storage.data_home);
+        }
+    }
 }

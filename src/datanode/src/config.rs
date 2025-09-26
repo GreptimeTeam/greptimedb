@@ -33,8 +33,6 @@ use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
-
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -105,6 +103,14 @@ impl DatanodeOptions {
     /// Sanitize the `DatanodeOptions` to ensure the config is valid.
     pub fn sanitize(&mut self) {
         sanitize_workload_types(&mut self.workload_types);
+
+        if self.storage.is_object_storage() {
+            self.storage
+                .store
+                .cache_config_mut()
+                .unwrap()
+                .sanitize(&self.storage.data_home);
+        }
     }
 }
 
@@ -241,5 +247,23 @@ mod tests {
             }
             _ => panic!("Expected S3 config"),
         }
+    }
+
+    #[test]
+    fn test_cache_config() {
+        let toml_str = r#"
+            [storage]
+            data_home = "test_data_home"
+            type = "S3"
+            [storage.cache_config]
+            enable_read_cache = true
+        "#;
+        let mut opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
+        opts.sanitize();
+        assert!(opts.storage.store.cache_config().unwrap().enable_read_cache);
+        assert_eq!(
+            opts.storage.store.cache_config().unwrap().cache_path,
+            "test_data_home"
+        );
     }
 }

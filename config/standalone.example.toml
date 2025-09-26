@@ -361,6 +361,9 @@ data_home = "./greptimedb_data"
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
 
+## Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage.
+#+ enable_read_cache = true
+
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
 ## A local file directory, defaults to `{data_home}`. An empty string means disabling.
 ## @toml2docs:none-default

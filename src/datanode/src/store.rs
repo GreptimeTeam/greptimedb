@@ -14,21 +14,19 @@
 
 //! object storage utilities
 
-use std::path::Path;
 use std::sync::Arc;
 
 use common_telemetry::info;
+use object_store::config::ObjectStorageCacheConfig;
 use object_store::factory::new_raw_object_store;
 use object_store::layers::LruCacheLayer;
 use object_store::services::Fs;
 use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, with_retry_layers};
-use object_store::{
-    ATOMIC_WRITE_DIR, Access, OLD_ATOMIC_WRITE_DIR, ObjectStore, ObjectStoreBuilder,
-};
+use object_store::{ATOMIC_WRITE_DIR, Access, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::config::{DEFAULT_OBJECT_STORE_CACHE_SIZE, ObjectStoreConfig};
-use crate::error::{self, CreateDirSnafu, Result};
+use crate::config::ObjectStoreConfig;
+use crate::error::{self, Result};
 
 pub(crate) async fn new_object_store_without_cache(
     store: &ObjectStoreConfig,
@@ -58,11 +56,15 @@ pub(crate) async fn new_object_store(
         .context(error::ObjectStoreSnafu)?;
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if store.is_object_storage() {
-        let object_store = if let Some(cache_layer) = build_cache_layer(&store, data_home).await? {
-            // Adds cache layer
-            object_store.layer(cache_layer)
-        } else {
-            object_store
+        let object_store = {
+            // It's safe to unwrap here because we already checked above.
+            let cache_config = store.cache_config().unwrap();
+            if let Some(cache_layer) = build_cache_layer(cache_config).await? {
+                // Adds cache layer
+                object_store.layer(cache_layer)
+            } else {
+                object_store
+            }
         };
 
         // Adds retry layer
@@ -76,94 +78,33 @@ pub(crate) async fn new_object_store(
 }
 
 async fn build_cache_layer(
-    store_config: &ObjectStoreConfig,
-    data_home: &str,
+    cache_config: &ObjectStorageCacheConfig,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
-    let (name, mut cache_path, cache_capacity) = match store_config {
-        ObjectStoreConfig::S3(s3_config) => {
-            let path = s3_config.cache.cache_path.clone();
-            let name = &s3_config.name;
-            let capacity = s3_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Oss(oss_config) => {
-            let path = oss_config.cache.cache_path.clone();
-            let name = &oss_config.name;
-            let capacity = oss_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Azblob(azblob_config) => {
-            let path = azblob_config.cache.cache_path.clone();
-            let name = &azblob_config.name;
-            let capacity = azblob_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        ObjectStoreConfig::Gcs(gcs_config) => {
-            let path = gcs_config.cache.cache_path.clone();
-            let name = &gcs_config.name;
-            let capacity = gcs_config
-                .cache
-                .cache_capacity
-                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (name, path, capacity)
-        }
-        _ => unreachable!("Already checked above"),
-    };
-
-    // Enable object cache by default
-    // Set the cache_path to be `${data_home}` by default
-    // if it's not present
-    if cache_path.is_none() {
-        let read_cache_path = data_home.to_string();
-        tokio::fs::create_dir_all(Path::new(&read_cache_path))
-            .await
-            .context(CreateDirSnafu {
-                dir: &read_cache_path,
-            })?;
-
-        info!(
-            "The object storage cache path is not set for '{}', using the default path: '{}'",
-            name, &read_cache_path
-        );
-
-        cache_path = Some(read_cache_path);
+    // No need to build cache layer if read cache is disabled.
+    if !cache_config.enable_read_cache {
+        return Ok(None);
     }
 
-    if let Some(path) = cache_path.as_ref()
-        && !path.trim().is_empty()
-    {
-        let atomic_temp_dir = join_dir(path, ATOMIC_WRITE_DIR);
-        clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
+    let atomic_temp_dir = join_dir(&cache_config.cache_path, ATOMIC_WRITE_DIR);
+    clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
-        // Compatible code. Remove this after a major release.
-        let old_atomic_temp_dir = join_dir(path, OLD_ATOMIC_WRITE_DIR);
-        clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
+    let cache_store = Fs::default()
+        .root(&cache_config.cache_path)
+        .atomic_write_dir(&atomic_temp_dir)
+        .build()
+        .context(error::BuildCacheStoreSnafu)?;
 
-        let cache_store = Fs::default()
-            .root(path)
-            .atomic_write_dir(&atomic_temp_dir)
-            .build()
-            .context(error::BuildCacheStoreSnafu)?;
+    let cache_layer = LruCacheLayer::new(
+        Arc::new(cache_store),
+        cache_config.cache_capacity.0 as usize,
+    )
+    .context(error::BuildCacheStoreSnafu)?;
+    cache_layer.recover_cache(false).await;
 
-        let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
-            .context(error::BuildCacheStoreSnafu)?;
-        cache_layer.recover_cache(false).await;
-        info!(
-            "Enabled local object storage cache, path: {}, capacity: {}.",
-            path, cache_capacity
-        );
+    info!(
+        "Enabled local object storage cache, path: {}, capacity: {}.",
+        cache_config.cache_path, cache_config.cache_capacity
+    );
 
-        Ok(Some(cache_layer))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(cache_layer))
 }
