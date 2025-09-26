@@ -103,63 +103,9 @@ impl TreeNodeRewriter for FixOrderingRewriter {
 
         // regex to match state udaf name
         for aggr_expr in &mut aggregate.aggr_expr {
-            // first see the aggr node in expr
-            // as it could be nested aggr like alias(aggr(sort))
-
-            // if contained aggr expr have a order by, and the aggr name match the regex
-            // then we need to fix the ordering field of the state udaf
-            // to be the same as the aggr expr
-            let new_aggr_expr = aggr_expr.clone().transform_up(|expr| {
-                let Expr::AggregateFunction(aggregate_function) = expr else {
-                    return Ok(Transformed::no(expr));
-                };
-
-                let Some(old_state_wrapper) = aggregate_function
-                    .func
-                    .inner()
-                    .as_any()
-                    .downcast_ref::<StateWrapper>()
-                else {
-                    return Ok(Transformed::no(Expr::AggregateFunction(aggregate_function)));
-                };
-
-                let mut state_wrapper = old_state_wrapper.clone();
-                if self.is_fix{
-                    // then always fix the ordering field&distinct flag and more
-                    let order_by = aggregate_function.params.order_by.clone();
-                    let ordering_fields: Vec<_> = order_by
-                        .iter()
-                        .map(|sort_expr| {
-                            sort_expr
-                                .expr
-                                .to_field(&aggregate.input.schema())
-                                .map(|(_, f)| f)
-                        })
-                        .collect::<datafusion_common::Result<Vec<_>>>()?;
-                    let distinct = aggregate_function.params.distinct;
-
-                    // fixing up
-                    state_wrapper.ordering = ordering_fields;
-                    state_wrapper.distinct = distinct;
-                } else {
-                    // remove the ordering field & distinct flag
-                    state_wrapper.ordering = vec![];
-                    state_wrapper.distinct = false;
-                }
-
-                debug!(
-                    "FixStateUdafOrderingAnalyzer: fix state udaf from {old_state_wrapper:?} to {:?}",
-                    state_wrapper
-                );
-
-                let mut aggregate_function = aggregate_function;
-
-                aggregate_function.func = Arc::new(AggregateUDF::new_from_impl(state_wrapper));
-
-                Ok(Transformed::yes(Expr::AggregateFunction(
-                    aggregate_function,
-                )))
-            })?;
+            let new_aggr_expr = aggr_expr
+                .clone()
+                .transform_up(|expr| rewrite_expr(expr, &aggregate.input, self.is_fix))?;
 
             if new_aggr_expr.transformed {
                 *aggr_expr = new_aggr_expr.data;
@@ -179,4 +125,65 @@ impl TreeNodeRewriter for FixOrderingRewriter {
             Ok(Transformed::yes(LogicalPlan::Aggregate(aggregate)))
         }
     }
+}
+
+/// first see the aggr node in expr
+/// as it could be nested aggr like alias(aggr(sort))
+/// if contained aggr expr have a order by, and the aggr name match the regex
+/// then we need to fix the ordering field of the state udaf
+/// to be the same as the aggr expr
+fn rewrite_expr(
+    expr: Expr,
+    aggregate_input: &Arc<LogicalPlan>,
+    is_fix: bool,
+) -> Result<Transformed<Expr>, datafusion_common::DataFusionError> {
+    let Expr::AggregateFunction(aggregate_function) = expr else {
+        return Ok(Transformed::no(expr));
+    };
+
+    let Some(old_state_wrapper) = aggregate_function
+        .func
+        .inner()
+        .as_any()
+        .downcast_ref::<StateWrapper>()
+    else {
+        return Ok(Transformed::no(Expr::AggregateFunction(aggregate_function)));
+    };
+
+    let mut state_wrapper = old_state_wrapper.clone();
+    if is_fix {
+        // then always fix the ordering field&distinct flag and more
+        let order_by = aggregate_function.params.order_by.clone();
+        let ordering_fields: Vec<_> = order_by
+            .iter()
+            .map(|sort_expr| {
+                sort_expr
+                    .expr
+                    .to_field(&aggregate_input.schema())
+                    .map(|(_, f)| f)
+            })
+            .collect::<datafusion_common::Result<Vec<_>>>()?;
+        let distinct = aggregate_function.params.distinct;
+
+        // fixing up
+        state_wrapper.ordering = ordering_fields;
+        state_wrapper.distinct = distinct;
+    } else {
+        // remove the ordering field & distinct flag
+        state_wrapper.ordering = vec![];
+        state_wrapper.distinct = false;
+    }
+
+    debug!(
+        "FixStateUdafOrderingAnalyzer: fix state udaf from {old_state_wrapper:?} to {:?}",
+        state_wrapper
+    );
+
+    let mut aggregate_function = aggregate_function;
+
+    aggregate_function.func = Arc::new(AggregateUDF::new_from_impl(state_wrapper));
+
+    Ok(Transformed::yes(Expr::AggregateFunction(
+        aggregate_function,
+    )))
 }
