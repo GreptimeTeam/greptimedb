@@ -312,6 +312,9 @@ impl Command {
             metrics.sum()
         );
 
+        // Print infos
+        println!("  {}: {:?}", "Index".bold(), infos[0].index_metadata);
+
         // Cleanup
         println!("\n{}", "Cleaning up...".yellow());
         object_store.delete(&dst_file_path).await.map_err(|e| {
