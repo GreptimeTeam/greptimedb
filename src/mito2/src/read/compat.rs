@@ -220,67 +220,6 @@ impl FlatCompatBatch {
             return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
         }
 
-        // // Maps column id to the index and data type in the actual schema.
-        // let actual_schema_index: HashMap<_, _> = actual_schema
-        //     .iter()
-        //     .enumerate()
-        //     .map(|(idx, (column_id, data_type))| (*column_id, (idx, data_type)))
-        //     .collect();
-
-        // let mut index_or_defaults = Vec::with_capacity(expect_schema.len());
-        // let mut fields = Vec::with_capacity(expect_schema.len());
-        // for (column_id, expect_data_type) in expect_schema {
-        //     // Safety: expect_schema comes from the same mapper.
-        //     let column_index = mapper.metadata().column_index_by_id(*column_id).unwrap();
-        //     let expect_column = &mapper.metadata().column_metadatas[column_index];
-        //     let column_field = &mapper.metadata().schema.arrow_schema().fields()[column_index];
-        //     // For tag columns, we need to create a dictionary field.
-        //     if expect_column.semantic_type == SemanticType::Tag {
-        //         fields.push(tag_maybe_to_dictionary_field(
-        //             &expect_column.column_schema.data_type,
-        //             column_field,
-        //         ));
-        //     } else {
-        //         fields.push(column_field.clone());
-        //     };
-
-        //     if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
-        //         let mut cast_type = None;
-
-        //         // Same column different type.
-        //         if expect_data_type != *actual_data_type {
-        //             cast_type = Some(expect_data_type.clone())
-        //         }
-        //         // Source has this column.
-        //         index_or_defaults.push(IndexOrDefault::Index {
-        //             pos: *index,
-        //             cast_type,
-        //         });
-        //     } else {
-        //         // Create a default vector with 1 element for that column.
-        //         let default_vector = expect_column
-        //             .column_schema
-        //             .create_default_vector(1)
-        //             .context(CreateDefaultSnafu {
-        //                 region_id: mapper.metadata().region_id,
-        //                 column: &expect_column.column_schema.name,
-        //             })?
-        //             .with_context(|| CompatReaderSnafu {
-        //                 region_id: mapper.metadata().region_id,
-        //                 reason: format!(
-        //                     "column {} does not have a default value to read",
-        //                     expect_column.column_schema.name
-        //                 ),
-        //             })?;
-        //         index_or_defaults.push(IndexOrDefault::DefaultValue {
-        //             column_id: expect_column.column_id,
-        //             default_vector,
-        //             semantic_type: expect_column.semantic_type,
-        //         });
-        //     };
-        // }
-        // fields.extend_from_slice(&internal_fields());
-
         let (index_or_defaults, fields) =
             Self::compute_index_and_fields(&actual_schema, expect_schema, &mapper.metadata())?;
 
