@@ -71,6 +71,7 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
         if let Some(aggr_func) = get_aggr_func(expr) {
             if aggr_func.params.distinct {
                 // Distinct aggregate functions are not steppable(yet).
+                // TODO(discord9): support distinct aggregate functions.
                 return false;
             }
 

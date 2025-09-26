@@ -681,7 +681,7 @@ async fn test_last_value_order_by_udaf() {
     let state = state_accum.state().unwrap();
 
     // FIXME(discord9): once datafusion fixes the issue that last_value udaf state fields are not correctly(missing ordering field if `last` field is part of ordering field)
-    // then change it back to 3 fielda
+    // then change it back to 3 fields
     assert_eq!(state.len(), 2); // last value weird optimization(or maybe bug?) that it only has 2 state fields now
     assert_eq!(state[0], ScalarValue::Int64(Some(3)));
     assert_eq!(state[1], ScalarValue::Boolean(Some(true)));
