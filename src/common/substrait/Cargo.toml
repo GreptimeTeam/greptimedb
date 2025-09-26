@@ -11,6 +11,7 @@ workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 common-error.workspace = true
+common-function.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
 datafusion.workspace = true

@@ -12471,6 +12471,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "common-error",
+ "common-function",
  "common-macro",
  "common-telemetry",
  "datafusion",

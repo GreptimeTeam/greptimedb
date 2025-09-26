@@ -16,6 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
+use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
@@ -217,7 +218,8 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     is_all_last_value = false;
                     break;
                 };
-                if func.func.name() != "last_value"
+                if (func.func.name() != "last_value"
+                    && func.func.name() != aggr_state_func_name("last_value"))
                     || func.params.filter.is_some()
                     || func.params.distinct
                 {

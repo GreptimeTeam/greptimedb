@@ -97,6 +97,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|

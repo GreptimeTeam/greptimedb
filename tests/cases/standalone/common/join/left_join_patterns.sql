@@ -24,7 +24,7 @@ SELECT
 FROM accounts a
 LEFT JOIN transactions t ON a.acc_id = t.acc_id
 GROUP BY a.acc_id, a.acc_name, a.balance
-ORDER BY transaction_count DESC;
+ORDER BY transaction_count DESC, total_activity DESC;
 
 -- Left join with date filtering
 SELECT
