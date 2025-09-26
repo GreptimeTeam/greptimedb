@@ -19,7 +19,7 @@ use clap::Parser;
 use cmd::error::{self, Result};
 use colored::Colorize;
 use datanode::config::ObjectStoreConfig;
-use mito2::config::MitoConfig;
+use mito2::config::{FulltextIndexConfig, MitoConfig, Mode};
 use mito2::read::Source;
 use mito2::sst::file::{FileHandle, FileId, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
@@ -184,6 +184,10 @@ impl Command {
             build_access_layer_simple(self.target.clone(), object_store.clone()).await?;
 
         // Build write request
+        let fulltext_index_config = FulltextIndexConfig {
+            create_on_flush: Mode::Disable,
+            ..Default::default()
+        };
         let write_opts = WriteOptions::default();
         let write_req = SstWriteRequest {
             op_type: OperationType::Compact,
@@ -194,7 +198,7 @@ impl Command {
             max_sequence: None,
             index_options: Default::default(),
             inverted_index_config: MitoConfig::default().inverted_index,
-            fulltext_index_config: MitoConfig::default().fulltext_index,
+            fulltext_index_config,
             bloom_filter_index_config: MitoConfig::default().bloom_filter_index,
         };
 
