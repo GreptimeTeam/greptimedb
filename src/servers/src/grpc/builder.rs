@@ -197,6 +197,7 @@ impl GrpcServerBuilder {
             otel_arrow_service: Mutex::new(self.otel_arrow_service),
             bind_addr: None,
             name: self.name,
+            config: self.config,
         }
     }
 }
