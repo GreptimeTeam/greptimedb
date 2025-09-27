@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFrom
 use crate::prelude::*;
 use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
-use crate::types::{IntervalType, ListType};
+use crate::types::{IntervalType, ListType, StructField, StructType};
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -84,6 +85,7 @@ pub enum Value {
     IntervalMonthDayNano(IntervalMonthDayNano),
 
     List(ListValue),
+    Struct(StructValue),
 }
 
 impl Display for Value {
@@ -133,6 +135,15 @@ impl Display for Value {
                 write!(f, "{}[{}]", v.datatype.name(), items)
             }
             Value::Decimal128(v) => write!(f, "{}", v),
+            Value::Struct(s) => {
+                let items = s
+                    .items()
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<String>>()
+                    .join(",");
+                write!(f, "{items}")
+            }
         }
     }
 }
@@ -176,6 +187,9 @@ macro_rules! define_data_type_func {
                 $struct::Decimal128(d) => {
                     ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
                 }
+                $struct::Struct(struct_value) => ConcreteDataType::struct_datatype(
+                    StructType::from(struct_value.fields().to_owned()),
+                ),
             }
         }
     };
@@ -227,6 +241,7 @@ impl Value {
             Value::IntervalMonthDayNano(v) => ValueRef::IntervalMonthDayNano(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
+            Value::Struct(v) => ValueRef::Struct(v),
         }
     }
 
@@ -384,6 +399,7 @@ impl Value {
                 TimeUnit::Nanosecond => LogicalTypeId::DurationNanosecond,
             },
             Value::Decimal128(_) => LogicalTypeId::Decimal128,
+            Value::Struct(_) => LogicalTypeId::Struct,
         }
     }
 
@@ -397,7 +413,8 @@ impl Value {
             output_type_id == value_type_id
                 || self.is_null()
                 || (output_type_id == LogicalTypeId::Json
-                    && value_type_id == LogicalTypeId::Binary),
+                    && value_type_id == LogicalTypeId::Binary)
+                || value_type_id == LogicalTypeId::Struct,
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -435,6 +452,9 @@ impl Value {
             Value::Decimal128(d) => {
                 let (v, p, s) = d.to_scalar_value();
                 ScalarValue::Decimal128(v, p, s)
+            }
+            Value::Struct(_) => {
+                unreachable!()
             }
         };
 
@@ -488,7 +508,11 @@ impl Value {
             Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
             Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
 
-            Value::Binary(_) | Value::String(_) | Value::Boolean(_) | Value::List(_) => None,
+            Value::Binary(_)
+            | Value::String(_)
+            | Value::Boolean(_)
+            | Value::List(_)
+            | Value::Struct(_) => None,
         }
     }
 }
@@ -824,7 +848,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
-            Value::List(v) => serde_json::to_value(v)?,
+            Value::List(v) => serde_json::to_value(v.items())?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
             Value::Time(v) => serde_json::to_value(v.value())?,
             Value::IntervalYearMonth(v) => serde_json::to_value(v.to_i32())?,
@@ -832,6 +856,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::IntervalMonthDayNano(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
+            Value::Struct(v) => serde_json::to_value(v.items())?,
         };
 
         Ok(json_value)
@@ -905,6 +930,33 @@ impl Ord for ListValue {
             "Cannot compare different datatypes!"
         );
         self.items.cmp(&other.items)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StructValue {
+    items: BTreeMap<String, Value>,
+    fields: Vec<StructField>,
+}
+
+impl StructValue {
+    pub fn new(items: BTreeMap<String, Value>, fields: Vec<StructField>) -> Self {
+        Self { items, fields }
+    }
+
+    pub fn items(&self) -> &BTreeMap<String, Value> {
+        &self.items
+    }
+
+    pub fn fields(&self) -> &[StructField] {
+        &self.fields
+    }
+
+    fn estimated_size(&self) -> usize {
+        self.items
+            .values()
+            .map(|x| x.as_value_ref().data_size())
+            .sum()
     }
 }
 
@@ -1049,6 +1101,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
+            ValueRef::Struct(v) => Value::Struct(v.clone()),
         }
     }
 }
@@ -1090,6 +1143,7 @@ pub enum ValueRef<'a> {
 
     // Compound types:
     List(ListValueRef<'a>),
+    Struct(&'a StructValue),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1345,6 +1399,7 @@ pub fn transform_value_ref_to_json_value<'a>(
         ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
         ValueRef::Duration(v) => serde_json::to_value(v.value())?,
         ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
+        ValueRef::Struct(v) => serde_json::to_value(v.items())?,
     };
 
     Ok(json_value)
@@ -1446,6 +1501,7 @@ impl ValueRef<'_> {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
             },
+            ValueRef::Struct(val) => val.estimated_size(),
         }
     }
 }

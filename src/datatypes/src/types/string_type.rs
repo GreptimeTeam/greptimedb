@@ -90,7 +90,7 @@ impl DataType for StringType {
             Value::Decimal128(v) => Some(Value::String(StringBytes::from(v.to_string()))),
 
             // StringBytes is only support for utf-8, Value::Binary is not allowed.
-            Value::Binary(_) | Value::List(_) => None,
+            Value::Binary(_) | Value::List(_) | Value::Struct(_) => None,
         }
     }
 }
