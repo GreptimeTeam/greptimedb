@@ -16,7 +16,6 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use arrow::compute;
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
 use datafusion_common::arrow::datatypes::DataType;
@@ -26,8 +25,22 @@ use crate::function::{Function, extract_args};
 use crate::helper;
 
 /// Check if the given JSON data contains the given JSON path.
-#[derive(Clone, Debug, Default)]
-pub struct JsonPathExistsFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct JsonPathExistsFunction {
+    signature: Signature,
+}
+
+impl Default for JsonPathExistsFunction {
+    fn default() -> Self {
+        Self {
+            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+            signature: helper::one_of_sigs2(
+                vec![DataType::Binary, DataType::BinaryView, DataType::Null],
+                vec![DataType::Utf8, DataType::Utf8View, DataType::Null],
+            ),
+        }
+    }
+}
 
 const NAME: &str = "json_path_exists";
 
@@ -36,16 +49,12 @@ impl Function for JsonPathExistsFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        helper::one_of_sigs2(
-            vec![DataType::Binary, DataType::BinaryView, DataType::Null],
-            vec![DataType::Utf8, DataType::Utf8View, DataType::Null],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -110,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_json_path_exists_function() {
-        let json_path_exists = JsonPathExistsFunction;
+        let json_path_exists = JsonPathExistsFunction::default();
 
         assert_eq!("json_path_exists", json_path_exists.name());
         assert_eq!(

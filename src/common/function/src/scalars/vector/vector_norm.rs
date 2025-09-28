@@ -14,7 +14,6 @@
 
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
@@ -43,27 +42,37 @@ const NAME: &str = "vec_norm";
 /// +--------------------------------------------------+
 ///
 /// ```
-#[derive(Debug, Clone, Default)]
-pub struct VectorNormFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct VectorNormFunction {
+    signature: Signature,
+}
+
+impl Default for VectorNormFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Uniform(1, STRINGS.to_vec()),
+                    TypeSignature::Uniform(1, BINARYS.to_vec()),
+                    TypeSignature::Uniform(1, vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for VectorNormFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::Uniform(1, STRINGS.to_vec()),
-                TypeSignature::Uniform(1, BINARYS.to_vec()),
-                TypeSignature::Uniform(1, vec![DataType::BinaryView]),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -108,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_vec_norm() {
-        let func = VectorNormFunction;
+        let func = VectorNormFunction::default();
 
         let input0 = Arc::new(StringViewArray::from(vec![
             Some("[0.0,2.0,3.0]".to_string()),

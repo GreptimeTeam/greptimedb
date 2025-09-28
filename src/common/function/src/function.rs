@@ -17,18 +17,13 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_query::error::{ExecuteSnafu, Result};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use datafusion_expr::{ScalarFunctionArgs, Signature};
-use datatypes::vectors::VectorRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
-use snafu::ResultExt;
 
 use crate::state::FunctionState;
 
@@ -108,31 +103,15 @@ pub trait Function: fmt::Display + Sync + Send {
     fn name(&self) -> &str;
 
     /// The returned data type of function execution.
-    fn return_type(&self, input_types: &[DataType]) -> Result<DataType>;
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType>;
 
     /// The signature of function.
-    fn signature(&self) -> Signature;
+    fn signature(&self) -> &Signature;
 
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
-    ) -> datafusion_common::Result<ColumnarValue> {
-        // TODO(LFC): Remove default implementation once all UDFs have implemented this function.
-        let _ = args;
-        Err(datafusion_common::DataFusionError::NotImplemented(
-            "invoke_with_args".to_string(),
-        ))
-    }
-
-    /// Evaluate the function, e.g. run/execute the function.
-    /// TODO(LFC): Remove `eval` when all UDFs are rewritten to `invoke_with_args`
-    fn eval(&self, _: &FunctionContext, _: &[VectorRef]) -> Result<VectorRef> {
-        Err(BoxedError::new(PlainError::new(
-            "unsupported".to_string(),
-            StatusCode::Unsupported,
-        )))
-        .context(ExecuteSnafu)
-    }
+    ) -> datafusion_common::Result<ColumnarValue>;
 
     fn aliases(&self) -> &[String] {
         &[]

@@ -15,7 +15,6 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
@@ -27,25 +26,35 @@ use crate::function::{Function, extract_args};
 macro_rules! json_is {
     ($name:ident, $json_type:ident, $doc:expr) => {
         paste::paste! {
-            #[derive(Clone, Debug, Default)]
-            pub struct $name;
+            #[derive(Clone, Debug)]
+            pub(crate) struct $name {
+                signature: Signature,
+            }
+
+            impl Default for $name {
+                fn default() -> Self {
+                    Self {
+                        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+                        signature: Signature::uniform(
+                            1,
+                            vec![DataType::Binary, DataType::BinaryView],
+                            Volatility::Immutable,
+                        ),
+                    }
+                }
+            }
 
             impl Function for $name {
                 fn name(&self) -> &str {
                     stringify!([<$name:snake>])
                 }
 
-                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+                fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
                     Ok(DataType::Boolean)
                 }
 
-                fn signature(&self) -> Signature {
-                    // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-                    Signature::uniform(
-                        1,
-                        vec![DataType::Binary, DataType::BinaryView],
-                        Volatility::Immutable,
-                    )
+                fn signature(&self) -> &Signature {
+                    &self.signature
                 }
 
                 fn invoke_with_args(
@@ -127,12 +136,12 @@ mod tests {
     #[test]
     fn test_json_is_functions() {
         let json_is_functions: [&dyn Function; 6] = [
-            &JsonIsBool,
-            &JsonIsInt,
-            &JsonIsFloat,
-            &JsonIsString,
-            &JsonIsArray,
-            &JsonIsObject,
+            &JsonIsBool::default(),
+            &JsonIsInt::default(),
+            &JsonIsFloat::default(),
+            &JsonIsString::default(),
+            &JsonIsArray::default(),
+            &JsonIsObject::default(),
         ];
         let expected_names = [
             "json_is_bool",
@@ -147,14 +156,6 @@ mod tests {
             assert_eq!(
                 func.return_type(&[DataType::Binary]).unwrap(),
                 DataType::Boolean
-            );
-            assert_eq!(
-                func.signature(),
-                Signature::uniform(
-                    1,
-                    vec![DataType::Binary, DataType::BinaryView],
-                    Volatility::Immutable
-                )
             );
         }
 

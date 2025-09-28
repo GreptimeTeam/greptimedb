@@ -15,7 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::InvalidFuncArgsSnafu;
 use datafusion::arrow::array::{Array, AsArray, BinaryViewBuilder};
 use datafusion::arrow::datatypes::Int64Type;
 use datafusion::logical_expr::ColumnarValue;
@@ -45,26 +45,36 @@ const NAME: &str = "vec_subvector";
 /// ```
 ///
 
-#[derive(Debug, Clone, Default)]
-pub struct VectorSubvectorFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct VectorSubvectorFunction {
+    signature: Signature,
+}
+
+impl Default for VectorSubvectorFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Utf8, DataType::Int64, DataType::Int64]),
+                    TypeSignature::Exact(vec![DataType::Binary, DataType::Int64, DataType::Int64]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for VectorSubvectorFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::Int64, DataType::Int64]),
-                TypeSignature::Exact(vec![DataType::Binary, DataType::Int64, DataType::Int64]),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -130,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_subvector() {
-        let func = VectorSubvectorFunction;
+        let func = VectorSubvectorFunction::default();
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0, 2.0, 3.0, 4.0, 5.0]".to_string()),
@@ -169,7 +179,7 @@ mod tests {
     }
     #[test]
     fn test_subvector_error() {
-        let func = VectorSubvectorFunction;
+        let func = VectorSubvectorFunction::default();
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0, 2.0, 3.0]".to_string()),
@@ -197,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_subvector_invalid_indices() {
-        let func = VectorSubvectorFunction;
+        let func = VectorSubvectorFunction::default();
 
         let input0 = Arc::new(StringViewArray::from(vec![
             Some("[1.0, 2.0, 3.0]".to_string()),

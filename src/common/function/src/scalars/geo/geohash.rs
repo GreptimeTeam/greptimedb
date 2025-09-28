@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, Result};
+use common_query::error;
 use datafusion::arrow::array::{Array, AsArray, ListBuilder, StringViewBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, UInt8Type};
 use datafusion::logical_expr::ColumnarValue;
@@ -40,23 +40,13 @@ fn ensure_resolution_usize(v: u8) -> datafusion_common::Result<usize> {
 }
 
 /// Function that return geohash string for a given geospatial coordinate.
-#[derive(Clone, Debug, Default)]
-pub struct GeohashFunction;
-
-impl GeohashFunction {
-    const NAME: &'static str = "geohash";
+#[derive(Clone, Debug)]
+pub(crate) struct GeohashFunction {
+    signature: Signature,
 }
 
-impl Function for GeohashFunction {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for GeohashFunction {
+    fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in &[DataType::Float32, DataType::Float64] {
             for resolution_type in INTEGERS {
@@ -70,7 +60,27 @@ impl Function for GeohashFunction {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl GeohashFunction {
+    const NAME: &'static str = "geohash";
+}
+
+impl Function for GeohashFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -127,27 +137,13 @@ impl fmt::Display for GeohashFunction {
 }
 
 /// Function that return geohash string for a given geospatial coordinate.
-#[derive(Clone, Debug, Default)]
-pub struct GeohashNeighboursFunction;
-
-impl GeohashNeighboursFunction {
-    const NAME: &'static str = "geohash_neighbours";
+#[derive(Clone, Debug)]
+pub(crate) struct GeohashNeighboursFunction {
+    signature: Signature,
 }
 
-impl Function for GeohashNeighboursFunction {
-    fn name(&self) -> &str {
-        GeohashNeighboursFunction::NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::List(Arc::new(Field::new(
-            "item",
-            DataType::Utf8View,
-            false,
-        ))))
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for GeohashNeighboursFunction {
+    fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in &[DataType::Float32, DataType::Float64] {
             for resolution_type in INTEGERS {
@@ -161,7 +157,31 @@ impl Function for GeohashNeighboursFunction {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl GeohashNeighboursFunction {
+    const NAME: &'static str = "geohash_neighbours";
+}
+
+impl Function for GeohashNeighboursFunction {
+    fn name(&self) -> &str {
+        GeohashNeighboursFunction::NAME
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Utf8View,
+            false,
+        ))))
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

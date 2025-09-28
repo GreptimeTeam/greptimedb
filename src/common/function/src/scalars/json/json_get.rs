@@ -16,7 +16,6 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use arrow::compute;
-use common_query::error::Result;
 use datafusion_common::arrow::array::{
     Array, AsArray, BooleanBuilder, Float64Builder, Int64Builder, StringViewBuilder,
 };
@@ -48,24 +47,38 @@ macro_rules! json_get {
     ($name:ident, $type:ident, $rust_type:ident, $doc:expr) => {
         paste::paste! {
             #[doc = $doc]
-            #[derive(Clone, Debug, Default)]
-            pub struct $name;
+            #[derive(Clone, Debug)]
+            pub struct $name {
+                signature: Signature,
+            }
+
+            impl $name {
+                pub const NAME: &'static str = stringify!([<$name:snake>]);
+            }
+
+            impl Default for $name {
+                fn default() -> Self {
+                    Self {
+                        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+                        signature: helper::one_of_sigs2(
+                            vec![DataType::Binary, DataType::BinaryView],
+                            vec![DataType::Utf8, DataType::Utf8View],
+                        ),
+                    }
+                }
+            }
 
             impl Function for $name {
                 fn name(&self) -> &str {
-                    stringify!([<$name:snake>])
+                    Self::NAME
                 }
 
-                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+                fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
                     Ok(DataType::[<$type>])
                 }
 
-                fn signature(&self) -> Signature {
-                    // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-                    helper::one_of_sigs2(
-                        vec![DataType::Binary, DataType::BinaryView],
-                        vec![DataType::Utf8, DataType::Utf8View],
-                    )
+                fn signature(&self) -> &Signature {
+                    &self.signature
                 }
 
                 fn invoke_with_args(
@@ -101,7 +114,7 @@ macro_rules! json_get {
 
             impl Display for $name {
                 fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    write!(f, "{}", stringify!([<$name:snake>]).to_ascii_uppercase())
+                    write!(f, "{}", Self::NAME.to_ascii_uppercase())
                 }
             }
         }
@@ -130,24 +143,38 @@ json_get!(
 );
 
 /// Get the value from the JSONB by the given path and return it as a string.
-#[derive(Clone, Debug, Default)]
-pub struct JsonGetString;
+#[derive(Clone, Debug)]
+pub struct JsonGetString {
+    signature: Signature,
+}
+
+impl JsonGetString {
+    pub const NAME: &'static str = "json_get_string";
+}
+
+impl Default for JsonGetString {
+    fn default() -> Self {
+        Self {
+            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+            signature: helper::one_of_sigs2(
+                vec![DataType::Binary, DataType::BinaryView],
+                vec![DataType::Utf8, DataType::Utf8View],
+            ),
+        }
+    }
+}
 
 impl Function for JsonGetString {
     fn name(&self) -> &str {
-        "json_get_string"
+        Self::NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        helper::one_of_sigs2(
-            vec![DataType::Binary, DataType::BinaryView],
-            vec![DataType::Utf8, DataType::Utf8View],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -181,7 +208,7 @@ impl Function for JsonGetString {
 
 impl Display for JsonGetString {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", "json_get_string".to_ascii_uppercase())
+        write!(f, "{}", Self::NAME.to_ascii_uppercase())
     }
 }
 
@@ -197,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_json_get_int() {
-        let json_get_int = JsonGetInt;
+        let json_get_int = JsonGetInt::default();
 
         assert_eq!("json_get_int", json_get_int.name());
         assert_eq!(
@@ -248,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_json_get_float() {
-        let json_get_float = JsonGetFloat;
+        let json_get_float = JsonGetFloat::default();
 
         assert_eq!("json_get_float", json_get_float.name());
         assert_eq!(
@@ -299,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_json_get_bool() {
-        let json_get_bool = JsonGetBool;
+        let json_get_bool = JsonGetBool::default();
 
         assert_eq!("json_get_bool", json_get_bool.name());
         assert_eq!(
@@ -350,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_json_get_string() {
-        let json_get_string = JsonGetString;
+        let json_get_string = JsonGetString::default();
 
         assert_eq!("json_get_string", json_get_string.name());
         assert_eq!(

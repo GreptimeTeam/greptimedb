@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use common_function::function::FunctionRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
-use datafusion_expr::{Signature, Volatility};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 use datafusion_substrait::extensions::Extensions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -119,12 +120,14 @@ pub fn register_function_to_query_engine(engine: &Arc<dyn QueryEngine>) {
 #[derive(Debug)]
 pub struct TumbleFunction {
     name: String,
+    signature: Signature,
 }
 
 impl TumbleFunction {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
+            signature: Signature::variadic_any(Volatility::Immutable),
         }
     }
 }
@@ -140,12 +143,16 @@ impl common_function::function::Function for TumbleFunction {
         &self.name
     }
 
-    fn return_type(&self, _: &[DataType]) -> common_query::error::Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Timestamp(TimeUnit::Millisecond, None))
     }
 
-    fn signature(&self) -> Signature {
-        Signature::variadic_any(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {
+        datafusion_common::not_impl_err!("{}", self.name())
     }
 }
 

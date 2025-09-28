@@ -18,12 +18,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{TRACE_TABLE_NAME, trace_services_table_name};
-use common_function::function::{Function, FunctionRef};
+use common_function::function::FunctionRef;
 use common_function::scalars::json::json_get::{
     JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
 };
 use common_function::scalars::udf::create_udf;
-use common_function::state::FunctionState;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
@@ -337,7 +336,7 @@ async fn query_trace_table(
         .map(|s| s.as_str())
         == Some(TABLE_DATA_MODEL_TRACE_V1);
 
-    let df_context = create_df_context(query_engine, ctx.clone())?;
+    let df_context = create_df_context(query_engine)?;
 
     let dataframe = df_context
         .read_table(Arc::new(DfTableProviderAdapter::new(table)))
@@ -392,28 +391,21 @@ async fn query_trace_table(
 // to utilize them through DataFrame APIs. To address this limitation, we create a new session
 // context and register the required UDFs, allowing them to be decoupled from the global context.
 // TODO(zyy17): Is it possible or necessary to reuse the existing session context?
-fn create_df_context(
-    query_engine: &QueryEngineRef,
-    ctx: QueryContextRef,
-) -> ServerResult<SessionContext> {
+fn create_df_context(query_engine: &QueryEngineRef) -> ServerResult<SessionContext> {
     let df_context = SessionContext::new_with_state(
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
     // The following JSON UDFs will be used for tags filters on v0 data model.
     let udfs: Vec<FunctionRef> = vec![
-        Arc::new(JsonGetInt),
-        Arc::new(JsonGetFloat),
-        Arc::new(JsonGetBool),
-        Arc::new(JsonGetString),
+        Arc::new(JsonGetInt::default()),
+        Arc::new(JsonGetFloat::default()),
+        Arc::new(JsonGetBool::default()),
+        Arc::new(JsonGetString::default()),
     ];
 
     for udf in udfs {
-        df_context.register_udf(create_udf(
-            udf,
-            ctx.clone(),
-            Arc::new(FunctionState::default()),
-        ));
+        df_context.register_udf(create_udf(udf));
     }
 
     Ok(df_context)
@@ -431,7 +423,7 @@ fn json_tag_filters(
             filters.push(
                 dataframe
                     .registry()
-                    .udf(JsonGetString {}.name())
+                    .udf(JsonGetString::NAME)
                     .context(DataFusionSnafu)?
                     .call(vec![
                         col(SPAN_ATTRIBUTES_COLUMN),
@@ -445,7 +437,7 @@ fn json_tag_filters(
                 filters.push(
                     dataframe
                         .registry()
-                        .udf(JsonGetInt {}.name())
+                        .udf(JsonGetInt::NAME)
                         .context(DataFusionSnafu)?
                         .call(vec![
                             col(SPAN_ATTRIBUTES_COLUMN),
@@ -458,7 +450,7 @@ fn json_tag_filters(
                 filters.push(
                     dataframe
                         .registry()
-                        .udf(JsonGetFloat {}.name())
+                        .udf(JsonGetFloat::NAME)
                         .context(DataFusionSnafu)?
                         .call(vec![
                             col(SPAN_ATTRIBUTES_COLUMN),
@@ -472,7 +464,7 @@ fn json_tag_filters(
             filters.push(
                 dataframe
                     .registry()
-                    .udf(JsonGetBool {}.name())
+                    .udf(JsonGetBool::NAME)
                     .context(DataFusionSnafu)?
                     .call(vec![
                         col(SPAN_ATTRIBUTES_COLUMN),

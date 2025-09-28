@@ -16,7 +16,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion::arrow::compute::is_null;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
@@ -26,8 +25,18 @@ use crate::function::{Function, extract_args};
 const NAME: &str = "isnull";
 
 /// The function to check whether an expression is NULL
-#[derive(Clone, Debug, Default)]
-pub struct IsNullFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct IsNullFunction {
+    signature: Signature,
+}
+
+impl Default for IsNullFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Display for IsNullFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -40,12 +49,12 @@ impl Function for IsNullFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::any(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -65,21 +74,13 @@ mod tests {
 
     use arrow_schema::Field;
     use datafusion_common::arrow::array::{AsArray, BooleanArray, Float32Array};
-    use datafusion_expr::TypeSignature;
 
     use super::*;
     #[test]
     fn test_is_null_function() {
-        let is_null = IsNullFunction;
+        let is_null = IsNullFunction::default();
         assert_eq!("isnull", is_null.name());
         assert_eq!(DataType::Boolean, is_null.return_type(&[]).unwrap());
-        assert_eq!(
-            is_null.signature(),
-            Signature {
-                type_signature: TypeSignature::Any(1),
-                volatility: Volatility::Immutable
-            }
-        );
         let values = vec![None, Some(3.0), None];
 
         let result = is_null
