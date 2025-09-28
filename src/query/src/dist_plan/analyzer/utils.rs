@@ -305,7 +305,7 @@ fn get_alias_layer_from_node(node: &LogicalPlan) -> DfResult<AliasLayer> {
                     } else {
                         // otherwise use the intersection of input and output
                         // TODO(discord9): maybe just make this case unsupported for now?
-                        common_telemetry::warn!(
+                        common_telemetry::debug!(
                             "Might be unsupported plan for alias tracking, track alias anyway: {}",
                             node
                         );
