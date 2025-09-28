@@ -221,7 +221,7 @@ impl FlatCompatBatch {
         }
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, expect_schema, &mapper.metadata())?;
+            Self::compute_index_and_fields(&actual_schema, expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
@@ -329,7 +329,7 @@ impl FlatCompatBatch {
             .collect();
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, &expect_schema, &mapper.metadata())?;
+            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
