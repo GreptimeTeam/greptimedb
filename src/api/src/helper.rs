@@ -24,7 +24,8 @@ use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
-    Int8Type, Int16Type, IntervalType, TimeType, TimestampType, UInt8Type, UInt16Type,
+    Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
+    UInt16Type,
 };
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
@@ -42,7 +43,7 @@ use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
     self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension,
-    QueryRequest, Row, SemanticType, VectorTypeExtension,
+    ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension, VectorTypeExtension,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -85,7 +86,7 @@ impl ColumnDataTypeWrapper {
 
     /// Get a tuple of ColumnDataType and ColumnDataTypeExtension.
     pub fn to_parts(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
-        (self.datatype, self.datatype_ext)
+        (self.datatype, self.datatype_ext.clone())
     }
 }
 
@@ -157,6 +158,43 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::vector_datatype(d.dim)
                 } else {
                     ConcreteDataType::vector_default_datatype()
+                }
+            }
+            ColumnDataType::List => {
+                if let Some(TypeExt::ListType(d)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    let item_type = ColumnDataTypeWrapper {
+                        datatype: d.datatype().clone(),
+                        datatype_ext: d.datatype_extension.clone().map(|d| *d),
+                    };
+                    ConcreteDataType::list_datatype(item_type.into())
+                } else {
+                    todo!()
+                }
+            }
+            ColumnDataType::Struct => {
+                if let Some(TypeExt::StructType(d)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    let fields = d
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            let field_type = ColumnDataTypeWrapper {
+                                datatype: f.datatype().clone(),
+                                datatype_ext: f.datatype_extension.clone(),
+                            };
+                            StructField::new(f.name.to_string(), field_type.into(), true)
+                        })
+                        .collect::<Vec<_>>();
+                    ConcreteDataType::struct_datatype(StructType::from(fields))
+                } else {
+                    todo!()
                 }
             }
         }
@@ -290,9 +328,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Decimal128(_) => ColumnDataType::Decimal128,
             ConcreteDataType::Json(_) => ColumnDataType::Json,
             ConcreteDataType::Vector(_) => ColumnDataType::Vector,
+            ConcreteDataType::List(_) => ColumnDataType::List,
+            ConcreteDataType::Struct(_) => ColumnDataType::Struct,
             ConcreteDataType::Null(_)
-            | ConcreteDataType::List(_)
-            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_)
             | ConcreteDataType::Duration(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail();
@@ -320,6 +358,40 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                             dim: vector_type.dim as _,
                         })),
                     })
+            }
+            ColumnDataType::List => {
+                if let Some(list_type) = datatype.as_list() {
+                    let list_item_type =
+                        ColumnDataTypeWrapper::try_from(list_type.item_type().clone())?;
+                    Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
+                            datatype: list_item_type.datatype.into(),
+                            datatype_extension: list_item_type.datatype_ext.map(Box::new),
+                        }))),
+                    })
+                } else {
+                    None
+                }
+            }
+            ColumnDataType::Struct => {
+                if let Some(struct_type) = datatype.as_struct() {
+                    let mut fields = Vec::with_capacity(struct_type.fields().len());
+                    for field in struct_type.fields() {
+                        let field_type =
+                            ColumnDataTypeWrapper::try_from(field.data_type().clone())?;
+                        let proto_field = crate::v1::StructField {
+                            name: field.name().to_string(),
+                            datatype: field_type.datatype.into(),
+                            datatype_extension: field_type.datatype_ext,
+                        };
+                        fields.push(proto_field);
+                    }
+                    Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::StructType(StructTypeExtension { fields })),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -448,6 +520,14 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             binary_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
+        ColumnDataType::List => Values {
+            list_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
+        ColumnDataType::Struct => Values {
+            struct_values: Vec::with_capacity(capacity),
+            ..Default::default()
+        },
     }
 }
 
@@ -493,7 +573,8 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             .interval_month_day_nano_values
             .push(convert_month_day_nano_to_pb(val)),
         Value::Decimal128(val) => values.decimal128_values.push(convert_to_pb_decimal128(val)),
-        Value::List(_) | Value::Duration(_) => unreachable!(),
+        // TODO: struct and list
+        Value::List(_) | Value::Duration(_) | Value::Struct(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -983,7 +1064,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         Value::Decimal128(v) => v1::Value {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
-        Value::List(_) | Value::Duration(_) => return None,
+        Value::List(_) | Value::Duration(_) | Value::Struct(_) => return None,
     };
 
     Some(proto_value)
@@ -1075,7 +1156,8 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 convert_month_day_nano_to_pb(v),
             )),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            Value::List(_) | Value::Duration(_) => unreachable!(),
+            // TODO
+            Value::List(_) | Value::Duration(_) | Value::Struct(_) => unreachable!(),
         },
     }
 }
