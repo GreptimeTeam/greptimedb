@@ -110,9 +110,7 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::access_layer::{
-        FilePathProvider, Metrics, OperationType, RegionFilePathFactory, WriteType,
-    };
+    use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
@@ -121,7 +119,7 @@ mod tests {
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
-    use crate::sst::index::{Indexer, IndexerBuilder, IndexerBuilderImpl};
+    use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::format::PrimaryKeyWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
@@ -700,7 +698,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
@@ -1075,7 +1073,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,

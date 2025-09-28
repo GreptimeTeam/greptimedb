@@ -18,11 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
-use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
-use crate::access_layer::OperationType;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
@@ -56,7 +54,7 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
-            op_type: OperationType::Flush, //TODO(SNC123): Temporarily set to Flush, 4 BuildTypes will be introduced later.
+            build_type: build_type.clone(),
             metadata: version.metadata.clone(),
             inverted_index_config: self.config.inverted_index.clone(),
             fulltext_index_config: self.config.fulltext_index.clone(),
@@ -99,6 +97,9 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
+            // NOTE: Currently, rebuilding the index will reconstruct the index for all
+            // files in the region, which is a simplified approach and is not yet available for
+            // production use; further optimization is required.
             all_files.values().cloned().collect::<Vec<_>>()
         } else {
             request
@@ -159,40 +160,58 @@ impl<S> RegionWorkerLoop<S> {
             let path = location::sst_file_path(
                 region.access_layer.table_dir(),
                 RegionFileId::new(file_meta.region_id, file_id),
-                PathType::Bare,
+                region.access_layer.path_type(),
             );
-            region.access_layer.object_store().exists(&path).await.map_err(|e| {
-                warn!(e; "SST file not found for index build, region: {}, file_id: {}", region_id, file_meta.file_id);
-            }).ok();
+            match region.access_layer.object_store().exists(&path).await {
+                Ok(found_in_object_store) => {
+                    if !found_in_object_store {
+                        warn!(
+                            "SST file not found for index build, region: {}, file_id: {}",
+                            region_id, file_meta.file_id
+                        );
+                        return;
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        "Failed to check SST file existence for index build, region: {}, file_id: {}",
+                        region_id, file_meta.file_id
+                    );
+                    return;
+                }
+            };
         }
 
         // Safety: The corresponding file exists.
-        let version_result = region
-            .manifest_ctx
-            .update_manifest(
-                RegionLeaderState::Writable,
-                RegionMetaActionList::with_action(RegionMetaAction::Edit(request.edit.clone())),
-            )
-            .await;
+        // Updates manifest in background.
+        common_runtime::spawn_global(async move {
+            let version_result = region
+                .manifest_ctx
+                .update_manifest(
+                    RegionLeaderState::Writable,
+                    RegionMetaActionList::with_action(RegionMetaAction::Edit(request.edit.clone())),
+                )
+                .await;
 
-        match version_result {
-            Ok(version) => {
-                debug!(
-                    "Successfully update manifest version to {version}, region: {region_id}, reason : index build"
-                );
-                region.version_control.apply_edit(
-                    Some(request.edit.clone()),
-                    &[],
-                    region.file_purger.clone(),
-                );
+            match version_result {
+                Ok(version) => {
+                    debug!(
+                        "Successfully update manifest version to {version}, region: {region_id}, reason : index build"
+                    );
+                    region.version_control.apply_edit(
+                        Some(request.edit.clone()),
+                        &[],
+                        region.file_purger.clone(),
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to update manifest for index build, region: {}, error: {:?}",
+                        region_id, e
+                    );
+                }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to update manifest for index build, region: {}, error: {:?}",
-                    region_id, e
-                );
-            }
-        }
+        });
     }
 
     pub(crate) async fn handle_index_build_failed(

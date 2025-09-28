@@ -178,7 +178,7 @@ impl WriteCache {
         let store = self.file_cache.local_store();
         let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
-            op_type: write_request.op_type,
+            build_type: write_request.op_type.into(),
             metadata: write_request.metadata.clone(),
             row_group_size: write_opts.row_group_size,
             puffin_manager: self

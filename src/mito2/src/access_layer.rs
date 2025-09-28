@@ -281,7 +281,7 @@ impl AccessLayer {
             let store = self.object_store.clone();
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let indexer_builder = IndexerBuilderImpl {
-                op_type: request.op_type,
+                build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
                 row_group_size: write_opts.row_group_size,
                 puffin_manager: self
