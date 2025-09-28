@@ -39,3 +39,23 @@ drop table "MemAvailable";
 drop table "AnotherSchema"."MemTotal";
 
 drop schema "AnotherSchema";
+
+create table metric (ts timestamp(3) time index, `AbCdE` string primary key, val double);
+
+insert into metric values
+    (0, 'host1', 1),
+    (5000, 'host1', 2),
+    (10000, 'host1', 3),
+    (0, 'host2', 4),
+    (5000, 'host2', 5),
+    (10000, 'host2', 6);
+
+-- which is actually group by nothing (invalid label name)
+tql eval (0,10,'5s') sum by (abcde) (metric);
+
+tql eval (0,10,'5s') sum by (AbCdE) (metric);
+
+-- not allowed by the parser
+tql eval (0,10,'5s') sum by (`AbCdE`) (metric);
+
+drop table metric;

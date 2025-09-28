@@ -605,7 +605,13 @@ impl RangeManipulateStream {
 
         // shorten the range to calculate
         let first_ts = ts_column.value(0);
-        let first_ts_aligned = (first_ts / self.interval) * self.interval;
+        // Preserve the query's alignment pattern when optimizing start time
+        let remainder = (first_ts - self.start).rem_euclid(self.interval);
+        let first_ts_aligned = if remainder == 0 {
+            first_ts
+        } else {
+            first_ts + (self.interval - remainder)
+        };
         let last_ts = ts_column.value(ts_column.len() - 1);
         let last_ts_aligned = ((last_ts + self.range) / self.interval) * self.interval;
         let start = self.start.max(first_ts_aligned);
@@ -671,6 +677,7 @@ mod test {
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+    use datafusion::physical_plan::memory::MemoryStream;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -831,5 +838,67 @@ mod test {
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
         }");
         do_normalize_test(1, 10_001, 3_000, 1_000, expected).await;
+    }
+
+    #[test]
+    fn test_calculate_range_preserves_alignment() {
+        // Test case: query starts at timestamp ending in 4000, step is 30s
+        // Data starts at different alignment - should preserve query's 4000 pattern
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
+
+        let stream = RangeManipulateStream {
+            start: 1758093274000, // ends in 4000
+            end: 1758093334000,   // ends in 4000
+            interval: 30000,      // 30s step
+            range: 60000,         // 60s lookback
+            time_index: 0,
+            field_columns: vec![],
+            aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
+            output_schema: schema.clone(),
+            input: Box::pin(empty_stream),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        // Create test data with timestamps not aligned to query pattern
+        let test_timestamps = vec![
+            1758093260000, // ends in 0000 (different alignment)
+            1758093290000, // ends in 0000
+            1758093320000, // ends in 0000
+        ];
+        let ts_array = TimestampMillisecondArray::from(test_timestamps);
+        let test_schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            TimestampMillisecondType::DATA_TYPE,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(test_schema, vec![Arc::new(ts_array)]).unwrap();
+
+        let (ranges, (start, end)) = stream.calculate_range(&batch).unwrap();
+
+        // Verify the optimized start preserves query alignment (should end in 4000)
+        assert_eq!(
+            start % 30000,
+            1758093274000 % 30000,
+            "Optimized start should preserve query alignment pattern"
+        );
+
+        // Verify we generate correct number of ranges for the alignment
+        let expected_timestamps: Vec<i64> = (start..=end).step_by(30000).collect();
+        assert_eq!(ranges.len(), expected_timestamps.len());
+
+        // Verify all generated timestamps maintain the same alignment pattern
+        for ts in expected_timestamps {
+            assert_eq!(
+                ts % 30000,
+                1758093274000 % 30000,
+                "All timestamps should maintain query alignment pattern"
+            );
+        }
     }
 }
