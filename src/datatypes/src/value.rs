@@ -42,7 +42,7 @@ use crate::prelude::*;
 use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType, StructField, StructType};
-use crate::vectors::ListVector;
+use crate::vectors::{ListVector, StructVector};
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -187,9 +187,9 @@ macro_rules! define_data_type_func {
                 $struct::Decimal128(d) => {
                     ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
                 }
-                $struct::Struct(struct_value) => ConcreteDataType::struct_datatype(
-                    StructType::from(struct_value.fields().to_owned()),
-                ),
+                $struct::Struct(struct_value) => {
+                    ConcreteDataType::struct_datatype(struct_value.struct_type())
+                }
             }
         }
     };
@@ -241,7 +241,7 @@ impl Value {
             Value::IntervalMonthDayNano(v) => ValueRef::IntervalMonthDayNano(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
-            Value::Struct(v) => ValueRef::Struct(v),
+            Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
         }
     }
 
@@ -936,11 +936,11 @@ impl Ord for ListValue {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructValue {
     items: BTreeMap<String, Value>,
-    fields: Vec<StructField>,
+    fields: StructType,
 }
 
 impl StructValue {
-    pub fn new(items: BTreeMap<String, Value>, fields: Vec<StructField>) -> Self {
+    pub fn new(items: BTreeMap<String, Value>, fields: StructType) -> Self {
         Self { items, fields }
     }
 
@@ -949,7 +949,11 @@ impl StructValue {
     }
 
     pub fn fields(&self) -> &[StructField] {
-        &self.fields
+        &self.fields.fields()
+    }
+
+    pub fn struct_type(&self) -> StructType {
+        self.fields.clone()
     }
 
     fn estimated_size(&self) -> usize {
@@ -957,6 +961,12 @@ impl StructValue {
             .values()
             .map(|x| x.as_value_ref().data_size())
             .sum()
+    }
+}
+
+impl Default for StructValue {
+    fn default() -> StructValue {
+        StructValue::new(BTreeMap::new(), StructType::new(vec![]))
     }
 }
 
@@ -1101,13 +1111,13 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
-            ValueRef::Struct(v) => Value::Struct(v.clone()),
+            ValueRef::Struct(v) => v.to_value(),
         }
     }
 }
 
 /// Reference to [Value].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ValueRef<'a> {
     Null,
 
@@ -1143,14 +1153,14 @@ pub enum ValueRef<'a> {
 
     // Compound types:
     List(ListValueRef<'a>),
-    Struct(&'a StructValue),
+    Struct(StructValueRef<'a>),
 }
 
 macro_rules! impl_as_for_value_ref {
     ($value: ident, $Variant: ident) => {
         match $value {
             ValueRef::Null => Ok(None),
-            ValueRef::$Variant(v) => Ok(Some(*v)),
+            ValueRef::$Variant(v) => Ok(Some(v.clone())),
             other => error::CastTypeSnafu {
                 msg: format!(
                     "Failed to cast value ref {:?} to {}",
@@ -1399,7 +1409,7 @@ pub fn transform_value_ref_to_json_value<'a>(
         ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
         ValueRef::Duration(v) => serde_json::to_value(v.value())?,
         ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
-        ValueRef::Struct(v) => serde_json::to_value(v.items())?,
+        ValueRef::Struct(v) => serde_json::to_value(v)?,
     };
 
     Ok(json_value)
@@ -1410,27 +1420,40 @@ pub fn transform_value_ref_to_json_value<'a>(
 /// Now comparison still requires some allocation (call of `to_value()`) and
 /// might be avoidable by downcasting and comparing the underlying array slice
 /// if it becomes bottleneck.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ListValueRef<'a> {
     // TODO(yingwen): Consider replace this by VectorRef.
-    Indexed { vector: &'a ListVector, idx: usize },
-    Ref { val: &'a ListValue },
+    Indexed {
+        vector: &'a ListVector,
+        idx: usize,
+    },
+    Ref {
+        val: &'a ListValue,
+    },
+    RefList {
+        val: Vec<ValueRef<'a>>,
+        item_datatype: ConcreteDataType,
+    },
 }
 
 impl ListValueRef<'_> {
     /// Convert self to [Value]. This method would clone the underlying data.
-    fn to_value(self) -> Value {
+    fn to_value(&self) -> Value {
         match self {
-            ListValueRef::Indexed { vector, idx } => vector.get(idx),
-            ListValueRef::Ref { val } => Value::List(val.clone()),
+            ListValueRef::Indexed { vector, idx } => vector.get(*idx),
+            ListValueRef::Ref { val } => Value::List((*val).clone()),
+            ListValueRef::RefList { val, item_datatype } => Value::List(ListValue::new(
+                val.iter().map(|v| Value::from(v.clone())).collect(),
+                item_datatype.clone(),
+            )),
         }
     }
-
     /// Returns the inner element's data type.
     fn datatype(&self) -> ConcreteDataType {
         match self {
             ListValueRef::Indexed { vector, .. } => vector.data_type(),
             ListValueRef::Ref { val } => val.datatype().clone(),
+            ListValueRef::RefList { item_datatype, .. } => item_datatype.clone(),
         }
     }
 }
@@ -1443,6 +1466,7 @@ impl Serialize for ListValueRef<'_> {
                 _ => unreachable!(),
             },
             ListValueRef::Ref { val } => val.serialize(serializer),
+            ListValueRef::RefList { val, .. } => val.serialize(serializer),
         }
     }
 }
@@ -1468,11 +1492,82 @@ impl PartialOrd for ListValueRef<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum StructValueRef<'a> {
+    Indexed {
+        vector: &'a StructVector,
+        idx: usize,
+    },
+    Ref(&'a StructValue),
+    RefMap {
+        val: BTreeMap<String, ValueRef<'a>>,
+        fields: StructType,
+    },
+}
+
+impl<'a> StructValueRef<'a> {
+    pub fn to_value(&self) -> Value {
+        match self {
+            StructValueRef::Indexed { vector, idx } => vector.get(*idx),
+            StructValueRef::Ref(val) => Value::Struct((*val).clone()),
+            StructValueRef::RefMap { val, fields } => {
+                let mut map = BTreeMap::new();
+                for (key, value) in val {
+                    map.insert(key.clone(), Value::from(value.clone()));
+                }
+                Value::Struct(StructValue::new(map, fields.clone()))
+            }
+        }
+    }
+
+    pub fn struct_type(&self) -> StructType {
+        match self {
+            StructValueRef::Indexed { vector, idx } => vector.struct_type(),
+            StructValueRef::Ref(val) => StructType::new(val.fields().to_owned()),
+            StructValueRef::RefMap { fields, .. } => fields.clone(),
+        }
+    }
+}
+
+impl Serialize for StructValueRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            StructValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::Struct(v) => v.serialize(serializer),
+                _ => unreachable!(),
+            },
+            StructValueRef::Ref(val) => val.serialize(serializer),
+            StructValueRef::RefMap { val, .. } => val.serialize(serializer),
+        }
+    }
+}
+
+impl PartialEq for StructValueRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl Eq for StructValueRef<'_> {}
+
+impl Ord for StructValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `Value` by converting into value before comparison.
+        self.to_value().cmp(&other.to_value())
+    }
+}
+
+impl PartialOrd for StructValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl ValueRef<'_> {
     /// Returns the size of the underlying data in bytes,
     /// The size is estimated and only considers the data size.
     pub fn data_size(&self) -> usize {
-        match *self {
+        match self {
             // Since the `Null` type is also considered to occupy space, we have opted to use the
             // size of `i64` as an initial approximation.
             ValueRef::Null => 8,
@@ -1500,12 +1595,18 @@ impl ValueRef<'_> {
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
+                ListValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
             },
-            ValueRef::Struct(val) => val.estimated_size(),
+            ValueRef::Struct(val) => match val {
+                StructValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
+                StructValueRef::Ref(val) => val.estimated_size(),
+                StructValueRef::RefMap { val, .. } => val.values().map(|v| v.data_size()).sum(),
+            },
         }
     }
 }
 
+/// This function is only for control panel data serialization
 pub fn column_data_to_json(data: ValueData) -> JsonValue {
     match data {
         ValueData::BinaryValue(b) => JsonValue::String(URL_SAFE.encode(b)),
@@ -1560,6 +1661,29 @@ pub fn column_data_to_json(data: ValueData) -> JsonValue {
         ValueData::Decimal128Value(d) => {
             JsonValue::String(format!("decimal128 [{}][{}]", d.hi, d.lo))
         }
+        ValueData::ListValue(d) => JsonValue::from(
+            d.items
+                .iter()
+                .map(|item| {
+                    item.value_data
+                        .clone()
+                        .map(column_data_to_json)
+                        .unwrap_or(JsonValue::Null)
+                })
+                .collect::<Vec<_>>(),
+        ),
+        // we don't have access to field names from this context
+        ValueData::StructValue(d) => JsonValue::from(
+            d.items
+                .iter()
+                .map(|item| {
+                    item.value_data
+                        .clone()
+                        .map(column_data_to_json)
+                        .unwrap_or(JsonValue::Null)
+                })
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 

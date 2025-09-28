@@ -71,6 +71,7 @@ pub use primitive::{
     UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder,
 };
 pub use string::{StringVector, StringVectorBuilder};
+pub use struct_vector::{StructVector, StructVectorBuilder};
 pub use time::{
     TimeMicrosecondVector, TimeMicrosecondVectorBuilder, TimeMillisecondVector,
     TimeMillisecondVectorBuilder, TimeNanosecondVector, TimeNanosecondVectorBuilder,
@@ -196,13 +197,13 @@ pub trait MutableVector: Send + Sync {
     fn to_vector_cloned(&self) -> VectorRef;
 
     /// Try to push value ref to this mutable vector.
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()>;
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()>;
 
     /// Push value ref to this mutable vector.
     ///
     /// # Panics
     /// Panics if error if data types mismatch.
-    fn push_value_ref(&mut self, value: ValueRef) {
+    fn push_value_ref(&mut self, value: &ValueRef) {
         self.try_push_value_ref(value).unwrap_or_else(|_| {
             panic!(
                 "expecting pushing value of datatype {:?}, actual {:?}",
@@ -439,9 +440,9 @@ pub mod tests {
     fn test_mutable_vector_to_vector_cloned() {
         // create a string vector builder
         let mut builder = ConcreteDataType::string_datatype().create_mutable_vector(1024);
-        builder.push_value_ref(ValueRef::String("hello"));
-        builder.push_value_ref(ValueRef::String("world"));
-        builder.push_value_ref(ValueRef::String("!"));
+        builder.push_value_ref(&ValueRef::String("hello"));
+        builder.push_value_ref(&ValueRef::String("world"));
+        builder.push_value_ref(&ValueRef::String("!"));
 
         // use MutableVector trait to_vector_cloned won't reset builder
         let vector = builder.to_vector_cloned();

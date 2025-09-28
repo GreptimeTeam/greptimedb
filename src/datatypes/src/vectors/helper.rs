@@ -237,8 +237,10 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
+            ScalarValue::Struct(_) => {
+                todo!()
+            }
             ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
@@ -418,7 +420,7 @@ impl Helper {
     pub fn try_from_row_into_vector(row: &[Value], dt: &ConcreteDataType) -> Result<VectorRef> {
         let mut builder = dt.create_mutable_vector(row.len());
         for val in row {
-            builder.try_push_value_ref(val.as_value_ref())?;
+            builder.try_push_value_ref(&val.as_value_ref())?;
         }
         let vector = builder.to_vector();
         Ok(vector)

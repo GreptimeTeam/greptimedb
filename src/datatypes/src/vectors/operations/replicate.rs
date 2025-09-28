@@ -29,7 +29,7 @@ pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
     for (i, offset) in offsets.iter().enumerate() {
         let data = c.get_data(i);
         for _ in previous_offset..*offset {
-            builder.push(data);
+            builder.push(data.clone());
         }
         previous_offset = *offset;
     }

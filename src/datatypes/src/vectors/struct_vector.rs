@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::compute::TakeOptions;
 use arrow_array::{Array, ArrayRef, StructArray};
-use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
-use crate::error::{self, ArrowComputeSnafu, Result, UnsupportedOperationSnafu};
-use crate::prelude::ConcreteDataType;
+use crate::error::{ArrowComputeSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu};
+use crate::prelude::{ConcreteDataType, ScalarVector};
 use crate::serialize::Serializable;
-use crate::value::{Value, ValueRef};
+use crate::types::StructType;
+use crate::value::{StructValue, StructValueRef, Value, ValueRef};
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 
@@ -30,15 +31,17 @@ use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 #[derive(Debug, PartialEq)]
 pub struct StructVector {
     array: StructArray,
-    data_type: ConcreteDataType,
+    fields: StructType,
 }
 
-#[allow(unused)]
 impl StructVector {
     pub fn new(array: StructArray) -> Result<Self> {
         let fields = array.fields();
-        let data_type = ConcreteDataType::Struct(fields.try_into()?);
-        Ok(StructVector { array, data_type })
+        let struct_type = fields.try_into()?;
+        Ok(StructVector {
+            array,
+            fields: struct_type,
+        })
     }
 
     pub fn array(&self) -> &StructArray {
@@ -48,11 +51,15 @@ impl StructVector {
     pub fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    pub fn struct_type(&self) -> StructType {
+        self.fields.clone()
+    }
 }
 
 impl Vector for StructVector {
     fn data_type(&self) -> ConcreteDataType {
-        self.data_type.clone()
+        ConcreteDataType::struct_datatype(self.fields.clone())
     }
 
     fn vector_type_name(&self) -> String {
@@ -94,16 +101,33 @@ impl Vector for StructVector {
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
         Arc::new(StructVector {
             array: self.array.slice(offset, length),
-            data_type: self.data_type.clone(),
+            fields: self.fields.clone(),
         })
     }
 
-    fn get(&self, _: usize) -> Value {
-        unimplemented!("StructValue not supported yet")
+    fn get(&self, index: usize) -> Value {
+        if !self.array.is_valid(index) {
+            return Value::Null;
+        }
+
+        let array = &self.array.value(index);
+        let vector = Helper::try_into_vector(array).unwrap_or_else(|_| {
+            panic!(
+                "arrow array with datatype {:?} cannot converted to our vector",
+                array.data_type()
+            )
+        });
+        let values = (0..vector.len())
+            .map(|i| vector.get(i))
+            .collect::<Vec<Value>>();
+        Value::Struct(StructValue::new(values, self.fields.clone()))
     }
 
-    fn get_ref(&self, _: usize) -> ValueRef {
-        unimplemented!("StructValue not supported yet")
+    fn get_ref(&self, index: usize) -> ValueRef {
+        ValueRef::Struct(StructValueRef::Indexed {
+            vector: self,
+            idx: index,
+        })
     }
 }
 
@@ -159,23 +183,45 @@ impl VectorOp for StructVector {
 
 impl Serializable for StructVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        let mut result = serde_json::Map::new();
+        let mut vectors = BTreeMap::new();
         for (field, value) in self.array.fields().iter().zip(self.array.columns().iter()) {
             let value_vector = Helper::try_into_vector(value)?;
-
-            let field_value = value_vector.serialize_to_json()?;
-            result.insert(field.name().clone(), JsonValue::Array(field_value));
+            vectors.insert(field.name().clone(), value_vector);
         }
-        let fields = JsonValue::Object(result);
-        let data_type = serde_json::to_value(&self.data_type).context(error::SerializeSnafu)?;
-        Ok(vec![JsonValue::Object(
-            [
-                ("fields".to_string(), fields),
-                ("data_type".to_string(), data_type),
-            ]
-            .iter()
-            .cloned()
-            .collect(),
-        )])
+
+        let mut results = Vec::with_capacity(self.array().len());
+        for idx in 0..self.array().len() {
+            let mut result = serde_json::Map::new();
+            for field in vectors.keys() {
+                let field_value = vectors.get(field).unwrap().get(idx);
+                result.insert(
+                    field.to_string(),
+                    field_value.try_into().context(SerializeSnafu)?,
+                );
+            }
+
+            results.push(result.into());
+        }
+
+        Ok(results)
+    }
+}
+
+impl ScalarVector for StructVector {
+    type OwnedItem = StructValue;
+    type RefItem<'a> = StructValueRef<'a>;
+    type Iter<'a> = StructIter<'a>;
+    type Builder = StructVectorBuilder;
+
+    fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
+        if self.array.is_valid(idx) {
+            Some(StructValueRef::Indexed { vector: self, idx })
+        } else {
+            None
+        }
+    }
+
+    fn iter_data(&self) -> Self::Iter<'_> {
+        StructIter::new(self)
     }
 }

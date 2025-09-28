@@ -158,7 +158,7 @@ impl MutableVector for NullVectorBuilder {
         Arc::new(NullVector::new(self.length))
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         ensure!(
             value.is_null(),
             error::CastTypeSnafu {
@@ -265,7 +265,7 @@ mod tests {
     fn test_null_vector_builder() {
         let mut builder = NullType.create_mutable_vector(3);
         builder.push_null();
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let input = NullVector::new(3);
         builder.extend_slice_of(&input, 1, 2).unwrap();

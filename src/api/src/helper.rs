@@ -27,7 +27,7 @@ use datatypes::types::{
     Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
     UInt16Type,
 };
-use datatypes::value::{OrderedF32, OrderedF64, Value};
+use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
     Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
@@ -167,7 +167,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
                 {
                     let item_type = ColumnDataTypeWrapper {
-                        datatype: d.datatype().clone(),
+                        datatype: d.datatype(),
                         datatype_ext: d.datatype_extension.clone().map(|d| *d),
                     };
                     ConcreteDataType::list_datatype(item_type.into())
@@ -186,7 +186,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                         .iter()
                         .map(|f| {
                             let field_type = ColumnDataTypeWrapper {
-                                datatype: f.datatype().clone(),
+                                datatype: f.datatype(),
                                 datatype_ext: f.datatype_extension.clone(),
                             };
                             StructField::new(f.name.to_string(), field_type.into(), true)
@@ -703,6 +703,38 @@ pub fn pb_value_to_value_ref<'a>(
                 ))
             }
         }
+        ValueData::ListValue(list) => {
+            let list_datatype_ext = datatype_ext
+                .and_then(|ext| {
+                    if let Some(TypeExt::ListType(l)) = ext.type_ext {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .expect("list must contains datatype ext");
+            let item_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(
+                list_datatype_ext.datatype(),
+                list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
+            ));
+            let items = list
+                .items
+                .iter()
+                .map(|item| {
+                    pb_value_to_value_ref(
+                        item,
+                        &list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let list_value = ListValueRef::RefList {
+                val: items,
+                item_datatype: item_type.clone(),
+            };
+            ValueRef::List(list_value)
+        }
+        ValueData::StructValue(struct_value) => {}
     }
 }
 
@@ -1102,6 +1134,8 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::IntervalDayTimeValue(_) => ColumnDataType::IntervalDayTime,
         ValueData::IntervalMonthDayNanoValue(_) => ColumnDataType::IntervalMonthDayNano,
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
+        ValueData::ListValue(_) => ColumnDataType::List,
+        ValueData::StructValue(_) => ColumnDataType::Struct,
     };
     Some(value_type)
 }
