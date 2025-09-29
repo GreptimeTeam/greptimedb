@@ -49,7 +49,7 @@ use store_api::region_engine::{
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
@@ -165,6 +165,7 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let write_cache = write_cache_from_config(
@@ -211,6 +212,7 @@ impl WorkerGroup {
                     schema_metadata_manager: schema_metadata_manager.clone(),
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
+                    flush_semaphore: flush_semaphore.clone(),
                 }
                 .start()
             })
@@ -319,6 +321,7 @@ impl WorkerGroup {
         });
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
             &config.index.aux_path,
@@ -367,6 +370,7 @@ impl WorkerGroup {
                     schema_metadata_manager: schema_metadata_manager.clone(),
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
+                    flush_semaphore: flush_semaphore.clone(),
                 }
                 .start()
             })
@@ -448,6 +452,7 @@ struct WorkerStarter<S> {
     schema_metadata_manager: SchemaMetadataManagerRef,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    flush_semaphore: Arc<Semaphore>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -502,6 +507,7 @@ impl<S: LogStore> WorkerStarter<S> {
             schema_metadata_manager: self.schema_metadata_manager,
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
+            flush_semaphore: self.flush_semaphore,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -755,6 +761,8 @@ struct RegionWorkerLoop<S> {
     file_ref_manager: FileReferenceManagerRef,
     /// Partition expr fetcher used to backfill partition expr on open for compatibility.
     partition_expr_fetcher: PartitionExprFetcherRef,
+    /// Semaphore to control flush concurrency.
+    flush_semaphore: Arc<Semaphore>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
