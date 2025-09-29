@@ -264,15 +264,12 @@ impl ParserContext<'_> {
         }
 
         let start_location = start_tql.span.start;
-
         // translate the start location to the index in the sql string
         let index = location_to_index(sql, &start_location);
+        assert!(index > 0);
 
+        let mut token = start_tql;
         loop {
-            let token = parser.next_token();
-            if token == Token::EOF {
-                break;
-            }
             // Find AS keyword, which indicates "<promql> AS <alias"
             if matches!(&token.token, Token::Word(w) if w.keyword == Keyword::AS) {
                 let query_end_index = location_to_index(sql, &token.span.start);
@@ -281,6 +278,9 @@ impl ParserContext<'_> {
                     .trim()
                     .trim_end_matches(';')
                     .to_string();
+                if promql.is_empty() {
+                    return Err(ParserError::ParserError("Empty promql query".to_string()));
+                }
 
                 if parser.consume_token(&Token::EOF) || parser.consume_token(&Token::SemiColon) {
                     return Ok((promql, Some(alias.value)));
@@ -291,13 +291,17 @@ impl ParserContext<'_> {
                     )));
                 }
             }
+            token = parser.next_token();
+            if token == Token::EOF {
+                break;
+            }
         }
 
+        // AS clause not found
         let promql = sql[index - 1..].trim().trim_end_matches(';').to_string();
         if promql.is_empty() {
             return Err(ParserError::ParserError("Empty promql query".to_string()));
         }
-        // AS clause not found
         Ok((promql, None))
     }
 }
@@ -1172,7 +1176,7 @@ mod tests {
         }
 
         // Test complex PromQL expression with AS
-        let sql = r#"TQL EVAL (0, 30, '10s') (sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100 AS cpu_utilization"#;
+        let sql = r#"TQL EVAL (0, 30, '10s') (sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100 AS cpu_utilization;"#;
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(
@@ -1222,6 +1226,11 @@ mod tests {
             result.is_err(),
             "Should fail with unexpected token after alias"
         );
+
+        // Test AS with empty promql query
+        let sql = "TQL EVAL (0, 10, '5s') AS alias";
+        let result = ParserContext::create_with_dialect(sql, dialect, parse_options.clone());
+        assert!(result.is_err(), "Should fail with empty promql query");
     }
 
     #[test]
