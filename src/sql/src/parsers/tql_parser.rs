@@ -267,11 +267,7 @@ impl ParserContext<'_> {
 
         // translate the start location to the index in the sql string
         let index = location_to_index(sql, &start_location);
-        if index == 0 {
-            return Err(ParserError::ParserError(
-                "Invalid TQL query start location index".to_string(),
-            ));
-        }
+
         loop {
             let token = parser.next_token();
             if token == Token::EOF {
