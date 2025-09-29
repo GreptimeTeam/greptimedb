@@ -272,8 +272,6 @@ impl ParserContext<'_> {
                 "Invalid TQL query start location index".to_string(),
             ));
         }
-
-        let mut query_end_index = sql.len();
         loop {
             let token = parser.next_token();
             if token == Token::EOF {
@@ -281,17 +279,15 @@ impl ParserContext<'_> {
             }
             // Find AS keyword, which indicates "<promql> AS <alias"
             if matches!(&token.token, Token::Word(w) if w.keyword == Keyword::AS) {
-                query_end_index = location_to_index(sql, &token.span.start);
+                let query_end_index = location_to_index(sql, &token.span.start);
                 let alias = parser.parse_identifier()?;
+                let promql = sql[index - 1..query_end_index]
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
 
-                if parser.consume_token(&Token::EOF) || parser.consume_token(&Token::SemiColon) {
-                    return Ok((
-                        sql[index - 1..query_end_index]
-                            .trim()
-                            .trim_end_matches(';')
-                            .to_string(),
-                        Some(alias.value),
-                    ));
+                if parser.consume_token(&Token::EOF) {
+                    return Ok((promql, Some(alias.value)));
                 } else {
                     return Err(ParserError::ParserError(format!(
                         "Unexpected token after alias: {}",
@@ -301,15 +297,12 @@ impl ParserContext<'_> {
             }
         }
 
-        if query_end_index == 0 {
-            Err(ParserError::ParserError("empty TQL query".to_string()))
-        } else {
-            // AS clause not found
-            Ok((
-                sql[index - 1..].trim().trim_end_matches(';').to_string(),
-                None,
-            ))
+        let promql = sql[index - 1..].trim().trim_end_matches(';').to_string();
+        if promql.is_empty() {
+            return Err(ParserError::ParserError("Empty promql query".to_string()));
         }
+        // AS clause not found
+        Ok((promql, None))
     }
 }
 
@@ -1196,7 +1189,7 @@ mod tests {
         }
 
         // Test query with semicolon and alias
-        let sql = "TQL EVAL (0, 10, '5s') simple_metric AS my_alias;";
+        let sql = "TQL EVAL (0, 10, '5s') simple_metric AS my_alias";
         match parse_into_statement(sql) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.query, "simple_metric");
