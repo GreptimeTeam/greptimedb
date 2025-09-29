@@ -819,3 +819,149 @@ StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: 
 StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#
     );
 }
+
+#[tokio::test]
+async fn test_all_index_metas_list_all_types() {
+    use datatypes::schema::{
+        FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+    };
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // One region with both fulltext backends and inverted index enabled, plus bloom skipping index
+    let region_id = RegionId::new(11, 1);
+
+    let mut request = CreateRequestBuilder::new().tag_num(3).field_num(2).build();
+    // inverted index on tag_0
+    request.column_metadatas[0]
+        .column_schema
+        .set_inverted_index(true);
+    // fulltext bloom on tag_1
+    let ft_bloom = FulltextOptions::new_unchecked(
+        true,
+        FulltextAnalyzer::English,
+        false,
+        FulltextBackend::Bloom,
+        4,
+        0.001,
+    );
+    request.column_metadatas[1]
+        .column_schema
+        .set_fulltext_options(&ft_bloom)
+        .unwrap();
+    // fulltext tantivy on tag_2
+    let ft_tantivy = FulltextOptions::new_unchecked(
+        true,
+        FulltextAnalyzer::Chinese,
+        true,
+        FulltextBackend::Tantivy,
+        2,
+        0.01,
+    );
+    request.column_metadatas[2]
+        .column_schema
+        .set_fulltext_options(&ft_tantivy)
+        .unwrap();
+    // bloom filter skipping index on field_1 (which is at index 3)
+    let skipping = SkippingIndexOptions::new_unchecked(2, 0.01, SkippingIndexType::BloomFilter);
+    request.column_metadatas[3]
+        .column_schema
+        .set_skipping_options(&skipping)
+        .unwrap();
+
+    // inverted index on field_1
+    request.column_metadatas[4]
+        .column_schema
+        .set_inverted_index(true);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // write some rows (schema: tag_0, tag_1, tag_2, field_0, field_1, ts)
+    let column_schemas = rows_schema(&request);
+    let rows_vec: Vec<api::v1::Row> = (0..20)
+        .map(|ts| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("x".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("y".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("z".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value(ts as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::F64Value((20 - ts) as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        ts as i64 * 1000,
+                    )),
+                },
+            ],
+        })
+        .collect();
+    let rows = api::v1::Rows {
+        schema: column_schemas.clone(),
+        rows: rows_vec,
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // flush to generate sst and indexes
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    fn bucket_size(size: u64) -> u64 {
+        if size < 512 { size } else { (size / 16) * 16 }
+    }
+
+    let mut metas = engine.all_index_metas().await;
+    for entry in &mut metas {
+        entry.file_id = "<file_id>".to_string();
+        entry.index_file_size = entry.index_file_size.map(bucket_size);
+        if entry.index_type == "fulltext_tantivy" {
+            entry.blob_size = bucket_size(entry.blob_size);
+        }
+        if let Some(meta_json) = entry.meta_json.as_mut()
+            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(meta_json)
+        {
+            if let Some(inverted) = value.get_mut("inverted").and_then(|v| v.as_object_mut()) {
+                inverted.insert("base_offset".to_string(), serde_json::Value::from(0));
+            }
+            *meta_json = value.to_string();
+        }
+    }
+    metas.sort_by(|a, b| {
+        (a.index_type.as_str(), a.target_key.as_str())
+            .cmp(&(b.index_type.as_str(), b.target_key.as_str()))
+    });
+
+    let debug_format = metas
+        .iter()
+        .map(|entry| format!("\n{:?}", entry))
+        .collect::<String>();
+
+    assert_eq!(
+        debug_format,
+        r#"
+PuffinIndexMetaEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "bloom_filter", target_type: "column", target_key: "3", target_json: "{\"columns\":[3]}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "fulltext_bloom", target_type: "column", target_key: "1", target_json: "{\"columns\":[1]}", blob_size: 87, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "fulltext_tantivy", target_type: "column", target_key: "2", target_json: "{\"columns\":[2]}", blob_size: 1104, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "inverted", target_type: "column", target_key: "0", target_json: "{\"columns\":[0]}", blob_size: 70, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":44,\"inverted_index_size\":70,\"null_bitmap_size\":8,\"relative_fst_offset\":26,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "inverted", target_type: "column", target_key: "4", target_json: "{\"columns\":[4]}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#
+    );
+}

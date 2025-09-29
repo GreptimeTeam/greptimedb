@@ -78,7 +78,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{info, tracing};
+use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
@@ -97,12 +97,14 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
-use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
+use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
+use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
     SerdeJsonSnafu, SerializeColumnMetadataSnafu,
@@ -117,7 +119,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
@@ -126,6 +128,8 @@ use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RawEntryReader};
 use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
+
+mod puffin_index;
 
 pub struct MitoEngineBuilder<'a, S: LogStore> {
     data_home: &'a str,
@@ -429,6 +433,71 @@ impl MitoEngine {
                 e.node_id = node_id;
             }
             results.extend(entries);
+        }
+
+        results
+    }
+
+    /// Lists metadata about all puffin index targets stored in the engine.
+    pub async fn all_index_metas(&self) -> Vec<PuffinIndexMetaEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let puffin_metadata_cache = self
+            .inner
+            .workers
+            .cache_manager()
+            .puffin_metadata_cache()
+            .cloned();
+
+        let mut results = Vec::new();
+
+        for region in self.inner.workers.all_regions() {
+            let mut manifest_entries = region.manifest_sst_entries().await;
+            let access_layer = region.access_layer.clone();
+            let table_dir = access_layer.table_dir().to_string();
+            let path_type = access_layer.path_type();
+            let object_store = access_layer.object_store().clone();
+            let puffin_factory = access_layer.puffin_manager_factory().clone();
+            let path_factory = RegionFilePathFactory::new(table_dir.clone(), path_type);
+
+            for entry in manifest_entries.drain(..) {
+                if entry.index_file_path.is_none() {
+                    continue;
+                }
+
+                let file_id = match FileId::parse_str(&entry.file_id) {
+                    Ok(file_id) => file_id,
+                    Err(err) => {
+                        warn!(
+                            err;
+                            "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
+                            entry.table_dir,
+                            entry.file_id
+                        );
+                        continue;
+                    }
+                };
+
+                let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                let context = IndexEntryContext {
+                    table_dir: &entry.table_dir,
+                    region_id: entry.region_id,
+                    table_id: entry.table_id,
+                    region_number: entry.region_number,
+                    region_group: entry.region_group,
+                    region_sequence: entry.region_sequence,
+                    file_id: &entry.file_id,
+                    index_file_size: entry.index_file_size,
+                    node_id,
+                };
+
+                let manager = puffin_factory
+                    .build(object_store.clone(), path_factory.clone())
+                    .with_puffin_metadata_cache(puffin_metadata_cache.clone());
+
+                let mut metas =
+                    collect_index_entries_from_puffin(manager, region_file_id, context).await;
+                results.append(&mut metas);
+            }
         }
 
         results

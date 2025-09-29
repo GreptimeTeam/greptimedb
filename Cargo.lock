@@ -7602,6 +7602,7 @@ dependencies = [
  "dotenv",
  "either",
  "futures",
+ "greptime-proto",
  "humantime-serde",
  "index",
  "itertools 0.14.0",
