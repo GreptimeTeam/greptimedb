@@ -15,7 +15,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanArray, BooleanBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
@@ -72,11 +71,21 @@ use crate::function_registry::FunctionRegistry;
 /// -- Text: "Cat" => true
 /// -- Text: "cat" => false
 /// ```
-pub struct MatchesTermFunction;
+pub struct MatchesTermFunction {
+    signature: Signature,
+}
 
 impl MatchesTermFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(MatchesTermFunction);
+        registry.register_scalar(MatchesTermFunction::default());
+    }
+}
+
+impl Default for MatchesTermFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
     }
 }
 
@@ -91,12 +100,12 @@ impl Function for MatchesTermFunction {
         "matches_term"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

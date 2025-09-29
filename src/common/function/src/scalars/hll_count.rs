@@ -18,7 +18,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, UInt64Builder};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
@@ -37,12 +36,22 @@ const NAME: &str = "hll_count";
 /// 1. The serialized HyperLogLogPlus state, as produced by the aggregator (binary).
 ///
 /// For each row, it deserializes the sketch and returns the estimated cardinality.
-#[derive(Debug, Default)]
-pub struct HllCalcFunction;
+#[derive(Debug)]
+pub(crate) struct HllCalcFunction {
+    signature: Signature,
+}
 
 impl HllCalcFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(HllCalcFunction);
+        registry.register_scalar(HllCalcFunction::default());
+    }
+}
+
+impl Default for HllCalcFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+        }
     }
 }
 
@@ -57,13 +66,12 @@ impl Function for HllCalcFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        // Only argument: HyperLogLogPlus state (binary)
-        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -122,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_hll_count_function() {
-        let function = HllCalcFunction;
+        let function = HllCalcFunction::default();
         assert_eq!("hll_count", function.name());
         assert_eq!(
             DataType::UInt64,
@@ -161,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_hll_count_function_errors() {
-        let function = HllCalcFunction;
+        let function = HllCalcFunction::default();
 
         // Test with invalid number of arguments
         let result = function.invoke_with_args(ScalarFunctionArgs {

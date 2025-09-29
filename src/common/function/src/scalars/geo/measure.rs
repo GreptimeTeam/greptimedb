@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, Result};
+use common_query::error;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
@@ -31,21 +31,31 @@ use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STDistance;
+pub(crate) struct STDistance {
+    signature: Signature,
+}
+
+impl Default for STDistance {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Stable),
+        }
+    }
+}
 
 impl Function for STDistance {
     fn name(&self) -> &str {
         "st_distance"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Stable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -84,21 +94,31 @@ impl Function for STDistance {
 }
 
 /// Return great circle distance between two geometry object, in meters
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STDistanceSphere;
+pub(crate) struct STDistanceSphere {
+    signature: Signature,
+}
+
+impl Default for STDistanceSphere {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Stable),
+        }
+    }
+}
 
 impl Function for STDistanceSphere {
     fn name(&self) -> &str {
         "st_distance_sphere_m"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Stable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -147,21 +167,31 @@ impl Function for STDistanceSphere {
 }
 
 /// Return area of given geometry object
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STArea;
+pub(crate) struct STArea {
+    signature: Signature,
+}
+
+impl Default for STArea {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Stable),
+        }
+    }
+}
 
 impl Function for STArea {
     fn name(&self) -> &str {
         "st_area"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Stable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

@@ -16,14 +16,12 @@ use std::sync::Arc;
 
 use common_function::scalars::matches_term::MatchesTermFunction;
 use common_function::scalars::udf::create_udf;
-use common_function::state::FunctionState;
 use datafusion::config::ConfigOptions;
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
-use session::context::QueryContext;
 
 use crate::plan::ExtractExpr;
 
@@ -88,11 +86,7 @@ impl TreeNodeRewriter for TranscribeAtatRewriter {
             && matches!(binary_expr.op, datafusion_expr::Operator::AtAt)
         {
             self.transcribed = true;
-            let scalar_udf = create_udf(
-                Arc::new(MatchesTermFunction),
-                QueryContext::arc(),
-                Arc::new(FunctionState::default()),
-            );
+            let scalar_udf = create_udf(Arc::new(MatchesTermFunction::default()));
             let exprs = vec![
                 binary_expr.left.as_ref().clone(),
                 binary_expr.right.as_ref().clone(),

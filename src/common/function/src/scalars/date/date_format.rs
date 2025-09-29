@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use common_query::error::{self, Result};
+use common_query::error;
 use common_time::{Date, Timestamp};
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
@@ -29,31 +29,39 @@ use crate::helper;
 use crate::helper::with_match_timestamp_types;
 
 /// A function that formats timestamp/date/datetime into string by the format
-#[derive(Clone, Debug, Default)]
-pub struct DateFormatFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct DateFormatFunction {
+    signature: Signature,
+}
 
-const NAME: &str = "date_format";
+impl Default for DateFormatFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![
+                    DataType::Date32,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ],
+                vec![DataType::Utf8],
+            ),
+        }
+    }
+}
 
 impl Function for DateFormatFunction {
     fn name(&self) -> &str {
-        NAME
+        "date_format"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![
-                DataType::Date32,
-                DataType::Timestamp(TimeUnit::Second, None),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-            ],
-            vec![DataType::Utf8],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -138,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_date_format_misc() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
         assert_eq!("date_format", f.name());
         assert_eq!(
             DataType::Utf8View,
@@ -163,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_date_format() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
 
         let times = vec![Some(123), None, Some(42), None];
         let formats = vec![
@@ -207,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_date_date_format() {
-        let f = DateFormatFunction;
+        let f = DateFormatFunction::default();
 
         let dates = vec![Some(123), None, Some(42), None];
         let formats = vec![

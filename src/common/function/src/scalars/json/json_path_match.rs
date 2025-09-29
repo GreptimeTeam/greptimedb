@@ -16,7 +16,6 @@ use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use arrow::compute;
-use common_query::error::Result;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
@@ -25,8 +24,22 @@ use crate::function::{Function, extract_args};
 use crate::helper;
 
 /// Check if the given JSON data match the given JSON path's predicate.
-#[derive(Clone, Debug, Default)]
-pub struct JsonPathMatchFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct JsonPathMatchFunction {
+    signature: Signature,
+}
+
+impl Default for JsonPathMatchFunction {
+    fn default() -> Self {
+        Self {
+            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+            signature: helper::one_of_sigs2(
+                vec![DataType::Binary, DataType::BinaryView],
+                vec![DataType::Utf8, DataType::Utf8View],
+            ),
+        }
+    }
+}
 
 const NAME: &str = "json_path_match";
 
@@ -35,16 +48,12 @@ impl Function for JsonPathMatchFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        helper::one_of_sigs2(
-            vec![DataType::Binary, DataType::BinaryView],
-            vec![DataType::Utf8, DataType::Utf8View],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -102,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_json_path_match_function() {
-        let json_path_match = JsonPathMatchFunction;
+        let json_path_match = JsonPathMatchFunction::default();
 
         assert_eq!("json_path_match", json_path_match.name());
         assert_eq!(

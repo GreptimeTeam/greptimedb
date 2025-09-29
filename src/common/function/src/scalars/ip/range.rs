@@ -36,21 +36,31 @@ use crate::function::{Function, extract_args};
 /// - ipv4_in_range('192.168.1.5', '192.168.1.0/24') -> true
 /// - ipv4_in_range('192.168.2.1', '192.168.1.0/24') -> false
 /// - ipv4_in_range('10.0.0.1', '10.0.0.0/8') -> true
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4InRange;
+pub(crate) struct Ipv4InRange {
+    signature: Signature,
+}
+
+impl Default for Ipv4InRange {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv4InRange {
     fn name(&self) -> &str {
         "ipv4_in_range"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -114,21 +124,31 @@ impl Function for Ipv4InRange {
 /// - ipv6_in_range('2001:db8:1::', '2001:db8::/32') -> true
 /// - ipv6_in_range('2001:db9::1', '2001:db8::/32') -> false
 /// - ipv6_in_range('::1', '::1/128') -> true
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6InRange;
+pub(crate) struct Ipv6InRange {
+    signature: Signature,
+}
+
+impl Default for Ipv6InRange {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6InRange {
     fn name(&self) -> &str {
         "ipv6_in_range"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -313,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_in_range() {
-        let func = Ipv4InRange;
+        let func = Ipv4InRange::default();
 
         // Test IPs
         let ip_values = vec![
@@ -357,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_in_range() {
-        let func = Ipv6InRange;
+        let func = Ipv6InRange::default();
 
         // Test IPs
         let ip_values = vec![
@@ -401,8 +421,8 @@ mod tests {
 
     #[test]
     fn test_invalid_inputs() {
-        let ipv4_func = Ipv4InRange;
-        let ipv6_func = Ipv6InRange;
+        let ipv4_func = Ipv4InRange::default();
+        let ipv6_func = Ipv6InRange::default();
 
         // Invalid IPv4 address
         let invalid_ip_values = vec!["not-an-ip", "192.168.1.300"];
@@ -448,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_edge_cases() {
-        let ipv4_func = Ipv4InRange;
+        let ipv4_func = Ipv4InRange::default();
 
         // Edge cases like prefix length 0 (matches everything) and 32 (exact match)
         let ip_values = vec!["8.8.8.8", "192.168.1.1", "192.168.1.1"];

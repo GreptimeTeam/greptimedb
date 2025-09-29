@@ -15,7 +15,6 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
 use datafusion_common::arrow::compute;
@@ -28,26 +27,36 @@ use crate::function::{Function, extract_args};
 
 const NAME: &str = "vec_to_string";
 
-#[derive(Debug, Clone, Default)]
-pub struct VectorToStringFunction;
+#[derive(Debug, Clone)]
+pub struct VectorToStringFunction {
+    signature: Signature,
+}
+
+impl Default for VectorToStringFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Uniform(1, vec![DataType::BinaryView]),
+                    TypeSignature::Uniform(1, BINARYS.to_vec()),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for VectorToStringFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::Uniform(1, vec![DataType::BinaryView]),
-                TypeSignature::Uniform(1, BINARYS.to_vec()),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -102,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_vector_to_string() {
-        let func = VectorToStringFunction;
+        let func = VectorToStringFunction::default();
 
         let mut builder = BinaryViewBuilder::with_capacity(3);
         builder.append_option(Some(

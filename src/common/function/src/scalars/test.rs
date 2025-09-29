@@ -14,7 +14,6 @@
 
 use std::fmt;
 
-use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow::datatypes::DataType;
@@ -23,23 +22,33 @@ use datatypes::vectors::{Helper, Vector};
 use crate::function::{Function, extract_args};
 use crate::scalars::expression::{EvalContext, scalar_binary_op};
 
-#[derive(Clone, Default)]
-pub(crate) struct TestAndFunction;
+#[derive(Clone)]
+pub(crate) struct TestAndFunction {
+    signature: Signature,
+}
+
+impl Default for TestAndFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(
+                vec![DataType::Boolean, DataType::Boolean],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for TestAndFunction {
     fn name(&self) -> &str {
         "test_and"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(
-            vec![DataType::Boolean, DataType::Boolean],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
