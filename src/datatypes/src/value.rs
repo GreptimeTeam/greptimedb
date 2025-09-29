@@ -215,6 +215,17 @@ impl Value {
         }
     }
 
+    pub fn as_struct(&self) -> Result<Option<&StructValue>> {
+        match self {
+            Value::Null => Ok(None),
+            Value::Struct(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast {other:?} to struct value"),
+            }
+            .fail(),
+        }
+    }
+
     /// Cast itself to [ValueRef].
     pub fn as_value_ref(&self) -> ValueRef {
         match self {
@@ -1289,6 +1300,10 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, List)
     }
 
+    pub fn as_struct(&self) -> Result<Option<StructValueRef>> {
+        impl_as_for_value_ref!(self, Struct)
+    }
+
     /// Cast itself to [Decimal128].
     pub fn as_decimal128(&self) -> Result<Option<Decimal128>> {
         impl_as_for_value_ref!(self, Decimal128)
@@ -1522,7 +1537,7 @@ impl<'a> StructValueRef<'a> {
 
     pub fn struct_type(&self) -> StructType {
         match self {
-            StructValueRef::Indexed { vector, idx } => vector.struct_type(),
+            StructValueRef::Indexed { vector, .. } => vector.struct_type(),
             StructValueRef::Ref(val) => StructType::new(val.fields().to_owned()),
             StructValueRef::RefMap { fields, .. } => fields.clone(),
         }

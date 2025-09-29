@@ -25,7 +25,7 @@ use crate::types::{
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value};
 use crate::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, ListVector, MutableVector,
-    PrimitiveVector, StringVector, StructVector, Vector,
+    NullVector, PrimitiveVector, StringVector, StructVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -187,6 +187,31 @@ impl_scalar_for_native!(i32, Int32Type);
 impl_scalar_for_native!(i64, Int64Type);
 impl_scalar_for_native!(f32, Float32Type);
 impl_scalar_for_native!(f64, Float64Type);
+
+impl Scalar for () {
+    type VectorType = NullVector;
+    type RefType<'a> = ();
+
+    #[inline]
+    fn as_scalar_ref(&self) -> () {
+        ()
+    }
+
+    #[allow(clippy::needless_lifetimes)]
+    #[inline]
+    fn upcast_gat<'short, 'long: 'short>(long: ()) -> () {
+        long
+    }
+}
+
+impl ScalarRef<'_> for () {
+    type ScalarType = ();
+
+    #[inline]
+    fn to_owned_scalar(&self) -> () {
+        ()
+    }
+}
 
 impl Scalar for bool {
     type VectorType = BooleanVector;

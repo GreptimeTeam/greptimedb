@@ -734,7 +734,40 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::List(list_value)
         }
-        ValueData::StructValue(struct_value) => {}
+        ValueData::StructValue(struct_value) => {
+            let struct_data_ext = datatype_ext.and_then(|ext| {
+                if let Some(TypeExt::StructType(s)) = ext.type_ext {
+                    Some(s)
+                } else {
+                    None
+                }
+            }).expect("struct must contians datatype ext");
+
+            let struct_fields = struct_data_ext.fields().map(|field| {
+                let field_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(field.datatype(), field.datatype_extension.map(|ext| *ext.clone())));
+                let field_name = field.name().to_string();
+                StructField::new(field_name, field_type)
+            }).collect());
+
+            let items = struct_value
+                .items
+                .iter()
+                .zip(struct_fields.iter())
+                .map(|(field, item)| {
+                    (field.name(),
+                    pb_value_to_value_ref(
+                        item,
+                        &list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
+                    )))
+                })
+                .collect::<BTreeMap<_,_>>();
+
+            let struct_value = StructValueRef::RefMap {
+                val: items,
+                fields: StructType::new(struct_fields)
+            };
+            ValueRef::Struct(struct_value)
+        }
     }
 }
 

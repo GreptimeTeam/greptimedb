@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::compute::TakeOptions;
+use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
 use snafu::ResultExt;
 
+use super::MutableVector;
 use crate::error::{ArrowComputeSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu};
-use crate::prelude::{ConcreteDataType, ScalarVector};
+use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StructType;
 use crate::value::{StructValue, StructValueRef, Value, ValueRef};
@@ -35,13 +38,8 @@ pub struct StructVector {
 }
 
 impl StructVector {
-    pub fn new(array: StructArray) -> Result<Self> {
-        let fields = array.fields();
-        let struct_type = fields.try_into()?;
-        Ok(StructVector {
-            array,
-            fields: struct_type,
-        })
+    pub fn new(fields: StructType, array: StructArray) -> Self {
+        StructVector { array, fields }
     }
 
     pub fn array(&self) -> &StructArray {
@@ -110,16 +108,19 @@ impl Vector for StructVector {
             return Value::Null;
         }
 
-        let array = &self.array.value(index);
-        let vector = Helper::try_into_vector(array).unwrap_or_else(|_| {
-            panic!(
-                "arrow array with datatype {:?} cannot converted to our vector",
-                array.data_type()
-            )
-        });
-        let values = (0..vector.len())
-            .map(|i| vector.get(i))
-            .collect::<Vec<Value>>();
+        let mut values = BTreeMap::new();
+        for (i, field) in self.fields.fields().iter().enumerate() {
+            let field_array = &self.array.column(i);
+            let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
+                panic!(
+                    "arrow array with datatype {:?} cannot converted to our vector",
+                    field_array.data_type()
+                )
+            });
+
+            values.insert(field.name().to_string(), field_vector.get(index));
+        }
+
         Value::Struct(StructValue::new(values, self.fields.clone()))
     }
 
@@ -148,9 +149,7 @@ impl VectorOp for StructVector {
             column_arrays,
             self.array.nulls().cloned(),
         );
-        Arc::new(
-            StructVector::new(replicated_array).expect("Failed to create replicated StructVector"),
-        )
+        Arc::new(StructVector::new(self.fields.clone(), replicated_array))
     }
 
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
@@ -207,6 +206,20 @@ impl Serializable for StructVector {
     }
 }
 
+impl From<StructArray> for StructVector {
+    fn from(array: StructArray) -> Self {
+        let fields = match array.data_type() {
+            ArrowDataType::Struct(fields) => {
+                StructType::try_from(fields).expect("Failed to create StructType")
+            }
+            other => panic!("Try to create StructVector from an arrow array with type {other:?}"),
+        };
+        Self { array, fields }
+    }
+}
+
+vectors::impl_try_from_arrow_array_for_vector!(StructArray, StructVector);
+
 impl ScalarVector for StructVector {
     type OwnedItem = StructValue;
     type RefItem<'a> = StructValueRef<'a>;
@@ -223,5 +236,180 @@ impl ScalarVector for StructVector {
 
     fn iter_data(&self) -> Self::Iter<'_> {
         StructIter::new(self)
+    }
+}
+
+pub struct StructIter<'a> {
+    vector: &'a StructVector,
+    index: usize,
+}
+
+impl<'a> StructIter<'a> {
+    pub fn new(vector: &'a StructVector) -> Self {
+        Self { vector, index: 0 }
+    }
+}
+
+impl<'a> Iterator for StructIter<'a> {
+    type Item = Option<StructValueRef<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.vector.array().len() {
+            if self.vector.is_null(self.index) {
+                return Some(None);
+            }
+
+            let value = StructValueRef::Indexed {
+                vector: self.vector,
+                idx: self.index,
+            };
+            self.index += 1;
+            Some(Some(value))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.vector.len(), Some(self.vector.len()))
+    }
+}
+
+pub struct StructVectorBuilder {
+    value_builders: Vec<Box<dyn MutableVector>>,
+    fields: StructType,
+}
+
+impl StructVectorBuilder {
+    pub fn with_type_and_capacity(fields: StructType, capacity: usize) -> Self {
+        let value_builders = fields
+            .fields()
+            .iter()
+            .map(|f| f.data_type().create_mutable_vector(capacity))
+            .collect();
+        Self {
+            value_builders,
+            fields,
+        }
+    }
+
+    fn push_struct_value(&mut self, struct_value: &StructValue) -> Result<()> {
+        for (index, field) in self.fields.fields().iter().enumerate() {
+            let value = struct_value
+                .items()
+                .get(field.name())
+                .unwrap_or(&Value::Null);
+            self.value_builders[index].try_push_value_ref(&value.as_value_ref())?;
+        }
+
+        Ok(())
+    }
+}
+
+impl MutableVector for StructVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::struct_datatype(self.fields.clone())
+    }
+
+    fn len(&self) -> usize {
+        if self.value_builders.len() == 0 {
+            0
+        } else {
+            self.value_builders[0].len()
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Arc::new(self.finish())
+    }
+
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        if let Some(struct_ref) = value.as_struct()? {
+            match struct_ref {
+                StructValueRef::Indexed { vector, idx } => match vector.get(idx).as_struct()? {
+                    Some(struct_value) => self.push_struct_value(struct_value)?,
+                    None => self.push_null(),
+                },
+                StructValueRef::Ref(val) => self.push_struct_value(val)?,
+                StructValueRef::RefMap { val, fields } => {
+                    let struct_value = StructValue::new(
+                        val.iter()
+                            .map(|(key, v)| (key.to_string(), Value::from(v.clone())))
+                            .collect(),
+                        fields.clone(),
+                    );
+                    self.push_struct_value(&struct_value)?;
+                }
+            }
+        } else {
+            self.push_null();
+        }
+
+        Ok(())
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        for idx in offset..offset + length {
+            let value = vector.get_ref(idx);
+            self.try_push_value_ref(&value)?;
+        }
+
+        Ok(())
+    }
+
+    fn push_null(&mut self) {
+        for array in self.value_builders.iter_mut() {
+            array.push_null();
+        }
+    }
+}
+
+impl ScalarVectorBuilder for StructVectorBuilder {
+    type VectorType = StructVector;
+
+    fn with_capacity(_capacity: usize) -> Self {
+        panic!("Must use StructVectorBuilder::with_type_capacity()");
+    }
+
+    fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
+        // We expect the input ListValue has the same inner type as the builder when using
+        // push(), so just panic if `push_value_ref()` returns error, which indicate an
+        // invalid input value type.
+        self.try_push_value_ref(&value.map(ValueRef::Struct).unwrap_or(ValueRef::Null))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to push value, expect value type {:?}, err:{}",
+                    self.fields, e
+                );
+            });
+    }
+
+    fn finish(&mut self) -> Self::VectorType {
+        let arrays = self.value_builders.iter_mut().map(|b| b.finish()).collect();
+
+        StructVector::new(self.fields.clone(), arrays.collect())
+    }
+
+    // Port from https://github.com/apache/arrow-rs/blob/ef6932f31e243d8545e097569653c8d3f1365b4d/arrow-array/src/builder/generic_list_builder.rs#L302-L325
+    fn finish_cloned(&self) -> Self::VectorType {
+        let arrays = self
+            .value_builders
+            .iter()
+            .map(|b| b.finish_cloned())
+            .collect();
+        StructVector::new(self.fields.clone(), arrays.collect())
     }
 }

@@ -33,6 +33,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
@@ -237,8 +238,9 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
-            ScalarValue::Struct(_) => {
-                todo!()
+            ScalarValue::Struct(v) => {
+                let struct_type = StructType::try_from(v.fields())?;
+                ConstantVector::new(Arc::new(StructVector::new(struct_type, vec![v])), length)
             }
             ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
@@ -388,13 +390,16 @@ impl Helper {
                 }
             }
 
-            ArrowDataType::Struct(_fields) => {
+            ArrowDataType::Struct(fields) => {
                 let array = array
                     .as_ref()
                     .as_any()
                     .downcast_ref::<StructArray>()
                     .unwrap();
-                Arc::new(StructVector::new(array.clone())?)
+                Arc::new(StructVector::new(
+                    StructType::try_from(fields)?,
+                    array.clone(),
+                ))
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)

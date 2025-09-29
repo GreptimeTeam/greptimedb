@@ -21,6 +21,7 @@ use snafu::{OptionExt, ensure};
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
+use crate::prelude::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::NullType;
 use crate::value::{Value, ValueRef};
@@ -112,6 +113,21 @@ impl Vector for NullVector {
     }
 }
 
+impl ScalarVector for NullVector {
+    type OwnedItem = ();
+    type RefItem<'a> = ();
+    type Iter<'a> = NullIter<'a>;
+    type Builder = NullVectorBuilder;
+
+    fn get_data(&self, _idx: usize) -> Option<Self::RefItem<'_>> {
+        Some(())
+    }
+
+    fn iter_data(&self) -> Self::Iter<'_> {
+        NullIter::new(self)
+    }
+}
+
 impl fmt::Debug for NullVector {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "NullVector({})", self.len())
@@ -125,6 +141,30 @@ impl Serializable for NullVector {
 }
 
 vectors::impl_try_from_arrow_array_for_vector!(NullArray, NullVector);
+
+pub struct NullIter<'a> {
+    vector: &'a NullVector,
+    index: usize,
+}
+
+impl<'a> NullIter<'a> {
+    pub fn new(vector: &'a NullVector) -> Self {
+        NullIter { vector, index: 0 }
+    }
+}
+
+impl<'a> Iterator for NullIter<'a> {
+    type Item = Option<()>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.vector.len() {
+            self.index += 1;
+            Some(Some(()))
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct NullVectorBuilder {
@@ -194,6 +234,29 @@ impl MutableVector for NullVectorBuilder {
 
     fn push_null(&mut self) {
         self.length += 1;
+    }
+}
+
+impl ScalarVectorBuilder for NullVectorBuilder {
+    type VectorType = NullVector;
+
+    fn with_capacity(_capacity: usize) -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, _value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
+        self.length += 1;
+    }
+
+    fn finish(&mut self) -> Self::VectorType {
+        let result = NullVector::new(self.length);
+
+        self.length = 0;
+        result
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        NullVector::new(self.length)
     }
 }
 
