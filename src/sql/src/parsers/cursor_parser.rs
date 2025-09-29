@@ -68,7 +68,9 @@ impl ParserContext<'_> {
             .parser
             .parse_literal_uint()
             .context(error::SyntaxSnafu)?;
-        let _ = self.parser.parse_keyword(Keyword::FROM);
+        let _ = self
+            .parser
+            .parse_one_of_keywords(&[Keyword::FROM, Keyword::IN]);
 
         let cursor_name = self
             .parser

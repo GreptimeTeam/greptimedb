@@ -129,7 +129,7 @@ async fn main() {
         .prefix("sqlness")
         .tempdir()
         .unwrap();
-    let sqlness_home = temp_dir.into_path();
+    let sqlness_home = temp_dir.keep();
 
     let mut interceptor_registry: Registry = Default::default();
     interceptor_registry.register(

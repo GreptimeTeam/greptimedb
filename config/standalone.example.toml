@@ -56,6 +56,11 @@ prom_validation_mode = "strict"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## The maximum connection age for gRPC connection.
+## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
+## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
+## @toml2docs:none-default
+#+ max_connection_age = "10m"
 
 ## gRPC server TLS options, see `mysql.tls` section.
 [grpc.tls]
@@ -360,6 +365,9 @@ data_home = "./greptimedb_data"
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
+
+## Whether to enable read cache. If not set, the read cache will be enabled by default when using object storage.
+#+ enable_read_cache = true
 
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
 ## A local file directory, defaults to `{data_home}`. An empty string means disabling.

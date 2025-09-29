@@ -140,6 +140,15 @@ select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 EXPLAIN 
 select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 
+select * from logical_table_4;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN select * from logical_table_4;
+
 drop table logical_table_2;
 
 drop table logical_table_3;

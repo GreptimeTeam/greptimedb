@@ -23,13 +23,13 @@ use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, ColumnarValue, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion_common::{DataFusionError, utils};
+use datafusion_common::DataFusionError;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use snafu::{OptionExt, ensure};
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
 
 /// `matches` for full text search.
@@ -65,8 +65,7 @@ impl Function for MatchesFunction {
 
     // TODO: read case-sensitive config
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [data_column, patterns] = utils::take_function_args(self.name(), args)?;
+        let [data_column, patterns] = extract_args(self.name(), &args)?;
 
         if data_column.is_empty() {
             return Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(

@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
+use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -568,6 +569,22 @@ impl QueryEngine for DatafusionQueryEngine {
                     });
             }
         }
+
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(FunctionContext {
+                query_ctx: query_ctx.clone(),
+                state: self.engine_state().function_state(),
+            });
+
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+
         QueryEngineContext::new(state, query_ctx)
     }
 

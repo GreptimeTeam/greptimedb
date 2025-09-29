@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -115,17 +114,6 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
     }
 }
 
-pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
-    // DBeaver tricky replacement for datafusion not support sql
-    // TODO: add more here
-    query
-        .replace(
-            "SELECT db.oid,db.* FROM pg_catalog.pg_database db",
-            "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
-        )
-        .into()
-}
-
 #[cfg(test)]
 mod test {
     use session::context::{QueryContext, QueryContextRef};
@@ -210,13 +198,5 @@ mod test {
         assert!(process("SELECT 1", query_context.clone()).is_none());
         assert!(process("SHOW TABLES ", query_context.clone()).is_none());
         assert!(process("SET TIME_ZONE=utc ", query_context.clone()).is_none());
-    }
-
-    #[test]
-    fn test_rewrite() {
-        assert_eq!(
-            "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
-            rewrite_sql("SELECT db.oid,db.* FROM pg_catalog.pg_database db")
-        );
     }
 }

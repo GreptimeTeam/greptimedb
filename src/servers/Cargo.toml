@@ -56,6 +56,7 @@ dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-pg-catalog.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
@@ -63,7 +64,6 @@ futures-util.workspace = true
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true
-http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }

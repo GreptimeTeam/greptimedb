@@ -28,7 +28,7 @@ use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::MergeScanLogicalPlan;
-use crate::dist_plan::analyzer::AliasMapping;
+use crate::dist_plan::analyzer::{AliasMapping, OTHER_PHY_PART_COL_PLACEHOLDER};
 
 /// FallbackPlanRewriter is a plan rewriter that will only push down table scan node
 /// This is used when `PlanRewriter` produce errors when trying to rewrite the plan
@@ -70,6 +70,10 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                         Some(partition_cols
                                 .into_iter()
                                 .map(|c| {
+                                    if c == OTHER_PHY_PART_COL_PLACEHOLDER {
+                                        // for placeholder, just return a empty alias
+                                        return Ok((c.clone(), BTreeSet::new()));
+                                    }
                                     let index =
                                         plan.schema().index_of_column_by_name(None, &c).ok_or_else(|| {
                                             datafusion_common::DataFusionError::Internal(

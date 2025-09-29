@@ -37,11 +37,15 @@ async fn test_stream_to_csv() {
         .display()
         .to_string();
 
+    let format_path = &find_workspace_path("/src/common/datasource/tests/csv/basic_format.csv")
+        .display()
+        .to_string();
+
     // A small threshold
     // Triggers the flush each writes
-    test_util::setup_stream_to_csv_test(origin_path, |size| size / 2).await;
+    test_util::setup_stream_to_csv_test(origin_path, format_path, |size| size / 2).await;
 
     // A large threshold
     // Only triggers the flush at last
-    test_util::setup_stream_to_csv_test(origin_path, |size| size * 2).await;
+    test_util::setup_stream_to_csv_test(origin_path, format_path, |size| size * 2).await;
 }

@@ -13,20 +13,18 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use datafusion_expr::{Signature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{
-    BooleanVectorBuilder, Float64VectorBuilder, Int64VectorBuilder, MutableVector,
-    StringVectorBuilder,
+use arrow::compute;
+use common_query::error::Result;
+use datafusion_common::arrow::array::{
+    Array, AsArray, BooleanBuilder, Float64Builder, Int64Builder, StringViewBuilder,
 };
-use snafu::ensure;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
+use crate::helper;
 
 fn get_json_by_path(json: &[u8], path: &str) -> Option<Vec<u8>> {
     let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
@@ -64,59 +62,40 @@ macro_rules! json_get {
 
                 fn signature(&self) -> Signature {
                     // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-                    Signature::exact(
-                        vec![DataType::Binary, DataType::Utf8],
-                        Volatility::Immutable,
+                    helper::one_of_sigs2(
+                        vec![DataType::Binary, DataType::BinaryView],
+                        vec![DataType::Utf8, DataType::Utf8View],
                     )
                 }
 
-                fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-                    ensure!(
-                        columns.len() == 2,
-                        InvalidFuncArgsSnafu {
-                            err_msg: format!(
-                                "The length of the args is not correct, expect exactly two, have: {}",
-                                columns.len()
-                            ),
-                        }
-                    );
-                    let jsons = &columns[0];
-                    let paths = &columns[1];
+                fn invoke_with_args(
+                    &self,
+                    args: ScalarFunctionArgs,
+                ) -> datafusion_common::Result<ColumnarValue> {
+                    let [arg0, arg1] = extract_args(self.name(), &args)?;
+                    let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                    let jsons = arg0.as_binary_view();
+                    let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+                    let paths = arg1.as_string_view();
 
                     let size = jsons.len();
-                    let datatype = jsons.data_type();
-                    let mut results = [<$type VectorBuilder>]::with_capacity(size);
+                    let mut builder = [<$type Builder>]::with_capacity(size);
 
-                    match datatype {
-                        // JSON data type uses binary vector
-                        ConcreteDataType::Binary(_) => {
-                            for i in 0..size {
-                                let json = jsons.get_ref(i);
-                                let path = paths.get_ref(i);
-
-                                let json = json.as_binary();
-                                let path = path.as_string();
-                                let result = match (json, path) {
-                                    (Ok(Some(json)), Ok(Some(path))) => {
-                                        get_json_by_path(json, path)
-                                            .and_then(|json| { jsonb::[<to_ $rust_type>](&json).ok() })
-                                    }
-                                    _ => None,
-                                };
-
-                                results.push(result);
+                    for i in 0..size {
+                        let json = jsons.is_valid(i).then(|| jsons.value(i));
+                        let path = paths.is_valid(i).then(|| paths.value(i));
+                        let result = match (json, path) {
+                            (Some(json), Some(path)) => {
+                                get_json_by_path(json, path)
+                                    .and_then(|json| { jsonb::[<to_ $rust_type>](&json).ok() })
                             }
-                        }
-                        _ => {
-                            return UnsupportedInputDataTypeSnafu {
-                                function: stringify!([<$name:snake>]),
-                                datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                            }
-                            .fail();
-                        }
+                            _ => None,
+                        };
+
+                        builder.append_option(result);
                     }
 
-                    Ok(results.to_vector())
+                    Ok(ColumnarValue::Array(Arc::new(builder.finish())))
                 }
             }
 
@@ -160,63 +139,43 @@ impl Function for JsonGetString {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        Signature::exact(
-            vec![DataType::Binary, DataType::Utf8],
-            Volatility::Immutable,
+        helper::one_of_sigs2(
+            vec![DataType::Binary, DataType::BinaryView],
+            vec![DataType::Utf8, DataType::Utf8View],
         )
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly two, have: {}",
-                    columns.len()
-                ),
-            }
-        );
-        let jsons = &columns[0];
-        let paths = &columns[1];
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+        let jsons = arg0.as_binary_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let paths = arg1.as_string_view();
 
         let size = jsons.len();
-        let datatype = jsons.data_type();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
-        match datatype {
-            // JSON data type uses binary vector
-            ConcreteDataType::Binary(_) => {
-                for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let path = paths.get_ref(i);
-
-                    let json = json.as_binary();
-                    let path = path.as_string();
-                    let result = match (json, path) {
-                        (Ok(Some(json)), Ok(Some(path))) => {
-                            get_json_by_path(json, path).and_then(|json| jsonb::to_str(&json).ok())
-                        }
-                        _ => None,
-                    };
-
-                    results.push(result.as_deref());
+        for i in 0..size {
+            let json = jsons.is_valid(i).then(|| jsons.value(i));
+            let path = paths.is_valid(i).then(|| paths.value(i));
+            let result = match (json, path) {
+                (Some(json), Some(path)) => {
+                    get_json_by_path(json, path).and_then(|json| jsonb::to_str(&json).ok())
                 }
-            }
-            _ => {
-                return UnsupportedInputDataTypeSnafu {
-                    function: "json_get_string",
-                    datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
-                }
-                .fail();
-            }
+                _ => None,
+            };
+            builder.append_option(result);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -230,9 +189,9 @@ impl Display for JsonGetString {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion_expr::TypeSignature;
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BinaryVector, StringVector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{BinaryArray, StringArray};
+    use datafusion_common::arrow::datatypes::{Float64Type, Int64Type};
 
     use super::*;
 
@@ -247,13 +206,6 @@ mod tests {
                 .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
-
-        assert!(matches!(json_get_int.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Binary, DataType::Utf8]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
@@ -271,17 +223,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_get_int
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Int64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_get_int
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
             .unwrap();
+        let vector = result.as_primitive::<Int64Type>();
 
         assert_eq!(3, vector.len());
         for (i, gt) in results.iter().enumerate() {
-            let result = vector.get_ref(i);
-            let result = result.as_i64().unwrap();
+            let result = vector.is_valid(i).then(|| vector.value(i));
             assert_eq!(*gt, result);
         }
     }
@@ -297,13 +257,6 @@ mod tests {
                 .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
-
-        assert!(matches!(json_get_float.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Binary, DataType::Utf8]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2.1}, "b": 2.2, "c": 3.3}"#,
@@ -321,17 +274,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_get_float
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_get_float
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
             .unwrap();
+        let vector = result.as_primitive::<Float64Type>();
 
         assert_eq!(3, vector.len());
         for (i, gt) in results.iter().enumerate() {
-            let result = vector.get_ref(i);
-            let result = result.as_f64().unwrap();
+            let result = vector.is_valid(i).then(|| vector.value(i));
             assert_eq!(*gt, result);
         }
     }
@@ -347,13 +308,6 @@ mod tests {
                 .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
-
-        assert!(matches!(json_get_bool.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Binary, DataType::Utf8]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": true}, "b": false, "c": true}"#,
@@ -371,17 +325,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_get_bool
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_get_bool
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
             .unwrap();
+        let vector = result.as_boolean();
 
         assert_eq!(3, vector.len());
         for (i, gt) in results.iter().enumerate() {
-            let result = vector.get_ref(i);
-            let result = result.as_boolean().unwrap();
+            let result = vector.is_valid(i).then(|| vector.value(i));
             assert_eq!(*gt, result);
         }
     }
@@ -392,18 +354,11 @@ mod tests {
 
         assert_eq!("json_get_string", json_get_string.name());
         assert_eq!(
-            DataType::Utf8,
+            DataType::Utf8View,
             json_get_string
                 .return_type(&[DataType::Binary, DataType::Utf8])
                 .unwrap()
         );
-
-        assert!(matches!(json_get_string.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Binary, DataType::Utf8]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": "a"}, "b": "b", "c": "c"}"#,
@@ -421,17 +376,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let json_vector = BinaryVector::from_vec(jsonbs);
-        let path_vector = StringVector::from_vec(paths);
-        let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
-        let vector = json_get_string
-            .eval(&FunctionContext::default(), &args)
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(jsonbs))),
+                ColumnarValue::Array(Arc::new(StringArray::from_iter_values(paths))),
+            ],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = json_get_string
+            .invoke_with_args(args)
+            .and_then(|x| x.to_array(3))
             .unwrap();
+        let vector = result.as_string_view();
 
         assert_eq!(3, vector.len());
         for (i, gt) in results.iter().enumerate() {
-            let result = vector.get_ref(i);
-            let result = result.as_string().unwrap();
+            let result = vector.is_valid(i).then(|| vector.value(i));
             assert_eq!(*gt, result);
         }
     }

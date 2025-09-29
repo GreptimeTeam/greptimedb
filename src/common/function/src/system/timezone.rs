@@ -13,15 +13,13 @@
 // limitations under the License.
 
 use std::fmt::{self};
-use std::sync::Arc;
 
 use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{StringVector, VectorRef};
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, find_function_context};
 
 /// A function to return current session timezone.
 #[derive(Clone, Debug, Default)]
@@ -35,17 +33,21 @@ impl Function for TimezoneFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let tz = func_ctx.query_ctx.timezone().to_string();
 
-        Ok(Arc::new(StringVector::from_slice(&[&tz])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(tz))))
     }
 }
 
@@ -59,14 +61,18 @@ impl fmt::Display for TimezoneFunction {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::Field;
+    use datafusion_common::config::ConfigOptions;
     use session::context::QueryContextBuilder;
 
     use super::*;
+    use crate::function::FunctionContext;
+
     #[test]
     fn test_build_function() {
         let build = TimezoneFunction;
         assert_eq!("timezone", build.name());
-        assert_eq!(DataType::Utf8, build.return_type(&[]).unwrap());
+        assert_eq!(DataType::Utf8View, build.return_type(&[]).unwrap());
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default().build().into();
@@ -75,8 +81,21 @@ mod tests {
             query_ctx,
             ..Default::default()
         };
-        let vector = build.eval(&func_ctx, &[]).unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["UTC"]));
-        assert_eq!(expect, vector);
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(func_ctx);
+        let config_options = Arc::new(config_options);
+
+        let args = ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            number_rows: 0,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options,
+        };
+        let result = build.invoke_with_args(args).unwrap();
+        let ColumnarValue::Scalar(ScalarValue::Utf8View(Some(s))) = result else {
+            unreachable!()
+        };
+        assert_eq!(s, "UTC");
     }
 }

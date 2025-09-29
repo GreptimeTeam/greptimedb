@@ -399,7 +399,6 @@ mod tests {
             threshold = 8.0
             min_std_deviation = "100ms"
             acceptable_heartbeat_pause = "3000ms"
-            first_heartbeat_estimate = "1000ms"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -428,13 +427,6 @@ mod tests {
             options
                 .failure_detector
                 .acceptable_heartbeat_pause
-                .as_millis()
-        );
-        assert_eq!(
-            1000,
-            options
-                .failure_detector
-                .first_heartbeat_estimate
                 .as_millis()
         );
         assert_eq!(

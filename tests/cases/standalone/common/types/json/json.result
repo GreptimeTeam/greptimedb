@@ -119,11 +119,11 @@ Affected Rows: 25
 
 INSERT INTO jsons VALUES(parse_json('{"a":1, "b":2, "c":3'), 4);
 
-Error: 3001(EngineExecuteQuery), Invalid function args: Cannot convert the string to json, have: {"a":1, "b":2, "c":3
+Error: 3001(EngineExecuteQuery), Execution error: cannot parse '{"a":1, "b":2, "c":3': EOF while parsing a value, pos 20
 
 INSERT INTO jsons VALUES(parse_json('Morning my friends, have a nice day :)'), 5);
 
-Error: 3001(EngineExecuteQuery), Invalid function args: Cannot convert the string to json, have: Morning my friends, have a nice day :)
+Error: 3001(EngineExecuteQuery), Execution error: cannot parse 'Morning my friends, have a nice day :)': expected value, pos 1
 
 SELECT json_to_string(j), t FROM jsons;
 

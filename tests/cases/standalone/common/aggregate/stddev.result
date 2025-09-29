@@ -1,0 +1,175 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_stddev.test
+-- Test STDDEV aggregations
+CREATE TABLE stddev_test(val INTEGER, grp INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO stddev_test VALUES (42, 1, 1000), (43, 1, 2000), (42, 2, 3000), (1000, 2, 4000), (NULL, 1, 5000), (NULL, 3, 6000);
+
+Affected Rows: 6
+
+SELECT stddev_samp(1);
+
++------------------+
+| stddev(Int64(1)) |
++------------------+
+|                  |
++------------------+
+
+SELECT var_samp(1);
+
++---------------+
+| var(Int64(1)) |
++---------------+
+|               |
++---------------+
+
+-- stddev_samp
+SELECT round(stddev_samp(val), 1) FROM stddev_test;
+
++-----------------------------------------+
+| round(stddev(stddev_test.val),Int64(1)) |
++-----------------------------------------+
+| 478.8                                   |
++-----------------------------------------+
+
+SELECT round(stddev_samp(val), 1) FROM stddev_test WHERE val IS NOT NULL;
+
++-----------------------------------------+
+| round(stddev(stddev_test.val),Int64(1)) |
++-----------------------------------------+
+| 478.8                                   |
++-----------------------------------------+
+
+SELECT grp, sum(val), round(stddev_samp(val), 1), min(val) FROM stddev_test GROUP BY grp ORDER BY grp;
+
++-----+----------------------+-----------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(stddev(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+-----------------------------------------+----------------------+
+| 1   | 85                   | 0.7                                     | 42                   |
+| 2   | 1042                 | 677.4                                   | 42                   |
+| 3   |                      |                                         |                      |
++-----+----------------------+-----------------------------------------+----------------------+
+
+SELECT grp, sum(val), round(stddev_samp(val), 1), min(val) FROM stddev_test WHERE val IS NOT NULL GROUP BY grp ORDER BY grp;
+
++-----+----------------------+-----------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(stddev(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+-----------------------------------------+----------------------+
+| 1   | 85                   | 0.7                                     | 42                   |
+| 2   | 1042                 | 677.4                                   | 42                   |
++-----+----------------------+-----------------------------------------+----------------------+
+
+-- stddev_pop
+SELECT round(stddev_pop(val), 1) FROM stddev_test;
+
++---------------------------------------------+
+| round(stddev_pop(stddev_test.val),Int64(1)) |
++---------------------------------------------+
+| 414.7                                       |
++---------------------------------------------+
+
+SELECT round(stddev_pop(val), 1) FROM stddev_test WHERE val IS NOT NULL;
+
++---------------------------------------------+
+| round(stddev_pop(stddev_test.val),Int64(1)) |
++---------------------------------------------+
+| 414.7                                       |
++---------------------------------------------+
+
+SELECT grp, sum(val), round(stddev_pop(val), 1), min(val) FROM stddev_test GROUP BY grp ORDER BY grp;
+
++-----+----------------------+---------------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(stddev_pop(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+---------------------------------------------+----------------------+
+| 1   | 85                   | 0.5                                         | 42                   |
+| 2   | 1042                 | 479.0                                       | 42                   |
+| 3   |                      |                                             |                      |
++-----+----------------------+---------------------------------------------+----------------------+
+
+SELECT grp, sum(val), round(stddev_pop(val), 1), min(val) FROM stddev_test WHERE val IS NOT NULL GROUP BY grp ORDER BY grp;
+
++-----+----------------------+---------------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(stddev_pop(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+---------------------------------------------+----------------------+
+| 1   | 85                   | 0.5                                         | 42                   |
+| 2   | 1042                 | 479.0                                       | 42                   |
++-----+----------------------+---------------------------------------------+----------------------+
+
+-- var_samp
+SELECT round(var_samp(val), 1) FROM stddev_test;
+
++--------------------------------------+
+| round(var(stddev_test.val),Int64(1)) |
++--------------------------------------+
+| 229281.6                             |
++--------------------------------------+
+
+SELECT round(var_samp(val), 1) FROM stddev_test WHERE val IS NOT NULL;
+
++--------------------------------------+
+| round(var(stddev_test.val),Int64(1)) |
++--------------------------------------+
+| 229281.6                             |
++--------------------------------------+
+
+SELECT grp, sum(val), round(var_samp(val), 1), min(val) FROM stddev_test GROUP BY grp ORDER BY grp;
+
++-----+----------------------+--------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(var(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+--------------------------------------+----------------------+
+| 1   | 85                   | 0.5                                  | 42                   |
+| 2   | 1042                 | 458882.0                             | 42                   |
+| 3   |                      |                                      |                      |
++-----+----------------------+--------------------------------------+----------------------+
+
+SELECT grp, sum(val), round(var_samp(val), 1), min(val) FROM stddev_test WHERE val IS NOT NULL GROUP BY grp ORDER BY grp;
+
++-----+----------------------+--------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(var(stddev_test.val),Int64(1)) | min(stddev_test.val) |
++-----+----------------------+--------------------------------------+----------------------+
+| 1   | 85                   | 0.5                                  | 42                   |
+| 2   | 1042                 | 458882.0                             | 42                   |
++-----+----------------------+--------------------------------------+----------------------+
+
+-- var_pop
+SELECT round(var_pop(val), 1) FROM stddev_test;
+
++------------------------------------------+
+| round(var_pop(stddev_test.val),Int64(1)) |
++------------------------------------------+
+| 171961.2                                 |
++------------------------------------------+
+
+SELECT round(var_pop(val), 1) FROM stddev_test WHERE val IS NOT NULL;
+
++------------------------------------------+
+| round(var_pop(stddev_test.val),Int64(1)) |
++------------------------------------------+
+| 171961.2                                 |
++------------------------------------------+
+
+SELECT grp, sum(val), round(var_pop(val), 2), min(val) FROM stddev_test GROUP BY grp ORDER BY grp;
+
++-----+----------------------+------------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(var_pop(stddev_test.val),Int64(2)) | min(stddev_test.val) |
++-----+----------------------+------------------------------------------+----------------------+
+| 1   | 85                   | 0.25                                     | 42                   |
+| 2   | 1042                 | 229441.0                                 | 42                   |
+| 3   |                      |                                          |                      |
++-----+----------------------+------------------------------------------+----------------------+
+
+SELECT grp, sum(val), round(var_pop(val), 2), min(val) FROM stddev_test WHERE val IS NOT NULL GROUP BY grp ORDER BY grp;
+
++-----+----------------------+------------------------------------------+----------------------+
+| grp | sum(stddev_test.val) | round(var_pop(stddev_test.val),Int64(2)) | min(stddev_test.val) |
++-----+----------------------+------------------------------------------+----------------------+
+| 1   | 85                   | 0.25                                     | 42                   |
+| 2   | 1042                 | 229441.0                                 | 42                   |
++-----+----------------------+------------------------------------------+----------------------+
+
+-- cleanup
+DROP TABLE stddev_test;
+
+Affected Rows: 0
+

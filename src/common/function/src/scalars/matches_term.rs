@@ -13,18 +13,17 @@
 // limitations under the License.
 
 use std::fmt;
-use std::iter::repeat_n;
 use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
+use common_query::error::Result;
+use datafusion_common::arrow::array::{Array, AsArray, BooleanArray, BooleanBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use memchr::memmem;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
 
 /// Exact term/phrase matching function for text columns.
@@ -100,64 +99,94 @@ impl Function for MatchesTermFunction {
         Signature::string(2, Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "The length of the args is not correct, expect exactly 2, have: {}",
-                    columns.len()
-                ),
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = datafusion_common::utils::take_function_args(self.name(), &args.args)?;
 
-        let text_column = &columns[0];
-        if text_column.is_empty() {
-            return Ok(Arc::new(BooleanVector::from(Vec::<bool>::with_capacity(0))));
+        fn as_str(v: &ScalarValue) -> Option<&str> {
+            match v {
+                ScalarValue::Utf8View(Some(x))
+                | ScalarValue::Utf8(Some(x))
+                | ScalarValue::LargeUtf8(Some(x)) => Some(x.as_str()),
+                _ => None,
+            }
         }
 
-        let term_column = &columns[1];
-        let compiled_finder = if term_column.is_const() {
-            let term = term_column.get_ref(0).as_string().unwrap();
-            match term {
-                None => {
-                    return Ok(Arc::new(BooleanVector::from_iter(repeat_n(
-                        None,
-                        text_column.len(),
-                    ))));
-                }
-                Some(term) => Some(MatchesTermFinder::new(term)),
-            }
-        } else {
-            None
+        if let (ColumnarValue::Scalar(text), ColumnarValue::Scalar(term)) = (arg0, arg1) {
+            let text = as_str(text);
+            let term = as_str(term);
+            let result = match (text, term) {
+                (Some(text), Some(term)) => Some(MatchesTermFinder::new(term).find(text)),
+                _ => None,
+            };
+            return Ok(ColumnarValue::Scalar(ScalarValue::Boolean(result)));
         };
 
-        let len = text_column.len();
-        let mut result = BooleanVectorBuilder::with_capacity(len);
-        for i in 0..len {
-            let text = text_column.get_ref(i).as_string().unwrap();
-            let Some(text) = text else {
-                result.push_null();
-                continue;
-            };
+        let v = match (arg0, arg1) {
+            (ColumnarValue::Scalar(_), ColumnarValue::Scalar(_)) => {
+                // Unreachable because we have checked this case above and returned if matched.
+                unreachable!()
+            }
+            (ColumnarValue::Scalar(text), ColumnarValue::Array(terms)) => {
+                let text = as_str(text);
+                if let Some(text) = text {
+                    let terms = compute::cast(terms, &DataType::Utf8View)?;
+                    let terms = terms.as_string_view();
 
-            let contains = match &compiled_finder {
-                Some(finder) => finder.find(text),
-                None => {
-                    let term = match term_column.get_ref(i).as_string().unwrap() {
-                        None => {
-                            result.push_null();
-                            continue;
-                        }
-                        Some(term) => term,
-                    };
-                    MatchesTermFinder::new(term).find(text)
+                    let mut builder = BooleanBuilder::with_capacity(terms.len());
+                    terms.iter().for_each(|term| {
+                        builder.append_option(term.map(|x| MatchesTermFinder::new(x).find(text)))
+                    });
+                    ColumnarValue::Array(Arc::new(builder.finish()))
+                } else {
+                    ColumnarValue::Array(Arc::new(BooleanArray::new_null(terms.len())))
                 }
-            };
-            result.push(Some(contains));
-        }
+            }
+            (ColumnarValue::Array(texts), ColumnarValue::Scalar(term)) => {
+                let term = as_str(term);
+                if let Some(term) = term {
+                    let finder = MatchesTermFinder::new(term);
 
-        Ok(result.to_vector())
+                    let texts = compute::cast(texts, &DataType::Utf8View)?;
+                    let texts = texts.as_string_view();
+
+                    let mut builder = BooleanBuilder::with_capacity(texts.len());
+                    texts
+                        .iter()
+                        .for_each(|text| builder.append_option(text.map(|x| finder.find(x))));
+                    ColumnarValue::Array(Arc::new(builder.finish()))
+                } else {
+                    ColumnarValue::Array(Arc::new(BooleanArray::new_null(texts.len())))
+                }
+            }
+            (ColumnarValue::Array(texts), ColumnarValue::Array(terms)) => {
+                let terms = compute::cast(terms, &DataType::Utf8View)?;
+                let terms = terms.as_string_view();
+                let texts = compute::cast(texts, &DataType::Utf8View)?;
+                let texts = texts.as_string_view();
+
+                let len = texts.len();
+                if terms.len() != len {
+                    return Err(DataFusionError::Internal(format!(
+                        "input arrays have different lengths: {len}, {}",
+                        terms.len()
+                    )));
+                }
+
+                let mut builder = BooleanBuilder::with_capacity(len);
+                for (text, term) in texts.iter().zip(terms.iter()) {
+                    let result = match (text, term) {
+                        (Some(text), Some(term)) => Some(MatchesTermFinder::new(term).find(text)),
+                        _ => None,
+                    };
+                    builder.append_option(result);
+                }
+                ColumnarValue::Array(Arc::new(builder.finish()))
+            }
+        };
+        Ok(v)
     }
 }
 

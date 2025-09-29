@@ -141,23 +141,13 @@ impl PrimaryKeyWriteFormat {
 
 /// Helper to read parquet formats.
 pub enum ReadFormat {
+    /// The parquet is in the old primary key format.
     PrimaryKey(PrimaryKeyReadFormat),
+    /// The parquet is in the new flat format.
     Flat(FlatReadFormat),
 }
 
 impl ReadFormat {
-    pub(crate) fn new(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-        flat_format: bool,
-    ) -> Self {
-        if flat_format {
-            Self::new_flat(metadata, column_ids, false)
-        } else {
-            Self::new_primary_key(metadata, column_ids)
-        }
-    }
-
     /// Creates a helper to read the primary key format.
     pub fn new_primary_key(
         metadata: RegionMetadataRef,
@@ -170,9 +160,65 @@ impl ReadFormat {
     pub fn new_flat(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-        convert_to_flat: bool,
-    ) -> Self {
-        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids, convert_to_flat))
+        num_columns: Option<usize>,
+        file_path: &str,
+        skip_auto_convert: bool,
+    ) -> Result<Self> {
+        Ok(ReadFormat::Flat(FlatReadFormat::new(
+            metadata,
+            column_ids,
+            num_columns,
+            file_path,
+            skip_auto_convert,
+        )?))
+    }
+
+    /// Creates a new read format.
+    pub fn new(
+        region_metadata: RegionMetadataRef,
+        projection: Option<&[ColumnId]>,
+        flat_format: bool,
+        num_columns: Option<usize>,
+        file_path: &str,
+        skip_auto_convert: bool,
+    ) -> Result<ReadFormat> {
+        if flat_format {
+            if let Some(column_ids) = projection {
+                ReadFormat::new_flat(
+                    region_metadata,
+                    column_ids.iter().copied(),
+                    num_columns,
+                    file_path,
+                    skip_auto_convert,
+                )
+            } else {
+                // No projection, lists all column ids to read.
+                ReadFormat::new_flat(
+                    region_metadata.clone(),
+                    region_metadata
+                        .column_metadatas
+                        .iter()
+                        .map(|col| col.column_id),
+                    num_columns,
+                    file_path,
+                    skip_auto_convert,
+                )
+            }
+        } else if let Some(column_ids) = projection {
+            Ok(ReadFormat::new_primary_key(
+                region_metadata,
+                column_ids.iter().copied(),
+            ))
+        } else {
+            // No projection, lists all column ids to read.
+            Ok(ReadFormat::new_primary_key(
+                region_metadata.clone(),
+                region_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            ))
+        }
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -1238,7 +1284,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = ReadFormat::new(metadata, column_ids.iter().copied(), false);
+        let read_format =
+            ReadFormat::new(metadata, Some(&column_ids), false, None, "test", false).unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1366,19 +1413,26 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), false);
+        let read_format =
+            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), false);
+        let read_format =
+            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), false);
+        let read_format =
+            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
+                .unwrap();
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), false);
+        let read_format =
+            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
@@ -1388,8 +1442,11 @@ mod tests {
         let mut format = FlatReadFormat::new(
             metadata,
             std::iter::once(1), // Just read tag0
+            Some(8),
+            "test",
             false,
-        );
+        )
+        .unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1438,8 +1495,7 @@ mod tests {
         // For flat format: all columns (5) + internal columns (3)
         let expected_columns = metadata.column_metadatas.len() + 3;
         let result =
-            FlatReadFormat::need_convert_to_flat("test.parquet", expected_columns, &metadata)
-                .unwrap();
+            FlatReadFormat::is_legacy_format(&metadata, expected_columns, "test.parquet").unwrap();
         assert!(
             !result,
             "Should not need conversion when column counts match"
@@ -1449,7 +1505,7 @@ mod tests {
         // Missing primary key columns (2 primary keys in test metadata)
         let num_columns_without_pk = expected_columns - metadata.primary_key.len();
         let result =
-            FlatReadFormat::need_convert_to_flat("test.parquet", num_columns_without_pk, &metadata)
+            FlatReadFormat::is_legacy_format(&metadata, num_columns_without_pk, "test.parquet")
                 .unwrap();
         assert!(
             result,
@@ -1458,15 +1514,14 @@ mod tests {
 
         // Test case 3: Invalid case - actual columns more than expected
         let too_many_columns = expected_columns + 1;
-        let err = FlatReadFormat::need_convert_to_flat("test.parquet", too_many_columns, &metadata)
+        let err = FlatReadFormat::is_legacy_format(&metadata, too_many_columns, "test.parquet")
             .unwrap_err();
         assert!(err.to_string().contains("Expected columns"), "{err:?}");
 
         // Test case 4: Invalid case - column difference doesn't match primary key count
         let wrong_diff_columns = expected_columns - 1; // Difference of 1, but we have 2 primary keys
-        let err =
-            FlatReadFormat::need_convert_to_flat("test.parquet", wrong_diff_columns, &metadata)
-                .unwrap_err();
+        let err = FlatReadFormat::is_legacy_format(&metadata, wrong_diff_columns, "test.parquet")
+            .unwrap_err();
         assert!(
             err.to_string().contains("Column number difference"),
             "{err:?}"
@@ -1601,7 +1656,14 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            column_ids.into_iter(),
+            Some(6),
+            "test",
+            false,
+        )
+        .unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;
@@ -1676,7 +1738,14 @@ mod tests {
             .iter()
             .map(|c| c.column_id)
             .collect();
-        let format = FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), true);
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            column_ids.into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
 
         let num_rows = 4;
         let original_sequence = 100u64;

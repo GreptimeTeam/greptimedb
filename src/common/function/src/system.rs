@@ -21,8 +21,7 @@ mod version;
 
 use build::BuildFunction;
 use database::{
-    ConnectionIdFunction, CurrentSchemaFunction, DatabaseFunction, PgBackendPidFunction,
-    ReadPreferenceFunction, SessionUserFunction,
+    ConnectionIdFunction, DatabaseFunction, PgBackendPidFunction, ReadPreferenceFunction,
 };
 use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
@@ -37,9 +36,7 @@ impl SystemFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register_scalar(BuildFunction);
         registry.register_scalar(VersionFunction);
-        registry.register_scalar(CurrentSchemaFunction);
         registry.register_scalar(DatabaseFunction);
-        registry.register_scalar(SessionUserFunction);
         registry.register_scalar(ReadPreferenceFunction);
         registry.register_scalar(PgBackendPidFunction);
         registry.register_scalar(ConnectionIdFunction);

@@ -19,12 +19,12 @@ use common_query::error::{InvalidFuncArgsSnafu, Result};
 use datafusion::arrow::array::{Array, AsArray, BinaryViewBuilder};
 use datafusion::arrow::datatypes::Int64Type;
 use datafusion::logical_expr::ColumnarValue;
-use datafusion_common::{ScalarValue, utils};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::DataType;
 use snafu::ensure;
 
-use crate::function::Function;
+use crate::function::{Function, extract_args};
 use crate::scalars::vector::impl_conv::{as_veclit, veclit_to_binlit};
 
 const NAME: &str = "vec_subvector";
@@ -71,8 +71,7 @@ impl Function for VectorSubvectorFunction {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let args = ColumnarValue::values_to_arrays(&args.args)?;
-        let [arg0, arg1, arg2] = utils::take_function_args(self.name(), args)?;
+        let [arg0, arg1, arg2] = extract_args(self.name(), &args)?;
         let arg1 = arg1.as_primitive::<Int64Type>();
         let arg2 = arg2.as_primitive::<Int64Type>();
 

@@ -15,11 +15,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::Column;
+use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
@@ -27,7 +29,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion_optimizer::{OptimizerContext, OptimizerRule};
+use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -49,6 +51,9 @@ mod fallback;
 mod utils;
 
 pub(crate) use utils::AliasMapping;
+
+/// Placeholder for other physical partition columns that are not in logical table
+const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
 #[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
@@ -100,8 +105,44 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        // preprocess the input plan
-        let optimizer_context = OptimizerContext::new();
+        let mut config = config.clone();
+        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
+        config.optimizer.filter_null_join_keys = true;
+        let config = Arc::new(config);
+
+        // The `ConstEvaluator` in `SimplifyExpressions` might evaluate some UDFs early in the
+        // planning stage, by executing them directly. For example, the `database()` function.
+        // So the `ConfigOptions` here (which is set from the session context) should be present
+        // in the UDF's `ScalarFunctionArgs`. However, the default implementation in DataFusion
+        // seems to lost track on it: the `ConfigOptions` is recreated with its default values again.
+        // So we create a custom `OptimizerConfig` with the desired `ConfigOptions`
+        // to walk around the issue.
+        // TODO(LFC): Maybe use DataFusion's `OptimizerContext` again
+        //   once https://github.com/apache/datafusion/pull/17742 is merged.
+        struct OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext,
+            config: Arc<ConfigOptions>,
+        }
+
+        impl OptimizerConfig for OptimizerContext {
+            fn query_execution_start_time(&self) -> DateTime<Utc> {
+                self.inner.query_execution_start_time()
+            }
+
+            fn alias_generator(&self) -> &Arc<AliasGenerator> {
+                self.inner.alias_generator()
+            }
+
+            fn options(&self) -> Arc<ConfigOptions> {
+                self.config.clone()
+            }
+        }
+
+        let optimizer_context = OptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+        };
+
         let plan = SimplifyExpressions::new()
             .rewrite(plan, &optimizer_context)?
             .data;
@@ -289,7 +330,7 @@ impl PlanRewriter {
     }
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
-    fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
+    fn should_expand(&mut self, plan: &LogicalPlan) -> DfResult<bool> {
         debug!(
             "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
@@ -299,20 +340,21 @@ impl PlanRewriter {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        if DFLogicalSubstraitConvertor
-            .encode(plan, DefaultSerializer)
-            .is_err()
-        {
-            return true;
+        if let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer) {
+            debug!(
+                "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
+            );
+            return Ok(true);
         }
 
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
-            return true;
+            debug!("PlanRewriter: expand_on_next_call is true, expanding now");
+            return Ok(true);
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone())?;
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -328,13 +370,16 @@ impl PlanRewriter {
                     // again a new node that can be push down, we should just
                     // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
-                    return true;
+                    debug!(
+                        "PlanRewriter: meet a new conditional/transformed commutative plan, expanding now: {plan}"
+                    );
+                    return Ok(true);
                 }
                 _ => (),
             }
         }
 
-        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone())? {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -355,9 +400,8 @@ impl PlanRewriter {
                 }
             }
             Commutativity::TransformedCommutative { transformer } => {
-                if let Some(transformer) = transformer
-                    && let Some(transformer_actions) = transformer(plan)
-                {
+                if let Some(transformer) = transformer {
+                    let transformer_actions = transformer(plan)?;
                     debug!(
                         "PlanRewriter: transformed plan: {}\n from {plan}",
                         transformer_actions
@@ -388,11 +432,12 @@ impl PlanRewriter {
             Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
-                return true;
+                debug!("PlanRewriter: meet a non-commutative plan, expanding now: {plan}");
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Update the column requirements for the current plan, plan_level is the level of the plan
@@ -488,12 +533,16 @@ impl PlanRewriter {
                     // as subset of phy part cols can still be used for certain optimization, and it works as if
                     // those columns are always null
                     // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
-                    partition_cols.push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
+                    partition_cols.push(OTHER_PHY_PART_COL_PLACEHOLDER.to_string());
                 }
                 self.partition_cols = Some(
                             partition_cols
                                 .into_iter()
                                 .map(|c| {
+                                    if c == OTHER_PHY_PART_COL_PLACEHOLDER {
+                                        // for placeholder, just return a empty alias
+                                        return Ok((c.clone(), BTreeSet::new()));
+                                    }
                                     let index =
                                         plan.schema().index_of_column_by_name(None, &c).ok_or_else(|| {
                                             datafusion_common::DataFusionError::Internal(
@@ -802,8 +851,7 @@ impl TreeNodeRewriter for PlanRewriter {
 
         let parent = parent.clone();
 
-        // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent) {
+        if self.should_expand(&parent)? {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
                 "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",

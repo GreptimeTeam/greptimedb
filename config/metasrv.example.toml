@@ -149,19 +149,17 @@ max_metadata_value_size = "1500KiB"
 max_running_procedures = 128
 
 # Failure detectors options.
+# GreptimeDB uses the Phi Accrual Failure Detector algorithm to detect datanode failures.
 [failure_detector]
-
-## The threshold value used by the failure detector to determine failure conditions.
+## Maximum acceptable φ before the peer is treated as failed.
+## Lower values react faster but yield more false positives.
 threshold = 8.0
-
-## The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations.
+## The minimum standard deviation of the heartbeat intervals.
+## So tiny variations don’t make φ explode. Prevents hypersensitivity when heartbeat intervals barely vary.
 min_std_deviation = "100ms"
-
-## The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable.
+## The acceptable pause duration between heartbeats.
+## Additional extra grace period to the learned mean interval before φ rises, absorbing temporary network hiccups or GC pauses.
 acceptable_heartbeat_pause = "10000ms"
-
-## The initial estimate of the heartbeat interval used by the failure detector.
-first_heartbeat_estimate = "1000ms"
 
 ## Datanode options.
 [datanode]

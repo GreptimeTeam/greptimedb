@@ -16,7 +16,12 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
+use opendal::services::{Azblob, Gcs, Oss, S3};
 use serde::{Deserialize, Serialize};
+
+use crate::util;
+
+const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,16 +74,37 @@ impl ObjectStoreConfig {
 
         name
     }
+
+    /// Returns the object storage cache configuration.
+    pub fn cache_config(&self) -> Option<&ObjectStorageCacheConfig> {
+        match self {
+            Self::File(_) => None,
+            Self::S3(s3) => Some(&s3.cache),
+            Self::Oss(oss) => Some(&oss.cache),
+            Self::Azblob(az) => Some(&az.cache),
+            Self::Gcs(gcs) => Some(&gcs.cache),
+        }
+    }
+
+    /// Returns the mutable object storage cache configuration.
+    pub fn cache_config_mut(&mut self) -> Option<&mut ObjectStorageCacheConfig> {
+        match self {
+            Self::File(_) => None,
+            Self::S3(s3) => Some(&mut s3.cache),
+            Self::Oss(oss) => Some(&mut oss.cache),
+            Self::Azblob(az) => Some(&mut az.cache),
+            Self::Gcs(gcs) => Some(&mut gcs.cache),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct FileConfig {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
-pub struct S3Config {
-    pub name: String,
+pub struct S3Connection {
     pub bucket: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -91,47 +117,46 @@ pub struct S3Config {
     /// By default, opendal will send API to https://s3.us-east-1.amazonaws.com/bucket_name
     /// Enabled, opendal will send API to https://bucket_name.s3.us-east-1.amazonaws.com
     pub enable_virtual_host_style: bool,
+}
+
+impl From<&S3Connection> for S3 {
+    fn from(connection: &S3Connection) -> Self {
+        let root = util::normalize_dir(&connection.root);
+
+        let mut builder = S3::default()
+            .root(&root)
+            .bucket(&connection.bucket)
+            .access_key_id(connection.access_key_id.expose_secret())
+            .secret_access_key(connection.secret_access_key.expose_secret());
+
+        if let Some(endpoint) = &connection.endpoint {
+            builder = builder.endpoint(endpoint);
+        }
+        if let Some(region) = &connection.region {
+            builder = builder.region(region);
+        }
+        if connection.enable_virtual_host_style {
+            builder = builder.enable_virtual_host_style();
+        }
+
+        builder
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct S3Config {
+    pub name: String,
+    #[serde(flatten)]
+    pub connection: S3Connection,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
     pub http_client: HttpClientConfig,
 }
 
-impl Default for S3Config {
-    fn default() -> Self {
-        Self {
-            name: String::default(),
-            bucket: String::default(),
-            root: String::default(),
-            access_key_id: SecretString::from(String::default()),
-            secret_access_key: SecretString::from(String::default()),
-            enable_virtual_host_style: false,
-            endpoint: Option::default(),
-            region: Option::default(),
-            cache: ObjectStorageCacheConfig::default(),
-            http_client: HttpClientConfig::default(),
-        }
-    }
-}
-
-impl PartialEq for S3Config {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.bucket == other.bucket
-            && self.root == other.root
-            && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
-            && self.secret_access_key.expose_secret() == other.secret_access_key.expose_secret()
-            && self.endpoint == other.endpoint
-            && self.region == other.region
-            && self.enable_virtual_host_style == other.enable_virtual_host_style
-            && self.cache == other.cache
-            && self.http_client == other.http_client
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
-pub struct OssConfig {
-    pub name: String,
+pub struct OssConnection {
     pub bucket: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -139,43 +164,34 @@ pub struct OssConfig {
     #[serde(skip_serializing)]
     pub access_key_secret: SecretString,
     pub endpoint: String,
+}
+
+impl From<&OssConnection> for Oss {
+    fn from(connection: &OssConnection) -> Self {
+        let root = util::normalize_dir(&connection.root);
+        Oss::default()
+            .root(&root)
+            .bucket(&connection.bucket)
+            .endpoint(&connection.endpoint)
+            .access_key_id(connection.access_key_id.expose_secret())
+            .access_key_secret(connection.access_key_secret.expose_secret())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct OssConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub connection: OssConnection,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
     pub http_client: HttpClientConfig,
 }
 
-impl PartialEq for OssConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.bucket == other.bucket
-            && self.root == other.root
-            && self.access_key_id.expose_secret() == other.access_key_id.expose_secret()
-            && self.access_key_secret.expose_secret() == other.access_key_secret.expose_secret()
-            && self.endpoint == other.endpoint
-            && self.cache == other.cache
-            && self.http_client == other.http_client
-    }
-}
-
-impl Default for OssConfig {
-    fn default() -> Self {
-        Self {
-            name: String::default(),
-            bucket: String::default(),
-            root: String::default(),
-            access_key_id: SecretString::from(String::default()),
-            access_key_secret: SecretString::from(String::default()),
-            endpoint: String::default(),
-            cache: ObjectStorageCacheConfig::default(),
-            http_client: HttpClientConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
-pub struct AzblobConfig {
-    pub name: String,
+pub struct AzblobConnection {
     pub container: String,
     pub root: String,
     #[serde(skip_serializing)]
@@ -184,44 +200,40 @@ pub struct AzblobConfig {
     pub account_key: SecretString,
     pub endpoint: String,
     pub sas_token: Option<String>,
+}
+
+impl From<&AzblobConnection> for Azblob {
+    fn from(connection: &AzblobConnection) -> Self {
+        let root = util::normalize_dir(&connection.root);
+        let mut builder = Azblob::default()
+            .root(&root)
+            .container(&connection.container)
+            .endpoint(&connection.endpoint)
+            .account_name(connection.account_name.expose_secret())
+            .account_key(connection.account_key.expose_secret());
+
+        if let Some(token) = &connection.sas_token {
+            builder = builder.sas_token(token);
+        };
+
+        builder
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct AzblobConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub connection: AzblobConnection,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
     pub http_client: HttpClientConfig,
 }
 
-impl PartialEq for AzblobConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.container == other.container
-            && self.root == other.root
-            && self.account_name.expose_secret() == other.account_name.expose_secret()
-            && self.account_key.expose_secret() == other.account_key.expose_secret()
-            && self.endpoint == other.endpoint
-            && self.sas_token == other.sas_token
-            && self.cache == other.cache
-            && self.http_client == other.http_client
-    }
-}
-impl Default for AzblobConfig {
-    fn default() -> Self {
-        Self {
-            name: String::default(),
-            container: String::default(),
-            root: String::default(),
-            account_name: SecretString::from(String::default()),
-            account_key: SecretString::from(String::default()),
-            endpoint: String::default(),
-            sas_token: Option::default(),
-            cache: ObjectStorageCacheConfig::default(),
-            http_client: HttpClientConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
-pub struct GcsConfig {
-    pub name: String,
+pub struct GcsConnection {
     pub root: String,
     pub bucket: String,
     pub scope: String,
@@ -230,41 +242,31 @@ pub struct GcsConfig {
     #[serde(skip_serializing)]
     pub credential: SecretString,
     pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct GcsConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub connection: GcsConnection,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
     pub http_client: HttpClientConfig,
 }
 
-impl Default for GcsConfig {
-    fn default() -> Self {
-        Self {
-            name: String::default(),
-            root: String::default(),
-            bucket: String::default(),
-            scope: String::default(),
-            credential_path: SecretString::from(String::default()),
-            credential: SecretString::from(String::default()),
-            endpoint: String::default(),
-            cache: ObjectStorageCacheConfig::default(),
-            http_client: HttpClientConfig::default(),
-        }
+impl From<&GcsConnection> for Gcs {
+    fn from(connection: &GcsConnection) -> Self {
+        let root = util::normalize_dir(&connection.root);
+        Gcs::default()
+            .root(&root)
+            .bucket(&connection.bucket)
+            .scope(&connection.scope)
+            .credential_path(connection.credential_path.expose_secret())
+            .credential(connection.credential.expose_secret())
+            .endpoint(&connection.endpoint)
     }
 }
-
-impl PartialEq for GcsConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.root == other.root
-            && self.bucket == other.bucket
-            && self.scope == other.scope
-            && self.credential_path.expose_secret() == other.credential_path.expose_secret()
-            && self.credential.expose_secret() == other.credential.expose_secret()
-            && self.endpoint == other.endpoint
-            && self.cache == other.cache
-            && self.http_client == other.http_client
-    }
-}
-
 /// The http client options to the storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -301,13 +303,36 @@ impl Default for HttpClientConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ObjectStorageCacheConfig {
+    /// Whether to enable read cache. If not set, the read cache will be enabled by default.
+    pub enable_read_cache: bool,
     /// The local file cache directory
-    pub cache_path: Option<String>,
+    pub cache_path: String,
     /// The cache capacity in bytes
-    pub cache_capacity: Option<ReadableSize>,
+    pub cache_capacity: ReadableSize,
+}
+
+impl Default for ObjectStorageCacheConfig {
+    fn default() -> Self {
+        Self {
+            enable_read_cache: true,
+            // The cache directory is set to the value of data_home in the build_cache_layer process.
+            cache_path: String::default(),
+            cache_capacity: DEFAULT_OBJECT_STORE_CACHE_SIZE,
+        }
+    }
+}
+
+impl ObjectStorageCacheConfig {
+    /// Sanitize the `ObjectStorageCacheConfig` to ensure the config is valid.
+    pub fn sanitize(&mut self, data_home: &str) {
+        // If `cache_path` is unset, default to use `${data_home}` as the local read cache directory.
+        if self.cache_path.is_empty() {
+            self.cache_path = data_home.to_string();
+        }
+    }
 }
 
 #[cfg(test)]

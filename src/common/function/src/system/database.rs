@@ -13,24 +13,18 @@
 // limitations under the License.
 
 use std::fmt::{self};
-use std::sync::Arc;
 
 use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::ScalarVector;
-use datatypes::vectors::{StringVector, UInt32Vector, VectorRef};
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, find_function_context};
 
 /// A function to return current schema name.
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseFunction;
-
-#[derive(Clone, Debug, Default)]
-pub struct CurrentSchemaFunction;
-pub struct SessionUserFunction;
 
 pub struct ReadPreferenceFunction;
 
@@ -43,8 +37,6 @@ pub struct PgBackendPidFunction;
 pub struct ConnectionIdFunction;
 
 const DATABASE_FUNCTION_NAME: &str = "database";
-const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
-const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 const READ_PREFERENCE_FUNCTION_NAME: &str = "read_preference";
 const PG_BACKEND_PID: &str = "pg_backend_pid";
 const CONNECTION_ID: &str = "connection_id";
@@ -55,59 +47,21 @@ impl Function for DatabaseFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
-    }
-}
-
-// Though "current_schema" can be aliased to "database", to not cause any breaking changes,
-// we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
-impl Function for CurrentSchemaFunction {
-    fn name(&self) -> &str {
-        CURRENT_SCHEMA_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let db = func_ctx.query_ctx.current_schema();
-
-        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
-    }
-}
-
-impl Function for SessionUserFunction {
-    fn name(&self) -> &str {
-        SESSION_USER_FUNCTION_NAME
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
-    }
-
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let user = func_ctx.query_ctx.current_user();
-
-        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
     }
 }
 
@@ -117,17 +71,23 @@ impl Function for ReadPreferenceFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+        Ok(DataType::Utf8View)
     }
 
     fn signature(&self) -> Signature {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let read_preference = func_ctx.query_ctx.read_preference();
 
-        Ok(Arc::new(StringVector::from_slice(&[read_preference.as_ref()])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(
+            read_preference.to_string(),
+        ))))
     }
 }
 
@@ -144,10 +104,14 @@ impl Function for PgBackendPidFunction {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let pid = func_ctx.query_ctx.process_id();
 
-        Ok(Arc::new(UInt32Vector::from_slice([pid])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::UInt64(Some(pid as u64))))
     }
 }
 
@@ -157,35 +121,27 @@ impl Function for ConnectionIdFunction {
     }
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::UInt64)
+        Ok(DataType::UInt32)
     }
 
     fn signature(&self) -> Signature {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let pid = func_ctx.query_ctx.process_id();
 
-        Ok(Arc::new(UInt32Vector::from_slice([pid])) as _)
+        Ok(ColumnarValue::Scalar(ScalarValue::UInt32(Some(pid))))
     }
 }
 
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
-    }
-}
-
-impl fmt::Display for CurrentSchemaFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CURRENT_SCHEMA")
-    }
-}
-
-impl fmt::Display for SessionUserFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SESSION_USER")
     }
 }
 
@@ -199,14 +155,17 @@ impl fmt::Display for ReadPreferenceFunction {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::Field;
+    use datafusion_common::config::ConfigOptions;
     use session::context::QueryContextBuilder;
 
     use super::*;
+    use crate::function::FunctionContext;
     #[test]
     fn test_build_function() {
         let build = DatabaseFunction;
         assert_eq!("database", build.name());
-        assert_eq!(DataType::Utf8, build.return_type(&[]).unwrap());
+        assert_eq!(DataType::Utf8View, build.return_type(&[]).unwrap());
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default()
@@ -214,12 +173,24 @@ mod tests {
             .build()
             .into();
 
-        let func_ctx = FunctionContext {
+        let mut config_options = ConfigOptions::default();
+        config_options.extensions.insert(FunctionContext {
             query_ctx,
             ..Default::default()
+        });
+        let config_options = Arc::new(config_options);
+
+        let args = ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            number_rows: 0,
+            return_field: Arc::new(Field::new("x", DataType::UInt64, false)),
+            config_options,
         };
-        let vector = build.eval(&func_ctx, &[]).unwrap();
-        let expect: VectorRef = Arc::new(StringVector::from(vec!["test_db"]));
-        assert_eq!(expect, vector);
+        let result = build.invoke_with_args(args).unwrap();
+        let ColumnarValue::Scalar(ScalarValue::Utf8View(Some(s))) = result else {
+            unreachable!()
+        };
+        assert_eq!(s, "test_db");
     }
 }

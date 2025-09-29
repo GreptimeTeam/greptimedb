@@ -21,6 +21,7 @@ use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
+use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
@@ -67,14 +68,21 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        let query = fixtures::rewrite_sql(query);
-        let query = query.as_ref();
+        let query = if let Ok(statements) = self.query_parser.compatibility_parser.parse(query) {
+            statements
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        } else {
+            query.to_string()
+        };
 
-        if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
+        if let Some(resps) = fixtures::process(&query, query_ctx.clone()) {
             send_warning_opt(client, query_ctx).await?;
             Ok(resps)
         } else {
-            let outputs = self.query_handler.do_query(query, query_ctx.clone()).await;
+            let outputs = self.query_handler.do_query(&query, query_ctx.clone()).await;
 
             let mut results = Vec::with_capacity(outputs.len());
 
@@ -181,6 +189,7 @@ where
 pub struct DefaultQueryParser {
     query_handler: ServerSqlQueryHandlerRef,
     session: Arc<Session>,
+    compatibility_parser: PostgresCompatibilityParser,
 }
 
 impl DefaultQueryParser {
@@ -188,6 +197,7 @@ impl DefaultQueryParser {
         DefaultQueryParser {
             query_handler,
             session,
+            compatibility_parser: PostgresCompatibilityParser::new(),
         }
     }
 }
@@ -215,12 +225,20 @@ impl QueryParser for DefaultQueryParser {
             });
         }
 
-        let sql = fixtures::rewrite_sql(sql);
-        let sql = sql.as_ref();
+        let sql = if let Ok(mut statements) = self.compatibility_parser.parse(sql) {
+            statements.remove(0).to_string()
+        } else {
+            // bypass the error: it can run into error because of different
+            // versions of sqlparser
+            sql.to_string()
+        };
 
-        let mut stmts =
-            ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
-                .map_err(convert_err)?;
+        let mut stmts = ParserContext::create_with_dialect(
+            &sql,
+            &PostgreSqlDialect {},
+            ParseOptions::default(),
+        )
+        .map_err(convert_err)?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::from(
                 PgErrorCode::Ec42P14,
@@ -245,7 +263,7 @@ impl QueryParser for DefaultQueryParser {
             };
 
             Ok(SqlPlan {
-                query: sql.to_owned(),
+                query: sql.clone(),
                 statement: Some(stmt),
                 plan,
                 schema,

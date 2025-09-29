@@ -553,7 +553,7 @@ pub mod tests {
         assert!(validity.is_set(0));
         assert!(!validity.is_set(1));
         assert!(validity.is_set(2));
-        assert_eq!(256, list_vector.memory_size());
+        assert_eq!(224, list_vector.memory_size());
 
         let slice = list_vector.slice(0, 2).to_arrow_array();
         let sliced_array = slice.as_any().downcast_ref::<ListArray>().unwrap();
