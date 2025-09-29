@@ -37,8 +37,6 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
-use crate::sst::parquet::WriteOptions;
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};

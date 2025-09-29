@@ -32,9 +32,8 @@ use smallvec::{SmallVec, smallvec};
 use statistics::{ByteCount, RowCount};
 use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, RegionId, FileId, SequenceNumber};
-use tokio::sync::{Sender, mpsc, oneshot};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -47,7 +46,7 @@ use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
 use crate::request::{BackgroundNotify, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, RegionFileId};
+use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -435,6 +434,7 @@ pub struct IndexBuildTask {
     pub reason: IndexBuildType,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
+    pub committed_sequence: Option<SequenceNumber>,
     pub access_layer: AccessLayerRef,
     pub write_cache: Option<WriteCacheRef>,
     pub file_purger: FilePurgerRef,
@@ -531,6 +531,7 @@ impl IndexBuildTask {
                 timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
                 flushed_sequence: self.flushed_sequence,
                 flushed_entry_id: self.flushed_entry_id,
+                committed_sequence: self.committed_sequence,
                 compaction_time_window: None,
             };
             let index_build_finished = IndexBuildFinished {
@@ -746,7 +747,7 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
-            source,
+            source: either::Left(source),
             storage: None,
             max_sequence: None,
             cache_manager: Default::default(),
@@ -1020,6 +1021,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             write_cache: None,
             file_purger: Arc::new(NoopFilePurger {}),
@@ -1062,6 +1064,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             write_cache: None,
             file_purger: Arc::new(NoopFilePurger {}),
@@ -1120,6 +1123,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             write_cache: None,
             file_purger: Arc::new(NoopFilePurger {}),
@@ -1207,6 +1211,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             write_cache: None,
             file_purger: Arc::new(NoopFilePurger {}),
@@ -1278,6 +1283,7 @@ mod tests {
             reason: IndexBuildType::Flush,
             flushed_entry_id: None,
             flushed_sequence: None,
+            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             write_cache: Some(write_cache.clone()),
             file_purger: Arc::new(NoopFilePurger {}),

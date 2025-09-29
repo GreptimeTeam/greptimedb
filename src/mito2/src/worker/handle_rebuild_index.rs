@@ -18,13 +18,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, warn};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot;
 
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
-use crate::sst::file::{FileHandle, FileId, RegionFileId};
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
 use crate::sst::location::{self};
 use crate::sst::parquet::WriteOptions;
@@ -70,6 +70,7 @@ impl<S> RegionWorkerLoop<S> {
             reason: build_type,
             flushed_entry_id: Some(version.flushed_entry_id),
             flushed_sequence: Some(version.flushed_sequence),
+            committed_sequence: Some(region.find_committed_sequence()),
             access_layer: access_layer.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
             file_purger: file.file_purger(),

@@ -51,7 +51,7 @@ use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::{Batch, FlatSource, Source};
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
