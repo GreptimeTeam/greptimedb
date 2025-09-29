@@ -52,6 +52,12 @@ pub struct Metrics {
     pub index_finish: Duration,
     pub close: Duration,
     pub num_series: usize,
+
+    // SST Opendal metrics.
+    pub opendal_create_cost: Duration,
+    pub opendal_num_writes: usize,
+    pub opendal_write_cost: Duration,
+    pub opendal_complete_cost: Duration,
 }
 
 impl Metrics {
@@ -186,9 +192,16 @@ impl AccessLayer {
                 path_provider,
             )
             .await;
-            writer
+            let sst_info = writer
                 .write_all(request.source, request.max_sequence, write_opts, metrics)
-                .await?
+                .await?;
+            let opendal_metrics = writer.opendal_metrics_val();
+            metrics.opendal_create_cost += opendal_metrics.create_cost;
+            metrics.opendal_num_writes += opendal_metrics.num_writes;
+            metrics.opendal_write_cost += opendal_metrics.write_cost;
+            metrics.opendal_complete_cost += opendal_metrics.complete_cost;
+
+            sst_info
         };
 
         // Put parquet metadata to cache manager.
