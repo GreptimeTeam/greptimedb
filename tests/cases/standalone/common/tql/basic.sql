@@ -11,6 +11,12 @@ TQL EVAL (0, 10, '5s') test;
 TQL EVAL (0, 10, '5s') {__name__="test"};
 
 -- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') {__name__="test"} AS test_series;
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') count by (k) (test) AS c;
+
+-- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') test{__schema__="public"};
 
 -- SQLNESS SORT_RESULT 2 1

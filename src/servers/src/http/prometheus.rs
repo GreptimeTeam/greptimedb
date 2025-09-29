@@ -245,6 +245,7 @@ pub async fn instant_query(
             .lookback
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+        alias: None,
     };
 
     let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
@@ -356,6 +357,7 @@ pub async fn range_query(
             .lookback
             .or(form_params.lookback)
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+        alias: None,
     };
 
     let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
@@ -568,6 +570,7 @@ pub async fn labels_query(
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
+            alias: None,
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -1367,6 +1370,7 @@ pub async fn series_query(
             // TODO: find a better value for step
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
+            alias: None,
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
