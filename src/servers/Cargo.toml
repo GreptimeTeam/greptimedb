@@ -64,7 +64,6 @@ futures-util.workspace = true
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true
-http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }

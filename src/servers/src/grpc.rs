@@ -23,6 +23,7 @@ pub mod prom_query_gateway;
 pub mod region_server;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
@@ -71,6 +72,11 @@ pub struct GrpcOptions {
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
+    /// Maximum time that a channel may exist.
+    /// Useful when the server wants to control the reconnection of its clients.
+    /// Default to `None`, means infinite.
+    #[serde(with = "humantime_serde")]
+    pub max_connection_age: Option<Duration>,
 }
 
 impl GrpcOptions {
@@ -111,6 +117,7 @@ impl GrpcOptions {
             max_recv_message_size: self.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
             tls: self.tls.clone(),
+            max_connection_age: self.max_connection_age,
         }
     }
 }
@@ -130,6 +137,7 @@ impl Default for GrpcOptions {
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
+            max_connection_age: None,
         }
     }
 }
@@ -148,6 +156,7 @@ impl GrpcOptions {
             flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
+            max_connection_age: None,
         }
     }
 
@@ -207,6 +216,7 @@ pub struct GrpcServer {
     >,
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
+    config: GrpcServerConfig,
 }
 
 /// Grpc Server configuration
@@ -217,6 +227,10 @@ pub struct GrpcServerConfig {
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
     pub tls: TlsOption,
+    /// Maximum time that a channel may exist.
+    /// Useful when the server wants to control the reconnection of its clients.
+    /// Default to `None`, means infinite.
+    pub max_connection_age: Option<Duration>,
 }
 
 impl Default for GrpcServerConfig {
@@ -225,6 +239,7 @@ impl Default for GrpcServerConfig {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
             tls: TlsOption::default(),
+            max_connection_age: None,
         }
     }
 }
@@ -331,6 +346,10 @@ impl Server for GrpcServer {
         let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
         if let Some(tls_config) = self.tls_config.clone() {
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
+        }
+
+        if let Some(max_connection_age) = self.config.max_connection_age {
+            builder = builder.max_connection_age(max_connection_age);
         }
 
         let mut builder = builder
