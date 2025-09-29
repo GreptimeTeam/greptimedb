@@ -282,7 +282,7 @@ impl ParserContext<'_> {
                     .trim_end_matches(';')
                     .to_string();
 
-                if parser.consume_token(&Token::EOF) {
+                if parser.consume_token(&Token::EOF) || parser.consume_token(&Token::SemiColon) {
                     return Ok((promql, Some(alias.value)));
                 } else {
                     return Err(ParserError::ParserError(format!(

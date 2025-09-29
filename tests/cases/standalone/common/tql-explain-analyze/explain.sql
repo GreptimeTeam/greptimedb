@@ -27,4 +27,12 @@ TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 
+-- explain verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
+
 DROP TABLE test;
