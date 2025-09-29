@@ -696,7 +696,7 @@ mod tests {
                 index_type: "bloom_filter".to_string(),
                 target_type: "column".to_string(),
                 target_key: "1".to_string(),
-                target_json: "{\"columns\":[1]}".to_string(),
+                target_json: "{\"column\":1}".to_string(),
                 blob_size: 256,
                 meta_json: Some("{\"bloom\":{}}".to_string()),
                 node_id: Some(42),
@@ -825,7 +825,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!("{\"columns\":[1]}", target_json.value(0));
+        assert_eq!("{\"column\":1}", target_json.value(0));
         assert_eq!("{}", target_json.value(1));
 
         let blob_sizes = batch

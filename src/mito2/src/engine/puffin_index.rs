@@ -265,7 +265,7 @@ async fn try_read_bloom_meta(
 fn decode_target_info(target_key: &str) -> (String, String) {
     match IndexTarget::decode(target_key) {
         Ok(IndexTarget::ColumnId(id)) => {
-            ("column".to_string(), json!({ "columns": [id] }).to_string())
+            ("column".to_string(), json!({ "column": id }).to_string())
         }
         _ => ("unknown".to_string(), "unknown".to_string()),
     }

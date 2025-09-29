@@ -67,6 +67,8 @@ mod sync_test;
 #[cfg(test)]
 mod truncate_test;
 
+mod puffin_index;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -128,8 +130,6 @@ use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RawEntryReader};
 use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
-
-mod puffin_index;
 
 pub struct MitoEngineBuilder<'a, S: LogStore> {
     data_home: &'a str,
