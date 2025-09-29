@@ -56,14 +56,21 @@ pub struct ProcessManager {
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
-    Promql(EvalStmt),
+    // The optional string is the alias of the PromQL query.
+    Promql(EvalStmt, Option<String>),
 }
 
 impl Display for QueryStatement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
-            QueryStatement::Promql(eval_stmt) => write!(f, "{}", eval_stmt),
+            QueryStatement::Promql(eval_stmt, alias) => {
+                if let Some(alias) = alias {
+                    write!(f, "{} AS {}", eval_stmt, alias)
+                } else {
+                    write!(f, "{}", eval_stmt)
+                }
+            }
         }
     }
 }
@@ -338,9 +345,9 @@ impl SlowQueryTimer {
         };
 
         match &self.stmt {
-            QueryStatement::Promql(stmt) => {
+            QueryStatement::Promql(stmt, _alias) => {
                 slow_query_event.is_promql = true;
-                slow_query_event.query = stmt.expr.to_string();
+                slow_query_event.query = self.stmt.to_string();
                 slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
 
                 let start = stmt

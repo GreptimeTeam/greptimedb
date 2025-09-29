@@ -327,6 +327,8 @@ impl From<PromqlQuery> for PromQuery {
             lookback: query
                 .lookback
                 .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+            // TODO(dennis): support alias from http params or parse from query.query
+            alias: None,
         }
     }
 }
