@@ -43,6 +43,7 @@ const INDEX_TYPE_INVERTED: &str = "inverted";
 
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
+    pub(crate) index_file_path: &'a str,
     pub(crate) region_id: RegionId,
     pub(crate) table_id: TableId,
     pub(crate) region_number: RegionNumber,
@@ -366,6 +367,7 @@ fn build_index_entry(
 ) -> PuffinIndexMetaEntry {
     PuffinIndexMetaEntry {
         table_dir: context.table_dir.to_string(),
+        index_file_path: context.index_file_path.to_string(),
         region_id: context.region_id,
         table_id: context.table_id,
         region_number: context.region_number,

@@ -254,6 +254,8 @@ impl StorageSstEntry {
 pub struct PuffinIndexMetaEntry {
     /// The table directory this index belongs to.
     pub table_dir: String,
+    /// The full path of the index file in object store.
+    pub index_file_path: String,
     /// The region id referencing the index file.
     pub region_id: RegionId,
     /// The table id referencing the index file.
@@ -290,6 +292,7 @@ impl PuffinIndexMetaEntry {
         use datatypes::prelude::ConcreteDataType as Ty;
         Arc::new(Schema::new(vec![
             ColumnSchema::new("table_dir", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_path", Ty::string_datatype(), false),
             ColumnSchema::new("region_id", Ty::uint64_datatype(), false),
             ColumnSchema::new("table_id", Ty::uint32_datatype(), false),
             ColumnSchema::new("region_number", Ty::uint32_datatype(), false),
@@ -311,6 +314,7 @@ impl PuffinIndexMetaEntry {
     pub fn to_record_batch(entries: &[Self]) -> std::result::Result<DfRecordBatch, ArrowError> {
         let schema = Self::schema();
         let table_dirs = entries.iter().map(|e| e.table_dir.as_str());
+        let index_file_paths = entries.iter().map(|e| e.index_file_path.as_str());
         let region_ids = entries.iter().map(|e| e.region_id.as_u64());
         let table_ids = entries.iter().map(|e| e.table_id);
         let region_numbers = entries.iter().map(|e| e.region_number);
@@ -328,6 +332,7 @@ impl PuffinIndexMetaEntry {
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from_iter_values(table_dirs)),
+            Arc::new(StringArray::from_iter_values(index_file_paths)),
             Arc::new(UInt64Array::from_iter_values(region_ids)),
             Arc::new(UInt32Array::from_iter_values(table_ids)),
             Arc::new(UInt32Array::from_iter_values(region_numbers)),
@@ -686,6 +691,7 @@ mod tests {
         let entries = vec![
             PuffinIndexMetaEntry {
                 table_dir: "table1".to_string(),
+                index_file_path: "index1".to_string(),
                 region_id: RegionId::with_group_and_seq(10, 0, 20),
                 table_id: 10,
                 region_number: 20,
@@ -703,6 +709,7 @@ mod tests {
             },
             PuffinIndexMetaEntry {
                 table_dir: "table2".to_string(),
+                index_file_path: "index2".to_string(),
                 region_id: RegionId::with_group_and_seq(11, 0, 21),
                 table_id: 11,
                 region_number: 21,
@@ -734,8 +741,16 @@ mod tests {
         assert_eq!("table1", table_dirs.value(0));
         assert_eq!("table2", table_dirs.value(1));
 
-        let region_ids = batch
+        let index_file_paths = batch
             .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("index1", index_file_paths.value(0));
+        assert_eq!("index2", index_file_paths.value(1));
+
+        let region_ids = batch
+            .column(2)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -749,7 +764,7 @@ mod tests {
         );
 
         let table_ids = batch
-            .column(2)
+            .column(3)
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
@@ -757,7 +772,7 @@ mod tests {
         assert_eq!(11, table_ids.value(1));
 
         let region_numbers = batch
-            .column(3)
+            .column(4)
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
@@ -765,7 +780,7 @@ mod tests {
         assert_eq!(21, region_numbers.value(1));
 
         let region_groups = batch
-            .column(4)
+            .column(5)
             .as_any()
             .downcast_ref::<UInt8Array>()
             .unwrap();
@@ -773,7 +788,7 @@ mod tests {
         assert_eq!(0, region_groups.value(1));
 
         let region_sequences = batch
-            .column(5)
+            .column(6)
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
@@ -781,7 +796,7 @@ mod tests {
         assert_eq!(21, region_sequences.value(1));
 
         let file_ids = batch
-            .column(6)
+            .column(7)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -789,7 +804,7 @@ mod tests {
         assert_eq!("file2", file_ids.value(1));
 
         let index_file_sizes = batch
-            .column(7)
+            .column(8)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -797,7 +812,7 @@ mod tests {
         assert!(index_file_sizes.is_null(1));
 
         let index_types = batch
-            .column(8)
+            .column(9)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -805,7 +820,7 @@ mod tests {
         assert_eq!("inverted", index_types.value(1));
 
         let target_types = batch
-            .column(9)
+            .column(10)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -813,7 +828,7 @@ mod tests {
         assert_eq!("unknown", target_types.value(1));
 
         let target_keys = batch
-            .column(10)
+            .column(11)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -821,7 +836,7 @@ mod tests {
         assert_eq!("legacy", target_keys.value(1));
 
         let target_json = batch
-            .column(11)
+            .column(12)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -829,7 +844,7 @@ mod tests {
         assert_eq!("{}", target_json.value(1));
 
         let blob_sizes = batch
-            .column(12)
+            .column(13)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -837,7 +852,7 @@ mod tests {
         assert_eq!(0, blob_sizes.value(1));
 
         let meta_jsons = batch
-            .column(13)
+            .column(14)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
@@ -845,7 +860,7 @@ mod tests {
         assert!(meta_jsons.is_null(1));
 
         let node_ids = batch
-            .column(14)
+            .column(15)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();

@@ -480,6 +480,7 @@ impl MitoEngine {
                 let region_file_id = RegionFileId::new(entry.region_id, file_id);
                 let context = IndexEntryContext {
                     table_dir: &entry.table_dir,
+                    index_file_path: entry.index_file_path.as_ref().unwrap(), // Safety: entry.index_file_path is not None
                     region_id: entry.region_id,
                     table_id: entry.table_id,
                     region_number: entry.region_number,
