@@ -22,14 +22,13 @@ use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
 use snafu::ResultExt;
 
-use super::MutableVector;
 use crate::error::{ArrowComputeSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu};
 use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StructType;
 use crate::value::{StructValue, StructValueRef, Value, ValueRef};
 use crate::vectors::operations::VectorOp;
-use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
+use crate::vectors::{self, Helper, MutableVector, Validity, Vector, VectorRef};
 
 /// A simple wrapper around `StructArray` to represent a vector of structs in GreptimeDB.
 #[derive(Debug, PartialEq)]
