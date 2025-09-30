@@ -654,14 +654,14 @@ impl FlatConvertFormat {
                     match decoded {
                         CompositeValues::Dense(dense) => {
                             if pk_index < dense.len() {
-                                builder.push_value_ref(dense[pk_index].1.as_value_ref());
+                                builder.push_value_ref(&dense[pk_index].1.as_value_ref());
                             } else {
                                 builder.push_null();
                             }
                         }
                         CompositeValues::Sparse(sparse) => {
                             let value = sparse.get_or_null(column_id);
-                            builder.push_value_ref(value.as_value_ref());
+                            builder.push_value_ref(&value.as_value_ref());
                         }
                     };
                 }

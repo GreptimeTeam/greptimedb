@@ -277,7 +277,7 @@ fn values_to_vectors_by_valid_types(
 fn value_to_vector(value: Value) -> VectorRef {
     let data_type = value.data_type();
     let mut mutable_vector = data_type.create_mutable_vector(1);
-    mutable_vector.push_value_ref(value.as_value_ref());
+    mutable_vector.push_value_ref(&value.as_value_ref());
 
     mutable_vector.to_vector()
 }

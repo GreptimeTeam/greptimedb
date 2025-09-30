@@ -219,7 +219,7 @@ impl DataBuffer {
 
     /// Writes a row to data buffer.
     pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
-        self.ts_builder.push_value_ref(kv.timestamp());
+        self.ts_builder.push_value_ref(&kv.timestamp());
         self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
         self.op_type_builder.push(Some(kv.op_type() as u8));
@@ -229,7 +229,7 @@ impl DataBuffer {
         for (idx, field) in kv.fields().enumerate() {
             self.field_builders[idx]
                 .get_or_create_builder(self.ts_builder.len())
-                .push_value_ref(field);
+                .push_value_ref(&field);
         }
     }
 
