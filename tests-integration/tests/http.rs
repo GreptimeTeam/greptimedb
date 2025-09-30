@@ -6448,7 +6448,7 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     validate_data(
         "test_influxdb_write",
         &client,
-        "select * from test_alter order by ts;",
+        "select * from test_alter order by greptime_timestamp;",
         expected,
     )
     .await;

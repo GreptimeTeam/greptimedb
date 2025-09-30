@@ -25,7 +25,6 @@ use crate::row_writer::{self, MultiTableData};
 
 const INFLUXDB_API_PATH_NAME: &str = "influxdb";
 const INFLUXDB_API_V2_PATH_NAME: &str = "influxdb/api/v2";
-// const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 
 #[inline]
@@ -194,7 +193,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                "greptime_timestamp" => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
@@ -269,7 +268,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                "greptime_timestamp" => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
