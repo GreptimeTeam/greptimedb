@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use common_base::BitVec;
@@ -27,7 +27,7 @@ use datatypes::types::{
     Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
     UInt16Type,
 };
-use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, Value};
+use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, StructValueRef, Value};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
     Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
@@ -636,7 +636,7 @@ pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
 
 pub fn pb_value_to_value_ref<'a>(
     value: &'a v1::Value,
-    datatype_ext: &'a Option<ColumnDataTypeExtension>,
+    datatype_ext: Option<&'a ColumnDataTypeExtension>,
 ) -> ValueRef<'a> {
     let Some(value) = &value.value_data else {
         return ValueRef::Null;
@@ -705,8 +705,9 @@ pub fn pb_value_to_value_ref<'a>(
         }
         ValueData::ListValue(list) => {
             let list_datatype_ext = datatype_ext
+                .as_ref()
                 .and_then(|ext| {
-                    if let Some(TypeExt::ListType(l)) = ext.type_ext {
+                    if let Some(TypeExt::ListType(l)) = &ext.type_ext {
                         Some(l)
                     } else {
                         None
@@ -715,16 +716,16 @@ pub fn pb_value_to_value_ref<'a>(
                 .expect("list must contains datatype ext");
             let item_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(
                 list_datatype_ext.datatype(),
-                list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
+                list_datatype_ext
+                    .datatype_extension
+                    .as_ref()
+                    .map(|ext| *ext.clone()),
             ));
             let items = list
                 .items
                 .iter()
                 .map(|item| {
-                    pb_value_to_value_ref(
-                        item,
-                        &list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
-                    )
+                    pb_value_to_value_ref(item, list_datatype_ext.datatype_extension.as_deref())
                 })
                 .collect::<Vec<_>>();
 
@@ -734,39 +735,49 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::List(list_value)
         }
-        ValueData::StructValue(struct_value) => {
-            let struct_data_ext = datatype_ext.and_then(|ext| {
-                if let Some(TypeExt::StructType(s)) = ext.type_ext {
-                    Some(s)
-                } else {
-                    None
-                }
-            }).expect("struct must contians datatype ext");
 
-            let struct_fields = struct_data_ext.fields().map(|field| {
-                let field_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(field.datatype(), field.datatype_extension.map(|ext| *ext.clone())));
-                let field_name = field.name().to_string();
-                StructField::new(field_name, field_type)
-            }).collect());
+        ValueData::StructValue(struct_value) => {
+            let struct_datatype_ext = datatype_ext
+                .as_ref()
+                .and_then(|ext| {
+                    if let Some(TypeExt::StructType(s)) = &ext.type_ext {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+                .expect("struct must contians datatype ext");
+
+            let struct_fields = struct_datatype_ext
+                .fields
+                .iter()
+                .map(|field| {
+                    let field_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(
+                        field.datatype(),
+                        field.datatype_extension.clone(),
+                    ));
+                    let field_name = field.name.to_string();
+                    StructField::new(field_name, field_type, true)
+                })
+                .collect::<Vec<_>>();
 
             let items = struct_value
                 .items
                 .iter()
-                .zip(struct_fields.iter())
-                .map(|(field, item)| {
-                    (field.name(),
-                    pb_value_to_value_ref(
-                        item,
-                        &list_datatype_ext.datatype_extension.map(|ext| *ext.clone()),
-                    )))
+                .zip(struct_datatype_ext.fields.iter())
+                .map(|(item, field)| {
+                    (
+                        field.name.to_string(),
+                        pb_value_to_value_ref(item, field.datatype_extension.as_ref()),
+                    )
                 })
-                .collect::<BTreeMap<_,_>>();
+                .collect::<BTreeMap<String, ValueRef>>();
 
-            let struct_value = StructValueRef::RefMap {
+            let struct_value_ref = StructValueRef::RefMap {
                 val: items,
-                fields: StructType::new(struct_fields)
+                fields: StructType::new(struct_fields),
             };
-            ValueRef::Struct(struct_value)
+            ValueRef::Struct(struct_value_ref)
         }
     }
 }

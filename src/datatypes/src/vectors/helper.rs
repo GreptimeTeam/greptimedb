@@ -240,7 +240,10 @@ impl Helper {
             }
             ScalarValue::Struct(v) => {
                 let struct_type = StructType::try_from(v.fields())?;
-                ConstantVector::new(Arc::new(StructVector::new(struct_type, vec![v])), length)
+                ConstantVector::new(
+                    Arc::new(StructVector::new(struct_type, (*v).clone())),
+                    length,
+                )
             }
             ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)

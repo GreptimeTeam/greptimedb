@@ -960,7 +960,7 @@ impl StructValue {
     }
 
     pub fn fields(&self) -> &[StructField] {
-        &self.fields.fields()
+        self.fields.fields()
     }
 
     pub fn struct_type(&self) -> StructType {
@@ -1597,8 +1597,8 @@ impl ValueRef<'_> {
             ValueRef::Int64(_) => 8,
             ValueRef::Float32(_) => 4,
             ValueRef::Float64(_) => 8,
-            ValueRef::String(v) => std::mem::size_of_val(v),
-            ValueRef::Binary(v) => std::mem::size_of_val(v),
+            ValueRef::String(v) => std::mem::size_of_val(*v),
+            ValueRef::Binary(v) => std::mem::size_of_val(*v),
             ValueRef::Date(_) => 4,
             ValueRef::Timestamp(_) => 16,
             ValueRef::Time(_) => 16,

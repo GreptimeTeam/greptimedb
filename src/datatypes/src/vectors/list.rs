@@ -57,7 +57,7 @@ impl ListVector {
 
 impl Vector for ListVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::List(ListType::new(self.item_type.clone()))
+        ConcreteDataType::List(ListType::new(self.item_type()))
     }
 
     fn vector_type_name(&self) -> String {

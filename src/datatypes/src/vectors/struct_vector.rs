@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use arrow::array::NullBufferBuilder;
 use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
@@ -278,6 +279,7 @@ impl<'a> Iterator for StructIter<'a> {
 
 pub struct StructVectorBuilder {
     value_builders: Vec<Box<dyn MutableVector>>,
+    null_buffer: NullBufferBuilder,
     fields: StructType,
 }
 
@@ -290,6 +292,7 @@ impl StructVectorBuilder {
             .collect();
         Self {
             value_builders,
+            null_buffer: NullBufferBuilder::new(capacity),
             fields,
         }
     }
@@ -302,6 +305,7 @@ impl StructVectorBuilder {
                 .unwrap_or(&Value::Null);
             self.value_builders[index].try_push_value_ref(&value.as_value_ref())?;
         }
+        self.null_buffer.append(true);
 
         Ok(())
     }
@@ -313,11 +317,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn len(&self) -> usize {
-        if self.value_builders.len() == 0 {
-            0
-        } else {
-            self.value_builders[0].len()
-        }
+        self.null_buffer.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -371,9 +371,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        for array in self.value_builders.iter_mut() {
-            array.push_null();
-        }
+        self.null_buffer.append_null();
     }
 }
 
@@ -398,18 +396,32 @@ impl ScalarVectorBuilder for StructVectorBuilder {
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        let arrays = self.value_builders.iter_mut().map(|b| b.finish()).collect();
+        let arrays = self
+            .value_builders
+            .iter_mut()
+            .map(|b| b.to_vector().to_arrow_array())
+            .collect();
+        let struct_array = StructArray::new(
+            self.fields.as_arrow_fields(),
+            arrays,
+            self.null_buffer.finish(),
+        );
 
-        StructVector::new(self.fields.clone(), arrays.collect())
+        StructVector::new(self.fields.clone(), struct_array)
     }
 
-    // Port from https://github.com/apache/arrow-rs/blob/ef6932f31e243d8545e097569653c8d3f1365b4d/arrow-array/src/builder/generic_list_builder.rs#L302-L325
     fn finish_cloned(&self) -> Self::VectorType {
         let arrays = self
             .value_builders
             .iter()
-            .map(|b| b.finish_cloned())
+            .map(|b| b.to_vector_cloned().to_arrow_array())
             .collect();
-        StructVector::new(self.fields.clone(), arrays.collect())
+
+        let struct_array = StructArray::new(
+            self.fields.as_arrow_fields(),
+            arrays,
+            self.null_buffer.finish_cloned(),
+        );
+        StructVector::new(self.fields.clone(), struct_array)
     }
 }

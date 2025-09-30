@@ -193,13 +193,11 @@ impl Scalar for () {
     type RefType<'a> = ();
 
     #[inline]
-    fn as_scalar_ref(&self) -> () {
-        ()
-    }
+    fn as_scalar_ref(&self) {}
 
     #[allow(clippy::needless_lifetimes)]
     #[inline]
-    fn upcast_gat<'short, 'long: 'short>(long: ()) -> () {
+    fn upcast_gat<'short, 'long: 'short>(long: ()) {
         long
     }
 }
@@ -208,9 +206,7 @@ impl ScalarRef<'_> for () {
     type ScalarType = ();
 
     #[inline]
-    fn to_owned_scalar(&self) -> () {
-        ()
-    }
+    fn to_owned_scalar(&self) {}
 }
 
 impl Scalar for bool {
