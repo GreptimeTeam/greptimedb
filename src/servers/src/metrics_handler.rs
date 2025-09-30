@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(target_os = "linux")]
+use common_stat::CgroupsMetricsCollector;
 use prometheus::{Encoder, TextEncoder};
 
 /// a server that serves metrics
@@ -23,6 +25,16 @@ impl MetricsHandler {
     pub fn render(&self) -> String {
         let mut buffer = Vec::new();
         let encoder = TextEncoder::new();
+
+        #[cfg(target_os = "linux")]
+        {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                // It's unlikely to fail to register the collector.
+                prometheus::register(Box::new(CgroupsMetricsCollector::default())).unwrap();
+            });
+        }
+
         // Gather the metrics.
         let metric_families = prometheus::gather();
         // Encode them to send.

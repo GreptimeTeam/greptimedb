@@ -1,11 +1,13 @@
 [package]
-name = "stat"
+name = "common-stat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+lazy_static.workspace = true
 nix.workspace = true
+prometheus.workspace = true
 
 [lints]
 workspace = true

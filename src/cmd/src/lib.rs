@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_mem_prof::activate_heap_profile;
+use common_stat::{get_cpu_limit, get_memory_limit};
 use common_telemetry::{error, info, warn};
-use stat::{get_cpu_limit, get_memory_limit};
 
 use crate::error::Result;
 
