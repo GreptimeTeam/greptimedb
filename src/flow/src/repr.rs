@@ -194,7 +194,7 @@ impl From<ProtoRow> for Row {
         Row::pack(
             row.values
                 .iter()
-                .map(|pb_val| -> Value { pb_value_to_value_ref(pb_val, &None).into() }),
+                .map(|pb_val| -> Value { pb_value_to_value_ref(pb_val, None).into() }),
         )
     }
 }

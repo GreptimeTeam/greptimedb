@@ -122,7 +122,7 @@ impl Batch {
             );
             for (idx, value) in row.iter().enumerate() {
                 builder[idx]
-                    .try_push_value_ref(value.as_value_ref())
+                    .try_push_value_ref(&value.as_value_ref())
                     .context(DataTypeSnafu {
                         msg: "Failed to convert rows to columns",
                     })?;

@@ -210,8 +210,8 @@ impl TimeWindowExpr {
 
             let mut vector = cdt.create_mutable_vector(rows.rows.len());
             for row in rows.rows {
-                let value = pb_value_to_value_ref(&row.values[ts_col_index], &None);
-                vector.try_push_value_ref(value).context(DataTypeSnafu {
+                let value = pb_value_to_value_ref(&row.values[ts_col_index], None);
+                vector.try_push_value_ref(&value).context(DataTypeSnafu {
                     msg: "Failed to convert rows to columns",
                 })?;
             }

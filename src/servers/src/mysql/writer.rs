@@ -237,6 +237,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         "[{}]",
                         v.items().iter().map(|x| x.to_string()).join(", ")
                     ))?,
+                    Value::Struct(struct_value) => row_writer.write_col(format!(
+                        "{{{}}}",
+                        struct_value
+                            .items()
+                            .iter()
+                            .map(|(k, v)| format!("{k}: {v}"))
+                            .join(", ")
+                    ))?,
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
                     Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
@@ -293,6 +301,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
         ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_BLOB),
         ConcreteDataType::List(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
+        ConcreteDataType::Struct(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",
