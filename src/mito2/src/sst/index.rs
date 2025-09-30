@@ -515,13 +515,15 @@ impl IndexBuildTask {
         let index_output = indexer.finish().await;
 
         if index_output.file_size > 0 {
-            // Upload index file if write cache is enabled.
-            self.maybe_upload_index_file(index_output.clone()).await?;
-
             // Check SST file existence again after building index.
             if !self.check_sst_file_exists().await {
+                // Calls abort to clean up index files.
+                indexer.abort().await;
                 return Ok(IndexBuildOutcome::Aborted("SST file not found".to_string()));
             }
+
+            // Upload index file if write cache is enabled.
+            self.maybe_upload_index_file(index_output.clone()).await?;
 
             self.file_meta.available_indexes = index_output.build_available_indexes();
             self.file_meta.index_file_size = index_output.file_size;
