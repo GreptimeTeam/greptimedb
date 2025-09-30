@@ -140,6 +140,8 @@ pub struct FlatReadFormat {
 
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
+    ///
+    /// If `skip_auto_convert` is true, skips auto conversion of format when the encoding is sparse encoding.
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
@@ -154,11 +156,18 @@ impl FlatReadFormat {
 
         let parquet_adapter = if is_legacy {
             // Safety: is_legacy_format() ensures primary_key is not empty.
-            ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
-                metadata,
-                column_ids,
-                skip_auto_convert,
-            ))
+            if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                // Only skip auto convert when the primary key encoding is sparse.
+                ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
+                    metadata,
+                    column_ids,
+                    skip_auto_convert,
+                ))
+            } else {
+                ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
+                    metadata, column_ids, false,
+                ))
+            }
         } else {
             ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
         };
