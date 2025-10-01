@@ -2378,8 +2378,7 @@ mod tests {
             to_json(Value::Duration(Duration::new_millisecond(1)))
         );
 
-        let json_value: serde_json::Value =
-            serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
+        let json_value: serde_json::Value = serde_json::from_str(r#"[{"Int32":123}]"#).unwrap();
         assert_eq!(
             json_value,
             to_json(Value::List(ListValue {

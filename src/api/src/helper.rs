@@ -287,6 +287,37 @@ impl ColumnDataTypeWrapper {
             }),
         }
     }
+
+    pub fn list_datatype(item_type: ColumnDataTypeWrapper) -> Self {
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::List,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
+                    datatype: item_type.datatype() as i32,
+                    datatype_extension: item_type.datatype_ext.map(Box::new),
+                }))),
+            }),
+        }
+    }
+
+    pub fn struct_datatype(fields: Vec<(String, ColumnDataTypeWrapper)>) -> Self {
+        let struct_fields = fields
+            .into_iter()
+            .map(|(name, datatype)| greptime_proto::v1::StructField {
+                name,
+                datatype: datatype.datatype() as i32,
+                datatype_extension: datatype.datatype_ext,
+            })
+            .collect();
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::Struct,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                    fields: struct_fields,
+                })),
+            }),
+        }
+    }
 }
 
 impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
@@ -713,7 +744,7 @@ pub fn pb_value_to_value_ref<'a>(
                         None
                     }
                 })
-                .expect("list must contains datatype ext");
+                .expect("list must contain datatype ext");
             let item_type = ConcreteDataType::from(ColumnDataTypeWrapper::new(
                 list_datatype_ext.datatype(),
                 list_datatype_ext
@@ -746,7 +777,7 @@ pub fn pb_value_to_value_ref<'a>(
                         None
                     }
                 })
-                .expect("struct must contians datatype ext");
+                .expect("struct must contain datatype ext");
 
             let struct_fields = struct_datatype_ext
                 .fields
@@ -1615,13 +1646,29 @@ mod tests {
             "Failed to create column datatype from Null(NullType)"
         );
 
-        let result: Result<ColumnDataTypeWrapper> =
-            ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()).try_into();
-        assert!(result.is_err());
         assert_eq!(
-            result.unwrap_err().to_string(),
-            "Failed to create column datatype from List(ListType { item_type: Boolean(BooleanType) })"
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int16_datatype()),
+            ConcreteDataType::list_datatype(ConcreteDataType::int16_datatype())
+                .try_into()
+                .expect("Failed to create column datatype from List(ListType { item_type: Int16(Int16Type) })")
         );
+
+        assert_eq!(
+            ColumnDataTypeWrapper::struct_datatype(vec![
+                ("a".to_string(), ColumnDataTypeWrapper::int64_datatype()),
+                (
+                    "a.a".to_string(),
+                    ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype())
+                )
+            ]),
+            ConcreteDataType::struct_datatype(StructType::new(vec![
+                StructField::new("a".to_string(), ConcreteDataType::int64_datatype(), true),
+                StructField::new(
+                    "a.a".to_string(),
+                    ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
+                )
+            ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
+        )
     }
 
     #[test]
