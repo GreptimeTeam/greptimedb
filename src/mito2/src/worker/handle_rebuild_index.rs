@@ -17,16 +17,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_telemetry::{debug, warn};
+use common_telemetry::{error, warn};
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot;
 
-use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
-use crate::region::{MitoRegionRef, RegionLeaderState};
+use crate::region::MitoRegionRef;
 use crate::request::{IndexBuildFailed, IndexBuildFinished, RegionBuildIndexRequest};
-use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::file::FileHandle;
 use crate::sst::index::{IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl};
-use crate::sst::location::{self};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
 
@@ -72,6 +70,7 @@ impl<S> RegionWorkerLoop<S> {
             flushed_sequence: Some(version.flushed_sequence),
             committed_sequence: Some(region.find_committed_sequence()),
             access_layer: access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
@@ -86,14 +85,15 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
 
-        let version = region.version();
+        let version_control = region.version_control.clone();
+        let version = version_control.current().version;
 
         let all_files: HashMap<FileId, FileHandle> = version
             .ssts
             .levels()
             .iter()
             .flat_map(|level| level.files.iter())
-            .filter(|(_, handle)| !handle.is_deleted())
+            .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
             .map(|(id, handle)| (*id, handle.clone()))
             .collect();
 
@@ -111,14 +111,11 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         for file_handle in build_tasks {
+            let task =
+                self.new_index_build_task(&region, file_handle, request.build_type.clone(), None);
             let _ = self
                 .index_build_scheduler
-                .schedule_build(self.new_index_build_task(
-                    &region,
-                    file_handle,
-                    request.build_type.clone(),
-                    None,
-                ));
+                .schedule_build(&region.version_control, task);
         }
     }
 
@@ -137,89 +134,18 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
-        let version = region.version();
-
-        for file_meta in &request.edit.files_to_add {
-            let file_id = file_meta.file_id;
-
-            // Check if the file exists in the region version.
-            let found_in_version = version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files.iter())
-                .any(|(id, handle)| *id == file_id && !handle.is_deleted() && !handle.compacting());
-            if !found_in_version {
-                warn!(
-                    "File id {} not found in region version for index build, region: {}",
-                    file_id, region_id
-                );
-                return;
-            }
-
-            // Check if the file exists in the object store.
-            let path = location::sst_file_path(
-                region.access_layer.table_dir(),
-                RegionFileId::new(file_meta.region_id, file_id),
-                region.access_layer.path_type(),
-            );
-            match region.access_layer.object_store().exists(&path).await {
-                Ok(found_in_object_store) => {
-                    if !found_in_object_store {
-                        warn!(
-                            "SST file not found for index build, region: {}, file_id: {}",
-                            region_id, file_meta.file_id
-                        );
-                        return;
-                    }
-                }
-                Err(_) => {
-                    warn!(
-                        "Failed to check SST file existence for index build, region: {}, file_id: {}",
-                        region_id, file_meta.file_id
-                    );
-                    return;
-                }
-            };
-        }
-
-        // Safety: The corresponding file exists.
-        // Updates manifest in background.
-        common_runtime::spawn_global(async move {
-            let version_result = region
-                .manifest_ctx
-                .update_manifest(
-                    RegionLeaderState::Writable,
-                    RegionMetaActionList::with_action(RegionMetaAction::Edit(request.edit.clone())),
-                )
-                .await;
-
-            match version_result {
-                Ok(version) => {
-                    debug!(
-                        "Successfully update manifest version to {version}, region: {region_id}, reason : index build"
-                    );
-                    region.version_control.apply_edit(
-                        Some(request.edit.clone()),
-                        &[],
-                        region.file_purger.clone(),
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to update manifest for index build, region: {}, error: {:?}",
-                        region_id, e
-                    );
-                }
-            }
-        });
+        region.version_control.apply_edit(
+            Some(request.edit.clone()),
+            &[],
+            region.file_purger.clone(),
+        );
     }
 
     pub(crate) async fn handle_index_build_failed(
         &mut self,
-        _region_id: RegionId,
-        _request: IndexBuildFailed,
+        region_id: RegionId,
+        request: IndexBuildFailed,
     ) {
-        unreachable!();
+        error!(request.err; "Index build failed for region: {}", region_id);
     }
 }

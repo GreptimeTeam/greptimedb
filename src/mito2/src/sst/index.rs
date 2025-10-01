@@ -25,7 +25,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
@@ -33,6 +33,7 @@ use statistics::{ByteCount, RowCount};
 use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
+use strum::IntoStaticStr;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
@@ -40,11 +41,15 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::Result;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::request::{BackgroundNotify, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime};
+use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
+use crate::region::{ManifestContextRef, RegionLeaderState};
+use crate::request::{
+    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
+};
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
 use crate::sst::file_purger::FilePurgerRef;
@@ -400,7 +405,7 @@ impl IndexerBuilderImpl {
 }
 
 /// Type of an index build task.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, IntoStaticStr)]
 pub enum IndexBuildType {
     /// Build index when schema change.
     SchemaChange,
@@ -410,6 +415,12 @@ pub enum IndexBuildType {
     Compact,
     /// Manually build index.
     Manual,
+}
+
+impl IndexBuildType {
+    fn as_str(&self) -> &'static str {
+        self.into()
+    }
 }
 
 impl From<OperationType> for IndexBuildType {
@@ -436,6 +447,7 @@ pub struct IndexBuildTask {
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
     pub access_layer: AccessLayerRef,
+    pub(crate) manifest_ctx: ManifestContextRef,
     pub write_cache: Option<WriteCacheRef>,
     pub file_purger: FilePurgerRef,
     /// When write cache is enabled, the indexer builder should be built from the write cache.
@@ -448,14 +460,16 @@ pub struct IndexBuildTask {
 }
 
 impl IndexBuildTask {
-    fn into_index_build_job(mut self) -> Job {
+    fn into_index_build_job(mut self, version_control: &VersionControlRef) -> Job {
+        let version_data = version_control.current();
+
         Box::pin(async move {
-            self.do_index_build().await;
+            self.do_index_build(version_data).await;
         })
     }
 
-    async fn do_index_build(&mut self) {
-        let outcome = match self.index_build().await {
+    async fn do_index_build(&mut self, version_data: VersionControlData) {
+        let outcome = match self.index_build(&version_data).await {
             Ok(outcome) => outcome,
             Err(e) => {
                 warn!(
@@ -470,12 +484,33 @@ impl IndexBuildTask {
         }
     }
 
-    async fn check_sst_file_exists(&self) -> bool {
+    // Checks if the SST file still exists in object store and version to avoid conflict with compaction.
+    async fn check_sst_file_exists(&self, version: &VersionRef) -> bool {
+        let region_id = self.file_meta.region_id;
+        let file_id = self.file_meta.file_id;
+
+        let found_in_version = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.iter())
+            .any(|(id, handle)| {
+                *id == self.file_meta.file_id && !handle.is_deleted() && !handle.compacting()
+            });
+        if !found_in_version {
+            warn!(
+                "File id {} not found in region version for index build, region: {}",
+                file_id, region_id
+            );
+            return false;
+        }
+
         let sst_path = location::sst_file_path(
             self.access_layer.table_dir(),
             RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id),
             self.access_layer.path_type(),
         );
+
         match self.access_layer.object_store().exists(&sst_path).await {
             Ok(exists) => {
                 if !exists {
@@ -496,9 +531,12 @@ impl IndexBuildTask {
         }
     }
 
-    async fn index_build(&mut self) -> Result<IndexBuildOutcome> {
+    async fn index_build(
+        &mut self,
+        version_data: &VersionControlData,
+    ) -> Result<IndexBuildOutcome> {
+        let version = &version_data.version;
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
-
         let mut parquet_reader = self
             .access_layer
             .read_sst(FileHandle::new(
@@ -516,7 +554,7 @@ impl IndexBuildTask {
 
         if index_output.file_size > 0 {
             // Check SST file existence again after building index.
-            if !self.check_sst_file_exists().await {
+            if !self.check_sst_file_exists(version).await {
                 // Calls abort to clean up index files.
                 indexer.abort().await;
                 return Ok(IndexBuildOutcome::Aborted("SST file not found".to_string()));
@@ -525,25 +563,26 @@ impl IndexBuildTask {
             // Upload index file if write cache is enabled.
             self.maybe_upload_index_file(index_output.clone()).await?;
 
-            self.file_meta.available_indexes = index_output.build_available_indexes();
-            self.file_meta.index_file_size = index_output.file_size;
-            let edit = RegionEdit {
-                files_to_add: vec![self.file_meta.clone()],
-                files_to_remove: vec![],
-                timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-                flushed_sequence: self.flushed_sequence,
-                flushed_entry_id: self.flushed_entry_id,
-                committed_sequence: self.committed_sequence,
-                compaction_time_window: None,
+            let worker_request = match self.update_manifest(index_output).await {
+                Ok(edit) => {
+                    let index_build_finished = IndexBuildFinished {
+                        region_id: self.file_meta.region_id,
+                        edit,
+                    };
+                    WorkerRequest::Background {
+                        region_id: self.file_meta.region_id,
+                        notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
+                    }
+                }
+                Err(e) => {
+                    let err = Arc::new(e);
+                    WorkerRequest::Background {
+                        region_id: self.file_meta.region_id,
+                        notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
+                    }
+                }
             };
-            let index_build_finished = IndexBuildFinished {
-                region_id: self.file_meta.region_id,
-                edit,
-            };
-            let worker_request = WorkerRequest::Background {
-                region_id: self.file_meta.region_id,
-                notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
-            };
+
             let _ = self
                 .request_sender
                 .send(WorkerRequestWithTime::new(worker_request))
@@ -592,6 +631,33 @@ impl IndexBuildTask {
         }
         Ok(())
     }
+
+    async fn update_manifest(&mut self, output: IndexOutput) -> Result<RegionEdit> {
+        self.file_meta.available_indexes = output.build_available_indexes();
+        self.file_meta.index_file_size = output.file_size;
+        let edit = RegionEdit {
+            files_to_add: vec![self.file_meta.clone()],
+            files_to_remove: vec![],
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+            flushed_sequence: self.flushed_sequence,
+            flushed_entry_id: self.flushed_entry_id,
+            committed_sequence: self.committed_sequence,
+            compaction_time_window: None,
+        };
+        let version = self
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
+            )
+            .await?;
+        info!(
+            "Successfully update manifest version to {version}, region: {}, reason: {}",
+            self.file_meta.region_id,
+            self.reason.as_str()
+        );
+        Ok(edit)
+    }
 }
 
 #[derive(Clone)]
@@ -603,8 +669,13 @@ impl IndexBuildScheduler {
     pub fn new(scheduler: SchedulerRef) -> Self {
         IndexBuildScheduler { scheduler }
     }
-    pub fn schedule_build(&mut self, task: IndexBuildTask) -> Result<()> {
-        let job = task.into_index_build_job();
+
+    pub(crate) fn schedule_build(
+        &mut self,
+        version_control: &VersionControlRef,
+        task: IndexBuildTask,
+    ) -> Result<()> {
+        let job = task.into_index_build_job(version_control);
         self.scheduler.schedule(job)?;
         Ok(())
     }
@@ -616,6 +687,7 @@ mod tests {
 
     use api::v1::SemanticType;
     use common_base::readable_size::ReadableSize;
+    use datafusion_common::HashMap;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{
         ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
@@ -630,9 +702,12 @@ mod tests {
     use crate::access_layer::{FilePathProvider, SstWriteRequest, WriteType};
     use crate::cache::write_cache::WriteCache;
     use crate::config::{FulltextIndexConfig, IndexBuildMode, MitoConfig, Mode};
+    use crate::memtable::time_partition::TimePartitions;
+    use crate::region::version::{VersionBuilder, VersionControl};
     use crate::sst::file::RegionFileId;
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::parquet::WriteOptions;
+    use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::sst_util::{new_batch_by_range, new_source, sst_region_metadata};
 
@@ -765,6 +840,23 @@ mod tests {
             .unwrap()
             .0
             .remove(0)
+    }
+
+    async fn mock_version_control(
+        metadata: RegionMetadataRef,
+        file_purger: FilePurgerRef,
+        files: HashMap<FileId, FileMeta>,
+    ) -> VersionControlRef {
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            Arc::new(EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let version_builder = VersionBuilder::new(metadata, mutable)
+            .add_files(file_purger, files.values().cloned())
+            .build();
+        Arc::new(VersionControl::new(version_builder))
     }
 
     async fn mock_indexer_builder(
@@ -1009,6 +1101,11 @@ mod tests {
         let (result_tx, result_rx) = oneshot::channel::<IndexBuildOutcome>();
         let mut scheduler = env.mock_index_build_scheduler();
         let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
+        let files = HashMap::new();
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let region_id = metadata.region_id;
         let indexer_builder = mock_indexer_builder(metadata, &env).await;
 
@@ -1025,15 +1122,16 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             access_layer: env.access_layer.clone(),
+            manifest_ctx,
             write_cache: None,
-            file_purger: Arc::new(NoopFilePurger {}),
+            file_purger,
             indexer_builder,
             request_sender: tx,
             result_sender: Some(result_tx),
         };
 
         // Schedule the build task and check result.
-        scheduler.schedule_build(task).unwrap();
+        scheduler.schedule_build(&version_control, task).unwrap();
         match result_rx.await.unwrap() {
             IndexBuildOutcome::Aborted(_) => {}
             _ => panic!("Expect aborted result due to missing SST file"),
@@ -1045,7 +1143,9 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler();
         let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let region_id = metadata.region_id;
+        let file_purger = Arc::new(NoopFilePurger {});
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
         let file_meta = FileMeta {
             region_id,
@@ -1056,6 +1156,9 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
         // Create mock task.
@@ -1068,14 +1171,15 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             access_layer: env.access_layer.clone(),
+            manifest_ctx,
             write_cache: None,
-            file_purger: Arc::new(NoopFilePurger {}),
+            file_purger,
             indexer_builder,
             request_sender: tx,
             result_sender: Some(result_tx),
         };
 
-        scheduler.schedule_build(task).unwrap();
+        scheduler.schedule_build(&version_control, task).unwrap();
 
         // The task should finish successfully.
         assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
@@ -1104,6 +1208,8 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler();
         let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
         let region_id = metadata.region_id;
         let sst_info = mock_sst_file(metadata.clone(), &env, build_mode.clone()).await;
         let file_meta = FileMeta {
@@ -1115,6 +1221,9 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
         // Create mock task.
@@ -1127,14 +1236,15 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             access_layer: env.access_layer.clone(),
+            manifest_ctx,
             write_cache: None,
-            file_purger: Arc::new(NoopFilePurger {}),
+            file_purger,
             indexer_builder,
             request_sender: tx,
             result_sender: Some(result_tx),
         };
 
-        scheduler.schedule_build(task).unwrap();
+        scheduler.schedule_build(&version_control, task).unwrap();
 
         let puffin_path = location::index_file_path(
             env.access_layer.table_dir(),
@@ -1193,6 +1303,8 @@ mod tests {
         });
         let region_id = metadata.region_id;
         let metadata = Arc::new(metadata);
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
         let sst_info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
         let file_meta = FileMeta {
             region_id,
@@ -1203,6 +1315,9 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
         let indexer_builder = mock_indexer_builder(metadata.clone(), &env).await;
 
         // Create mock task.
@@ -1215,14 +1330,15 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             access_layer: env.access_layer.clone(),
+            manifest_ctx,
             write_cache: None,
-            file_purger: Arc::new(NoopFilePurger {}),
+            file_purger,
             indexer_builder,
             request_sender: tx,
             result_sender: Some(result_tx),
         };
 
-        scheduler.schedule_build(task).unwrap();
+        scheduler.schedule_build(&version_control, task).unwrap();
 
         // The task should finish successfully.
         assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
@@ -1236,6 +1352,8 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let mut scheduler = env.mock_index_build_scheduler();
         let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
         let region_id = metadata.region_id;
 
         let (dir, factory) = PuffinManagerFactory::new_for_test_async("test_write_cache").await;
@@ -1276,6 +1394,9 @@ mod tests {
             num_row_groups: sst_info.num_row_groups,
             ..Default::default()
         };
+        let files = HashMap::from([(file_meta.file_id, file_meta.clone())]);
+        let version_control =
+            mock_version_control(metadata.clone(), file_purger.clone(), files).await;
 
         // Create mock task.
         let (tx, mut _rx) = mpsc::channel(4);
@@ -1287,14 +1408,15 @@ mod tests {
             flushed_sequence: None,
             committed_sequence: None,
             access_layer: env.access_layer.clone(),
+            manifest_ctx,
             write_cache: Some(write_cache.clone()),
-            file_purger: Arc::new(NoopFilePurger {}),
+            file_purger,
             indexer_builder,
             request_sender: tx,
             result_sender: Some(result_tx),
         };
 
-        scheduler.schedule_build(task).unwrap();
+        scheduler.schedule_build(&version_control, task).unwrap();
 
         // The task should finish successfully.
         assert_eq!(result_rx.await.unwrap(), IndexBuildOutcome::Finished);
