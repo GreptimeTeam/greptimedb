@@ -2979,14 +2979,6 @@ mod tests {
                 .unwrap()
         );
 
-        dbg!(ScalarValue::new_null_list(ArrowDataType::Boolean, true, 1));
-        dbg!(
-            Value::Null
-                .try_to_scalar_value(&ConcreteDataType::list_datatype(
-                    ConcreteDataType::boolean_datatype(),
-                ))
-                .unwrap()
-        );
         assert_eq!(
             ScalarValue::new_null_list(ArrowDataType::Boolean, true, 1),
             Value::Null
