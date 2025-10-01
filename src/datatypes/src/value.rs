@@ -895,6 +895,10 @@ impl ListValue {
         &self.items
     }
 
+    pub fn take_items(self) -> Vec<Value> {
+        self.items
+    }
+
     pub fn datatype(&self) -> &ConcreteDataType {
         &self.datatype
     }
@@ -957,6 +961,15 @@ impl StructValue {
 
     pub fn items(&self) -> &BTreeMap<String, Value> {
         &self.items
+    }
+
+    pub fn take_items(self) -> Vec<Value> {
+        let Self { mut items, fields } = self;
+        fields
+            .fields()
+            .iter()
+            .map(|f| items.remove(f.name()).unwrap_or(Value::Null))
+            .collect()
     }
 
     pub fn fields(&self) -> &[StructField] {
@@ -1622,6 +1635,7 @@ impl ValueRef<'_> {
 }
 
 /// This function is only for control panel data serialization
+/// TODO: this function should not be in this module
 pub fn column_data_to_json(data: ValueData) -> JsonValue {
     match data {
         ValueData::BinaryValue(b) => JsonValue::String(URL_SAFE.encode(b)),

@@ -409,13 +409,7 @@ impl WriteRequest {
         };
 
         // Convert default value into proto's value.
-        to_proto_value(default_value).with_context(|| InvalidRequestSnafu {
-            region_id: self.region_id,
-            reason: format!(
-                "no protobuf type for default value of column {} ({:?})",
-                column.column_schema.name, column.column_schema.data_type
-            ),
-        })
+        Ok(to_proto_value(default_value))
     }
 }
 

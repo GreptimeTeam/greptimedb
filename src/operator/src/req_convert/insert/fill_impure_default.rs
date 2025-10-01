@@ -38,7 +38,7 @@ pub fn find_all_impure_columns(table_info: &TableInfo) -> Vec<ColumnSchema> {
 
 /// Fill impure default values in the request
 pub struct ImpureDefaultFiller {
-    impure_columns: HashMap<String, (api::v1::ColumnSchema, Option<api::v1::Value>)>,
+    impure_columns: HashMap<String, (api::v1::ColumnSchema, api::v1::Value)>,
 }
 
 impl ImpureDefaultFiller {
@@ -100,7 +100,7 @@ impl ImpureDefaultFiller {
             .iter()
             .filter_map(|(name, (schema, val))| {
                 if !impure_columns_in_reqs.contains(name) {
-                    Some((schema.clone(), val.clone().unwrap_or_default()))
+                    Some((schema.clone(), val.clone()))
                 } else {
                     None
                 }

@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use common_base::BitVec;
 use common_decimal::Decimal128;
 use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_time::time::Time;
@@ -27,7 +26,9 @@ use datatypes::types::{
     Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
     UInt16Type,
 };
-use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, StructValueRef, Value};
+use datatypes::value::{
+    ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
+};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
     Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
@@ -50,7 +51,7 @@ use snafu::prelude::*;
 
 use crate::error::{self, InconsistentTimeUnitSnafu, InvalidTimeUnitSnafu, Result};
 use crate::v1::column::Values;
-use crate::v1::{Column, ColumnDataType, Value as GrpcValue};
+use crate::v1::{ColumnDataType, Value as GrpcValue};
 
 /// ColumnDataTypeWrapper is a wrapper of ColumnDataType and ColumnDataTypeExtension.
 /// It could be used to convert with ConcreteDataType.
@@ -172,7 +173,8 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     };
                     ConcreteDataType::list_datatype(item_type.into())
                 } else {
-                    todo!()
+                    // invalid state: type extension not found
+                    ConcreteDataType::null_datatype()
                 }
             }
             ColumnDataType::Struct => {
@@ -194,7 +196,8 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                         .collect::<Vec<_>>();
                     ConcreteDataType::struct_datatype(StructType::from(fields))
                 } else {
-                    todo!()
+                    // invalid state: type extension not found
+                    ConcreteDataType::null_datatype()
                 }
             }
         }
@@ -560,54 +563,6 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
     }
-}
-
-// The type of vals must be same.
-pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
-    let values = column.values.get_or_insert_with(Values::default);
-    let mut null_mask = BitVec::from_slice(&column.null_mask);
-    let len = vector.len();
-    null_mask.reserve_exact(origin_count + len);
-    null_mask.extend(BitVec::repeat(false, len));
-
-    (0..len).for_each(|idx| match vector.get(idx) {
-        Value::Null => null_mask.set(idx + origin_count, true),
-        Value::Boolean(val) => values.bool_values.push(val),
-        Value::UInt8(val) => values.u8_values.push(val.into()),
-        Value::UInt16(val) => values.u16_values.push(val.into()),
-        Value::UInt32(val) => values.u32_values.push(val),
-        Value::UInt64(val) => values.u64_values.push(val),
-        Value::Int8(val) => values.i8_values.push(val.into()),
-        Value::Int16(val) => values.i16_values.push(val.into()),
-        Value::Int32(val) => values.i32_values.push(val),
-        Value::Int64(val) => values.i64_values.push(val),
-        Value::Float32(val) => values.f32_values.push(*val),
-        Value::Float64(val) => values.f64_values.push(*val),
-        Value::String(val) => values.string_values.push(val.as_utf8().to_string()),
-        Value::Binary(val) => values.binary_values.push(val.to_vec()),
-        Value::Date(val) => values.date_values.push(val.val()),
-        Value::Timestamp(val) => match val.unit() {
-            TimeUnit::Second => values.timestamp_second_values.push(val.value()),
-            TimeUnit::Millisecond => values.timestamp_millisecond_values.push(val.value()),
-            TimeUnit::Microsecond => values.timestamp_microsecond_values.push(val.value()),
-            TimeUnit::Nanosecond => values.timestamp_nanosecond_values.push(val.value()),
-        },
-        Value::Time(val) => match val.unit() {
-            TimeUnit::Second => values.time_second_values.push(val.value()),
-            TimeUnit::Millisecond => values.time_millisecond_values.push(val.value()),
-            TimeUnit::Microsecond => values.time_microsecond_values.push(val.value()),
-            TimeUnit::Nanosecond => values.time_nanosecond_values.push(val.value()),
-        },
-        Value::IntervalYearMonth(val) => values.interval_year_month_values.push(val.to_i32()),
-        Value::IntervalDayTime(val) => values.interval_day_time_values.push(val.to_i64()),
-        Value::IntervalMonthDayNano(val) => values
-            .interval_month_day_nano_values
-            .push(convert_month_day_nano_to_pb(val)),
-        Value::Decimal128(val) => values.decimal128_values.push(convert_to_pb_decimal128(val)),
-        // TODO: struct and list
-        Value::List(_) | Value::Duration(_) | Value::Struct(_) => unreachable!(),
-    });
-    column.null_mask = null_mask.into_vec();
 }
 
 /// Returns the type name of the [Request].
@@ -1084,8 +1039,8 @@ pub fn is_column_type_value_eq(
 }
 
 /// Convert value into proto's value.
-pub fn to_proto_value(value: Value) -> Option<v1::Value> {
-    let proto_value = match value {
+pub fn to_proto_value(value: Value) -> v1::Value {
+    match value {
         Value::Null => v1::Value { value_data: None },
         Value::Boolean(v) => v1::Value {
             value_data: Some(ValueData::BoolValue(v)),
@@ -1171,10 +1126,34 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         Value::Decimal128(v) => v1::Value {
             value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
         },
-        Value::List(_) | Value::Duration(_) | Value::Struct(_) => return None,
-    };
+        Value::List(list_value) => v1::Value {
+            value_data: Some(ValueData::ListValue(v1::ListValue {
+                items: convert_list_to_pb_values(list_value),
+            })),
+        },
+        Value::Struct(struct_value) => v1::Value {
+            value_data: Some(ValueData::StructValue(v1::StructValue {
+                items: convert_struct_to_pb_values(struct_value),
+            })),
+        },
+        Value::Duration(_) => v1::Value { value_data: None },
+    }
+}
 
-    Some(proto_value)
+fn convert_list_to_pb_values(list_value: ListValue) -> Vec<v1::Value> {
+    list_value
+        .take_items()
+        .into_iter()
+        .map(to_proto_value)
+        .collect()
+}
+
+fn convert_struct_to_pb_values(struct_value: StructValue) -> Vec<v1::Value> {
+    struct_value
+        .take_items()
+        .into_iter()
+        .map(to_proto_value)
+        .collect()
 }
 
 /// Returns the [ColumnDataTypeWrapper] of the value.
@@ -1364,15 +1343,11 @@ mod tests {
         TimeMillisecondType, TimeSecondType, TimestampMillisecondType, TimestampSecondType,
         UInt32Type,
     };
-    use datatypes::vectors::{
-        BooleanVector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-        TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-        TimestampSecondVector, Vector,
-    };
+    use datatypes::vectors::BooleanVector;
     use paste::paste;
 
     use super::*;
+    use crate::v1::Column;
 
     #[test]
     fn test_values_with_capacity() {
@@ -1450,6 +1425,14 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::Vector, 2);
         let values = values.binary_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::List, 2);
+        let values = values.list_values;
+        assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Struct, 2);
+        let values = values.struct_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -1542,6 +1525,37 @@ mod tests {
         assert_eq!(
             ConcreteDataType::vector_datatype(3),
             ColumnDataTypeWrapper::vector_datatype(3).into()
+        );
+        assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype()).into()
+        );
+        let struct_type = StructType::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
+            StructField::new(
+                "address".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            ConcreteDataType::struct_datatype(struct_type.clone()),
+            ColumnDataTypeWrapper::struct_datatype(vec![
+                ("id".to_string(), ColumnDataTypeWrapper::int64_datatype()),
+                ("name".to_string(), ColumnDataTypeWrapper::string_datatype()),
+                ("age".to_string(), ColumnDataTypeWrapper::int32_datatype()),
+                (
+                    "address".to_string(),
+                    ColumnDataTypeWrapper::string_datatype()
+                )
+            ])
+            .into()
         );
     }
 
@@ -1669,169 +1683,6 @@ mod tests {
                 )
             ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
         )
-    }
-
-    #[test]
-    fn test_column_put_timestamp_values() {
-        let mut column = Column {
-            column_name: "test".to_string(),
-            semantic_type: 0,
-            values: Some(Values {
-                ..Default::default()
-            }),
-            null_mask: vec![],
-            datatype: 0,
-            ..Default::default()
-        };
-
-        let vector = Arc::new(TimestampNanosecondVector::from_vec(vec![1, 2, 3]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![1, 2, 3],
-            column.values.as_ref().unwrap().timestamp_nanosecond_values
-        );
-
-        let vector = Arc::new(TimestampMillisecondVector::from_vec(vec![4, 5, 6]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![4, 5, 6],
-            column.values.as_ref().unwrap().timestamp_millisecond_values
-        );
-
-        let vector = Arc::new(TimestampMicrosecondVector::from_vec(vec![7, 8, 9]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![7, 8, 9],
-            column.values.as_ref().unwrap().timestamp_microsecond_values
-        );
-
-        let vector = Arc::new(TimestampSecondVector::from_vec(vec![10, 11, 12]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![10, 11, 12],
-            column.values.as_ref().unwrap().timestamp_second_values
-        );
-    }
-
-    #[test]
-    fn test_column_put_time_values() {
-        let mut column = Column {
-            column_name: "test".to_string(),
-            semantic_type: 0,
-            values: Some(Values {
-                ..Default::default()
-            }),
-            null_mask: vec![],
-            datatype: 0,
-            ..Default::default()
-        };
-
-        let vector = Arc::new(TimeNanosecondVector::from_vec(vec![1, 2, 3]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![1, 2, 3],
-            column.values.as_ref().unwrap().time_nanosecond_values
-        );
-
-        let vector = Arc::new(TimeMillisecondVector::from_vec(vec![4, 5, 6]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![4, 5, 6],
-            column.values.as_ref().unwrap().time_millisecond_values
-        );
-
-        let vector = Arc::new(TimeMicrosecondVector::from_vec(vec![7, 8, 9]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![7, 8, 9],
-            column.values.as_ref().unwrap().time_microsecond_values
-        );
-
-        let vector = Arc::new(TimeSecondVector::from_vec(vec![10, 11, 12]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![10, 11, 12],
-            column.values.as_ref().unwrap().time_second_values
-        );
-    }
-
-    #[test]
-    fn test_column_put_interval_values() {
-        let mut column = Column {
-            column_name: "test".to_string(),
-            semantic_type: 0,
-            values: Some(Values {
-                ..Default::default()
-            }),
-            null_mask: vec![],
-            datatype: 0,
-            ..Default::default()
-        };
-
-        let vector = Arc::new(IntervalYearMonthVector::from_vec(vec![1, 2, 3]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![1, 2, 3],
-            column.values.as_ref().unwrap().interval_year_month_values
-        );
-
-        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![
-            IntervalDayTime::new(0, 4).into(),
-            IntervalDayTime::new(0, 5).into(),
-            IntervalDayTime::new(0, 6).into(),
-        ]));
-        push_vals(&mut column, 3, vector);
-        assert_eq!(
-            vec![4, 5, 6],
-            column.values.as_ref().unwrap().interval_day_time_values
-        );
-
-        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![
-            IntervalMonthDayNano::new(0, 0, 7).into(),
-            IntervalMonthDayNano::new(0, 0, 8).into(),
-            IntervalMonthDayNano::new(0, 0, 9).into(),
-        ]));
-        let len = vector.len();
-        push_vals(&mut column, 3, vector);
-        (0..len).for_each(|i| {
-            assert_eq!(
-                7 + i as i64,
-                column
-                    .values
-                    .as_ref()
-                    .unwrap()
-                    .interval_month_day_nano_values
-                    .get(i)
-                    .unwrap()
-                    .nanoseconds
-            );
-        });
-    }
-
-    #[test]
-    fn test_column_put_vector() {
-        use crate::v1::SemanticType;
-        // Some(false), None, Some(true), Some(true)
-        let mut column = Column {
-            column_name: "test".to_string(),
-            semantic_type: SemanticType::Field as i32,
-            values: Some(Values {
-                bool_values: vec![false, true, true],
-                ..Default::default()
-            }),
-            null_mask: vec![2],
-            datatype: ColumnDataType::Boolean as i32,
-            ..Default::default()
-        };
-        let row_count = 4;
-
-        let vector = Arc::new(BooleanVector::from(vec![Some(true), None, Some(false)]));
-        push_vals(&mut column, row_count, vector);
-        // Some(false), None, Some(true), Some(true), Some(true), None, Some(false)
-        let bool_values = column.values.unwrap().bool_values;
-        assert_eq!(vec![false, true, true, true, false], bool_values);
-        let null_mask = column.null_mask;
-        assert_eq!(34, null_mask[0]);
     }
 
     #[test]
@@ -2206,5 +2057,50 @@ mod tests {
         let pb_decimal = convert_to_pb_decimal128(decimal);
         assert_eq!(pb_decimal.lo, 123);
         assert_eq!(pb_decimal.hi, 0);
+    }
+
+    #[test]
+    fn test_list_to_pb_value() {
+        let value = Value::List(ListValue::new(
+            vec![Value::Boolean(true)],
+            ConcreteDataType::boolean_datatype(),
+        ));
+
+        let pb_value = to_proto_value(value);
+
+        match pb_value.value_data.unwrap() {
+            ValueData::ListValue(pb_list_value) => {
+                assert_eq!(pb_list_value.items.len(), 1);
+            }
+            _ => panic!("Unexpected value type"),
+        }
+    }
+
+    #[test]
+    fn test_struct_to_pb_value() {
+        let mut items = BTreeMap::new();
+        items.insert("a.a".to_string(), Value::Boolean(true));
+        items.insert("a.b".to_string(), Value::String("tom".into()));
+
+        let value = Value::Struct(StructValue::new(
+            items,
+            StructType::new(vec![
+                StructField::new(
+                    "a.a".to_string(),
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+                StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
+            ]),
+        ));
+
+        let pb_value = to_proto_value(value);
+
+        match pb_value.value_data.unwrap() {
+            ValueData::StructValue(pb_struct_value) => {
+                assert_eq!(pb_struct_value.items.len(), 2);
+            }
+            _ => panic!("Unexpected value type"),
+        }
     }
 }
