@@ -58,6 +58,7 @@ const START_TIME: &str = "start_time";
 const UPTIME: &str = "uptime";
 const ACTIVE_TIME: &str = "active_time";
 const NODE_STATUS: &str = "node_status";
+const HOSTNAME: &str = "hostname";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -74,6 +75,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `uptime`: the uptime of the peer.
 /// - `active_time`: the time since the last activity of the peer.
 /// - `node_status`: the status info of the peer.
+/// - `hostname`: the hostname of the peer.
 ///
 #[derive(Debug)]
 pub(super) struct InformationSchemaClusterInfo {
@@ -106,6 +108,7 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(UPTIME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(ACTIVE_TIME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(NODE_STATUS, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(HOSTNAME, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -163,6 +166,7 @@ struct InformationSchemaClusterInfoBuilder {
     uptimes: StringVectorBuilder,
     active_times: StringVectorBuilder,
     node_status: StringVectorBuilder,
+    hostnames: StringVectorBuilder,
 }
 
 impl InformationSchemaClusterInfoBuilder {
@@ -181,6 +185,7 @@ impl InformationSchemaClusterInfoBuilder {
             uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             active_times: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             node_status: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            hostnames: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -205,6 +210,7 @@ impl InformationSchemaClusterInfoBuilder {
             (PEER_ADDR, &Value::from(node_info.peer.addr.as_str())),
             (VERSION, &Value::from(node_info.version.as_str())),
             (GIT_COMMIT, &Value::from(node_info.git_commit.as_str())),
+            (HOSTNAME, &Value::from(node_info.hostname.as_str())),
         ];
 
         if !predicates.eval(&row) {
@@ -230,6 +236,7 @@ impl InformationSchemaClusterInfoBuilder {
         }
         self.cpus.push(Some(node_info.cpus));
         self.memory_bytes.push(Some(node_info.memory_bytes));
+        self.hostnames.push(Some(&node_info.hostname));
 
         if node_info.last_activity_ts > 0 {
             self.active_times.push(Some(
@@ -261,6 +268,7 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.uptimes.finish()),
             Arc::new(self.active_times.finish()),
             Arc::new(self.node_status.finish()),
+            Arc::new(self.hostnames.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

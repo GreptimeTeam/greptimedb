@@ -54,6 +54,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             start_time_ms: info.start_time_ms,
             cpus: info.cpus,
             memory_bytes: info.memory_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -89,6 +90,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             start_time_ms: info.start_time_ms,
             cpus: info.cpus,
             memory_bytes: info.memory_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;
@@ -142,6 +144,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             start_time_ms: info.start_time_ms,
             cpus: info.cpus,
             memory_bytes: info.memory_bytes,
+            hostname: info.hostname,
         };
 
         put_into_memory_store(ctx, key, value).await?;

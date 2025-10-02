@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
+use api::helper::{from_pb_time_ranges, ColumnDataTypeWrapper};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    alter_request, compact_request, region_request, truncate_request, AlterRequest, AlterRequests,
+    BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests,
+    DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -38,7 +38,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
@@ -178,6 +178,7 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::BuildIndex(_) => todo!(),
         }
     }
 
@@ -1942,10 +1943,9 @@ mod tests {
             column_metadatas: column_metadatas_with_different_ts_column,
         };
         let err = kind.validate(&metadata).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("timestamp column ts has different id")
-        );
+        assert!(err
+            .to_string()
+            .contains("timestamp column ts has different id"));
 
         // Change the primary key column name.
         let mut column_metadatas_with_different_pk_column = metadata.column_metadatas.clone();
@@ -1958,10 +1958,9 @@ mod tests {
             column_metadatas: column_metadatas_with_different_pk_column,
         };
         let err = kind.validate(&metadata).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("column with same name tag_0 has different id")
-        );
+        assert!(err
+            .to_string()
+            .contains("column with same name tag_0 has different id"));
 
         // Add a new field column.
         let mut column_metadatas_with_new_field_column = metadata.column_metadatas.clone();

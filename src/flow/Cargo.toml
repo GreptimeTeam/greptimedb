@@ -48,6 +48,7 @@ enum_dispatch = "0.3"
 futures.workspace = true
 get-size2 = "0.1.2"
 greptime-proto.workspace = true
+hostname.workspace = true
 http.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
