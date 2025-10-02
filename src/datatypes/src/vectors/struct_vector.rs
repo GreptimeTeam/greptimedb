@@ -254,17 +254,20 @@ impl<'a> Iterator for StructIter<'a> {
     type Item = Option<StructValueRef<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.vector.array().len() {
-            if self.vector.is_null(self.index) {
-                return Some(None);
-            }
-
-            let value = StructValueRef::Indexed {
-                vector: self.vector,
-                idx: self.index,
-            };
+        if self.index < self.vector.len() {
+            let idx = self.index;
             self.index += 1;
-            Some(Some(value))
+
+            if self.vector.is_null(idx) {
+                Some(None)
+            } else {
+                let value = StructValueRef::Indexed {
+                    vector: self.vector,
+                    idx,
+                };
+
+                Some(Some(value))
+            }
         } else {
             None
         }
@@ -304,7 +307,16 @@ impl StructVectorBuilder {
                 .unwrap_or(&Value::Null);
             self.value_builders[index].try_push_value_ref(&value.as_value_ref())?;
         }
-        self.null_buffer.append(true);
+        self.null_buffer.append_non_null();
+
+        Ok(())
+    }
+
+    fn push_null_struct_value(&mut self) -> Result<()> {
+        for builder in &mut self.value_builders {
+            builder.push_null();
+        }
+        self.null_buffer.append_null();
 
         Ok(())
     }
@@ -370,7 +382,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.null_buffer.append_null();
+        self.push_null_struct_value().expect("failed to push null");
     }
 }
 
@@ -422,5 +434,42 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             self.null_buffer.finish_cloned(),
         );
         StructVector::new(self.fields.clone(), struct_array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::tests::*;
+
+    #[test]
+    fn test_struct_vector_builder() {
+        let struct_type = build_struct_type();
+
+        let struct_values = (0..10).map(|_| build_struct_value());
+        let mut builder = StructVectorBuilder::with_type_and_capacity(struct_type.clone(), 20);
+        for value in struct_values {
+            builder.push(Some(StructValueRef::Ref(&value)));
+        }
+
+        builder.push_nulls(5);
+
+        let vector = builder.finish();
+        assert_eq!(
+            vector.data_type(),
+            ConcreteDataType::struct_datatype(struct_type.clone())
+        );
+        assert_eq!(vector.len(), 15);
+        assert_eq!(vector.null_count(), 5);
+
+        let mut null_count = 0;
+        for item in vector.iter_data() {
+            if let Some(value) = item.as_ref() {
+                assert_eq!(&value.struct_type(), &struct_type);
+            } else {
+                null_count += 1;
+            }
+        }
+        assert_eq!(5, null_count);
     }
 }

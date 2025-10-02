@@ -1744,7 +1744,7 @@ pub fn column_data_to_json(data: ValueData) -> JsonValue {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, Field};
     use common_time::timezone::set_default_timezone;
     use greptime_proto::v1::{
@@ -1755,7 +1755,7 @@ mod tests {
     use super::*;
     use crate::vectors::ListVectorBuilder;
 
-    fn build_struct_type() -> StructType {
+    pub(crate) fn build_struct_type() -> StructType {
         StructType::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
             StructField::new(
@@ -1772,7 +1772,7 @@ mod tests {
         ])
     }
 
-    fn build_struct_value() -> StructValue {
+    pub(crate) fn build_struct_value() -> StructValue {
         let struct_type = build_struct_type();
 
         let mut struct_items = BTreeMap::new();
@@ -1784,7 +1784,7 @@ mod tests {
         StructValue::new(struct_items, struct_type)
     }
 
-    fn build_scalar_struct_value() -> ScalarValue {
+    pub(crate) fn build_scalar_struct_value() -> ScalarValue {
         let struct_type = build_struct_type();
         let arrays = vec![
             ScalarValue::Int32(Some(1)).to_array().unwrap(),
@@ -1796,12 +1796,12 @@ mod tests {
         ScalarValue::Struct(Arc::new(struct_arrow_array))
     }
 
-    fn build_list_value() -> ListValue {
+    pub(crate) fn build_list_value() -> ListValue {
         let items = vec![Value::Boolean(true), Value::Boolean(false)];
         ListValue::new(items, ConcreteDataType::boolean_datatype())
     }
 
-    fn build_scalar_list_value() -> ScalarValue {
+    pub(crate) fn build_scalar_list_value() -> ScalarValue {
         let items = vec![
             ScalarValue::Boolean(Some(true)),
             ScalarValue::Boolean(Some(false)),
