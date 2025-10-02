@@ -52,9 +52,7 @@ impl From<ScalarUDF> for ScalarFunctionFactory {
 impl From<FunctionRef> for ScalarFunctionFactory {
     fn from(func: FunctionRef) -> Self {
         let name = func.name().to_string();
-        let func = Arc::new(move |ctx: FunctionContext| {
-            create_udf(func.clone(), ctx.query_ctx, ctx.state)
-        });
+        let func = Arc::new(move |_| create_udf(func.clone()));
         Self {
             name,
             factory: func,

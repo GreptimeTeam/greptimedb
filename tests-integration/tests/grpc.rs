@@ -959,6 +959,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
         tls,
+        max_connection_age: None,
     };
     let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
@@ -1000,6 +1001,7 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             max_recv_message_size: 1024,
             max_send_message_size: 1024,
             tls,
+            max_connection_age: None,
         };
         let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =

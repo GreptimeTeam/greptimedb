@@ -39,30 +39,40 @@ use crate::function::Function;
 /// - ipv4_to_cidr('192.168.1.0') -> '192.168.1.0/24'
 /// - ipv4_to_cidr('192.168') -> '192.168.0.0/16'
 /// - ipv4_to_cidr('192.168.1.1', 24) -> '192.168.1.0/24'
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4ToCidr;
+pub(crate) struct Ipv4ToCidr {
+    signature: Signature,
+}
+
+impl Default for Ipv4ToCidr {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::String(1),
+                    TypeSignature::Coercible(vec![
+                        Coercion::new_exact(TypeSignatureClass::Native(types::logical_string())),
+                        Coercion::new_exact(TypeSignatureClass::Integer),
+                    ]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for Ipv4ToCidr {
     fn name(&self) -> &str {
         "ipv4_to_cidr"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::String(1),
-                TypeSignature::Coercible(vec![
-                    Coercion::new_exact(TypeSignatureClass::Native(types::logical_string())),
-                    Coercion::new_exact(TypeSignatureClass::Integer),
-                ]),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -170,27 +180,37 @@ impl Function for Ipv4ToCidr {
 /// - ipv6_to_cidr('2001:db8::') -> '2001:db8::/32'
 /// - ipv6_to_cidr('2001:db8') -> '2001:db8::/32'
 /// - ipv6_to_cidr('2001:db8::', 48) -> '2001:db8::/48'
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6ToCidr;
+pub(crate) struct Ipv6ToCidr {
+    signature: Signature,
+}
+
+impl Default for Ipv6ToCidr {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::String(1),
+                    TypeSignature::Exact(vec![DataType::Utf8, DataType::UInt8]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for Ipv6ToCidr {
     fn name(&self) -> &str {
         "ipv6_to_cidr"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::String(1),
-                TypeSignature::Exact(vec![DataType::Utf8, DataType::UInt8]),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -387,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_to_cidr_auto() {
-        let func = Ipv4ToCidr;
+        let func = Ipv4ToCidr::default();
 
         // Test data with auto subnet detection
         let values = vec!["192.168.1.0", "10.0.0.0", "172.16", "192"];
@@ -412,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_to_cidr_with_subnet() {
-        let func = Ipv4ToCidr;
+        let func = Ipv4ToCidr::default();
 
         // Test data with explicit subnet
         let ip_values = vec!["192.168.1.1", "10.0.0.1", "172.16.5.5"];
@@ -438,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_to_cidr_auto() {
-        let func = Ipv6ToCidr;
+        let func = Ipv6ToCidr::default();
 
         // Test data with auto subnet detection
         let values = vec!["2001:db8::", "2001:db8", "fe80::1", "::1"];
@@ -463,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_to_cidr_with_subnet() {
-        let func = Ipv6ToCidr;
+        let func = Ipv6ToCidr::default();
 
         // Test data with explicit subnet
         let ip_values = vec!["2001:db8::", "fe80::1", "2001:db8:1234::"];
@@ -489,8 +509,8 @@ mod tests {
 
     #[test]
     fn test_invalid_inputs() {
-        let ipv4_func = Ipv4ToCidr;
-        let ipv6_func = Ipv6ToCidr;
+        let ipv4_func = Ipv4ToCidr::default();
+        let ipv6_func = Ipv6ToCidr::default();
 
         // Empty string should fail
         let empty_values = vec![""];

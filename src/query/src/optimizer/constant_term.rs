@@ -240,7 +240,6 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_function::scalars::matches_term::MatchesTermFunction;
     use common_function::scalars::udf::create_udf;
-    use common_function::state::FunctionState;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -328,11 +327,7 @@ mod tests {
     }
 
     fn matches_term_udf() -> Arc<ScalarUDF> {
-        Arc::new(create_udf(
-            Arc::new(MatchesTermFunction),
-            QueryContext::arc(),
-            Arc::new(FunctionState::default()),
-        ))
+        Arc::new(create_udf(Arc::new(MatchesTermFunction::default())))
     }
 
     #[test]

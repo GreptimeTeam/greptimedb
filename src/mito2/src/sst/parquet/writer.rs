@@ -304,9 +304,11 @@ where
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
-        let flat_format =
-            FlatWriteFormat::new(self.metadata.clone(), &FlatSchemaOptions::default())
-                .with_override_sequence(None);
+        let flat_format = FlatWriteFormat::new(
+            self.metadata.clone(),
+            &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
+        )
+        .with_override_sequence(None);
         let mut stats = SourceStats::default();
 
         while let Some(record_batch) = self

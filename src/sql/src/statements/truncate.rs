@@ -105,7 +105,7 @@ mod tests {
     use crate::statements::statement::Statement;
 
     #[test]
-    fn test_display_for_tuncate_table() {
+    fn test_display_for_truncate_table() {
         let sql = r"truncate table t1;";
         let stmts: Vec<Statement> =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
