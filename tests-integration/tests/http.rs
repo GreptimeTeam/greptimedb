@@ -3212,37 +3212,37 @@ transform:
 
     let dryrun_schema = json!([
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id1"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id2"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "type"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "log"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "logger"
         },
         {
-            "colume_type": "TIMESTAMP",
+            "column_type": "TIMESTAMP",
             "data_type": "TIMESTAMP_NANOSECOND",
             "fulltext": false,
             "name": "time"

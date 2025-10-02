@@ -82,7 +82,7 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                 // and we only need to do a merge sort, otherwise fallback to quick sort
                 let can_merge_sort = partition_cnt >= region_cnt;
                 if can_merge_sort {
-                    // TODO(discord9): use `SortPreversingMergeExec here`
+                    // TODO(discord9): use `SortPreservingMergeExec here`
                 }
                 // for now merge sort only exist in logical plan, and have the same effect as `Sort`
                 // doesn't change the execution plan, this will change in the future

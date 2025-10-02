@@ -29,7 +29,7 @@ use futures::TryStreamExt;
 
 use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
-use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_fromatter};
+use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_formatter};
 use crate::Tool;
 
 /// Getting metadata from metadata store.
@@ -206,7 +206,7 @@ impl Tool for GetTableTool {
             println!(
                 "{}\n{}",
                 TableInfoKey::new(table_id),
-                json_fromatter(self.pretty, &*table_info)
+                json_formatter(self.pretty, &*table_info)
             );
         } else {
             println!("Table info not found");
@@ -221,7 +221,7 @@ impl Tool for GetTableTool {
             println!(
                 "{}\n{}",
                 TableRouteKey::new(table_id),
-                json_fromatter(self.pretty, &table_route)
+                json_formatter(self.pretty, &table_route)
             );
         } else {
             println!("Table route not found");

@@ -76,7 +76,7 @@ pub struct RegionManifestOptions {
 ///     -RegionMetadataRef metadata
 /// }
 /// class RegionEdit {
-///     -VersionNumber regoin_version
+///     -VersionNumber region_version
 ///     -Vec~FileMeta~ files_to_add
 ///     -Vec~FileMeta~ files_to_remove
 ///     -SequenceNumber flushed_sequence
