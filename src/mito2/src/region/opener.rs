@@ -60,12 +60,12 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
+use crate::sst::FormatType;
 use crate::sst::file_purger::create_local_file_purger;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
-use crate::sst::FormatType;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -255,8 +255,15 @@ impl RegionOpener {
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
-        // Default to PrimaryKeyParquet for newly created regions
-        let sst_format = FormatType::PrimaryKeyParquet;
+        // Set the sst_format based on options or flat_format flag
+        let sst_format = if let Some(format) = options.sst_format {
+            format
+        } else if config.enable_experimental_flat_format {
+            FormatType::FlatParquet
+        } else {
+            // Default to PrimaryKeyParquet for newly created regions
+            FormatType::PrimaryKeyParquet
+        };
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
