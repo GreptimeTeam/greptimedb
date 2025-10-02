@@ -352,7 +352,7 @@ async fn dryrun_pipeline_inner(
     )
     .await?;
 
-    let colume_type_key = "colume_type";
+    let column_type_key = "column_type";
     let data_type_key = "data_type";
     let name_key = "name";
 
@@ -376,7 +376,7 @@ async fn dryrun_pipeline_inner(
                             JsonValue::String(cs.datatype().as_str_name().to_string()),
                         );
                         map.insert(
-                            colume_type_key.to_string(),
+                            column_type_key.to_string(),
                             JsonValue::String(cs.semantic_type().as_str_name().to_string()),
                         );
                         map.insert(
@@ -409,7 +409,7 @@ async fn dryrun_pipeline_inner(
                                         );
                                         map.insert(
                                             "semantic_type".to_string(),
-                                            schema[idx][colume_type_key].clone(),
+                                            schema[idx][column_type_key].clone(),
                                         );
                                         map.insert(
                                             "data_type".to_string(),

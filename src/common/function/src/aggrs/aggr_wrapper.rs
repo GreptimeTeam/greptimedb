@@ -332,7 +332,7 @@ impl AggregateUDFImpl for StateWrapper {
         self.inner.signature()
     }
 
-    /// Coerce types also do nothing, as optimzer should be able to already make struct types
+    /// Coerce types also do nothing, as optimizer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         self.inner.coerce_types(arg_types)
     }
@@ -486,7 +486,7 @@ impl AggregateUDFImpl for MergeWrapper {
         &self.merge_signature
     }
 
-    /// Coerce types also do nothing, as optimzer should be able to already make struct types
+    /// Coerce types also do nothing, as optimizer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         // just check if the arg_types are only one and is struct array
         if arg_types.len() != 1 || !matches!(arg_types.first(), Some(DataType::Struct(_))) {

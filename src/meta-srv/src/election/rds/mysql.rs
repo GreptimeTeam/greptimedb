@@ -1190,7 +1190,7 @@ mod tests {
             ));
             handles.push(handle);
         }
-        // Wait for candidates to registrate themselves and renew their leases at least once.
+        // Wait for candidates to register themselves and renew their leases at least once.
         tokio::time::sleep(candidate_lease_ttl / 2 + Duration::from_secs(1)).await;
 
         let (tx, _) = broadcast::channel(100);

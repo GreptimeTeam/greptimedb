@@ -27,7 +27,7 @@ pub fn decode_key_value(kv: KeyValue) -> CommonMetaResult<(String, String)> {
 }
 
 /// Formats a value as a JSON string.
-pub fn json_fromatter<T>(pretty: bool, value: &T) -> String
+pub fn json_formatter<T>(pretty: bool, value: &T) -> String
 where
     T: Serialize,
 {

@@ -525,7 +525,7 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
-    /// Returns a heartbeat bidirectional streaming: (sender, recever), the
+    /// Returns a heartbeat bidirectional streaming: (sender, receiver), the
     /// other end is the leader of `metasrv`.
     ///
     /// The `datanode` needs to use the sender to continuously send heartbeat
