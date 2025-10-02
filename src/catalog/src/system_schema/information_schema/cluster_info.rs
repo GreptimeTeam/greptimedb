@@ -50,8 +50,8 @@ const PEER_TYPE_METASRV: &str = "METASRV";
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";
 const PEER_ADDR: &str = "peer_addr";
-const CPUS: &str = "cpus";
-const MEMORY_BYTES: &str = "memory_bytes";
+const TOTAL_CPU_MILLICORES: &str = "total_cpu_millicores";
+const TOTAL_MEMORY_BYTES: &str = "total_memory_bytes";
 const VERSION: &str = "version";
 const GIT_COMMIT: &str = "git_commit";
 const START_TIME: &str = "start_time";
@@ -67,8 +67,8 @@ const INIT_CAPACITY: usize = 42;
 /// - `peer_id`: the peer server id.
 /// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
 /// - `peer_addr`: the peer gRPC address.
-/// - `cpus`: the number of CPUs of the peer.
-/// - `memory_bytes`: the memory bytes of the peer.
+/// - `total_cpu_millicores`: the total CPU millicores of the peer.
+/// - `total_memory_bytes`: the total memory bytes of the peer.
 /// - `version`: the build package version of the peer.
 /// - `git_commit`: the build git commit hash of the peer.
 /// - `start_time`: the starting time of the peer.
@@ -96,8 +96,16 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(PEER_ID, ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(CPUS, ConcreteDataType::uint32_datatype(), false),
-            ColumnSchema::new(MEMORY_BYTES, ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new(
+                TOTAL_CPU_MILLICORES,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                TOTAL_MEMORY_BYTES,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
             ColumnSchema::new(VERSION, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(GIT_COMMIT, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(

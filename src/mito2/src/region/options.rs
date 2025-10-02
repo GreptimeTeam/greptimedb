@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use common_time::TimeToLive;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use serde::de::Error as _;
@@ -347,9 +348,9 @@ pub struct PartitionTreeOptions {
 impl Default for PartitionTreeOptions {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes = std::cmp::min(
-                sys_memory / crate::memtable::partition_tree::DICTIONARY_SIZE_FACTOR,
+                total_memory / crate::memtable::partition_tree::DICTIONARY_SIZE_FACTOR,
                 fork_dictionary_bytes,
             );
             if adjust_dictionary_bytes.0 > 0 {

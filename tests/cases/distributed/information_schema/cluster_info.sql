@@ -50,6 +50,6 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 -- SQLNESS REPLACE (:\s*(\".*?\"|\[.*?\]|\{.*?\}|[0-9]+|true|false|null)) PLACEHOLDER
 SELECT peer_id, node_status FROM CLUSTER_INFO WHERE PEER_TYPE = 'DATANODE' ORDER BY peer_id;
 
-SELECT peer_type, cpus!=0, memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
+SELECT peer_type, total_cpu_millicores!=0, total_memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
 USE PUBLIC;
