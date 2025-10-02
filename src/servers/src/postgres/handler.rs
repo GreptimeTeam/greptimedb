@@ -51,7 +51,7 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
-    async fn do_query<'a, C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response<'a>>>
+    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
@@ -120,11 +120,11 @@ where
     Ok(())
 }
 
-pub(crate) fn output_to_query_response<'a>(
+pub(crate) fn output_to_query_response(
     query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
-) -> PgWireResult<Response<'a>> {
+) -> PgWireResult<Response> {
     match output {
         Ok(o) => match o.data {
             OutputData::AffectedRows(rows) => {
@@ -148,12 +148,12 @@ pub(crate) fn output_to_query_response<'a>(
     }
 }
 
-fn recordbatches_to_query_response<'a, S>(
+fn recordbatches_to_query_response<S>(
     query_ctx: QueryContextRef,
     recordbatches_stream: S,
     schema: SchemaRef,
     field_format: &Format,
-) -> PgWireResult<Response<'a>>
+) -> PgWireResult<Response>
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
@@ -281,12 +281,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         self.query_parser.clone()
     }
 
-    async fn do_query<'a, C>(
+    async fn do_query<C>(
         &self,
         client: &mut C,
         portal: &Portal<Self::Statement>,
         _max_rows: usize,
-    ) -> PgWireResult<Response<'a>>
+    ) -> PgWireResult<Response>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: Debug,
