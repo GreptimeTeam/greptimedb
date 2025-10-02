@@ -43,7 +43,7 @@ use crate::error::{
 use crate::prelude::*;
 use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
-use crate::types::{IntervalType, ListType, StructField, StructType};
+use crate::types::{IntervalType, ListType, StructType};
 use crate::vectors::{ListVector, StructVector};
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -190,7 +190,7 @@ macro_rules! define_data_type_func {
                     ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
                 }
                 $struct::Struct(struct_value) => {
-                    ConcreteDataType::struct_datatype(struct_value.struct_type())
+                    ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
             }
         }
@@ -965,12 +965,8 @@ impl StructValue {
             .collect()
     }
 
-    pub fn fields(&self) -> &[StructField] {
-        self.fields.fields()
-    }
-
-    pub fn struct_type(&self) -> StructType {
-        self.fields.clone()
+    pub fn struct_type(&self) -> &StructType {
+        &self.fields
     }
 
     fn estimated_size(&self) -> usize {
@@ -982,6 +978,7 @@ impl StructValue {
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
         let arrays = self
+            .fields
             .fields()
             .iter()
             .map(|f| {
@@ -1575,11 +1572,11 @@ impl<'a> StructValueRef<'a> {
         }
     }
 
-    pub fn struct_type(&self) -> StructType {
+    pub fn struct_type(&self) -> &StructType {
         match self {
             StructValueRef::Indexed { vector, .. } => vector.struct_type(),
-            StructValueRef::Ref(val) => StructType::new(val.fields().to_owned()),
-            StructValueRef::RefMap { fields, .. } => fields.clone(),
+            StructValueRef::Ref(val) => val.struct_type(),
+            StructValueRef::RefMap { fields, .. } => fields,
         }
     }
 }
@@ -1753,6 +1750,7 @@ pub(crate) mod tests {
     use num_traits::Float;
 
     use super::*;
+    use crate::types::StructField;
     use crate::vectors::ListVectorBuilder;
 
     pub(crate) fn build_struct_type() -> StructType {

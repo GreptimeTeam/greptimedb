@@ -50,8 +50,8 @@ impl StructVector {
         &self.array
     }
 
-    pub fn struct_type(&self) -> StructType {
-        self.fields.clone()
+    pub fn struct_type(&self) -> &StructType {
+        &self.fields
     }
 }
 
@@ -465,7 +465,7 @@ mod tests {
         let mut null_count = 0;
         for item in vector.iter_data() {
             if let Some(value) = item.as_ref() {
-                assert_eq!(&value.struct_type(), &struct_type);
+                assert_eq!(value.struct_type(), &struct_type);
             } else {
                 null_count += 1;
             }
