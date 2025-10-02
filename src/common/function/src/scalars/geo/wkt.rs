@@ -32,20 +32,14 @@ static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct LatLngToPointWkt;
+pub(crate) struct LatLngToPointWkt {
+    signature: Signature,
+}
 
-impl Function for LatLngToPointWkt {
-    fn name(&self) -> &str {
-        "wkt_point_from_latlng"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8View)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for LatLngToPointWkt {
+    fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in COORDINATE_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
@@ -55,7 +49,23 @@ impl Function for LatLngToPointWkt {
                 coord_type.clone(),
             ]));
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for LatLngToPointWkt {
+    fn name(&self) -> &str {
+        "wkt_point_from_latlng"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

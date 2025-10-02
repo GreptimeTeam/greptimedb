@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod flight;
+mod network;
 
 use api::v1::QueryRequest;
 use api::v1::greptime_request::Request;

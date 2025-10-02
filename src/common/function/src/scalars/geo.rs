@@ -27,57 +27,57 @@ pub(crate) struct GeoFunctions;
 impl GeoFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // geohash
-        registry.register_scalar(geohash::GeohashFunction);
-        registry.register_scalar(geohash::GeohashNeighboursFunction);
+        registry.register_scalar(geohash::GeohashFunction::default());
+        registry.register_scalar(geohash::GeohashNeighboursFunction::default());
 
         // h3 index
-        registry.register_scalar(h3::H3LatLngToCell);
-        registry.register_scalar(h3::H3LatLngToCellString);
+        registry.register_scalar(h3::H3LatLngToCell::default());
+        registry.register_scalar(h3::H3LatLngToCellString::default());
 
         // h3 index inspection
-        registry.register_scalar(h3::H3CellBase);
-        registry.register_scalar(h3::H3CellIsPentagon);
-        registry.register_scalar(h3::H3StringToCell);
-        registry.register_scalar(h3::H3CellToString);
-        registry.register_scalar(h3::H3CellCenterLatLng);
-        registry.register_scalar(h3::H3CellResolution);
+        registry.register_scalar(h3::H3CellBase::default());
+        registry.register_scalar(h3::H3CellIsPentagon::default());
+        registry.register_scalar(h3::H3StringToCell::default());
+        registry.register_scalar(h3::H3CellToString::default());
+        registry.register_scalar(h3::H3CellCenterLatLng::default());
+        registry.register_scalar(h3::H3CellResolution::default());
 
         // h3 hierarchical grid
-        registry.register_scalar(h3::H3CellCenterChild);
-        registry.register_scalar(h3::H3CellParent);
-        registry.register_scalar(h3::H3CellToChildren);
-        registry.register_scalar(h3::H3CellToChildrenSize);
-        registry.register_scalar(h3::H3CellToChildPos);
-        registry.register_scalar(h3::H3ChildPosToCell);
-        registry.register_scalar(h3::H3CellContains);
+        registry.register_scalar(h3::H3CellCenterChild::default());
+        registry.register_scalar(h3::H3CellParent::default());
+        registry.register_scalar(h3::H3CellToChildren::default());
+        registry.register_scalar(h3::H3CellToChildrenSize::default());
+        registry.register_scalar(h3::H3CellToChildPos::default());
+        registry.register_scalar(h3::H3ChildPosToCell::default());
+        registry.register_scalar(h3::H3CellContains::default());
 
         // h3 grid traversal
-        registry.register_scalar(h3::H3GridDisk);
-        registry.register_scalar(h3::H3GridDiskDistances);
-        registry.register_scalar(h3::H3GridDistance);
-        registry.register_scalar(h3::H3GridPathCells);
+        registry.register_scalar(h3::H3GridDisk::default());
+        registry.register_scalar(h3::H3GridDiskDistances::default());
+        registry.register_scalar(h3::H3GridDistance::default());
+        registry.register_scalar(h3::H3GridPathCells::default());
 
         // h3 measurement
-        registry.register_scalar(h3::H3CellDistanceSphereKm);
-        registry.register_scalar(h3::H3CellDistanceEuclideanDegree);
+        registry.register_scalar(h3::H3CellDistanceSphereKm::default());
+        registry.register_scalar(h3::H3CellDistanceEuclideanDegree::default());
 
         // s2
-        registry.register_scalar(s2::S2LatLngToCell);
-        registry.register_scalar(s2::S2CellLevel);
-        registry.register_scalar(s2::S2CellToToken);
-        registry.register_scalar(s2::S2CellParent);
+        registry.register_scalar(s2::S2LatLngToCell::default());
+        registry.register_scalar(s2::S2CellLevel::default());
+        registry.register_scalar(s2::S2CellToToken::default());
+        registry.register_scalar(s2::S2CellParent::default());
 
         // spatial data type
-        registry.register_scalar(wkt::LatLngToPointWkt);
+        registry.register_scalar(wkt::LatLngToPointWkt::default());
 
         // spatial relation
-        registry.register_scalar(relation::STContains);
-        registry.register_scalar(relation::STWithin);
-        registry.register_scalar(relation::STIntersects);
+        registry.register_scalar(relation::STContains::default());
+        registry.register_scalar(relation::STWithin::default());
+        registry.register_scalar(relation::STIntersects::default());
 
         // spatial measure
-        registry.register_scalar(measure::STDistance);
-        registry.register_scalar(measure::STDistanceSphere);
-        registry.register_scalar(measure::STArea);
+        registry.register_scalar(measure::STDistance::default());
+        registry.register_scalar(measure::STDistanceSphere::default());
+        registry.register_scalar(measure::STArea::default());
     }
 }

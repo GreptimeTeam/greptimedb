@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::InvalidFuncArgsSnafu;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt32Builder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType, UInt32Type};
@@ -36,12 +36,17 @@ use crate::function::{Function, extract_args};
 #[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
 pub struct Ipv4NumToString {
+    signature: Signature,
     aliases: [String; 1],
 }
 
 impl Default for Ipv4NumToString {
     fn default() -> Self {
         Self {
+            signature: Signature::new(
+                TypeSignature::Exact(vec![DataType::UInt32]),
+                Volatility::Immutable,
+            ),
             aliases: ["inet_ntoa".to_string()],
         }
     }
@@ -52,15 +57,12 @@ impl Function for Ipv4NumToString {
         "ipv4_num_to_string"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::UInt32]),
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -104,21 +106,31 @@ impl Function for Ipv4NumToString {
 /// - "10.0.0.1" returns 167772161
 /// - "192.168.0.1" returns 3232235521
 /// - Invalid IPv4 format throws an exception
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4StringToNum;
+pub(crate) struct Ipv4StringToNum {
+    signature: Signature,
+}
+
+impl Default for Ipv4StringToNum {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv4StringToNum {
     fn name(&self) -> &str {
         "ipv4_string_to_num"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt32)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -190,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_string_to_num() {
-        let func = Ipv4StringToNum;
+        let func = Ipv4StringToNum::default();
 
         // Test data
         let values = vec!["10.0.0.1", "192.168.0.1", "0.0.0.0", "255.255.255.255"];
@@ -215,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_ipv4_conversions_roundtrip() {
-        let to_num = Ipv4StringToNum;
+        let to_num = Ipv4StringToNum::default();
         let to_string = Ipv4NumToString::default();
 
         // Test data for string to num to string

@@ -12,36 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use session::context::Channel;
 
 use crate::function::{Function, find_function_context};
+use crate::system::define_nullary_udf;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct VersionFunction;
-
-impl fmt::Display for VersionFunction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VERSION")
-    }
-}
+define_nullary_udf!(VersionFunction);
 
 impl Function for VersionFunction {
     fn name(&self) -> &str {
         "version"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

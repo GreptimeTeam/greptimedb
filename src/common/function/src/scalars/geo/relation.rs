@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
@@ -29,12 +28,26 @@ use crate::function::{Function, extract_args};
 use crate::scalars::geo::wkt::parse_wkt;
 
 /// Test if spatial relationship: contains
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STContains;
+pub(crate) struct STContains {
+    signature: Signature,
+}
+
+impl Default for STContains {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Stable),
+        }
+    }
+}
 
 impl StFunction for STContains {
     const NAME: &'static str = "st_contains";
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
 
     fn invoke(g1: Geometry, g2: Geometry) -> bool {
         g1.contains(&g2)
@@ -42,12 +55,26 @@ impl StFunction for STContains {
 }
 
 /// Test if spatial relationship: within
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STWithin;
+pub(crate) struct STWithin {
+    signature: Signature,
+}
+
+impl Default for STWithin {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Stable),
+        }
+    }
+}
 
 impl StFunction for STWithin {
     const NAME: &'static str = "st_within";
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
 
     fn invoke(g1: Geometry, g2: Geometry) -> bool {
         g1.is_within(&g2)
@@ -55,12 +82,26 @@ impl StFunction for STWithin {
 }
 
 /// Test if spatial relationship: within
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct STIntersects;
+pub(crate) struct STIntersects {
+    signature: Signature,
+}
+
+impl Default for STIntersects {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Stable),
+        }
+    }
+}
 
 impl StFunction for STIntersects {
     const NAME: &'static str = "st_intersects";
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
 
     fn invoke(g1: Geometry, g2: Geometry) -> bool {
         g1.intersects(&g2)
@@ -70,6 +111,8 @@ impl StFunction for STIntersects {
 trait StFunction {
     const NAME: &'static str;
 
+    fn signature(&self) -> &Signature;
+
     fn invoke(g1: Geometry, g2: Geometry) -> bool;
 }
 
@@ -78,12 +121,12 @@ impl<T: StFunction + Display + Send + Sync> Function for T {
         T::NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Stable)
+    fn signature(&self) -> &Signature {
+        self.signature()
     }
 
     fn invoke_with_args(

@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{self};
-
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::{Function, find_function_context};
+use crate::system::define_nullary_udf;
 
+define_nullary_udf!(
 /// A function to return current session timezone.
-#[derive(Clone, Debug, Default)]
-pub struct TimezoneFunction;
+TimezoneFunction);
 
 const NAME: &str = "timezone";
 
@@ -32,12 +30,12 @@ impl Function for TimezoneFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -48,12 +46,6 @@ impl Function for TimezoneFunction {
         let tz = func_ctx.query_ctx.timezone().to_string();
 
         Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(tz))))
-    }
-}
-
-impl fmt::Display for TimezoneFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TIMEZONE")
     }
 }
 
@@ -70,10 +62,9 @@ mod tests {
 
     #[test]
     fn test_build_function() {
-        let build = TimezoneFunction;
+        let build = TimezoneFunction::default();
         assert_eq!("timezone", build.name());
         assert_eq!(DataType::Utf8View, build.return_type(&[]).unwrap());
-        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default().build().into();
 

@@ -14,7 +14,6 @@
 
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ScalarFunctionArgs, Signature};
@@ -43,23 +42,33 @@ const NAME: &str = "vec_kth_elem";
 /// ```
 ///
 
-#[derive(Debug, Clone, Default)]
-pub struct VectorKthElemFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct VectorKthElemFunction {
+    signature: Signature,
+}
+
+impl Default for VectorKthElemFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![DataType::Utf8, DataType::Binary],
+                vec![DataType::Int64],
+            ),
+        }
+    }
+}
 
 impl Function for VectorKthElemFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float32)
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![DataType::Utf8, DataType::Binary],
-            vec![DataType::Int64],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -122,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_vec_kth_elem() {
-        let func = VectorKthElemFunction;
+        let func = VectorKthElemFunction::default();
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),

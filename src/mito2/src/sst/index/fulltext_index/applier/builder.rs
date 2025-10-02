@@ -320,14 +320,14 @@ mod tests {
 
     fn matches_func() -> Arc<ScalarUDF> {
         Arc::new(
-            ScalarFunctionFactory::from(Arc::new(MatchesFunction) as FunctionRef)
+            ScalarFunctionFactory::from(Arc::new(MatchesFunction::default()) as FunctionRef)
                 .provide(Default::default()),
         )
     }
 
     fn matches_term_func() -> Arc<ScalarUDF> {
         Arc::new(
-            ScalarFunctionFactory::from(Arc::new(MatchesTermFunction) as FunctionRef)
+            ScalarFunctionFactory::from(Arc::new(MatchesTermFunction::default()) as FunctionRef)
                 .provide(Default::default()),
         )
     }

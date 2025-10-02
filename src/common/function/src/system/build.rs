@@ -12,38 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion::arrow::array::StringViewArray;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::Function;
+use crate::system::define_nullary_udf;
 
+define_nullary_udf!(
 /// Generates build information
-#[derive(Clone, Debug, Default)]
-pub struct BuildFunction;
-
-impl fmt::Display for BuildFunction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "BUILD")
-    }
-}
+BuildFunction);
 
 impl Function for BuildFunction {
     fn name(&self) -> &str {
         "build"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {
@@ -65,10 +58,9 @@ mod tests {
     use super::*;
     #[test]
     fn test_build_function() {
-        let build = BuildFunction;
+        let build = BuildFunction::default();
         assert_eq!("build", build.name());
         assert_eq!(DataType::Utf8View, build.return_type(&[]).unwrap());
-        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
         let build_info = common_version::build_info().to_string();
         let actual = build
             .invoke_with_args(ScalarFunctionArgs {

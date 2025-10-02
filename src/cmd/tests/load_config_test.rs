@@ -143,9 +143,11 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default()
-                .with_bind_addr("127.0.0.1:4001")
-                .with_server_addr("127.0.0.1:4001"),
+            grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:4001".to_string(),
+                server_addr: "127.0.0.1:4001".to_string(),
+                ..Default::default()
+            },
             internal_grpc: Some(GrpcOptions::internal_default()),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],

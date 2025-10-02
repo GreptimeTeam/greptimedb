@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use common_query::error::{ArrowComputeSnafu, Result};
+use common_query::error::ArrowComputeSnafu;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 use datatypes::arrow::compute::kernels::numeric;
@@ -27,8 +27,31 @@ use crate::helper;
 /// A function adds an interval value to Timestamp, Date, and return the result.
 /// The implementation of datetime type is based on Date64 which is incorrect so this function
 /// doesn't support the datetime type.
-#[derive(Clone, Debug, Default)]
-pub struct DateAddFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct DateAddFunction {
+    signature: Signature,
+}
+
+impl Default for DateAddFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![
+                    DataType::Date32,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ],
+                vec![
+                    DataType::Interval(IntervalUnit::MonthDayNano),
+                    DataType::Interval(IntervalUnit::YearMonth),
+                    DataType::Interval(IntervalUnit::DayTime),
+                ],
+            ),
+        }
+    }
+}
 
 const NAME: &str = "date_add";
 
@@ -37,25 +60,12 @@ impl Function for DateAddFunction {
         NAME
     }
 
-    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(input_types[0].clone())
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![
-                DataType::Date32,
-                DataType::Timestamp(TimeUnit::Second, None),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-            ],
-            vec![
-                DataType::Interval(IntervalUnit::MonthDayNano),
-                DataType::Interval(IntervalUnit::YearMonth),
-                DataType::Interval(IntervalUnit::DayTime),
-            ],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -92,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_date_add_misc() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
         assert_eq!("date_add", f.name());
         assert_eq!(
             DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -121,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_date_add() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
 
         let times = vec![Some(123), None, Some(42), None];
         // Intervals in milliseconds
@@ -170,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_date_date_add() {
-        let f = DateAddFunction;
+        let f = DateAddFunction::default();
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months

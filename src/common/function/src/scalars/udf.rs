@@ -14,28 +14,21 @@
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
 
-use common_query::prelude::ColumnarValue;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use datafusion_expr::ScalarUDF;
-use session::context::QueryContextRef;
 
-use crate::function::{FunctionContext, FunctionRef};
-use crate::state::FunctionState;
+use crate::function::FunctionRef;
 
 struct ScalarUdf {
     function: FunctionRef,
-    signature: datafusion_expr::Signature,
-    context: FunctionContext,
 }
 
 impl Debug for ScalarUdf {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScalarUdf")
             .field("function", &self.function.name())
-            .field("signature", &self.signature)
             .finish()
     }
 }
@@ -54,51 +47,24 @@ impl ScalarUDFImpl for ScalarUdf {
     }
 
     fn signature(&self) -> &datafusion_expr::Signature {
-        &self.signature
+        self.function.signature()
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
-        self.function.return_type(arg_types).map_err(Into::into)
+        self.function.return_type(arg_types)
     }
 
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
-        let result = self.function.invoke_with_args(args.clone());
-        if !matches!(
-            result,
-            Err(datafusion_common::DataFusionError::NotImplemented(_))
-        ) {
-            return result;
-        }
-
-        let columns = args
-            .args
-            .iter()
-            .map(|x| ColumnarValue::try_from(x).and_then(|y| y.try_into_vector(args.number_rows)))
-            .collect::<common_query::error::Result<Vec<_>>>()?;
-        let v = self
-            .function
-            .eval(&self.context, &columns)
-            .map(ColumnarValue::Vector)?;
-        Ok(v.into())
+        self.function.invoke_with_args(args)
     }
 }
 
 /// Create a ScalarUdf from function, query context and state.
-pub fn create_udf(
-    func: FunctionRef,
-    query_ctx: QueryContextRef,
-    state: Arc<FunctionState>,
-) -> ScalarUDF {
-    let signature = func.signature();
-    let udf = ScalarUdf {
-        function: func,
-        signature,
-        context: FunctionContext { query_ctx, state },
-    };
-    ScalarUDF::new_from_impl(udf)
+pub fn create_udf(function: FunctionRef) -> ScalarUDF {
+    ScalarUDF::new_from_impl(ScalarUdf { function })
 }
 
 #[cfg(test)]
@@ -112,7 +78,6 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datatypes::arrow::datatypes::Field;
     use datatypes::data_type::{ConcreteDataType, DataType};
-    use session::context::QueryContextBuilder;
 
     use super::*;
     use crate::function::Function;
@@ -120,8 +85,7 @@ mod tests {
 
     #[test]
     fn test_create_udf() {
-        let f = Arc::new(TestAndFunction);
-        let query_ctx = QueryContextBuilder::default().build().into();
+        let f = Arc::new(TestAndFunction::default());
 
         let args = ScalarFunctionArgs {
             args: vec![
@@ -150,11 +114,9 @@ mod tests {
         assert!(vector.value(2));
 
         // create a udf and test it again
-        let udf = create_udf(f.clone(), query_ctx, Arc::new(FunctionState::default()));
+        let udf = create_udf(f);
 
         assert_eq!("test_and", udf.name());
-        let expected_signature: datafusion_expr::Signature = f.signature();
-        assert_eq!(udf.signature(), &expected_signature);
         assert_eq!(
             ConcreteDataType::boolean_datatype(),
             udf.return_type(&[])
