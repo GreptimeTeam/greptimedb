@@ -46,12 +46,13 @@ use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
+use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::{Batch, FlatSource, Source};
 use crate::sst::file::RegionFileId;
-use crate::sst::index::{Indexer, IndexerBuilder};
+use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
@@ -68,6 +69,8 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     writer_factory: F,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
+    /// Global index config.
+    index_config: IndexConfig,
     /// Indexer build that can create indexer for multiple files.
     indexer_builder: I,
     /// Current active indexer.
@@ -110,6 +113,7 @@ where
     pub async fn new_with_object_store(
         object_store: ObjectStore,
         metadata: RegionMetadataRef,
+        index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
         metrics: Metrics,
@@ -117,6 +121,7 @@ where
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
+            index_config,
             indexer_builder,
             path_provider,
             metrics,
@@ -140,6 +145,7 @@ where
     pub async fn new(
         factory: F,
         metadata: RegionMetadataRef,
+        index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
         metrics: Metrics,
@@ -153,6 +159,7 @@ where
             current_file: init_file,
             writer_factory: factory,
             metadata,
+            index_config,
             indexer_builder,
             current_indexer: Some(indexer),
             bytes_written: Arc::new(AtomicUsize::new(0)),
@@ -182,7 +189,18 @@ where
 
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
-            let index_output = self.current_indexer.as_mut().unwrap().finish().await;
+            let mut index_output = IndexOutput::default();
+            match self.index_config.build_mode {
+                IndexBuildMode::Sync => {
+                    index_output = self.current_indexer.as_mut().unwrap().finish().await;
+                }
+                IndexBuildMode::Async => {
+                    debug!(
+                        "Index for file {} will be built asynchronously later",
+                        self.current_file
+                    );
+                }
+            }
             current_writer.flush().await.context(WriteParquetSnafu)?;
 
             let file_meta = current_writer.close().await.context(WriteParquetSnafu)?;
@@ -252,11 +270,16 @@ where
                     stats.update(&batch);
                     let start = Instant::now();
                     // safety: self.current_indexer must be set when first batch has been written.
-                    self.current_indexer
-                        .as_mut()
-                        .unwrap()
-                        .update(&mut batch)
-                        .await;
+                    match self.index_config.build_mode {
+                        IndexBuildMode::Sync => {
+                            self.current_indexer
+                                .as_mut()
+                                .unwrap()
+                                .update(&mut batch)
+                                .await;
+                        }
+                        IndexBuildMode::Async => {}
+                    }
                     self.metrics.update_index += start.elapsed();
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size

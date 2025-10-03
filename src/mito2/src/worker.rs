@@ -24,6 +24,7 @@ mod handle_drop;
 mod handle_flush;
 mod handle_manifest;
 mod handle_open;
+mod handle_rebuild_index;
 mod handle_truncate;
 mod handle_write;
 
@@ -67,6 +68,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
@@ -127,6 +129,8 @@ pub(crate) struct WorkerGroup {
     flush_job_pool: SchedulerRef,
     /// Compaction background job pool.
     compact_job_pool: SchedulerRef,
+    /// Scheduler for index build jobs.
+    index_build_job_pool: SchedulerRef,
     /// Scheduler for file purgers.
     purge_scheduler: SchedulerRef,
     /// Cache.
@@ -163,6 +167,8 @@ impl WorkerGroup {
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
             .await?
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
+        let index_build_job_pool =
+            Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -198,6 +204,7 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
+                    index_build_job_pool: index_build_job_pool.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -222,6 +229,7 @@ impl WorkerGroup {
             workers,
             flush_job_pool,
             compact_job_pool,
+            index_build_job_pool,
             purge_scheduler,
             cache_manager,
             file_ref_manager,
@@ -239,6 +247,8 @@ impl WorkerGroup {
         self.flush_job_pool.stop(true).await?;
         // Stops the purge scheduler gracefully.
         self.purge_scheduler.stop(true).await?;
+        // Stops the index build job pool gracefully.
+        self.index_build_job_pool.stop(true).await?;
 
         try_join_all(self.workers.iter().map(|worker| worker.stop())).await?;
 
@@ -319,6 +329,8 @@ impl WorkerGroup {
                     .with_notifier(flush_sender.clone()),
             )
         });
+        let index_build_job_pool =
+            Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -356,6 +368,7 @@ impl WorkerGroup {
                     log_store: log_store.clone(),
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
+                    index_build_job_pool: index_build_job_pool.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -380,6 +393,7 @@ impl WorkerGroup {
             workers,
             flush_job_pool,
             compact_job_pool,
+            index_build_job_pool,
             purge_scheduler,
             cache_manager,
             file_ref_manager,
@@ -437,6 +451,7 @@ struct WorkerStarter<S> {
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: SchedulerRef,
+    index_build_job_pool: SchedulerRef,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -482,6 +497,7 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
+            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -725,6 +741,8 @@ struct RegionWorkerLoop<S> {
     purge_scheduler: SchedulerRef,
     /// Engine write buffer manager.
     write_buffer_manager: WriteBufferManagerRef,
+    /// Scheduler for index build task.
+    index_build_scheduler: IndexBuildScheduler,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.
@@ -913,6 +931,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
+                WorkerRequest::BuildIndexRegion(request) => {
+                    self.handle_rebuild_index(request).await;
+                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1021,6 +1042,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_flush_finished(region_id, req).await
             }
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+            BackgroundNotify::IndexBuildFinished(req) => {
+                self.handle_index_build_finished(region_id, req).await
+            }
+            BackgroundNotify::IndexBuildFailed(req) => {
+                self.handle_index_build_failed(region_id, req).await
+            }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
             }

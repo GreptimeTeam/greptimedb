@@ -67,7 +67,7 @@ impl Default for WriteOptions {
 }
 
 /// Parquet SST info returned by the writer.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SstInfo {
     /// SST file id.
     pub file_id: FileId,
@@ -110,17 +110,16 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::access_layer::{
-        FilePathProvider, Metrics, OperationType, RegionFilePathFactory, WriteType,
-    };
+    use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
+    use crate::config::IndexConfig;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
-    use crate::sst::index::{Indexer, IndexerBuilder, IndexerBuilderImpl};
+    use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::format::PrimaryKeyWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
@@ -183,6 +182,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
             Metrics::new(WriteType::Flush),
@@ -244,6 +244,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -329,6 +330,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -377,6 +379,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -435,6 +438,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -478,6 +482,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             FixedPathProvider {
                 region_file_id: handle.file_id(),
@@ -635,6 +640,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             path_provider,
             Metrics::new(WriteType::Flush),
@@ -692,7 +698,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
@@ -711,6 +717,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
             Metrics::new(WriteType::Flush),
@@ -1066,7 +1073,7 @@ mod tests {
         let intermediate_manager = env.get_intermediate_manager();
 
         let indexer_builder = IndexerBuilderImpl {
-            op_type: OperationType::Flush,
+            build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
             row_group_size,
             puffin_manager,
@@ -1085,6 +1092,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
             Metrics::new(WriteType::Flush),
@@ -1140,6 +1148,7 @@ mod tests {
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
+            IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
             Metrics::new(WriteType::Flush),
