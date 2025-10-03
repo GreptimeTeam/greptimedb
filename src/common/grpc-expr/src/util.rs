@@ -167,7 +167,7 @@ pub fn build_create_table_expr(
             default_constraint: vec![],
             semantic_type,
             comment: String::new(),
-            datatype_extension: *datatype_extension,
+            datatype_extension: datatype_extension.clone(),
             options: options.clone(),
         });
     }
@@ -209,7 +209,7 @@ pub fn extract_new_columns(
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
                 comment: String::new(),
-                datatype_extension: *expr.datatype_extension,
+                datatype_extension: expr.datatype_extension.clone(),
                 options: expr.options.clone(),
             });
             AddColumn {
@@ -425,7 +425,7 @@ mod tests {
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
                     decimal_column.data_type,
-                    decimal_column.datatype_extension,
+                    decimal_column.datatype_extension.clone(),
                 )
                 .unwrap()
             )
@@ -520,6 +520,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .datatype_extension
+                        .clone()
                 )
                 .unwrap()
             )

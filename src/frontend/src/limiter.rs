@@ -87,7 +87,7 @@ impl Limiter {
         for insert in &request.inserts {
             for column in &insert.columns {
                 if let Some(values) = &column.values {
-                    size += self.size_of_column_values(values);
+                    size += Self::size_of_column_values(values);
                 }
             }
         }
@@ -104,7 +104,7 @@ impl Limiter {
                 for row in &rows.rows {
                     for value in &row.values {
                         if let Some(value) = &value.value_data {
-                            size += self.size_of_value_data(value);
+                            size += Self::size_of_value_data(value);
                         }
                     }
                 }
@@ -113,7 +113,7 @@ impl Limiter {
         size
     }
 
-    fn size_of_column_values(&self, values: &Values) -> usize {
+    fn size_of_column_values(values: &Values) -> usize {
         let mut size: usize = 0;
         size += values.i8_values.len() * size_of::<i32>();
         size += values.i16_values.len() * size_of::<i32>();
@@ -146,10 +146,41 @@ impl Limiter {
         size += values.interval_day_time_values.len() * size_of::<i64>();
         size += values.interval_month_day_nano_values.len() * size_of::<IntervalMonthDayNano>();
         size += values.decimal128_values.len() * size_of::<Decimal128>();
+        size += values
+            .list_values
+            .iter()
+            .map(|v| {
+                v.items
+                    .iter()
+                    .map(|item| {
+                        item.value_data
+                            .as_ref()
+                            .map(Self::size_of_value_data)
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        size += values
+            .struct_values
+            .iter()
+            .map(|v| {
+                v.items
+                    .iter()
+                    .map(|item| {
+                        item.value_data
+                            .as_ref()
+                            .map(Self::size_of_value_data)
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+
         size
     }
 
-    fn size_of_value_data(&self, value: &ValueData) -> usize {
+    fn size_of_value_data(value: &ValueData) -> usize {
         match value {
             ValueData::I8Value(_) => size_of::<i32>(),
             ValueData::I16Value(_) => size_of::<i32>(),
@@ -178,6 +209,26 @@ impl Limiter {
             ValueData::IntervalDayTimeValue(_) => size_of::<i64>(),
             ValueData::IntervalMonthDayNanoValue(_) => size_of::<IntervalMonthDayNano>(),
             ValueData::Decimal128Value(_) => size_of::<Decimal128>(),
+            ValueData::ListValue(list_values) => list_values
+                .items
+                .iter()
+                .map(|item| {
+                    item.value_data
+                        .as_ref()
+                        .map(Self::size_of_value_data)
+                        .unwrap_or(0)
+                })
+                .sum(),
+            ValueData::StructValue(struct_values) => struct_values
+                .items
+                .iter()
+                .map(|item| {
+                    item.value_data
+                        .as_ref()
+                        .map(Self::size_of_value_data)
+                        .unwrap_or(0)
+                })
+                .sum(),
         }
     }
 }

@@ -309,7 +309,7 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
         match primitive {
             Some(v) => self.mutable_array.append_value(v.into_native()),
@@ -549,8 +549,8 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Int64(123));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::Int64(123));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let input = Int64Vector::from_slice([7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();
@@ -711,8 +711,8 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder_finish_cloned() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Int64(123));
-        builder.push_value_ref(ValueRef::Int64(456));
+        builder.push_value_ref(&ValueRef::Int64(123));
+        builder.push_value_ref(&ValueRef::Int64(456));
         let vector = builder.to_vector_cloned();
         assert_eq!(vector.len(), 2);
         assert_eq!(vector.null_count(), 0);

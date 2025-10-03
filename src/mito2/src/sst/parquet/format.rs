@@ -747,7 +747,7 @@ impl PrimaryKeyReadFormat {
         for value_opt in values {
             match value_opt {
                 // Safety: We use the same data type to create the converter.
-                Some(v) => builder.push_value_ref(v.as_value_ref()),
+                Some(v) => builder.push_value_ref(&v.as_value_ref()),
                 None => builder.push_null(),
             }
         }

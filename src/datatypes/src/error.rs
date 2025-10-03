@@ -220,6 +220,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert scalar value to Arrow array"))]
+    ConvertScalarToArrowArray {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse extended type in metadata: {}", value))]
     ParseExtendedType {
         value: String,
@@ -275,6 +283,7 @@ impl ErrorExt for Error {
             | ToScalarValue { .. }
             | TryFromValue { .. }
             | ConvertArrowArrayToScalars { .. }
+            | ConvertScalarToArrowArray { .. }
             | ParseExtendedType { .. } => StatusCode::Internal,
         }
     }

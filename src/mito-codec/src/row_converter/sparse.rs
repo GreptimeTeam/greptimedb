@@ -310,7 +310,7 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        self.encode_to_vec(values.iter().map(|v| (v.0, v.1)), buffer)
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1.clone())), buffer)
     }
 
     fn estimated_size(&self) -> Option<usize> {
@@ -678,7 +678,12 @@ mod tests {
                 .has_column(&buffer, &mut offsets_map, column_id)
                 .unwrap();
             let value = codec.decode_value_at(&buffer, offset, column_id).unwrap();
-            let expected_value = row.iter().find(|(id, _)| *id == column_id).unwrap().1;
+            let expected_value = row
+                .iter()
+                .find(|(id, _)| *id == column_id)
+                .unwrap()
+                .1
+                .clone();
             assert_eq!(value.as_value_ref(), expected_value);
         }
     }

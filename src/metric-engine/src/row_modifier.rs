@@ -82,11 +82,11 @@ impl RowModifier {
             let internal_columns = [
                 (
                     ReservedColumnId::table_id(),
-                    api::helper::pb_value_to_value_ref(&table_id, &None),
+                    api::helper::pb_value_to_value_ref(&table_id, None),
                 ),
                 (
                     ReservedColumnId::tsid(),
-                    api::helper::pb_value_to_value_ref(&tsid, &None),
+                    api::helper::pb_value_to_value_ref(&tsid, None),
                 ),
             ];
             self.codec
@@ -323,7 +323,7 @@ impl RowIter<'_> {
                     idx.column_id,
                     api::helper::pb_value_to_value_ref(
                         &self.row.values[idx.index],
-                        &self.schema[idx.index].datatype_extension,
+                        self.schema[idx.index].datatype_extension.as_ref(),
                     ),
                 )
             })

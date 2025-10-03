@@ -296,7 +296,7 @@ impl ColumnSchema {
         let value_ref = padding_value.as_value_ref();
         let mut mutable_vector = self.data_type.create_mutable_vector(num_rows);
         for _ in 0..num_rows {
-            mutable_vector.push_value_ref(value_ref);
+            mutable_vector.push_value_ref(&value_ref);
         }
         mutable_vector.to_vector()
     }

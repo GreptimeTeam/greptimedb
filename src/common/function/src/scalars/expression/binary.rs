@@ -41,7 +41,7 @@ where
             let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(right.inner()) };
             let b = right.get_data(0);
 
-            let it = left.iter_data().map(|a| f(a, b, ctx));
+            let it = left.iter_data().map(|a| f(a, b.clone(), ctx));
             <O as Scalar>::VectorType::from_owned_iterator(it)
         }
 
@@ -62,7 +62,7 @@ where
             let a = left.get_data(0);
 
             let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(r) };
-            let it = right.iter_data().map(|b| f(a, b, ctx));
+            let it = right.iter_data().map(|b| f(a.clone(), b, ctx));
             <O as Scalar>::VectorType::from_owned_iterator(it)
         }
 

@@ -194,7 +194,7 @@ impl MutableVector for StringVectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         match value.as_string()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
@@ -289,8 +289,8 @@ mod tests {
     #[test]
     fn test_string_vector_builder() {
         let mut builder = StringVectorBuilder::with_capacity(3);
-        builder.push_value_ref(ValueRef::String("hello"));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::String("hello"));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
 
         let input = StringVector::from_slice(&["world", "one", "two"]);
         builder.extend_slice_of(&input, 1, 2).unwrap();

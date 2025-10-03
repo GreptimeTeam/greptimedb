@@ -46,7 +46,7 @@ fn encode_sparse(c: &mut Criterion) {
         b.iter(|| {
             let mut buffer = Vec::new();
             codec
-                .encode_to_vec(internal_columns.into_iter(), &mut buffer)
+                .encode_to_vec(internal_columns.clone().into_iter(), &mut buffer)
                 .unwrap();
             codec
                 .encode_to_vec(

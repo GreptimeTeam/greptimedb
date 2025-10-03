@@ -355,7 +355,7 @@ impl LastFieldsBuilder {
             // Builds last fields.
             for (builder, value) in self.builders.iter_mut().zip(&self.last_fields) {
                 // Safety: Vectors of the batch has the same type.
-                builder.push_value_ref(value.as_value_ref());
+                builder.push_value_ref(&value.as_value_ref());
             }
             let fields = self
                 .builders

@@ -285,6 +285,13 @@ impl ConcreteDataType {
         }
     }
 
+    pub fn as_struct(&self) -> Option<&StructType> {
+        match self {
+            ConcreteDataType::Struct(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Try to cast data type as a [`TimestampType`].
     pub fn as_timestamp(&self) -> Option<TimestampType> {
         match self {

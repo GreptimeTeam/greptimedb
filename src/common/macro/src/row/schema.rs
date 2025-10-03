@@ -90,6 +90,12 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
                                 Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: #dim })) })
                             }
                         }
+                        Some(TypeExt::ListType(_ext)) => {
+                            todo!("macro for generating list item types")
+                        }
+                        Some(TypeExt::StructType(_ext)) => {
+                            todo!("macro for generating struct fields")
+                        }
                         None => {
                             quote! { None }
                         }

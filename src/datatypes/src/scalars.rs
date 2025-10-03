@@ -21,10 +21,10 @@ use crate::types::{
     Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
     UInt32Type, UInt64Type,
 };
-use crate::value::{ListValue, ListValueRef, Value};
+use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value};
 use crate::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, ListVector, MutableVector,
-    PrimitiveVector, StringVector, Vector,
+    NullVector, PrimitiveVector, StringVector, StructVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -52,7 +52,7 @@ where
     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short>;
 }
 
-pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Copy + Send + 'a {
+pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Send + 'a {
     /// The corresponding [`Scalar`] type.
     type ScalarType: Scalar<RefType<'a> = Self>;
 
@@ -95,7 +95,7 @@ where
     fn from_slice(data: &[Self::RefItem<'_>]) -> Self {
         let mut builder = Self::Builder::with_capacity(data.len());
         for item in data {
-            builder.push(Some(*item));
+            builder.push(Some(item.clone()));
         }
         builder.finish()
     }
@@ -186,6 +186,27 @@ impl_scalar_for_native!(i32, Int32Type);
 impl_scalar_for_native!(i64, Int64Type);
 impl_scalar_for_native!(f32, Float32Type);
 impl_scalar_for_native!(f64, Float64Type);
+
+impl Scalar for () {
+    type VectorType = NullVector;
+    type RefType<'a> = ();
+
+    #[inline]
+    fn as_scalar_ref(&self) {}
+
+    #[allow(clippy::needless_lifetimes)]
+    #[inline]
+    fn upcast_gat<'short, 'long: 'short>(long: ()) {
+        long
+    }
+}
+
+impl ScalarRef<'_> for () {
+    type ScalarType = ();
+
+    #[inline]
+    fn to_owned_scalar(&self) {}
+}
 
 impl Scalar for bool {
     type VectorType = BooleanVector;
@@ -332,6 +353,42 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
                 _ => unreachable!(),
             },
             ListValueRef::Ref { val } => (*val).clone(),
+            ListValueRef::RefList { val, item_datatype } => ListValue::new(
+                val.iter().map(|v| Value::from(v.clone())).collect(),
+                item_datatype.clone(),
+            ),
+        }
+    }
+}
+
+impl Scalar for StructValue {
+    type VectorType = StructVector;
+    type RefType<'a> = StructValueRef<'a>;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        StructValueRef::Ref(self)
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for StructValueRef<'a> {
+    type ScalarType = StructValue;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        match self {
+            Self::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::Null => StructValue::default(),
+                Value::Struct(v) => v,
+                _ => unreachable!(),
+            },
+            StructValueRef::Ref(val) => (*val).clone(),
+            StructValueRef::RefList { val, fields } => {
+                let items = val.iter().map(|v| Value::from(v.clone())).collect();
+                StructValue::new(items, fields.clone())
+            }
         }
     }
 }
@@ -346,7 +403,7 @@ mod tests {
     fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
         let mut builder = T::Builder::with_capacity(items.len());
         for item in items {
-            builder.push(*item);
+            builder.push(item.clone());
         }
         builder.finish()
     }

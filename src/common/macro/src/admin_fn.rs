@@ -325,7 +325,7 @@ fn build_struct(
                     let result = #fn_name(handler, query_ctx, &[]).await
                         .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
 
-                    builder.push_value_ref(result.as_value_ref());
+                    builder.push_value_ref(&result.as_value_ref());
                 } else {
                     for i in 0..rows_num {
                         let args: Vec<_> = columns.iter()
@@ -335,7 +335,7 @@ fn build_struct(
                         let result = #fn_name(handler, query_ctx, &args).await
                             .map_err(|e| datafusion_common::DataFusionError::Execution(format!("Function execution error: {}", e.output_msg())))?;
 
-                        builder.push_value_ref(result.as_value_ref());
+                        builder.push_value_ref(&result.as_value_ref());
                     }
                 }
 

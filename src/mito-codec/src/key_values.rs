@@ -205,7 +205,7 @@ impl KeyValue<'_> {
             .map(|idx| match idx {
                 Some(i) => api::helper::pb_value_to_value_ref(
                     &self.row.values[*i],
-                    &self.schema[*i].datatype_extension,
+                    self.schema[*i].datatype_extension.as_ref(),
                 ),
                 None => ValueRef::Null,
             })
@@ -218,7 +218,7 @@ impl KeyValue<'_> {
             .map(|idx| match idx {
                 Some(i) => api::helper::pb_value_to_value_ref(
                     &self.row.values[*i],
-                    &self.schema[*i].datatype_extension,
+                    self.schema[*i].datatype_extension.as_ref(),
                 ),
                 None => ValueRef::Null,
             })
@@ -230,7 +230,7 @@ impl KeyValue<'_> {
         let index = self.helper.indices[self.helper.num_primary_key_column].unwrap();
         api::helper::pb_value_to_value_ref(
             &self.row.values[index],
-            &self.schema[index].datatype_extension,
+            self.schema[index].datatype_extension.as_ref(),
         )
     }
 

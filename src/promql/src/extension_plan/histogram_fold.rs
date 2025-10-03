@@ -567,7 +567,7 @@ impl HistogramFoldStream {
             // "sample" normal columns
             for normal_index in &self.normal_indices {
                 let val = batch.column(*normal_index).get(cursor);
-                self.output_buffer[*normal_index].push_value_ref(val.as_value_ref());
+                self.output_buffer[*normal_index].push_value_ref(&val.as_value_ref());
             }
             // "fold" `le` and field columns
             let le_array = batch.column(self.le_column_index);
@@ -594,7 +594,7 @@ impl HistogramFoldStream {
             }
             // ignore invalid data
             let result = Self::evaluate_row(self.quantile, &bucket, &counters).unwrap_or(f64::NAN);
-            self.output_buffer[self.field_column_index].push_value_ref(ValueRef::from(result));
+            self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
             cursor += bucket_num;
             remaining_rows -= bucket_num;
             self.output_buffered_rows += 1;

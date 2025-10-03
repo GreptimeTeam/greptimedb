@@ -540,15 +540,15 @@ mod tests {
 
         for (text_english_case_sensitive, text_english_case_insensitive, text_chinese) in rows {
             match text_english_case_sensitive {
-                Some(s) => vec_english_sensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_sensitive.push_value_ref(&(*s).into()),
                 None => vec_english_sensitive.push_null(),
             }
             match text_english_case_insensitive {
-                Some(s) => vec_english_insensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_insensitive.push_value_ref(&(*s).into()),
                 None => vec_english_insensitive.push_null(),
             }
             match text_chinese {
-                Some(s) => vec_chinese.push_value_ref((*s).into()),
+                Some(s) => vec_chinese.push_value_ref(&(*s).into()),
                 None => vec_chinese.push_null(),
             }
         }

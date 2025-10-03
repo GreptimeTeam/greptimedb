@@ -46,7 +46,7 @@ pub(crate) fn add_values_to_builder(
                 Some(true) => builder.push_null(),
                 _ => {
                     builder
-                        .try_push_value_ref(values[idx_of_values].as_value_ref())
+                        .try_push_value_ref(&values[idx_of_values].as_value_ref())
                         .context(CreateVectorSnafu)?;
                     idx_of_values += 1
                 }
