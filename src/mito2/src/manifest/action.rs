@@ -133,6 +133,7 @@ pub struct RegionManifest {
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
     /// Format of the SST file.
+    #[serde(default)]
     pub sst_format: FormatType,
 }
 
@@ -935,13 +936,17 @@ mod tests {
     fn test_region_change_backward_compatibility() {
         // Test that we can deserialize a RegionChange without sst_format
         let region_change_json = r#"{
-            "metadata":{
-                "column_metadatas":[
-                {"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1}
+            "metadata": {
+                "column_metadatas": [
+                    {"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},
+                    {"column_schema":{"name":"b","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},
+                    {"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}
                 ],
-                "primary_key":[1],
-                "region_id":42,
-                "schema_version":0
+                "primary_key": [
+                    1
+                ],
+                "region_id": 42,
+                "schema_version": 0
             }
         }"#;
 

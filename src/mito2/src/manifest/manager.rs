@@ -30,13 +30,13 @@ use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionEdit, RegionManifest, RegionManifestBuilder,
     RegionMetaAction, RegionMetaActionList,
 };
-use crate::sst::FormatType;
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
     ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::sst::FormatType;
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -188,7 +188,10 @@ impl RegionManifestManager {
             options.manifest_dir, manifest
         );
 
-        let mut actions = vec![RegionMetaAction::Change(RegionChange { metadata, sst_format })];
+        let mut actions = vec![RegionMetaAction::Change(RegionChange {
+            metadata,
+            sst_format,
+        })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
                 files_to_add: vec![],
@@ -920,6 +923,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1721);
+        assert_eq!(manifest_size, 1756);
     }
 }
