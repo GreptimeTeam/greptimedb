@@ -32,6 +32,7 @@ use crate::tests::test_util::MockInstance;
 async fn promql_query(
     ins: Arc<Instance>,
     promql: &str,
+    alias: Option<String>,
     query_ctx: Arc<QueryContext>,
     start: SystemTime,
     end: SystemTime,
@@ -40,9 +41,10 @@ async fn promql_query(
 ) -> operator::error::Result<Output> {
     let query = PromQuery {
         query: promql.to_string(),
+        alias,
         ..PromQuery::default()
     };
-    let QueryStatement::Promql(mut eval_stmt) =
+    let QueryStatement::Promql(mut eval_stmt, alias) =
         QueryLanguageParser::parse_promql(&query, &query_ctx).unwrap()
     else {
         unreachable!()
@@ -53,7 +55,7 @@ async fn promql_query(
     eval_stmt.lookback_delta = lookback;
 
     ins.statement_executor()
-        .execute_stmt(QueryStatement::Promql(eval_stmt), query_ctx)
+        .execute_stmt(QueryStatement::Promql(eval_stmt, alias), query_ctx)
         .await
 }
 
@@ -63,6 +65,25 @@ async fn create_insert_query_assert(
     create: &str,
     insert: &str,
     promql: &str,
+    start: SystemTime,
+    end: SystemTime,
+    interval: Duration,
+    lookback: Duration,
+    expected: &str,
+) {
+    create_insert_query_assert_with_alias(
+        instance, create, insert, promql, None, start, end, interval, lookback, expected,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_insert_query_assert_with_alias(
+    instance: Arc<Instance>,
+    create: &str,
+    insert: &str,
+    promql: &str,
+    alias: Option<String>,
     start: SystemTime,
     end: SystemTime,
     interval: Duration,
@@ -87,6 +108,7 @@ async fn create_insert_query_assert(
     let query_output = promql_query(
         instance,
         promql,
+        alias,
         QueryContext::arc(),
         start,
         end,
@@ -335,6 +357,31 @@ async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
     .await;
 }
 
+// Test like `aggregators_simple_count` but with value aliasing.
+#[apply(both_instances_cases)]
+async fn value_alias(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    create_insert_query_assert_with_alias(
+        instance,
+        AGGREGATORS_CREATE_TABLE,
+        AGGREGATORS_INSERT_DATA,
+        "COUNT BY (group) (http_requests{job=\"api-server\"})",
+        Some("my_series".to_string()),
+        UNIX_EPOCH,
+        unix_epoch_plus_100s(),
+        Duration::from_secs(60),
+        Duration::from_secs(0),
+        "+-----------+------------+---------------------+\
+        \n| my_series | group      | ts                  |\
+        \n+-----------+------------+---------------------+\
+        \n| 2         | canary     | 1970-01-01T00:00:00 |\
+        \n| 2         | production | 1970-01-01T00:00:00 |\
+        \n+-----------+------------+---------------------+",
+    )
+    .await;
+}
+
 // # Simple without.
 // eval instant at 50m sum without (instance) (http_requests{job="api-server"})
 //   {group="canary",job="api-server"} 700
@@ -578,6 +625,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests{__schema__="greptime_private"}"#,
+        None,
         QueryContext::arc(),
         start,
         end,
@@ -605,6 +653,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests{__database__="greptime_private"}"#,
+        None,
         QueryContext::arc(),
         start,
         end,
@@ -632,6 +681,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests"#,
+        None,
         QueryContext::arc(),
         start,
         end,
@@ -649,6 +699,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
     let query_output = promql_query(
         ins.clone(),
         r#"http_requests"#,
+        None,
         QueryContext::with_db_name(Some("greptime_private")).into(),
         start,
         end,

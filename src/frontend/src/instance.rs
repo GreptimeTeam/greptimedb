@@ -736,8 +736,8 @@ impl PrometheusHandler for Instance {
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
-        let query_statement = if let QueryStatement::Promql(eval_stmt) = stmt {
-            CatalogQueryStatement::Promql(eval_stmt)
+        let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
+            CatalogQueryStatement::Promql(eval_stmt, alias)
         } else {
             // It should not happen since the query is already parsed successfully.
             return UnexpectedResultSnafu {

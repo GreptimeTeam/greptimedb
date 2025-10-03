@@ -42,6 +42,7 @@ impl StatementExecutor {
                     lookback: eval
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    alias: eval.alias,
                 };
                 QueryLanguageParser::parse_promql(&promql, query_ctx).context(ParseQuerySnafu)?
             }
@@ -82,6 +83,7 @@ impl StatementExecutor {
                     lookback: analyze
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    alias: analyze.alias,
                 };
                 let analyze_node_name = if analyze.is_verbose {
                     ANALYZE_VERBOSE_NODE_NAME

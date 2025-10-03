@@ -196,9 +196,10 @@ pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
 }
 
 impl PromPlanner {
-    pub async fn stmt_to_plan(
+    pub async fn stmt_to_plan_with_alias(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
+        alias: Option<String>,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
@@ -206,9 +207,25 @@ impl PromPlanner {
             ctx: PromPlannerContext::from_eval_stmt(stmt),
         };
 
-        planner
+        let plan = planner
             .prom_expr_to_plan(&stmt.expr, query_engine_state)
-            .await
+            .await?;
+
+        // Apply alias if provided
+        if let Some(alias_name) = alias {
+            planner.apply_alias_projection(plan, alias_name)
+        } else {
+            Ok(plan)
+        }
+    }
+
+    #[cfg(test)]
+    async fn stmt_to_plan(
+        table_provider: DfTableSourceProvider,
+        stmt: &EvalStmt,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        Self::stmt_to_plan_with_alias(table_provider, stmt, None, query_engine_state).await
     }
 
     pub async fn prom_expr_to_plan(
@@ -3340,6 +3357,35 @@ impl PromPlanner {
         });
         Ok(fn_expr)
     }
+
+    /// Apply an alias to the query result by adding a projection with the alias name
+    fn apply_alias_projection(
+        &mut self,
+        plan: LogicalPlan,
+        alias_name: String,
+    ) -> Result<LogicalPlan> {
+        let fields_expr = self.create_field_column_exprs()?;
+
+        // TODO(dennis): how to support multi-value aliasing?
+        ensure!(
+            fields_expr.len() == 1,
+            UnsupportedExprSnafu {
+                name: "alias on multi-value result"
+            }
+        );
+
+        let project_fields = fields_expr
+            .into_iter()
+            .map(|expr| expr.alias(&alias_name))
+            .chain(self.create_tag_column_exprs()?)
+            .chain(Some(self.create_time_index_column_expr()?));
+
+        LogicalPlanBuilder::from(plan)
+            .project(project_fields)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -4925,6 +4971,59 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_value_alias() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let case = r#"count_values('series', prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip)"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "prometheus_tsdb_head_series".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_server_requests_seconds_count".to_string(),
+                ),
+            ],
+            &["ip"],
+        )
+        .await;
+
+        let alias = Some("my_series".to_string());
+        let plan = PromPlanner::stmt_to_plan_with_alias(
+            table_provider,
+            &eval_stmt,
+            alias,
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let expected = r#"
+Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None)]
+  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]
+    Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+      Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+        Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+            PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+              Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                Filter: prometheus_tsdb_head_series.ip ~ Utf8("^(?:(10.0.160.237:8080|10.0.160.237:9090))$") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                  TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]"#;
+        assert_eq!(format!("\n{}", plan.display_indent_schema()), expected);
     }
 
     #[tokio::test]

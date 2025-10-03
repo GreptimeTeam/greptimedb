@@ -145,6 +145,21 @@ WHERE l.host = 'host1'
 ORDER BY t.ts, l.host, avg_value
 LIMIT 5;
 
+-- TQL CTE with JOIN and value aliasing
+-- SQLNESS SORT_RESULT 3 1
+WITH tql_summary AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s]) AS cpu
+)
+SELECT
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (
     TQL ANALYZE (0, 40, '10s') metric
