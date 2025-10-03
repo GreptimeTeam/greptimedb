@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::BTreeMap;
 
 use common_decimal::Decimal128;
 use common_time::Date;
@@ -386,12 +385,9 @@ impl<'a> ScalarRef<'a> for StructValueRef<'a> {
                 _ => unreachable!(),
             },
             StructValueRef::Ref(val) => (*val).clone(),
-            StructValueRef::RefMap { val, fields } => {
-                let mut map = BTreeMap::new();
-                for (key, value) in val {
-                    map.insert(key.clone(), Value::from(value.clone()));
-                }
-                StructValue::new(map, fields.clone())
+            StructValueRef::RefList { val, fields } => {
+                let items = val.iter().map(|v| Value::from(v.clone())).collect();
+                StructValue::new(items, fields.clone())
             }
         }
     }

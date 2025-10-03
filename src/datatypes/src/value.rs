@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -139,8 +138,11 @@ impl Display for Value {
             Value::Decimal128(v) => write!(f, "{}", v),
             Value::Struct(s) => {
                 let items = s
-                    .items()
+                    .fields
+                    .fields()
                     .iter()
+                    .map(|f| f.name())
+                    .zip(s.items().iter())
                     .map(|(k, v)| format!("{k}: {v}"))
                     .collect::<Vec<String>>()
                     .join(", ");
@@ -943,26 +945,21 @@ impl Ord for ListValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructValue {
-    items: BTreeMap<String, Value>,
+    items: Vec<Value>,
     fields: StructType,
 }
 
 impl StructValue {
-    pub fn new(items: BTreeMap<String, Value>, fields: StructType) -> Self {
+    pub fn new(items: Vec<Value>, fields: StructType) -> Self {
         Self { items, fields }
     }
 
-    pub fn items(&self) -> &BTreeMap<String, Value> {
+    pub fn items(&self) -> &[Value] {
         &self.items
     }
 
     pub fn take_items(self) -> Vec<Value> {
-        let Self { mut items, fields } = self;
-        fields
-            .fields()
-            .iter()
-            .map(|f| items.remove(f.name()).unwrap_or(Value::Null))
-            .collect()
+        self.items
     }
 
     pub fn struct_type(&self) -> &StructType {
@@ -971,18 +968,16 @@ impl StructValue {
 
     fn estimated_size(&self) -> usize {
         self.items
-            .values()
+            .iter()
             .map(|x| x.as_value_ref().data_size())
             .sum()
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
         let arrays = self
-            .fields
-            .fields()
+            .items
             .iter()
-            .map(|f| {
-                let value = self.items.get(f.name()).unwrap_or(&Value::Null);
+            .map(|value| {
                 let scalar_value = value.try_to_scalar_value(&value.data_type())?;
                 scalar_value
                     .to_array()
@@ -998,7 +993,7 @@ impl StructValue {
 
 impl Default for StructValue {
     fn default() -> StructValue {
-        StructValue::new(BTreeMap::new(), StructType::new(vec![]))
+        StructValue::new(vec![], StructType::new(vec![]))
     }
 }
 
@@ -1099,18 +1094,16 @@ impl TryFrom<ScalarValue> for Value {
                 .unwrap_or(Value::Null),
             ScalarValue::Struct(struct_array) => {
                 let struct_type: StructType = (struct_array.fields()).try_into()?;
-                let items = struct_type
-                    .fields()
+                let items = struct_array
+                    .columns()
                     .iter()
-                    .zip(struct_array.columns().iter())
-                    .map(|(field, array)| {
+                    .map(|array| {
                         // we only take first element from each array
                         let field_scalar_value = ScalarValue::try_from_array(array.as_ref(), 0)
                             .context(ConvertArrowArrayToScalarsSnafu)?;
-                        let field_value = field_scalar_value.try_into()?;
-                        Ok((field.name().to_string(), field_value))
+                        field_scalar_value.try_into()
                     })
-                    .collect::<Result<BTreeMap<String, Value>>>()?;
+                    .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::new(items, struct_type))
             }
             ScalarValue::Decimal256(_, _, _)
@@ -1551,8 +1544,8 @@ pub enum StructValueRef<'a> {
         idx: usize,
     },
     Ref(&'a StructValue),
-    RefMap {
-        val: BTreeMap<String, ValueRef<'a>>,
+    RefList {
+        val: Vec<ValueRef<'a>>,
         fields: StructType,
     },
 }
@@ -1562,12 +1555,9 @@ impl<'a> StructValueRef<'a> {
         match self {
             StructValueRef::Indexed { vector, idx } => vector.get(*idx),
             StructValueRef::Ref(val) => Value::Struct((*val).clone()),
-            StructValueRef::RefMap { val, fields } => {
-                let mut map = BTreeMap::new();
-                for (key, value) in val {
-                    map.insert(key.clone(), Value::from(value.clone()));
-                }
-                Value::Struct(StructValue::new(map, fields.clone()))
+            StructValueRef::RefList { val, fields } => {
+                let items = val.iter().map(|v| Value::from(v.clone())).collect();
+                Value::Struct(StructValue::new(items, fields.clone()))
             }
         }
     }
@@ -1576,7 +1566,7 @@ impl<'a> StructValueRef<'a> {
         match self {
             StructValueRef::Indexed { vector, .. } => vector.struct_type(),
             StructValueRef::Ref(val) => val.struct_type(),
-            StructValueRef::RefMap { fields, .. } => fields,
+            StructValueRef::RefList { fields, .. } => fields,
         }
     }
 }
@@ -1589,7 +1579,7 @@ impl Serialize for StructValueRef<'_> {
                 _ => unreachable!(),
             },
             StructValueRef::Ref(val) => val.serialize(serializer),
-            StructValueRef::RefMap { val, .. } => val.serialize(serializer),
+            StructValueRef::RefList { val, .. } => val.serialize(serializer),
         }
     }
 }
@@ -1652,7 +1642,7 @@ impl ValueRef<'_> {
             ValueRef::Struct(val) => match val {
                 StructValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 StructValueRef::Ref(val) => val.estimated_size(),
-                StructValueRef::RefMap { val, .. } => val.values().map(|v| v.data_size()).sum(),
+                StructValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
             },
         }
     }
@@ -1773,12 +1763,12 @@ pub(crate) mod tests {
     pub(crate) fn build_struct_value() -> StructValue {
         let struct_type = build_struct_type();
 
-        let mut struct_items = BTreeMap::new();
-        struct_items.insert("id".to_string(), Value::Int32(1));
-        struct_items.insert("name".to_string(), Value::String("tom".into()));
-        struct_items.insert("age".to_string(), Value::UInt8(25));
-        struct_items.insert("address".to_string(), Value::String("94038".into()));
-
+        let struct_items = vec![
+            Value::Int32(1),
+            Value::String("tom".into()),
+            Value::UInt8(25),
+            Value::String("94038".into()),
+        ];
         StructValue::new(struct_items, struct_type)
     }
 
@@ -2722,7 +2712,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             Value::Struct(build_struct_value()).to_string(),
-            "{ address: 94038, age: 25, id: 1, name: tom }"
+            "{ id: 1, name: tom, age: 25, address: 94038 }"
         );
     }
 
