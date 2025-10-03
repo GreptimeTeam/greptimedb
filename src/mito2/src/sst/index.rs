@@ -21,13 +21,14 @@ pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_base::AffectedRows;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, error, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
@@ -42,7 +43,7 @@ use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, Regio
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::error::{BuildIndexAsyncSnafu, Error, Result};
+use crate::error::{BuildIndexAsyncSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, Result};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
@@ -437,7 +438,7 @@ impl IndexerBuilderImpl {
 }
 
 /// Type of an index build task.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum IndexBuildType {
     /// Build index when schema change.
     SchemaChange,
@@ -458,6 +459,38 @@ impl From<OperationType> for IndexBuildType {
     }
 }
 
+impl IndexBuildType {
+    // Higher value means higher priority.
+    fn priority(&self) -> u8 {
+        match self {
+            IndexBuildType::Manual => 3,
+            IndexBuildType::SchemaChange => 2,
+            IndexBuildType::Flush => 1,
+            IndexBuildType::Compact => 0,
+        }
+    }
+}
+
+impl PartialEq for IndexBuildType {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority() == other.priority()
+    }
+}
+
+impl Eq for IndexBuildType {}
+
+impl PartialOrd for IndexBuildType {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexBuildType {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority().cmp(&other.priority())
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum IndexBuildOutcome {
     Finished,
@@ -465,7 +498,7 @@ pub enum IndexBuildOutcome {
 }
 
 /// Mpsc output result sender.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResultMpscSender(Sender<Result<IndexBuildOutcome>>);
 
 impl ResultMpscSender {
@@ -474,6 +507,7 @@ impl ResultMpscSender {
     }
 }
 
+#[derive(Clone)]
 pub struct IndexBuildTask {
     /// The file meta to build index for.
     pub file_meta: FileMeta,
@@ -494,13 +528,14 @@ pub struct IndexBuildTask {
 
 impl IndexBuildTask {
     /// Notify the caller the job is success.
-    pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
+    pub async fn on_success(&self, outcome: IndexBuildOutcome) {
         let _ = self.sender.0.send(Ok(outcome)).await;
     }
 
     /// Send index build error to waiter.
-    pub async fn on_failure(&mut self, err: Arc<Error>) {
-        let _ = self.sender
+    pub async fn on_failure(&self, err: Arc<Error>) {
+        let _ = self
+            .sender
             .0
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
                 region_id: self.file_meta.region_id,
@@ -655,19 +690,165 @@ impl IndexBuildTask {
     }
 }
 
-#[derive(Clone)]
+// Implement ordering for IndexBuildTask based on the reason's priority.
+impl PartialEq for IndexBuildTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.reason == other.reason
+    }
+}
+
+impl Eq for IndexBuildTask {}
+
+impl PartialOrd for IndexBuildTask {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexBuildTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.reason.cmp(&other.reason)
+    }
+}
+
+/// Tracks the index build status of a region scheduled by the [IndexBuildScheduler].
+pub struct IndexBuildStatus {
+    pub region_id: RegionId,
+    pub building_files: HashSet<FileId>,
+    pub pending_tasks: BinaryHeap<IndexBuildTask>,
+}
+
+impl IndexBuildStatus {
+    pub fn new(region_id: RegionId) -> Self {
+        IndexBuildStatus {
+            region_id,
+            building_files: HashSet::new(),
+            pending_tasks: BinaryHeap::new(),
+        }
+    }
+
+    async fn on_failure(self, err: Arc<Error>) {
+        for task in self.pending_tasks {
+            task.on_failure(err.clone()).await;
+        }
+    }
+}
+
+/// Manager background index build tasks of a worker.
 pub struct IndexBuildScheduler {
+    /// Background job scheduler.
     scheduler: SchedulerRef,
+    /// Tracks regions need to build index.
+    region_status: HashMap<RegionId, IndexBuildStatus>,
+    /// Limit of files allowed to build index concurrently for a region.
+    files_limit: usize,
 }
 
 impl IndexBuildScheduler {
-    pub fn new(scheduler: SchedulerRef) -> Self {
-        IndexBuildScheduler { scheduler }
+    pub fn new(scheduler: SchedulerRef, files_limit: usize) -> Self {
+        IndexBuildScheduler {
+            scheduler,
+            region_status: HashMap::new(),
+            files_limit,
+        }
     }
+
     pub fn schedule_build(&mut self, task: IndexBuildTask) -> Result<()> {
-        let job = task.into_index_build_job();
-        self.scheduler.schedule(job)?;
+        let status = self
+            .region_status
+            .entry(task.file_meta.region_id)
+            .or_insert_with(|| IndexBuildStatus::new(task.file_meta.region_id));
+
+        if status.building_files.contains(&task.file_meta.file_id) {
+            // Index is already being built for this file, skip.
+            debug!(
+                "Index is already being built for region {}, file {}, skipping.",
+                task.file_meta.region_id, task.file_meta.file_id
+            );
+            return Ok(());
+        }
+
+        status.pending_tasks.push(task);
+
+        self.schedule_next_build_batch();
         Ok(())
+    }
+
+    /// Schedule tasks until reaching the files limit or no more tasks.
+    fn schedule_next_build_batch(&mut self) {
+        let mut building_count = 0;
+        for status in self.region_status.values() {
+            building_count += status.building_files.len();
+        }
+
+        while building_count < self.files_limit {
+            if let Some(task) = self.find_next_task() {
+                let region_id = task.file_meta.region_id;
+                let file_id = task.file_meta.file_id;
+                let job = task.into_index_build_job();
+                if self.scheduler.schedule(job).is_ok() {
+                    if let Some(status) = self.region_status.get_mut(&region_id) {
+                        status.building_files.insert(file_id);
+                        building_count += 1;
+                        status
+                            .pending_tasks
+                            .retain(|t| t.file_meta.file_id != file_id);
+                    } else {
+                        error!(
+                            "Region status not found when scheduling index build task, region: {}",
+                            region_id
+                        );
+                    }
+                } else {
+                    error!(
+                        "Failed to schedule index build job, region: {}, file_id: {}",
+                        region_id, file_id
+                    );
+                }
+            } else {
+                // No more tasks to schedule.
+                break;
+            }
+        }
+    }
+
+    /// Find the next task which has the highest priority to run.
+    fn find_next_task(&self) -> Option<IndexBuildTask> {
+        self.region_status
+            .iter()
+            .filter_map(|(_, status)| status.pending_tasks.peek())
+            .max()
+            .cloned()
+    }
+
+    fn on_build_finished(&mut self, region_id: RegionId, file_id: FileId) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.building_files.remove(&file_id);
+            if status.building_files.is_empty() && status.pending_tasks.is_empty() {
+                // No more tasks for this region, remove it.
+                self.region_status.remove(&region_id);
+            }
+        }
+
+        self.schedule_next_build_batch();
+    }
+
+    pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        );
+    }
+
+    pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+    }
+
+    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+        status.on_failure(err);
     }
 }
 
