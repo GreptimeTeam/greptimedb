@@ -240,8 +240,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Struct(struct_value) => row_writer.write_col(format!(
                         "{{{}}}",
                         struct_value
-                            .items()
+                            .struct_type()
+                            .fields()
                             .iter()
+                            .map(|f| f.name())
+                            .zip(struct_value.items().iter())
                             .map(|(k, v)| format!("{k}: {v}"))
                             .join(", ")
                     ))?,

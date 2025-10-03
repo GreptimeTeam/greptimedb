@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_decimal::Decimal128;
@@ -751,15 +751,10 @@ pub fn pb_value_to_value_ref<'a>(
                 .items
                 .iter()
                 .zip(struct_datatype_ext.fields.iter())
-                .map(|(item, field)| {
-                    (
-                        field.name.to_string(),
-                        pb_value_to_value_ref(item, field.datatype_extension.as_ref()),
-                    )
-                })
-                .collect::<BTreeMap<String, ValueRef>>();
+                .map(|(item, field)| pb_value_to_value_ref(item, field.datatype_extension.as_ref()))
+                .collect::<Vec<ValueRef>>();
 
-            let struct_value_ref = StructValueRef::RefMap {
+            let struct_value_ref = StructValueRef::RefList {
                 val: items,
                 fields: StructType::new(struct_fields),
             };
@@ -2078,9 +2073,7 @@ mod tests {
 
     #[test]
     fn test_struct_to_pb_value() {
-        let mut items = BTreeMap::new();
-        items.insert("a.a".to_string(), Value::Boolean(true));
-        items.insert("a.b".to_string(), Value::String("tom".into()));
+        let items = vec![Value::Boolean(true), Value::String("tom".into())];
 
         let value = Value::Struct(StructValue::new(
             items,

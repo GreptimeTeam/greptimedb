@@ -108,8 +108,8 @@ impl Vector for StructVector {
             return Value::Null;
         }
 
-        let mut values = BTreeMap::new();
-        for (i, field) in self.fields.fields().iter().enumerate() {
+        let mut values = Vec::new();
+        for i in 0..self.fields.fields().len() {
             let field_array = &self.array.column(i);
             let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
                 panic!(
@@ -118,7 +118,7 @@ impl Vector for StructVector {
                 )
             });
 
-            values.insert(field.name().to_string(), field_vector.get(index));
+            values.push(field_vector.get(index));
         }
 
         Value::Struct(StructValue::new(values, self.fields.clone()))
@@ -300,11 +300,7 @@ impl StructVectorBuilder {
     }
 
     fn push_struct_value(&mut self, struct_value: &StructValue) -> Result<()> {
-        for (index, field) in self.fields.fields().iter().enumerate() {
-            let value = struct_value
-                .items()
-                .get(field.name())
-                .unwrap_or(&Value::Null);
+        for (index, value) in struct_value.items().iter().enumerate() {
             self.value_builders[index].try_push_value_ref(&value.as_value_ref())?;
         }
         self.null_buffer.append_non_null();
@@ -355,11 +351,9 @@ impl MutableVector for StructVectorBuilder {
                     None => self.push_null(),
                 },
                 StructValueRef::Ref(val) => self.push_struct_value(val)?,
-                StructValueRef::RefMap { val, fields } => {
+                StructValueRef::RefList { val, fields } => {
                     let struct_value = StructValue::new(
-                        val.iter()
-                            .map(|(key, v)| (key.to_string(), Value::from(v.clone())))
-                            .collect(),
+                        val.iter().map(|v| Value::from(v.clone())).collect(),
                         fields.clone(),
                     );
                     self.push_struct_value(&struct_value)?;
