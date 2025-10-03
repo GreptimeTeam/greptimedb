@@ -13,61 +13,22 @@
 // limitations under the License.
 
 use common_base::readable_size::ReadableSize;
-use sysinfo::System;
-
-/// Get the CPU core number of system, aware of cgroups.
-pub fn get_cpus() -> usize {
-    // This function will check cgroups
-    num_cpus::get()
-}
-
-/// Get the total memory of the system.
-/// If `cgroup_limits` is enabled, it will also check it.
-pub fn get_sys_total_memory() -> Option<ReadableSize> {
-    if sysinfo::IS_SUPPORTED_SYSTEM {
-        let mut sys_info = System::new();
-        sys_info.refresh_memory();
-        let mut total_memory = sys_info.total_memory();
-        // Compare with cgroups memory limit, use smaller values
-        // This method is only implemented for Linux. It always returns None for all other systems.
-        if let Some(cgroup_limits) = sys_info.cgroup_limits() {
-            total_memory = total_memory.min(cgroup_limits.total_memory)
-        }
-        Some(ReadableSize(total_memory))
-    } else {
-        None
-    }
-}
+use common_stat::{get_total_cpu_millicores, get_total_memory_readable};
 
 /// `ResourceSpec` holds the static resource specifications of a node,
 /// such as CPU cores and memory capacity. These values are fixed
 /// at startup and do not change dynamically during runtime.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceSpec {
-    pub cpus: usize,
+    pub cpus: i64,
     pub memory: Option<ReadableSize>,
 }
 
 impl Default for ResourceSpec {
     fn default() -> Self {
         Self {
-            cpus: get_cpus(),
-            memory: get_sys_total_memory(),
+            cpus: get_total_cpu_millicores(),
+            memory: get_total_memory_readable(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_cpus() {
-        assert!(get_cpus() > 0);
-    }
-
-    #[test]
-    fn test_get_sys_total_memory() {
-        assert!(get_sys_total_memory().unwrap() > ReadableSize::mb(0));
     }
 }

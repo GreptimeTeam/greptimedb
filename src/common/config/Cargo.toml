@@ -11,15 +11,14 @@ workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-stat.workspace = true
 config.workspace = true
 humantime-serde.workspace = true
-num_cpus.workspace = true
 object-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 snafu.workspace = true
-sysinfo.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
