@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["contains","ends_with","ilike","in_list","in_list_utf8","like","nilike","nlike","regexp_is_match","regexp_is_match_scalar","starts_with"],"trait":["StringArrayType"]};

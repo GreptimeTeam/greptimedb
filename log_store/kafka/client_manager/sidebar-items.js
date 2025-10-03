@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PARTITION"],"struct":["Client","ClientManager"],"type":["ClientManagerRef"]};
