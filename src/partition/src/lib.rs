@@ -22,7 +22,9 @@ pub mod error;
 pub mod expr;
 pub mod manager;
 pub mod multi_dim;
+pub mod overlap;
 pub mod partition;
 pub mod splitter;
+pub mod subtask;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};
