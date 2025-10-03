@@ -79,6 +79,10 @@ impl InformationExtension for StandaloneInformationExtension {
             memory_bytes: common_config::utils::get_sys_total_memory()
                 .unwrap_or_default()
                 .as_bytes(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         };
         Ok(vec![node_info])
     }

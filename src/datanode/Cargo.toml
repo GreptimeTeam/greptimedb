@@ -43,6 +43,7 @@ datatypes.workspace = true
 file-engine.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+hostname.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
 log-store.workspace = true

@@ -185,6 +185,10 @@ impl HeartbeatTask {
             start_time_ms,
             cpus,
             memory_bytes,
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         })
     }
 

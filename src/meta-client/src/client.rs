@@ -372,25 +372,33 @@ impl ClusterInfo for MetaClient {
             let (leader, followers) = cluster_client.get_metasrv_peers().await?;
             followers
                 .into_iter()
-                .map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
-                    cpus: node.cpus,
-                    memory_bytes: node.memory_bytes,
+                .map(|node| {
+                    let node_info = node.info.unwrap_or_default();
+                    NodeInfo {
+                        peer: node.peer.unwrap_or_default(),
+                        last_activity_ts,
+                        status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                        version: node_info.version,
+                        git_commit: node_info.git_commit,
+                        start_time_ms: node_info.start_time_ms,
+                        cpus: node_info.cpus,
+                        memory_bytes: node_info.memory_bytes,
+                        hostname: node_info.hostname,
+                    }
                 })
-                .chain(leader.into_iter().map(|node| NodeInfo {
-                    peer: node.peer.unwrap_or_default(),
-                    last_activity_ts,
-                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
-                    version: node.version,
-                    git_commit: node.git_commit,
-                    start_time_ms: node.start_time_ms,
-                    cpus: node.cpus,
-                    memory_bytes: node.memory_bytes,
+                .chain(leader.into_iter().map(|node| {
+                    let node_info = node.info.unwrap_or_default();
+                    NodeInfo {
+                        peer: node.peer.unwrap_or_default(),
+                        last_activity_ts,
+                        status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                        version: node_info.version,
+                        git_commit: node_info.git_commit,
+                        start_time_ms: node_info.start_time_ms,
+                        cpus: node_info.cpus,
+                        memory_bytes: node_info.memory_bytes,
+                        hostname: node_info.hostname,
+                    }
                 }))
                 .collect::<Vec<_>>()
         } else {

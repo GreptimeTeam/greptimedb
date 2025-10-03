@@ -1002,6 +1002,7 @@ mod tests {
             start_time_ms: 0,
             cpus: 0,
             memory_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
         pg_election.register_candidate(&node_info).await.unwrap();
     }

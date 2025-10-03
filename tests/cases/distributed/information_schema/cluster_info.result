@@ -18,6 +18,7 @@ DESC TABLE CLUSTER_INFO;
 | uptime       | String               |     | YES  |         | FIELD         |
 | active_time  | String               |     | YES  |         | FIELD         |
 | node_status  | String               |     | YES  |         | FIELD         |
+| hostname     | String               |     | YES  |         | FIELD         |
 +--------------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS REPLACE version node_version

@@ -245,6 +245,7 @@ mod tests {
             start_time_ms: current_time_millis() as u64,
             cpus: 0,
             memory_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
@@ -270,6 +271,7 @@ mod tests {
             start_time_ms: current_time_millis() as u64,
             cpus: 0,
             memory_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         in_memory
@@ -307,6 +309,7 @@ mod tests {
             start_time_ms: last_activity_ts as u64,
             cpus: 0,
             memory_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
