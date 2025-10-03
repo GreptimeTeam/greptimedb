@@ -381,8 +381,10 @@ impl ClusterInfo for MetaClient {
                         version: node_info.version,
                         git_commit: node_info.git_commit,
                         start_time_ms: node_info.start_time_ms,
-                        cpus: node_info.cpus,
-                        memory_bytes: node_info.memory_bytes,
+                        total_cpu_millicores: node_info.total_cpu_millicores,
+                        total_memory_bytes: node_info.total_memory_bytes,
+                        cpu_usage_millicores: node_info.cpu_usage_millicores,
+                        memory_usage_bytes: node_info.memory_usage_bytes,
                         hostname: node_info.hostname,
                     }
                 })
@@ -395,8 +397,10 @@ impl ClusterInfo for MetaClient {
                         version: node_info.version,
                         git_commit: node_info.git_commit,
                         start_time_ms: node_info.start_time_ms,
-                        cpus: node_info.cpus,
-                        memory_bytes: node_info.memory_bytes,
+                        total_cpu_millicores: node_info.total_cpu_millicores,
+                        total_memory_bytes: node_info.total_memory_bytes,
+                        cpu_usage_millicores: node_info.cpu_usage_millicores,
+                        memory_usage_bytes: node_info.memory_usage_bytes,
                         hostname: node_info.hostname,
                     }
                 }))

@@ -24,6 +24,9 @@ use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::peer::Peer;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_query::request::QueryRequest;
+use common_stat::{
+    get_memory_usage_from_cgroups, get_total_cpu_millicores, get_total_memory_bytes,
+};
 use datanode::region_server::RegionServer;
 use flow::StreamingEngine;
 use snafu::ResultExt;
@@ -75,8 +78,11 @@ impl InformationExtension for StandaloneInformationExtension {
             // Use `self.start_time_ms` instead.
             // It's not precise but enough.
             start_time_ms: self.start_time_ms,
-            cpus: common_stat::get_total_cpu_millicores() as u32,
-            memory_bytes: common_stat::get_total_memory_bytes() as u64,
+            total_cpu_millicores: get_total_cpu_millicores(),
+            total_memory_bytes: get_total_memory_bytes(),
+            // FIXME(zyy17): How to get the accurate cpu usage? It need to be calculated periodically.
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: get_memory_usage_from_cgroups().unwrap_or_default(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

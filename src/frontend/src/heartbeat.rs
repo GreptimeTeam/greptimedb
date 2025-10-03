@@ -24,6 +24,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_stat::{calculate_cpu_usage, get_cpu_usage_from_cgroups, get_memory_usage_from_cgroups};
 use common_telemetry::{debug, error, info, warn};
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
@@ -133,6 +134,8 @@ impl HeartbeatTask {
     fn new_heartbeat_request(
         heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
+        cpu_usage: Option<i64>,
+        memory_usage: Option<i64>,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -143,21 +146,38 @@ impl HeartbeatTask {
             None => None,
         };
 
-        Some(HeartbeatRequest {
+        let mut heartbeat_request = HeartbeatRequest {
             mailbox_message,
             ..heartbeat_request.clone()
-        })
+        };
+
+        if let Some(info) = heartbeat_request.info.as_mut() {
+            if let Some(mem) = memory_usage {
+                info.memory_usage_bytes = mem;
+            }
+            if let Some(cpu) = cpu_usage {
+                info.cpu_usage_millicores = cpu;
+            }
+        }
+
+        Some(heartbeat_request)
     }
 
-    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
+    fn build_node_info(
+        start_time_ms: u64,
+        total_cpu_millicores: i64,
+        total_memory_bytes: i64,
+    ) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
 
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus,
-            memory_bytes,
+            total_cpu_millicores,
+            total_memory_bytes,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -177,24 +197,33 @@ impl HeartbeatTask {
             id: 0,
             addr: self.peer_addr.clone(),
         });
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
-
+        let total_cpu_millicores = self.resource_spec.total_cpu_millicores;
+        let total_memory_bytes = self
+            .resource_spec
+            .total_memory_bytes
+            .unwrap_or_default()
+            .as_bytes() as i64;
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
-                info: Self::build_node_info(start_time_ms, cpus, memory_bytes),
+                info: Self::build_node_info(
+                    start_time_ms,
+                    total_cpu_millicores,
+                    total_memory_bytes,
+                ),
                 ..Default::default()
             };
+
+            let mut last_cpu_usage_usecs = get_cpu_usage_from_cgroups();
 
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::new_heartbeat_request(&heartbeat_request, Some(message))
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), None, None)
                         } else {
                             warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
@@ -202,8 +231,17 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        sleep.as_mut().reset(Instant::now() + report_interval);
-                       Self::new_heartbeat_request(&heartbeat_request, None)
+                       sleep.as_mut().reset(Instant::now() + report_interval);
+
+                       let mut cpu_usage = get_cpu_usage_from_cgroups();
+                       let memory_usage = get_memory_usage_from_cgroups();
+
+                       if let (Some(current), Some(last)) = (cpu_usage, last_cpu_usage_usecs) {
+                            cpu_usage = Some(calculate_cpu_usage(current, last, report_interval.as_millis() as i64));
+                            last_cpu_usage_usecs = Some(current);
+                       }
+
+                       Self::new_heartbeat_request(&heartbeat_request, None, cpu_usage, memory_usage)
                     }
                 };
 

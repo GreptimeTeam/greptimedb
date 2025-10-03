@@ -3917,6 +3917,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -4917,6 +4918,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -5333,7 +5335,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1681de73fdf47b95542ec5d10d2c7f6c9d347540#1681de73fdf47b95542ec5d10d2c7f6c9d347540"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=560ae673ca678dcc844fd6c0c725aa172b017c99#560ae673ca678dcc844fd6c0c725aa172b017c99"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7406,6 +7408,7 @@ dependencies = [
  "common-procedure",
  "common-procedure-test",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",

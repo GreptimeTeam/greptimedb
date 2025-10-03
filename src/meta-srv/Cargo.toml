@@ -39,6 +39,7 @@ common-meta.workspace = true
 common-options.workspace = true
 common-procedure.workspace = true
 common-runtime.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true

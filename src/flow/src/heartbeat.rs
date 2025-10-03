@@ -26,6 +26,7 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_meta::key::flow::flow_state::FlowStat;
+use common_stat::{calculate_cpu_usage, get_cpu_usage_from_cgroups, get_memory_usage_from_cgroups};
 use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
@@ -146,6 +147,8 @@ impl HeartbeatTask {
         heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
         latest_report: &Option<FlowStat>,
+        cpu_usage: Option<i64>,
+        memory_usage: Option<i64>,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -170,21 +173,37 @@ impl HeartbeatTask {
                     .collect(),
             });
 
-        Some(HeartbeatRequest {
+        let mut heartbeat_request = HeartbeatRequest {
             mailbox_message,
             flow_stat,
             ..heartbeat_request.clone()
-        })
+        };
+
+        if let (Some(cpu_usage), Some(info)) = (cpu_usage, heartbeat_request.info.as_mut()) {
+            info.cpu_usage_millicores = cpu_usage;
+        }
+
+        if let (Some(memory_usage), Some(info)) = (memory_usage, heartbeat_request.info.as_mut()) {
+            info.memory_usage_bytes = memory_usage;
+        }
+
+        Some(heartbeat_request)
     }
 
-    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
+    fn build_node_info(
+        start_time_ms: u64,
+        total_cpu_millicores: i64,
+        total_memory_bytes: i64,
+    ) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus,
-            memory_bytes,
+            total_cpu_millicores,
+            total_memory_bytes,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -203,8 +222,12 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
+        let total_cpu_millicores = self.resource_spec.total_cpu_millicores;
+        let total_memory_bytes = self
+            .resource_spec
+            .total_memory_bytes
+            .unwrap_or_default()
+            .as_bytes() as i64;
 
         let query_stat_size = self.query_stat_size.clone();
 
@@ -218,15 +241,16 @@ impl HeartbeatTask {
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
                 node_epoch,
-                info: Self::build_node_info(node_epoch, cpus, memory_bytes),
+                info: Self::build_node_info(node_epoch, total_cpu_millicores, total_memory_bytes),
                 ..Default::default()
             };
 
+            let mut last_cpu_usage_usecs = get_cpu_usage_from_cgroups();
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report, None, None)
                         } else {
                             warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
@@ -234,7 +258,14 @@ impl HeartbeatTask {
                         }
                     }
                     _ = interval.tick() => {
-                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report)
+                        let mut cpu_usage = get_cpu_usage_from_cgroups();
+                        let memory_usage = get_memory_usage_from_cgroups();
+                        if let (Some(current), Some(last)) = (cpu_usage, last_cpu_usage_usecs) {
+                            cpu_usage = Some(calculate_cpu_usage(current, last, report_interval.as_millis() as i64));
+                            last_cpu_usage_usecs = Some(current);
+                        }
+
+                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report, cpu_usage, memory_usage)
                     }
                 };
 

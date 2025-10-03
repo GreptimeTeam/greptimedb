@@ -20,15 +20,15 @@ use common_stat::{get_total_cpu_millicores, get_total_memory_readable};
 /// at startup and do not change dynamically during runtime.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceSpec {
-    pub cpus: i64,
-    pub memory: Option<ReadableSize>,
+    pub total_cpu_millicores: i64,
+    pub total_memory_bytes: Option<ReadableSize>,
 }
 
 impl Default for ResourceSpec {
     fn default() -> Self {
         Self {
-            cpus: get_total_cpu_millicores(),
-            memory: get_total_memory_readable(),
+            total_cpu_millicores: get_total_cpu_millicores(),
+            total_memory_bytes: get_total_memory_readable(),
         }
     }
 }

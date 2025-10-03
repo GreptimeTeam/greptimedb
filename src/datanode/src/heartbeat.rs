@@ -31,6 +31,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_stat::{calculate_cpu_usage, get_cpu_usage_from_cgroups, get_memory_usage_from_cgroups};
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
 use meta_client::MetaClientRef;
@@ -234,8 +235,12 @@ impl HeartbeatTask {
 
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
+        let total_cpu_millicores = self.resource_spec.total_cpu_millicores;
+        let total_memory_bytes = self
+            .resource_spec
+            .total_memory_bytes
+            .unwrap_or_default()
+            .as_bytes() as i64;
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -249,8 +254,10 @@ impl HeartbeatTask {
                     version: build_info.version.to_string(),
                     git_commit: build_info.commit_short.to_string(),
                     start_time_ms: node_epoch,
-                    cpus,
-                    memory_bytes,
+                    total_cpu_millicores,
+                    total_memory_bytes,
+                    cpu_usage_millicores: 0,
+                    memory_usage_bytes: 0,
                     hostname: hostname::get()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -262,6 +269,7 @@ impl HeartbeatTask {
                 ..Default::default()
             };
 
+            let mut last_cpu_usage_usecs = get_cpu_usage_from_cgroups();
             loop {
                 if !running.load(Ordering::Relaxed) {
                     info!("shutdown heartbeat task");
@@ -294,12 +302,28 @@ impl HeartbeatTask {
                         let topic_stats = region_server_clone.topic_stats();
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
-                        let req = HeartbeatRequest {
+                        let mut cpu_usage = get_cpu_usage_from_cgroups();
+                        let memory_usage = get_memory_usage_from_cgroups();
+                        if let (Some(current), Some(last)) = (cpu_usage, last_cpu_usage_usecs) {
+                            cpu_usage = Some(calculate_cpu_usage(current, last, interval as i64));
+                            last_cpu_usage_usecs = Some(current);
+                        }
+
+                        let mut req = HeartbeatRequest {
                             region_stats,
                             topic_stats,
                             duration_since_epoch,
                             ..heartbeat_request.clone()
                         };
+
+                        if let (Some(cpu_usage), Some(info)) = (cpu_usage, req.info.as_mut()) {
+                            info.cpu_usage_millicores = cpu_usage;
+                        }
+
+                        if let (Some(memory_usage), Some(info)) = (memory_usage, req.info.as_mut()) {
+                            info.memory_usage_bytes = memory_usage;
+                        }
+
                         sleep.as_mut().reset(now + Duration::from_millis(interval));
                         Some(req)
                     }
