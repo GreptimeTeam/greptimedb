@@ -249,6 +249,115 @@ impl StorageSstEntry {
     }
 }
 
+/// An entry describing puffin index metadata for inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PuffinIndexMetaEntry {
+    /// The table directory this index belongs to.
+    pub table_dir: String,
+    /// The full path of the index file in object store.
+    pub index_file_path: String,
+    /// The region id referencing the index file.
+    pub region_id: RegionId,
+    /// The table id referencing the index file.
+    pub table_id: TableId,
+    /// The region number referencing the index file.
+    pub region_number: RegionNumber,
+    /// The region group referencing the index file.
+    pub region_group: RegionGroup,
+    /// The region sequence referencing the index file.
+    pub region_sequence: RegionSeq,
+    /// Engine-specific file identifier (string form).
+    pub file_id: String,
+    /// Size of the index file in object store (if available).
+    pub index_file_size: Option<u64>,
+    /// Logical index type (`bloom_filter`, `fulltext_bloom`, `fulltext_tantivy`, `inverted`).
+    pub index_type: String,
+    /// Target type (`column`, ...).
+    pub target_type: String,
+    /// Encoded target key string.
+    pub target_key: String,
+    /// Structured JSON describing the target.
+    pub target_json: String,
+    /// Size of the blob storing this target.
+    pub blob_size: u64,
+    /// Structured JSON describing index-specific metadata (if available).
+    pub meta_json: Option<String>,
+    /// Node id associated with the index file (if known).
+    pub node_id: Option<u64>,
+}
+
+impl PuffinIndexMetaEntry {
+    /// Returns the schema describing puffin index metadata entries.
+    pub fn schema() -> SchemaRef {
+        use datatypes::prelude::ConcreteDataType as Ty;
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new("table_dir", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_path", Ty::string_datatype(), false),
+            ColumnSchema::new("region_id", Ty::uint64_datatype(), false),
+            ColumnSchema::new("table_id", Ty::uint32_datatype(), false),
+            ColumnSchema::new("region_number", Ty::uint32_datatype(), false),
+            ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
+            ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
+            ColumnSchema::new("file_id", Ty::string_datatype(), false),
+            ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
+            ColumnSchema::new("index_type", Ty::string_datatype(), false),
+            ColumnSchema::new("target_type", Ty::string_datatype(), false),
+            ColumnSchema::new("target_key", Ty::string_datatype(), false),
+            ColumnSchema::new("target_json", Ty::string_datatype(), false),
+            ColumnSchema::new("blob_size", Ty::uint64_datatype(), false),
+            ColumnSchema::new("meta_json", Ty::string_datatype(), true),
+            ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
+        ]))
+    }
+
+    /// Converts a list of puffin index metadata entries to a record batch.
+    pub fn to_record_batch(entries: &[Self]) -> std::result::Result<DfRecordBatch, ArrowError> {
+        let schema = Self::schema();
+        let table_dirs = entries.iter().map(|e| e.table_dir.as_str());
+        let index_file_paths = entries.iter().map(|e| e.index_file_path.as_str());
+        let region_ids = entries.iter().map(|e| e.region_id.as_u64());
+        let table_ids = entries.iter().map(|e| e.table_id);
+        let region_numbers = entries.iter().map(|e| e.region_number);
+        let region_groups = entries.iter().map(|e| e.region_group);
+        let region_sequences = entries.iter().map(|e| e.region_sequence);
+        let file_ids = entries.iter().map(|e| e.file_id.as_str());
+        let index_file_sizes = entries.iter().map(|e| e.index_file_size);
+        let index_types = entries.iter().map(|e| e.index_type.as_str());
+        let target_types = entries.iter().map(|e| e.target_type.as_str());
+        let target_keys = entries.iter().map(|e| e.target_key.as_str());
+        let target_jsons = entries.iter().map(|e| e.target_json.as_str());
+        let blob_sizes = entries.iter().map(|e| e.blob_size);
+        let meta_jsons = entries.iter().map(|e| e.meta_json.as_deref());
+        let node_ids = entries.iter().map(|e| e.node_id);
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(table_dirs)),
+            Arc::new(StringArray::from_iter_values(index_file_paths)),
+            Arc::new(UInt64Array::from_iter_values(region_ids)),
+            Arc::new(UInt32Array::from_iter_values(table_ids)),
+            Arc::new(UInt32Array::from_iter_values(region_numbers)),
+            Arc::new(UInt8Array::from_iter_values(region_groups)),
+            Arc::new(UInt32Array::from_iter_values(region_sequences)),
+            Arc::new(StringArray::from_iter_values(file_ids)),
+            Arc::new(UInt64Array::from_iter(index_file_sizes)),
+            Arc::new(StringArray::from_iter_values(index_types)),
+            Arc::new(StringArray::from_iter_values(target_types)),
+            Arc::new(StringArray::from_iter_values(target_keys)),
+            Arc::new(StringArray::from_iter_values(target_jsons)),
+            Arc::new(UInt64Array::from_iter_values(blob_sizes)),
+            Arc::new(StringArray::from_iter(meta_jsons)),
+            Arc::new(UInt64Array::from_iter(node_ids)),
+        ];
+
+        DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
+    }
+
+    /// Reserved internal inspect table name for puffin index metadata.
+    pub fn reserved_table_name_for_inspection() -> &'static str {
+        "__inspect/__mito/__puffin_index_meta"
+    }
+}
+
 fn build_plan_helper(
     scan_request: ScanRequest,
     table_name: &str,
@@ -574,6 +683,188 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(1, node_ids.value(0));
+        assert!(node_ids.is_null(1));
+    }
+
+    #[test]
+    fn test_puffin_index_meta_to_record_batch() {
+        let entries = vec![
+            PuffinIndexMetaEntry {
+                table_dir: "table1".to_string(),
+                index_file_path: "index1".to_string(),
+                region_id: RegionId::with_group_and_seq(10, 0, 20),
+                table_id: 10,
+                region_number: 20,
+                region_group: 0,
+                region_sequence: 20,
+                file_id: "file1".to_string(),
+                index_file_size: Some(1024),
+                index_type: "bloom_filter".to_string(),
+                target_type: "column".to_string(),
+                target_key: "1".to_string(),
+                target_json: "{\"column\":1}".to_string(),
+                blob_size: 256,
+                meta_json: Some("{\"bloom\":{}}".to_string()),
+                node_id: Some(42),
+            },
+            PuffinIndexMetaEntry {
+                table_dir: "table2".to_string(),
+                index_file_path: "index2".to_string(),
+                region_id: RegionId::with_group_and_seq(11, 0, 21),
+                table_id: 11,
+                region_number: 21,
+                region_group: 0,
+                region_sequence: 21,
+                file_id: "file2".to_string(),
+                index_file_size: None,
+                index_type: "inverted".to_string(),
+                target_type: "unknown".to_string(),
+                target_key: "legacy".to_string(),
+                target_json: "{}".to_string(),
+                blob_size: 0,
+                meta_json: None,
+                node_id: None,
+            },
+        ];
+
+        let schema = PuffinIndexMetaEntry::schema();
+        let batch = PuffinIndexMetaEntry::to_record_batch(&entries).unwrap();
+
+        assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());
+        assert_eq!(2, batch.num_rows());
+
+        let table_dirs = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("table1", table_dirs.value(0));
+        assert_eq!("table2", table_dirs.value(1));
+
+        let index_file_paths = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("index1", index_file_paths.value(0));
+        assert_eq!("index2", index_file_paths.value(1));
+
+        let region_ids = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(
+            RegionId::with_group_and_seq(10, 0, 20).as_u64(),
+            region_ids.value(0)
+        );
+        assert_eq!(
+            RegionId::with_group_and_seq(11, 0, 21).as_u64(),
+            region_ids.value(1)
+        );
+
+        let table_ids = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(10, table_ids.value(0));
+        assert_eq!(11, table_ids.value(1));
+
+        let region_numbers = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(20, region_numbers.value(0));
+        assert_eq!(21, region_numbers.value(1));
+
+        let region_groups = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        assert_eq!(0, region_groups.value(0));
+        assert_eq!(0, region_groups.value(1));
+
+        let region_sequences = batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(20, region_sequences.value(0));
+        assert_eq!(21, region_sequences.value(1));
+
+        let file_ids = batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("file1", file_ids.value(0));
+        assert_eq!("file2", file_ids.value(1));
+
+        let index_file_sizes = batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(1024, index_file_sizes.value(0));
+        assert!(index_file_sizes.is_null(1));
+
+        let index_types = batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("bloom_filter", index_types.value(0));
+        assert_eq!("inverted", index_types.value(1));
+
+        let target_types = batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("column", target_types.value(0));
+        assert_eq!("unknown", target_types.value(1));
+
+        let target_keys = batch
+            .column(11)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("1", target_keys.value(0));
+        assert_eq!("legacy", target_keys.value(1));
+
+        let target_json = batch
+            .column(12)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("{\"column\":1}", target_json.value(0));
+        assert_eq!("{}", target_json.value(1));
+
+        let blob_sizes = batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(256, blob_sizes.value(0));
+        assert_eq!(0, blob_sizes.value(1));
+
+        let meta_jsons = batch
+            .column(14)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("{\"bloom\":{}}", meta_jsons.value(0));
+        assert!(meta_jsons.is_null(1));
+
+        let node_ids = batch
+            .column(15)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(42, node_ids.value(0));
         assert!(node_ids.is_null(1));
     }
 
