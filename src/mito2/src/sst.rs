@@ -21,13 +21,18 @@ use common_base::readable_size::ReadableSize;
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use serde::{Deserialize, Serialize};
+use datatypes::timestamp::timestamp_array_to_primitive;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
+
+use crate::read::Batch;
+use crate::sst::parquet::flat_format::time_index_column_index;
 
 pub mod file;
 pub mod file_purger;
@@ -240,4 +245,93 @@ fn plain_internal_fields() -> [FieldRef; 2] {
         )),
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
     ]
+}
+
+/// Gets the estimated number of series from record batches.
+///
+/// This struct tracks the last timestamp value to detect series boundaries
+/// by observing when timestamps decrease (indicating a new series).
+#[derive(Default)]
+pub(crate) struct SeriesEstimator {
+    /// The last timestamp value seen
+    last_timestamp: Option<i64>,
+    /// The estimated number of series
+    series_count: u64,
+}
+
+impl SeriesEstimator {
+    /// Updates the estimator with a new Batch.
+    ///
+    /// Since each Batch contains only one series, this increments the series count
+    /// and updates the last timestamp.
+    pub(crate) fn update(&mut self, batch: &Batch) {
+        let Some(last_ts) = batch.last_timestamp() else {
+            return;
+        };
+
+        // Checks if there's a boundary between the last batch and this batch
+        if let Some(prev_last_ts) = self.last_timestamp {
+            // If the first timestamp of this batch is less than the last timestamp
+            // we've seen, it indicates a new series
+            if let Some(first_ts) = batch.first_timestamp() {
+                if first_ts.value() <= prev_last_ts {
+                    self.series_count += 1;
+                }
+            }
+        } else {
+            // First batch, counts as first series
+            self.series_count = 1;
+        }
+
+        // Updates the last timestamp
+        self.last_timestamp = Some(last_ts.value());
+    }
+
+    /// Updates the estimator with a new record batch in flat format.
+    ///
+    /// This method examines the time index column to detect series boundaries.
+    pub(crate) fn update_flat(&mut self, record_batch: &RecordBatch) {
+        let batch_rows = record_batch.num_rows();
+        if batch_rows == 0 {
+            return;
+        }
+
+        let time_index_pos = time_index_column_index(record_batch.num_columns());
+        let timestamps = record_batch.column(time_index_pos);
+        let Some((ts_values, _unit)) = timestamp_array_to_primitive(timestamps) else {
+            return;
+        };
+        let values = ts_values.values();
+
+        // Checks if there's a boundary between the last batch and this batch
+        if let Some(last_ts) = self.last_timestamp {
+            if values[0] < last_ts {
+                self.series_count += 1;
+            }
+        } else {
+            // First batch, counts as first series
+            self.series_count = 1;
+        }
+
+        // Counts series boundaries within this batch.
+        for i in 0..batch_rows - 1 {
+            // We assumes the same timestamp as a new series, which is different from
+            // how we split batches.
+            if values[i] >= values[i + 1] {
+                self.series_count += 1;
+            }
+        }
+
+        // Updates the last timestamp
+        self.last_timestamp = Some(values[batch_rows - 1]);
+    }
+
+    /// Returns the estimated number of series.
+    pub(crate) fn finish(&mut self) -> u64 {
+        self.last_timestamp = None;
+        let count = self.series_count;
+        self.series_count = 0;
+
+        count
+    }
 }
