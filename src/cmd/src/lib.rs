@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_mem_prof::activate_heap_profile;
-use common_stat::{get_cpu_limit, get_memory_limit};
+use common_stat::{get_total_cpu_millicores, get_total_memory_bytes};
 use common_telemetry::{error, info, warn};
 
 use crate::error::Result;
@@ -125,7 +125,8 @@ pub fn log_versions(version: &str, short_version: &str, app: &str) {
 }
 
 pub fn create_resource_limit_metrics(app: &str) {
-    if let Some(cpu_limit) = get_cpu_limit() {
+    let cpu_limit = get_total_cpu_millicores();
+    if cpu_limit > 0 {
         info!(
             "GreptimeDB start with cpu limit in millicores: {}",
             cpu_limit
@@ -133,7 +134,8 @@ pub fn create_resource_limit_metrics(app: &str) {
         CPU_LIMIT.with_label_values(&[app]).set(cpu_limit);
     }
 
-    if let Some(memory_limit) = get_memory_limit() {
+    let memory_limit = get_total_memory_bytes();
+    if memory_limit > 0 {
         info!(
             "GreptimeDB start with memory limit in bytes: {}",
             memory_limit

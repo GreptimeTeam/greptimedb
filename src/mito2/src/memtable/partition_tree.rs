@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
@@ -91,9 +92,9 @@ pub struct PartitionTreeConfig {
 impl Default for PartitionTreeConfig {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes =
-                std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
+                std::cmp::min(total_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
             if adjust_dictionary_bytes.0 > 0 {
                 fork_dictionary_bytes = adjust_dictionary_bytes;
             }

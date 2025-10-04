@@ -243,8 +243,11 @@ mod tests {
             version: "1.0.0".to_string(),
             git_commit: "1234567890".to_string(),
             start_time_ms: current_time_millis() as u64,
-            cpus: 0,
-            memory_bytes: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
@@ -268,8 +271,11 @@ mod tests {
             version: "1.0.0".to_string(),
             git_commit: "1234567890".to_string(),
             start_time_ms: current_time_millis() as u64,
-            cpus: 0,
-            memory_bytes: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         in_memory
@@ -305,8 +311,11 @@ mod tests {
             version: "1.0.0".to_string(),
             git_commit: "1234567890".to_string(),
             start_time_ms: last_activity_ts as u64,
-            cpus: 0,
-            memory_bytes: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);

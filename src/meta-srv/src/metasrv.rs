@@ -47,6 +47,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
 use common_procedure::options::ProcedureConfig;
+use common_stat::get_memory_usage_from_cgroups;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
 use common_wal::config::MetasrvWalConfig;
@@ -372,12 +373,18 @@ pub struct MetasrvNodeInfo {
     pub git_commit: String,
     // The node start timestamp in milliseconds
     pub start_time_ms: u64,
-    // The node cpus
+    // The node total cpu millicores
     #[serde(default)]
-    pub cpus: u32,
+    pub total_cpu_millicores: i64,
     #[serde(default)]
-    // The node memory bytes
-    pub memory_bytes: u64,
+    // The node total memory bytes
+    pub total_memory_bytes: i64,
+    /// The node build cpu usage millicores
+    pub cpu_usage_millicores: i64,
+    /// The node build memory usage bytes
+    pub memory_usage_bytes: i64,
+    // The node hostname
+    pub hostname: String,
 }
 
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
@@ -387,11 +394,16 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
-            version: node_info.version,
-            git_commit: node_info.git_commit,
-            start_time_ms: node_info.start_time_ms,
-            cpus: node_info.cpus,
-            memory_bytes: node_info.memory_bytes,
+            info: Some(api::v1::meta::NodeInfo {
+                version: node_info.version,
+                git_commit: node_info.git_commit,
+                start_time_ms: node_info.start_time_ms,
+                total_cpu_millicores: node_info.total_cpu_millicores,
+                total_memory_bytes: node_info.total_memory_bytes,
+                cpu_usage_millicores: node_info.cpu_usage_millicores,
+                memory_usage_bytes: node_info.memory_usage_bytes,
+                hostname: node_info.hostname,
+            }),
         }
     }
 }
@@ -694,8 +706,19 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            cpus: self.resource_spec().cpus as u32,
-            memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
+            total_cpu_millicores: self.resource_spec().total_cpu_millicores,
+            total_memory_bytes: self
+                .resource_spec()
+                .total_memory_bytes
+                .unwrap_or_default()
+                .as_bytes() as i64,
+            // FIXME(zyy17): How to get the accurate cpu usage? It need to be calculated periodically.
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: get_memory_usage_from_cgroups().unwrap_or_default(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         }
     }
 
