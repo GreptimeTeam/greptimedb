@@ -50,9 +50,9 @@ pub const DEFAULT_WRITE_CONCURRENCY: usize = 8;
 pub enum FormatType {
     /// Parquet with primary key encoded.
     #[default]
-    PrimaryKeyParquet,
+    PrimaryKey,
     /// Flat Parquet format.
-    FlatParquet,
+    Flat,
 }
 
 /// Gets the arrow schema to store in parquet.

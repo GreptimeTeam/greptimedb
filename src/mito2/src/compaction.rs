@@ -1112,7 +1112,7 @@ mod tests {
                 },
                 Default::default(),
                 Default::default(),
-                FormatType::PrimaryKeyParquet,
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap();

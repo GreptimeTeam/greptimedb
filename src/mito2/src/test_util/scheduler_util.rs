@@ -29,13 +29,13 @@ use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::sst::FormatType;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
+use crate::sst::FormatType;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -135,7 +135,7 @@ impl SchedulerEnv {
                 },
                 Default::default(),
                 Default::default(),
-                FormatType::PrimaryKeyParquet,
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap(),

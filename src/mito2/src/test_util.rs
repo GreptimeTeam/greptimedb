@@ -37,7 +37,6 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
-use crate::sst::FormatType;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::warn;
@@ -75,6 +74,7 @@ use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
+use crate::sst::FormatType;
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
@@ -610,7 +610,7 @@ impl TestEnv {
                 manifest_opts,
                 Default::default(),
                 Default::default(),
-                FormatType::PrimaryKeyParquet,
+                FormatType::PrimaryKey,
             )
             .await
             .map(Some)

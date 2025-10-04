@@ -1249,7 +1249,7 @@ mod tests {
                 },
                 Default::default(),
                 Default::default(),
-                FormatType::PrimaryKeyParquet,
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap();
@@ -1316,7 +1316,7 @@ mod tests {
             },
             Default::default(),
             Default::default(),
-            FormatType::PrimaryKeyParquet,
+            FormatType::PrimaryKey,
         )
         .await
         .unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
-            sst_format: FormatType::PrimaryKeyParquet,
+            sst_format: FormatType::PrimaryKey,
             stats: ManifestStats::default(),
         };
 

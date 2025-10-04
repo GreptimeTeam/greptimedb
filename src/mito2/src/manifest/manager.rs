@@ -798,7 +798,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
-                sst_format: FormatType::PrimaryKeyParquet,
+                sst_format: FormatType::PrimaryKey,
             }));
 
         let current_version = manager
@@ -867,7 +867,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
-                sst_format: FormatType::PrimaryKeyParquet,
+                sst_format: FormatType::PrimaryKey,
             }));
 
         let current_version = manager

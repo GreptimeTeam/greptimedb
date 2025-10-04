@@ -741,7 +741,7 @@ mod tests {
                     .unwrap()]),
                 }],
             },
-            sst_format: FormatType::PrimaryKeyParquet,
+            sst_format: FormatType::PrimaryKey,
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -843,7 +843,7 @@ mod tests {
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
-                sst_format: FormatType::PrimaryKeyParquet,
+                sst_format: FormatType::PrimaryKey,
             }
         );
 
@@ -857,7 +857,7 @@ mod tests {
             manifest_version: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
-            sst_format: FormatType::PrimaryKeyParquet,
+            sst_format: FormatType::PrimaryKey,
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -951,16 +951,16 @@ mod tests {
         }"#;
 
         let region_change: RegionChange = serde_json::from_str(region_change_json).unwrap();
-        assert_eq!(region_change.sst_format, FormatType::PrimaryKeyParquet);
+        assert_eq!(region_change.sst_format, FormatType::PrimaryKey);
 
         // Test serialization and deserialization with sst_format
         let region_change = RegionChange {
             metadata: region_change.metadata.clone(),
-            sst_format: FormatType::FlatParquet,
+            sst_format: FormatType::Flat,
         };
 
         let serialized = serde_json::to_string(&region_change).unwrap();
         let deserialized: RegionChange = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.sst_format, FormatType::FlatParquet);
+        assert_eq!(deserialized.sst_format, FormatType::Flat);
     }
 }
