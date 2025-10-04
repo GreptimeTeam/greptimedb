@@ -48,6 +48,7 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
+use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -343,8 +344,14 @@ impl Compactor for DefaultCompactor {
             let append_mode = compaction_region.current_version.options.append_mode;
             let merge_mode = compaction_region.current_version.options.merge_mode();
             let flat_format = compaction_region
-                .engine_config
-                .enable_experimental_flat_format;
+                .region_options
+                .sst_format
+                .map(|format| format == FormatType::Flat)
+                .unwrap_or(
+                    compaction_region
+                        .engine_config
+                        .enable_experimental_flat_format,
+                );
             let index_config = compaction_region.engine_config.index.clone();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
@@ -431,8 +438,8 @@ impl Compactor for DefaultCompactor {
                 let output_file_names =
                     output_files.iter().map(|f| f.file_id.to_string()).join(",");
                 info!(
-                    "Region {} compaction inputs: [{}], outputs: [{}], metrics: {:?}",
-                    region_id, input_file_names, output_file_names, metrics
+                    "Region {} compaction inputs: [{}], outputs: [{}], flat_format: {}, metrics: {:?}",
+                    region_id, input_file_names, output_file_names, flat_format, metrics
                 );
                 metrics.observe();
                 Ok(output_files)
