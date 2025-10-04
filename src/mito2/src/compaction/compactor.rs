@@ -433,6 +433,7 @@ impl Compactor for DefaultCompactor {
                         num_row_groups: sst_info.num_row_groups,
                         sequence: max_sequence,
                         partition_expr: partition_expr.clone(),
+                        num_series: 0,
                     })
                     .collect::<Vec<_>>();
                 let output_file_names =

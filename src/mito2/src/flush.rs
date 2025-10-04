@@ -641,6 +641,7 @@ impl RegionFlushTask {
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
+            num_series: 0,
         }
     }
 

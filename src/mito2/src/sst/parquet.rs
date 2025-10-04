@@ -766,6 +766,7 @@ mod tests {
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                num_series: 0,
             },
             Arc::new(NoopFilePurger),
         );

@@ -78,6 +78,7 @@ pub fn new_file_handle_with_size_and_sequence(
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            num_series: 0,
             sequence: NonZeroU64::new(sequence),
             partition_expr: None,
         },
