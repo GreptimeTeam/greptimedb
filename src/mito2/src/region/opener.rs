@@ -258,7 +258,7 @@ impl RegionOpener {
         // Set the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
-        } else if config.enable_experimental_flat_format {
+        } else if config.default_experimental_flat_format {
             FormatType::Flat
         } else {
             // Default to PrimaryKeyParquet for newly created regions

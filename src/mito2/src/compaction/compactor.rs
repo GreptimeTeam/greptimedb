@@ -350,7 +350,7 @@ impl Compactor for DefaultCompactor {
                 .unwrap_or(
                     compaction_region
                         .engine_config
-                        .enable_experimental_flat_format,
+                        .default_experimental_flat_format,
                 );
             let index_config = compaction_region.engine_config.index.clone();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();

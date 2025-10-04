@@ -349,7 +349,7 @@ impl MemtableBuilderProvider {
         let flat_format = options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(self.config.enable_experimental_flat_format);
+            .unwrap_or(self.config.default_experimental_flat_format);
         if flat_format {
             if options.memtable.is_some() {
                 common_telemetry::info!(
@@ -390,7 +390,7 @@ impl MemtableBuilderProvider {
     }
 
     fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
-        if self.config.enable_experimental_flat_format {
+        if self.config.default_experimental_flat_format {
             return Arc::new(
                 BulkMemtableBuilder::new(
                     self.write_buffer_manager.clone(),
