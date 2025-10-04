@@ -62,6 +62,11 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
+/// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
+///
+/// there are alternatives like records, arrays, etc. but there are also limitations:
+/// records: there is no support for include keys
+/// arrays: element in array must be the same type
 fn encode_struct(
     _query_ctx: &QueryContextRef,
     _struct_value: &StructValue,
