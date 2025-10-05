@@ -30,9 +30,8 @@ use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
 use statistics::{ByteCount, RowCount};
-use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, FileId, RegionId};
 use strum::IntoStaticStr;
 use tokio::sync::{mpsc, oneshot};
 
@@ -56,7 +55,6 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
-use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -443,9 +441,6 @@ pub struct IndexBuildTask {
     /// The file meta to build index for.
     pub file_meta: FileMeta,
     pub reason: IndexBuildType,
-    pub flushed_entry_id: Option<EntryId>,
-    pub flushed_sequence: Option<SequenceNumber>,
-    pub committed_sequence: Option<SequenceNumber>,
     pub access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub write_cache: Option<WriteCacheRef>,
@@ -502,32 +497,12 @@ impl IndexBuildTask {
                 "File id {} not found in region version for index build, region: {}",
                 file_id, region_id
             );
-            return false;
-        }
-
-        let sst_path = location::sst_file_path(
-            self.access_layer.table_dir(),
-            RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id),
-            self.access_layer.path_type(),
-        );
-
-        match self.access_layer.object_store().exists(&sst_path).await {
-            Ok(exists) => {
-                if !exists {
-                    warn!(
-                        "SST file not found during index build, skipping. region: {}, file_id: {}",
-                        self.file_meta.region_id, self.file_meta.file_id
-                    );
-                }
-                exists
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to check SST file existence during index build, skipping. region: {}, file_id: {}, error: {:?}",
-                    self.file_meta.region_id, self.file_meta.file_id, e
-                );
-                false
-            }
+            false
+        } else {
+            // If the file's metadata is present in the current version, the physical SST file
+            // is guaranteed to exist on object store. The file purger removes the physical
+            // file only after its metadata is removed from the version.
+            true
         }
     }
 
@@ -547,8 +522,17 @@ impl IndexBuildTask {
             .await?;
 
         // TODO(SNC123): optimize index batch
-        while let Some(batch) = &mut parquet_reader.next_batch().await? {
-            indexer.update(batch).await;
+        loop {
+            match parquet_reader.next_batch().await {
+                Ok(Some(batch)) => {
+                    indexer.update(&mut batch.clone()).await;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    indexer.abort().await;
+                    return Err(e);
+                }
+            }
         }
         let index_output = indexer.finish().await;
 
@@ -557,7 +541,10 @@ impl IndexBuildTask {
             if !self.check_sst_file_exists(version).await {
                 // Calls abort to clean up index files.
                 indexer.abort().await;
-                return Ok(IndexBuildOutcome::Aborted("SST file not found".to_string()));
+                return Ok(IndexBuildOutcome::Aborted(format!(
+                    "SST file not found during index build, region: {}, file_id: {}",
+                    self.file_meta.region_id, self.file_meta.file_id
+                )));
             }
 
             // Upload index file if write cache is enabled.
@@ -639,9 +626,9 @@ impl IndexBuildTask {
             files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            flushed_sequence: self.flushed_sequence,
-            flushed_entry_id: self.flushed_entry_id,
-            committed_sequence: self.committed_sequence,
+            flushed_sequence: None,
+            flushed_entry_id: None,
+            committed_sequence: None,
             compaction_time_window: None,
         };
         let version = self
@@ -706,6 +693,7 @@ mod tests {
     use crate::region::version::{VersionBuilder, VersionControl};
     use crate::sst::file::RegionFileId;
     use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::location;
     use crate::sst::parquet::WriteOptions;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
@@ -1118,9 +1106,6 @@ mod tests {
                 ..Default::default()
             },
             reason: IndexBuildType::Flush,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             write_cache: None,
@@ -1167,9 +1152,6 @@ mod tests {
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             write_cache: None,
@@ -1232,9 +1214,6 @@ mod tests {
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             write_cache: None,
@@ -1326,9 +1305,6 @@ mod tests {
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             write_cache: None,
@@ -1404,9 +1380,6 @@ mod tests {
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             write_cache: Some(write_cache.clone()),

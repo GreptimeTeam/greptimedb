@@ -66,9 +66,6 @@ impl<S> RegionWorkerLoop<S> {
         IndexBuildTask {
             file_meta: file.meta_ref().clone(),
             reason: build_type,
-            flushed_entry_id: Some(version.flushed_entry_id),
-            flushed_sequence: Some(version.flushed_sequence),
-            committed_sequence: Some(region.find_committed_sequence()),
             access_layer: access_layer.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
@@ -147,5 +144,6 @@ impl<S> RegionWorkerLoop<S> {
         request: IndexBuildFailed,
     ) {
         error!(request.err; "Index build failed for region: {}", region_id);
+        // TODO(SNC123): Implement error handling logic after IndexBuildScheduler optimization.
     }
 }
