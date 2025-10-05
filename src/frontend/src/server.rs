@@ -68,7 +68,7 @@ where
         }
     }
 
-    fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
+    pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
         let builder = GrpcServerBuilder::new(opts.as_config(), common_runtime::global_runtime())
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
