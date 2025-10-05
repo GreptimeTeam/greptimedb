@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 //! Data conversion between greptime's StructType and Json
 //!
@@ -1027,9 +1026,9 @@ mod tests {
 
             // Test float
             let result = settings
-                .decode(&Value::Float64(OrderedFloat(3.14)))
+                .decode(&Value::Float64(OrderedFloat(3.16)))
                 .unwrap();
-            assert_eq!(result, Json::from(3.14));
+            assert_eq!(result, Json::from(3.16));
 
             // Test string
             let result = settings.decode(&Value::String("hello".into())).unwrap();

@@ -947,6 +947,7 @@ impl Ord for ListValue {
 pub struct StructValue {
     items: Vec<Value>,
     fields: StructType,
+    // TODO(sunng87): whether to store json settings here
 }
 
 impl StructValue {
