@@ -72,7 +72,7 @@ fn set_transaction_warning(query_ctx: QueryContextRef) {
 }
 
 /// Process unsupported SQL and return fixed result as a compatibility solution
-pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
+pub(crate) fn process(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response>> {
     // Transaction directives:
     if START_TRANSACTION_PATTERN.is_match(query) {
         set_transaction_warning(query_ctx);
@@ -133,7 +133,7 @@ mod test {
         }
     }
 
-    fn get_data<'a>(q: &str, query_context: QueryContextRef) -> QueryResponse<'a> {
+    fn get_data(q: &str, query_context: QueryContextRef) -> QueryResponse {
         if let Response::Query(resp) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
             .remove(0)
