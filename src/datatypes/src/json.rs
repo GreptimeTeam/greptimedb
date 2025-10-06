@@ -55,7 +55,7 @@ pub struct JsonContext<'a> {
 impl JsonStructureSettings {
     pub const RAW_FIELD: &'static str = "_raw";
 
-    pub fn decode(&self, value: &Value) -> Result<Json, Error> {
+    pub fn decode(&self, value: Value) -> Result<Json, Error> {
         let context = JsonContext {
             key_path: String::new(),
             settings: self,
@@ -66,7 +66,7 @@ impl JsonStructureSettings {
     /// Decode a StructValue that was encoded with current settings back into a fully structured StructValue.
     /// This is useful for reconstructing the original structure from encoded data, especially when
     /// unstructured encoding was used for some fields.
-    pub fn decode_struct(&self, struct_value: &StructValue) -> Result<StructValue, Error> {
+    pub fn decode_struct(&self, struct_value: StructValue) -> Result<StructValue, Error> {
         let context = JsonContext {
             key_path: String::new(),
             settings: self,
@@ -74,7 +74,7 @@ impl JsonStructureSettings {
         decode_struct_with_settings(struct_value, &context)
     }
 
-    pub fn encode(&self, json: &Json) -> Result<Value, Error> {
+    pub fn encode(&self, json: Json) -> Result<Value, Error> {
         let context = JsonContext {
             key_path: String::new(),
             settings: self,
@@ -84,7 +84,7 @@ impl JsonStructureSettings {
 
     pub fn encode_with_type(
         &self,
-        json: &Json,
+        json: Json,
         data_type: Option<&ConcreteDataType>,
     ) -> Result<Value, Error> {
         let context = JsonContext {
@@ -122,7 +122,7 @@ impl<'a> JsonContext<'a> {
 
 /// Main encoding function with key path tracking
 pub fn encode_json_with_context<'a>(
-    json: &Json,
+    json: Json,
     data_type: Option<&ConcreteDataType>,
     context: &JsonContext<'a>,
 ) -> Result<Value, Error> {
@@ -167,8 +167,7 @@ pub fn encode_json_with_context<'a>(
             } else {
                 None
             };
-            let list_value =
-                encode_json_array_with_context(json_array.as_ref(), item_type, context)?;
+            let list_value = encode_json_array_with_context(json_array, item_type, context)?;
             Ok(Value::List(list_value))
         }
         _ => {
@@ -197,7 +196,7 @@ pub fn encode_json_with_context<'a>(
 }
 
 fn encode_json_object_with_context<'a>(
-    json_object: &Map<String, Json>,
+    mut json_object: Map<String, Json>,
     fields: Option<&StructType>,
     context: &JsonContext<'a>,
 ) -> Result<StructValue, Error> {
@@ -211,7 +210,7 @@ fn encode_json_object_with_context<'a>(
             let field_name = field.name();
             processed_keys.insert(field_name.to_string());
 
-            if let Some(value) = json_object.get(field_name) {
+            if let Some(value) = json_object.remove(field_name) {
                 let field_context = context.with_key(field_name);
                 let (value, data_type) =
                     encode_json_value_with_context(value, Some(field.data_type()), &field_context)?;
@@ -231,11 +230,11 @@ fn encode_json_object_with_context<'a>(
 
     // Then, process any remaining JSON fields that weren't in the schema
     for (key, value) in json_object {
-        if processed_keys.contains(key) {
+        if processed_keys.contains(&key) {
             continue; // Skip fields already processed from schema
         }
 
-        let field_context = context.with_key(key);
+        let field_context = context.with_key(&key);
 
         let (value, data_type) = encode_json_value_with_context(value, None, &field_context)?;
         items.push(value);
@@ -252,14 +251,14 @@ fn encode_json_object_with_context<'a>(
 }
 
 fn encode_json_array_with_context<'a>(
-    json_array: &[Json],
+    json_array: Vec<Json>,
     item_type: Option<&ConcreteDataType>,
     context: &JsonContext<'a>,
 ) -> Result<ListValue, Error> {
     let mut items = Vec::new();
     let mut element_type = None;
 
-    for (index, value) in json_array.iter().enumerate() {
+    for (index, value) in json_array.into_iter().enumerate() {
         let array_context = context.with_key(&index.to_string());
         let (item_value, item_type) =
             encode_json_value_with_context(value, item_type, &array_context)?;
@@ -292,7 +291,7 @@ fn encode_json_array_with_context<'a>(
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
 fn encode_json_value_with_context<'a>(
-    json: &Json,
+    json: Json,
     expected_type: Option<&ConcreteDataType>,
     context: &JsonContext<'a>,
 ) -> Result<(Value, ConcreteDataType), Error> {
@@ -306,7 +305,7 @@ fn encode_json_value_with_context<'a>(
 
     match json {
         Json::Null => Ok((Value::Null, ConcreteDataType::null_datatype())),
-        Json::Bool(b) => Ok((Value::Boolean(*b), ConcreteDataType::boolean_datatype())),
+        Json::Bool(b) => Ok((Value::Boolean(b), ConcreteDataType::boolean_datatype())),
         Json::Number(n) => {
             if let Some(i) = n.as_i64() {
                 // Use int64 for all integer numbers when possible
@@ -375,7 +374,7 @@ fn encode_json_value_with_context<'a>(
 
 /// Main decoding function with key path tracking
 pub fn decode_value_with_context<'a>(
-    value: &Value,
+    value: Value,
     context: &JsonContext<'a>,
 ) -> Result<Json, Error> {
     // Check if the entire decoding should be unstructured
@@ -397,20 +396,15 @@ pub fn decode_value_with_context<'a>(
 
 /// Decode a structured value to JSON object
 fn decode_struct_with_context<'a>(
-    struct_value: &StructValue,
+    struct_value: StructValue,
     context: &JsonContext<'a>,
 ) -> Result<Json, Error> {
     let mut json_object = Map::new();
-    let fields = struct_value.struct_type().fields();
-    let items = struct_value.items();
 
-    for (i, field) in fields.iter().enumerate() {
+    let (items, fields) = struct_value.into_parts();
+
+    for (field, field_value) in fields.fields().iter().zip(items.into_iter()) {
         let field_context = context.with_key(field.name());
-        let field_value = if i < items.len() {
-            &items[i]
-        } else {
-            &Value::Null
-        };
         let json_value = decode_value_with_context(field_value, &field_context)?;
         json_object.insert(field.name().to_string(), json_value);
     }
@@ -420,12 +414,14 @@ fn decode_struct_with_context<'a>(
 
 /// Decode a list value to JSON array
 fn decode_list_with_context<'a>(
-    list_value: &ListValue,
+    list_value: ListValue,
     context: &JsonContext<'a>,
 ) -> Result<Json, Error> {
     let mut json_array = Vec::new();
 
-    for (index, item) in list_value.items().iter().enumerate() {
+    let data_items = list_value.take_items();
+
+    for (index, item) in data_items.into_iter().enumerate() {
         let array_context = context.with_key(&index.to_string());
         let json_value = decode_value_with_context(item, &array_context)?;
         json_array.push(json_value);
@@ -435,7 +431,7 @@ fn decode_list_with_context<'a>(
 }
 
 /// Decode unstructured value (stored as string)
-fn decode_unstructured_value(value: &Value) -> Result<Json, Error> {
+fn decode_unstructured_value(value: Value) -> Result<Json, Error> {
     match value {
         // Handle expected format: StructValue with single _raw field
         Value::Struct(struct_value) => {
@@ -473,18 +469,18 @@ fn decode_unstructured_value(value: &Value) -> Result<Json, Error> {
 }
 
 /// Decode primitive value to JSON
-fn decode_primitive_value(value: &Value) -> Result<Json, Error> {
+fn decode_primitive_value(value: Value) -> Result<Json, Error> {
     match value {
         Value::Null => Ok(Json::Null),
-        Value::Boolean(b) => Ok(Json::Bool(*b)),
-        Value::UInt8(v) => Ok(Json::from(*v)),
-        Value::UInt16(v) => Ok(Json::from(*v)),
-        Value::UInt32(v) => Ok(Json::from(*v)),
-        Value::UInt64(v) => Ok(Json::from(*v)),
-        Value::Int8(v) => Ok(Json::from(*v)),
-        Value::Int16(v) => Ok(Json::from(*v)),
-        Value::Int32(v) => Ok(Json::from(*v)),
-        Value::Int64(v) => Ok(Json::from(*v)),
+        Value::Boolean(b) => Ok(Json::Bool(b)),
+        Value::UInt8(v) => Ok(Json::from(v)),
+        Value::UInt16(v) => Ok(Json::from(v)),
+        Value::UInt32(v) => Ok(Json::from(v)),
+        Value::UInt64(v) => Ok(Json::from(v)),
+        Value::Int8(v) => Ok(Json::from(v)),
+        Value::Int16(v) => Ok(Json::from(v)),
+        Value::Int32(v) => Ok(Json::from(v)),
+        Value::Int64(v) => Ok(Json::from(v)),
         Value::Float32(v) => Ok(Json::from(v.0)),
         Value::Float64(v) => Ok(Json::from(v.0)),
         Value::String(s) => Ok(Json::String(s.as_utf8().to_string())),
@@ -515,12 +511,12 @@ fn decode_primitive_value(value: &Value) -> Result<Json, Error> {
 
 /// Decode a StructValue that was encoded with current settings back into a fully structured StructValue
 fn decode_struct_with_settings<'a>(
-    struct_value: &StructValue,
+    struct_value: StructValue,
     context: &JsonContext<'a>,
 ) -> Result<StructValue, Error> {
     // Check if we can return the struct directly (Structured case)
     if matches!(context.settings, JsonStructureSettings::Structured(_)) {
-        return Ok(struct_value.clone());
+        return Ok(struct_value);
     }
 
     // Check if we can return the struct directly (PartialUnstructuredByKey with no matching keys)
@@ -542,12 +538,8 @@ fn decode_struct_with_settings<'a>(
     let mut struct_fields = Vec::new();
 
     // Process each field in the struct value
-    for (field, value) in struct_value
-        .struct_type()
-        .fields()
-        .iter()
-        .zip(struct_value.items().iter())
-    {
+    let (struct_data, fields) = struct_value.into_parts();
+    for (field, value) in fields.fields().iter().zip(struct_data.into_iter()) {
         let field_context = context.with_key(field.name());
 
         // Check if this field should be treated as unstructured
@@ -561,7 +553,7 @@ fn decode_struct_with_settings<'a>(
                 settings: &JsonStructureSettings::Structured(None),
             };
             let (decoded_value, data_type) = encode_json_value_with_context(
-                &json_value,
+                json_value,
                 None, // Don't force a specific type, let it be inferred from JSON
                 &structured_context,
             )?;
@@ -597,12 +589,14 @@ fn decode_struct_with_settings<'a>(
 
 /// Decode a ListValue that was encoded with current settings back into a fully structured ListValue
 fn decode_list_with_settings<'a>(
-    list_value: &ListValue,
+    list_value: ListValue,
     context: &JsonContext<'a>,
 ) -> Result<ListValue, Error> {
     let mut items = Vec::new();
 
-    for (index, item) in list_value.items().iter().enumerate() {
+    let (data_items, datatype) = list_value.into_parts();
+
+    for (index, item) in data_items.into_iter().enumerate() {
         let item_context = context.with_key(&index.to_string());
 
         let decoded_item = match item {
@@ -618,11 +612,11 @@ fn decode_list_with_settings<'a>(
         items.push(decoded_item);
     }
 
-    Ok(ListValue::new(items, list_value.datatype().clone()))
+    Ok(ListValue::new(items, datatype))
 }
 
 /// Helper function to decode a struct that was encoded with UnstructuredRaw settings
-fn decode_unstructured_raw_struct(struct_value: &StructValue) -> Result<StructValue, Error> {
+fn decode_unstructured_raw_struct(struct_value: StructValue) -> Result<StructValue, Error> {
     // For UnstructuredRaw, the struct must have exactly one field named "_raw"
     if struct_value.struct_type().fields().len() == 1 {
         let field = &struct_value.struct_type().fields()[0];
@@ -641,7 +635,7 @@ fn decode_unstructured_raw_struct(struct_value: &StructValue) -> Result<StructVa
                 settings: &JsonStructureSettings::Structured(None),
             };
             let (decoded_value, data_type) =
-                encode_json_value_with_context(&json_value, None, &context)?;
+                encode_json_value_with_context(json_value, None, &context)?;
 
             if let Value::Struct(decoded_struct) = decoded_value {
                 return Ok(decoded_struct);
@@ -683,7 +677,7 @@ where
 }
 
 pub fn encode_json_partial_unstructured(
-    json: &Json,
+    json: Json,
     data_type: Option<&ConcreteDataType>,
     keys: &HashSet<String>,
 ) -> Result<Value, Error> {
@@ -708,7 +702,7 @@ mod tests {
     fn test_encode_json_null() {
         let json = Json::Null;
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -716,7 +710,7 @@ mod tests {
     fn test_encode_json_boolean() {
         let json = Json::Bool(true);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
 
@@ -724,7 +718,7 @@ mod tests {
     fn test_encode_json_number_integer() {
         let json = Json::from(42);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::Int64(42));
     }
 
@@ -732,7 +726,7 @@ mod tests {
     fn test_encode_json_number_float() {
         let json = Json::from(3.15);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         match result {
             Value::Float64(f) => assert_eq!(f.0, 3.15),
             _ => panic!("Expected Float64"),
@@ -743,7 +737,7 @@ mod tests {
     fn test_encode_json_string() {
         let json = Json::String("hello".to_string());
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::String("hello".into()));
     }
 
@@ -751,7 +745,7 @@ mod tests {
     fn test_encode_json_array() {
         let json = json!([1, 2, 3]);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 3);
@@ -772,7 +766,7 @@ mod tests {
         });
 
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         let Value::Struct(result) = result else {
             panic!("Expected Struct value");
         };
@@ -818,7 +812,7 @@ mod tests {
         });
 
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         let Value::Struct(result) = result else {
             panic!("Expected Struct value");
         };
@@ -869,13 +863,13 @@ mod tests {
         let json = Json::from(42);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::int8_datatype()))
+            .encode_with_type(json.clone(), Some(&ConcreteDataType::int8_datatype()))
             .unwrap();
         assert_eq!(result, Value::Int8(42));
 
         // Test with expected string type
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::string_datatype()))
+            .encode_with_type(json, Some(&ConcreteDataType::string_datatype()))
             .unwrap();
         assert_eq!(result, Value::String("42".into()));
     }
@@ -884,7 +878,7 @@ mod tests {
     fn test_encode_json_array_mixed_types() {
         let json = json!([1, "hello", true, 3.15]);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 4);
@@ -903,7 +897,7 @@ mod tests {
     fn test_encode_json_empty_array() {
         let json = json!([]);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 0);
@@ -925,7 +919,7 @@ mod tests {
         });
 
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode(&json).unwrap();
+        let result = settings.encode(json).unwrap();
 
         if let Value::Struct(struct_value) = result {
             assert_eq!(struct_value.items().len(), 2);
@@ -963,7 +957,7 @@ mod tests {
 
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&concrete_type))
+            .encode_with_type(json, Some(&concrete_type))
             .unwrap();
 
         if let Value::Struct(struct_value) = result {
@@ -1013,7 +1007,7 @@ mod tests {
         let struct_type = StructType::new(fields);
 
         let result = encode_json_object_with_context(
-            json.as_object().unwrap(),
+            json.as_object().unwrap().clone(),
             Some(&struct_type),
             &JsonContext {
                 key_path: String::new(),
@@ -1055,7 +1049,7 @@ mod tests {
         let struct_type = StructType::new(fields);
 
         let result = encode_json_object_with_context(
-            json.as_object().unwrap(),
+            json.as_object().unwrap().clone(),
             Some(&struct_type),
             &JsonContext {
                 key_path: String::new(),
@@ -1096,7 +1090,7 @@ mod tests {
         let struct_type = StructType::new(fields);
 
         let result = encode_json_object_with_context(
-            json.as_object().unwrap(),
+            json.as_object().unwrap().clone(),
             Some(&struct_type),
             &JsonContext {
                 key_path: String::new(),
@@ -1123,7 +1117,7 @@ mod tests {
             "age": 40
         });
 
-        let result = encode_json_partial_unstructured(&json, None, &HashSet::new()).unwrap();
+        let result = encode_json_partial_unstructured(json, None, &HashSet::new()).unwrap();
 
         if let Value::Struct(s) = result {
             assert_eq!(s.items().len(), 2);
@@ -1140,7 +1134,7 @@ mod tests {
         });
 
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode(&json).unwrap();
+        let result = settings.encode(json).unwrap();
 
         if let Value::Struct(struct_value) = result {
             assert_eq!(struct_value.items().len(), 2);
@@ -1156,7 +1150,7 @@ mod tests {
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&concrete_type))
+            .encode_with_type(json, Some(&concrete_type))
             .unwrap();
 
         if let Value::List(list_value) = result {
@@ -1180,7 +1174,7 @@ mod tests {
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&concrete_type))
+            .encode_with_type(json, Some(&concrete_type))
             .unwrap();
 
         if let Value::List(list_value) = result {
@@ -1205,25 +1199,23 @@ mod tests {
             let settings = JsonStructureSettings::Structured(None);
 
             // Test null
-            let result = settings.decode(&Value::Null).unwrap();
+            let result = settings.decode(Value::Null).unwrap();
             assert_eq!(result, Json::Null);
 
             // Test boolean
-            let result = settings.decode(&Value::Boolean(true)).unwrap();
+            let result = settings.decode(Value::Boolean(true)).unwrap();
             assert_eq!(result, Json::Bool(true));
 
             // Test integer
-            let result = settings.decode(&Value::Int64(42)).unwrap();
+            let result = settings.decode(Value::Int64(42)).unwrap();
             assert_eq!(result, Json::from(42));
 
             // Test float
-            let result = settings
-                .decode(&Value::Float64(OrderedFloat(3.16)))
-                .unwrap();
+            let result = settings.decode(Value::Float64(OrderedFloat(3.16))).unwrap();
             assert_eq!(result, Json::from(3.16));
 
             // Test string
-            let result = settings.decode(&Value::String("hello".into())).unwrap();
+            let result = settings.decode(Value::String("hello".into())).unwrap();
             assert_eq!(result, Json::String("hello".to_string()));
         }
 
@@ -1252,7 +1244,7 @@ mod tests {
                 ]),
             );
 
-            let result = settings.decode(&Value::Struct(struct_value)).unwrap();
+            let result = settings.decode(Value::Struct(struct_value)).unwrap();
             let expected = json!({
                 "name": "Alice",
                 "age": 25,
@@ -1270,7 +1262,7 @@ mod tests {
                 ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
             );
 
-            let result = settings.decode(&Value::List(list_value)).unwrap();
+            let result = settings.decode(Value::List(list_value)).unwrap();
             let expected = json!([1, 2, 3]);
             assert_eq!(result, expected);
         }
@@ -1324,7 +1316,7 @@ mod tests {
                 ]),
             );
 
-            let result = settings.decode(&Value::Struct(outer_struct)).unwrap();
+            let result = settings.decode(Value::Struct(outer_struct)).unwrap();
             let expected = json!({
                 "user": {
                     "name": "Alice",
@@ -1342,7 +1334,7 @@ mod tests {
             let json_str = r#"{"name": "Bob", "age": 30}"#;
             let value = Value::String(json_str.into());
 
-            let result = settings.decode(&value).unwrap();
+            let result = settings.decode(value).unwrap();
             let expected: Json = serde_json::from_str(json_str).unwrap();
             assert_eq!(result, expected);
         }
@@ -1362,7 +1354,7 @@ mod tests {
             );
             let value = Value::Struct(struct_value);
 
-            let result = settings.decode(&value).unwrap();
+            let result = settings.decode(value).unwrap();
             let expected: Json = serde_json::from_str(json_str).unwrap();
             assert_eq!(result, expected);
         }
@@ -1398,7 +1390,7 @@ mod tests {
                 ]),
             );
 
-            let result = settings.decode(&Value::Struct(struct_value)).unwrap();
+            let result = settings.decode(Value::Struct(struct_value)).unwrap();
 
             if let Json::Object(obj) = result {
                 assert_eq!(obj.get("name"), Some(&Json::String("Alice".to_string())));
@@ -1435,7 +1427,7 @@ mod tests {
                 ]),
             );
 
-            let result = settings.decode(&Value::Struct(struct_value)).unwrap();
+            let result = settings.decode(Value::Struct(struct_value)).unwrap();
             let expected = json!({
                 "name": "Bob",
                 "age": null
@@ -1451,21 +1443,21 @@ mod tests {
         // Test encoding JSON number with expected int64 type
         let json = Json::from(42);
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::int64_datatype()))
+            .encode_with_type(json, Some(&ConcreteDataType::int64_datatype()))
             .unwrap();
         assert_eq!(result, Value::Int64(42));
 
         // Test encoding JSON string with expected string type
         let json = Json::String("hello".to_string());
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::string_datatype()))
+            .encode_with_type(json, Some(&ConcreteDataType::string_datatype()))
             .unwrap();
         assert_eq!(result, Value::String("hello".into()));
 
         // Test encoding JSON boolean with expected boolean type
         let json = Json::Bool(true);
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::boolean_datatype()))
+            .encode_with_type(json, Some(&ConcreteDataType::boolean_datatype()))
             .unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
@@ -1475,12 +1467,12 @@ mod tests {
         // Test encoding JSON number with mismatched string type
         let json = Json::from(42);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, Some(&ConcreteDataType::string_datatype()));
+        let result = settings.encode_with_type(json, Some(&ConcreteDataType::string_datatype()));
         assert!(result.is_ok()); // Should succeed due to type conversion
 
         // Test encoding JSON object with mismatched non-struct type
         let json = json!({"name": "test"});
-        let result = settings.encode_with_type(&json, Some(&ConcreteDataType::int64_datatype()));
+        let result = settings.encode_with_type(json, Some(&ConcreteDataType::int64_datatype()));
         assert!(result.is_err()); // Should fail - object can't be converted to int64
     }
 
@@ -1492,7 +1484,7 @@ mod tests {
 
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&concrete_type))
+            .encode_with_type(json, Some(&concrete_type))
             .unwrap();
 
         if let Value::List(list_value) = result {
@@ -1515,14 +1507,14 @@ mod tests {
         let json = Json::Null;
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::null_datatype()))
+            .encode_with_type(json.clone(), Some(&ConcreteDataType::null_datatype()))
             .unwrap();
         assert_eq!(result, Value::Null);
 
         // Test float with float64 type
         let json = Json::from(3.15);
         let result = settings
-            .encode_with_type(&json, Some(&ConcreteDataType::float64_datatype()))
+            .encode_with_type(json, Some(&ConcreteDataType::float64_datatype()))
             .unwrap();
         match result {
             Value::Float64(f) => assert_eq!(f.0, 3.15),
@@ -1535,12 +1527,12 @@ mod tests {
         // Test unsigned integer that fits in i64
         let json = Json::from(u64::MAX / 2);
         let settings = JsonStructureSettings::Structured(None);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::Int64((u64::MAX / 2) as i64));
 
         // Test unsigned integer that exceeds i64 range
         let json = Json::from(u64::MAX);
-        let result = settings.encode_with_type(&json, None).unwrap();
+        let result = settings.encode_with_type(json, None).unwrap();
         assert_eq!(result, Value::UInt64(u64::MAX));
     }
 
@@ -1552,7 +1544,7 @@ mod tests {
         });
 
         let settings = JsonStructureSettings::UnstructuredRaw;
-        let result = settings.encode(&json).unwrap();
+        let result = settings.encode(json).unwrap();
 
         if let Value::Struct(struct_value) = result {
             assert_eq!(struct_value.struct_type().fields().len(), 1);
@@ -1585,8 +1577,8 @@ mod tests {
         let settings = JsonStructureSettings::UnstructuredRaw;
 
         // Test with encode (no type)
-        let result1 = settings.encode(&json).unwrap();
-        if let Value::Struct(s) = result1 {
+        let result = settings.encode(json.clone()).unwrap();
+        if let Value::Struct(s) = result {
             if let Value::String(json_str) = &s.items()[0] {
                 let json_str = json_str.as_utf8();
                 assert!(json_str.contains("\"name\":\"Grace\""));
@@ -1616,7 +1608,7 @@ mod tests {
         let concrete_type = ConcreteDataType::Struct(struct_type);
 
         let result2 = settings
-            .encode_with_type(&json, Some(&concrete_type))
+            .encode_with_type(json, Some(&concrete_type))
             .unwrap();
         if let Value::Struct(s) = result2 {
             if let Value::String(json_str) = &s.items()[0] {
@@ -1641,7 +1633,7 @@ mod tests {
             }
         });
 
-        let result3 = settings.encode(&nested_json).unwrap();
+        let result3 = settings.encode(nested_json).unwrap();
         if let Value::Struct(s) = result3 {
             if let Value::String(json_str) = &s.items()[0] {
                 let json_str = json_str.as_utf8();
@@ -1659,7 +1651,7 @@ mod tests {
 
         // Test with arrays
         let array_json = json!([1, "hello", true, 3.15]);
-        let result4 = settings.encode(&array_json).unwrap();
+        let result4 = settings.encode(array_json).unwrap();
         if let Value::Struct(s) = result4 {
             if let Value::String(json_str) = &s.items()[0] {
                 let json_str = json_str.as_utf8();
@@ -1691,7 +1683,7 @@ mod tests {
             fields: None,
             unstructured_keys,
         };
-        let result = settings.encode(&json).unwrap();
+        let result = settings.encode(json).unwrap();
 
         if let Value::Struct(struct_value) = result {
             let items = struct_value.items();
@@ -1759,7 +1751,7 @@ mod tests {
             ]),
         );
 
-        let decoded_struct = settings.decode_struct(&original_struct).unwrap();
+        let decoded_struct = settings.decode_struct(original_struct.clone()).unwrap();
 
         // With Structured settings, the struct should be returned directly
         assert_eq!(decoded_struct.items(), original_struct.items());
@@ -1795,7 +1787,7 @@ mod tests {
             ]),
         );
 
-        let decoded_struct = settings.decode_struct(&original_struct).unwrap();
+        let decoded_struct = settings.decode_struct(original_struct.clone()).unwrap();
 
         // With empty unstructured_keys, the struct should be returned directly
         assert_eq!(decoded_struct.items(), original_struct.items());
@@ -1844,7 +1836,7 @@ mod tests {
             ]),
         );
 
-        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+        let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
         // Verify name field remains the same
         assert_eq!(decoded_struct.items()[0], Value::String("Alice".into()));
@@ -1905,7 +1897,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+        let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
         // Verify the nested structure is properly decoded
         if let Value::Struct(decoded_user) = &decoded_struct.items()[0] {
@@ -1975,7 +1967,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+        let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
         // With UnstructuredRaw, the entire struct should be reconstructed from _raw field
         let decoded_fields: Vec<&str> = decoded_struct
@@ -2021,7 +2013,7 @@ mod tests {
         );
 
         // Should fail with error since it doesn't match expected UnstructuredRaw format
-        let result = settings.decode_struct(&invalid_struct);
+        let result = settings.decode_struct(invalid_struct);
         assert!(result.is_err());
         assert!(
             result
@@ -2046,7 +2038,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&string_struct).unwrap();
+        let decoded_struct = settings.decode_struct(string_struct).unwrap();
         let decoded_fields: Vec<&str> = decoded_struct
             .struct_type()
             .fields()
@@ -2069,7 +2061,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&number_struct).unwrap();
+        let decoded_struct = settings.decode_struct(number_struct).unwrap();
         let decoded_fields: Vec<&str> = decoded_struct
             .struct_type()
             .fields()
@@ -2089,7 +2081,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&bool_struct).unwrap();
+        let decoded_struct = settings.decode_struct(bool_struct).unwrap();
         let decoded_fields: Vec<&str> = decoded_struct
             .struct_type()
             .fields()
@@ -2109,7 +2101,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&null_struct).unwrap();
+        let decoded_struct = settings.decode_struct(null_struct).unwrap();
         let decoded_fields: Vec<&str> = decoded_struct
             .struct_type()
             .fields()
@@ -2135,7 +2127,7 @@ mod tests {
             )]),
         );
 
-        let decoded_struct = settings.decode_struct(&array_struct).unwrap();
+        let decoded_struct = settings.decode_struct(array_struct).unwrap();
         let decoded_fields: Vec<&str> = decoded_struct
             .struct_type()
             .fields()
@@ -2192,7 +2184,7 @@ mod tests {
         });
 
         // Encode the JSON with partial unstructured settings
-        let encoded_value = settings.encode(&original_json).unwrap();
+        let encoded_value = settings.encode(original_json).unwrap();
 
         // Verify encoding worked - metadata and user.profile.settings should be unstructured
         if let Value::Struct(encoded_struct) = encoded_value {
@@ -2254,7 +2246,7 @@ mod tests {
             }
 
             // Now decode the struct back to fully structured form
-            let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+            let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
             // Verify the decoded struct has proper structure
             let decoded_fields: Vec<&str> = decoded_struct

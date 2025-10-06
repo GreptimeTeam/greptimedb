@@ -894,6 +894,10 @@ impl ListValue {
         self.items
     }
 
+    pub fn into_parts(self) -> (Vec<Value>, ConcreteDataType) {
+        (self.items, self.datatype)
+    }
+
     pub fn datatype(&self) -> &ConcreteDataType {
         &self.datatype
     }
@@ -961,6 +965,10 @@ impl StructValue {
 
     pub fn take_items(self) -> Vec<Value> {
         self.items
+    }
+
+    pub fn into_parts(self) -> (Vec<Value>, StructType) {
+        (self.items, self.fields)
     }
 
     pub fn struct_type(&self) -> &StructType {
