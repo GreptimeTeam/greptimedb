@@ -63,6 +63,17 @@ impl JsonStructureSettings {
         decode_value_with_context(value, &context)
     }
 
+    /// Decode a StructValue that was encoded with current settings back into a fully structured StructValue.
+    /// This is useful for reconstructing the original structure from encoded data, especially when
+    /// unstructured encoding was used for some fields.
+    pub fn decode_struct(&self, struct_value: &StructValue) -> Result<StructValue, Error> {
+        let context = JsonContext {
+            key_path: String::new(),
+            settings: self,
+        };
+        decode_struct_with_settings(struct_value, &context)
+    }
+
     pub fn encode(&self, json: &Json) -> Result<Value, Error> {
         let context = JsonContext {
             key_path: String::new(),
@@ -426,31 +437,25 @@ fn decode_list_with_context<'a>(
 /// Decode unstructured value (stored as string)
 fn decode_unstructured_value(value: &Value) -> Result<Json, Error> {
     match value {
-        // Handle new format: StructValue with _raw field
+        // Handle expected format: StructValue with single _raw field
         Value::Struct(struct_value) => {
             if struct_value.struct_type().fields().len() == 1 {
                 let field = &struct_value.struct_type().fields()[0];
-                if field.name() == JsonStructureSettings::RAW_FIELD {
-                    if let Some(value) = struct_value.items().first() {
-                        if let Value::String(s) = value {
-                            let json_str = s.as_utf8();
-                            return serde_json::from_str(json_str).context(
-                                error::DeserializeSnafu {
-                                    json: json_str.to_string(),
-                                },
-                            );
-                        }
-                    }
+                if field.name() == JsonStructureSettings::RAW_FIELD
+                    && let Some(Value::String(s)) = struct_value.items().first()
+                {
+                    let json_str = s.as_utf8();
+                    return serde_json::from_str(json_str).context(error::DeserializeSnafu {
+                        json: json_str.to_string(),
+                    });
                 }
             }
-            // Fall back to treating as regular struct
-            decode_struct_with_context(
-                struct_value,
-                &JsonContext {
-                    key_path: String::new(),
-                    settings: &JsonStructureSettings::Structured(None),
-                },
-            )
+            // Invalid format - expected struct with single _raw field
+            Err(error::InvalidJsonSnafu {
+                value: "Unstructured value must be stored as struct with single _raw field"
+                    .to_string(),
+            }
+            .build())
         }
         // Handle old format: plain string (for backward compatibility)
         Value::String(s) => {
@@ -506,6 +511,154 @@ fn decode_primitive_value(value: &Value) -> Result<Json, Error> {
             .build())
         }
     }
+}
+
+/// Decode a StructValue that was encoded with current settings back into a fully structured StructValue
+fn decode_struct_with_settings<'a>(
+    struct_value: &StructValue,
+    context: &JsonContext<'a>,
+) -> Result<StructValue, Error> {
+    // Check if we can return the struct directly (Structured case)
+    if matches!(context.settings, JsonStructureSettings::Structured(_)) {
+        return Ok(struct_value.clone());
+    }
+
+    // Check if we can return the struct directly (PartialUnstructuredByKey with no matching keys)
+    if let JsonStructureSettings::PartialUnstructuredByKey {
+        unstructured_keys, ..
+    } = context.settings
+        && unstructured_keys.is_empty()
+    {
+        return Ok(struct_value.clone());
+    }
+
+    // Check if the entire decoding should be unstructured (UnstructuredRaw case)
+    if matches!(context.settings, JsonStructureSettings::UnstructuredRaw) {
+        // For UnstructuredRaw, the entire struct should be reconstructed from _raw field
+        return decode_unstructured_raw_struct(struct_value);
+    }
+
+    let mut items = Vec::new();
+    let mut struct_fields = Vec::new();
+
+    // Process each field in the struct value
+    for (field, value) in struct_value
+        .struct_type()
+        .fields()
+        .iter()
+        .zip(struct_value.items().iter())
+    {
+        let field_context = context.with_key(field.name());
+
+        // Check if this field should be treated as unstructured
+        if field_context.is_unstructured_key() {
+            // Decode the unstructured value
+            let json_value = decode_unstructured_value(value)?;
+
+            // Re-encode the unstructured value with proper structure using structured context
+            let structured_context = JsonContext {
+                key_path: field_context.key_path.clone(),
+                settings: &JsonStructureSettings::Structured(None),
+            };
+            let (decoded_value, data_type) = encode_json_value_with_context(
+                &json_value,
+                None, // Don't force a specific type, let it be inferred from JSON
+                &structured_context,
+            )?;
+
+            items.push(decoded_value);
+            struct_fields.push(StructField::new(
+                field.name().to_string(),
+                data_type,
+                true, // JSON fields are always nullable
+            ));
+        } else {
+            // For structured fields, recursively decode if they are structs/lists
+            let decoded_value = match value {
+                Value::Struct(nested_struct) => {
+                    let nested_context = context.with_key(field.name());
+                    Value::Struct(decode_struct_with_settings(nested_struct, &nested_context)?)
+                }
+                Value::List(list_value) => {
+                    let list_context = context.with_key(field.name());
+                    Value::List(decode_list_with_settings(list_value, &list_context)?)
+                }
+                _ => value.clone(),
+            };
+
+            items.push(decoded_value);
+            struct_fields.push(field.clone());
+        }
+    }
+
+    let struct_type = StructType::new(struct_fields);
+    Ok(StructValue::new(items, struct_type))
+}
+
+/// Decode a ListValue that was encoded with current settings back into a fully structured ListValue
+fn decode_list_with_settings<'a>(
+    list_value: &ListValue,
+    context: &JsonContext<'a>,
+) -> Result<ListValue, Error> {
+    let mut items = Vec::new();
+
+    for (index, item) in list_value.items().iter().enumerate() {
+        let item_context = context.with_key(&index.to_string());
+
+        let decoded_item = match item {
+            Value::Struct(nested_struct) => {
+                Value::Struct(decode_struct_with_settings(nested_struct, &item_context)?)
+            }
+            Value::List(nested_list) => {
+                Value::List(decode_list_with_settings(nested_list, &item_context)?)
+            }
+            _ => item.clone(),
+        };
+
+        items.push(decoded_item);
+    }
+
+    Ok(ListValue::new(items, list_value.datatype().clone()))
+}
+
+/// Helper function to decode a struct that was encoded with UnstructuredRaw settings
+fn decode_unstructured_raw_struct(struct_value: &StructValue) -> Result<StructValue, Error> {
+    // For UnstructuredRaw, the struct must have exactly one field named "_raw"
+    if struct_value.struct_type().fields().len() == 1 {
+        let field = &struct_value.struct_type().fields()[0];
+        if field.name() == JsonStructureSettings::RAW_FIELD
+            && let Some(Value::String(s)) = struct_value.items().first()
+        {
+            let json_str = s.as_utf8();
+            let json_value: Json =
+                serde_json::from_str(json_str).context(error::DeserializeSnafu {
+                    json: json_str.to_string(),
+                })?;
+
+            // Re-encode the JSON with proper structure
+            let context = JsonContext {
+                key_path: String::new(),
+                settings: &JsonStructureSettings::Structured(None),
+            };
+            let (decoded_value, data_type) =
+                encode_json_value_with_context(&json_value, None, &context)?;
+
+            if let Value::Struct(decoded_struct) = decoded_value {
+                return Ok(decoded_struct);
+            } else {
+                // If the decoded value is not a struct, wrap it in a struct
+                let struct_type =
+                    StructType::new(vec![StructField::new("value".to_string(), data_type, true)]);
+                return Ok(StructValue::new(vec![decoded_value], struct_type));
+            }
+        }
+    }
+
+    // Invalid format - expected struct with single _raw field
+    Err(error::InvalidJsonSnafu {
+        value: "UnstructuredRaw value must be stored as struct with single _raw field".to_string(),
+    }
+    .build())
 }
 
 /// Helper function to try converting a value to an expected type
@@ -1577,6 +1730,628 @@ mod tests {
             }
         } else {
             panic!("Expected Struct value");
+        }
+    }
+
+    #[test]
+    fn test_decode_struct_structured() {
+        // Test decoding a structured struct value - should return the same struct
+        let settings = JsonStructureSettings::Structured(None);
+
+        let original_struct = StructValue::new(
+            vec![
+                Value::String("Alice".into()),
+                Value::Int64(25),
+                Value::Boolean(true),
+            ],
+            StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
+                StructField::new(
+                    "active".to_string(),
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+            ]),
+        );
+
+        let decoded_struct = settings.decode_struct(&original_struct).unwrap();
+
+        // With Structured settings, the struct should be returned directly
+        assert_eq!(decoded_struct.items(), original_struct.items());
+        assert_eq!(decoded_struct.struct_type(), original_struct.struct_type());
+    }
+
+    #[test]
+    fn test_decode_struct_partial_unstructured_empty_keys() {
+        // Test decoding with PartialUnstructuredByKey but empty unstructured_keys
+        let settings = JsonStructureSettings::PartialUnstructuredByKey {
+            fields: None,
+            unstructured_keys: HashSet::new(),
+        };
+
+        let original_struct = StructValue::new(
+            vec![
+                Value::String("Alice".into()),
+                Value::Int64(25),
+                Value::Boolean(true),
+            ],
+            StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
+                StructField::new(
+                    "active".to_string(),
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+            ]),
+        );
+
+        let decoded_struct = settings.decode_struct(&original_struct).unwrap();
+
+        // With empty unstructured_keys, the struct should be returned directly
+        assert_eq!(decoded_struct.items(), original_struct.items());
+        assert_eq!(decoded_struct.struct_type(), original_struct.struct_type());
+    }
+
+    #[test]
+    fn test_decode_struct_partial_unstructured() {
+        // Test decoding a struct with unstructured fields
+        let mut unstructured_keys = HashSet::new();
+        unstructured_keys.insert("metadata".to_string());
+
+        let settings = JsonStructureSettings::PartialUnstructuredByKey {
+            fields: Some(StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "metadata".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            ])),
+            unstructured_keys,
+        };
+
+        // Create a struct where metadata is stored as unstructured JSON string
+        let encoded_struct = StructValue::new(
+            vec![
+                Value::String("Alice".into()),
+                Value::String(r#"{"preferences":{"theme":"dark"},"history":[1,2,3]}"#.into()),
+            ],
+            StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "metadata".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            ]),
+        );
+
+        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+
+        // Verify name field remains the same
+        assert_eq!(decoded_struct.items()[0], Value::String("Alice".into()));
+
+        // Verify metadata field is now properly structured
+        if let Value::Struct(metadata_struct) = &decoded_struct.items()[1] {
+            let metadata_fields: Vec<&str> = metadata_struct
+                .struct_type()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect();
+
+            assert!(metadata_fields.contains(&"preferences"));
+            assert!(metadata_fields.contains(&"history"));
+        } else {
+            panic!("Expected metadata to be decoded as structured value");
+        }
+    }
+
+    #[test]
+    fn test_decode_struct_nested_unstructured() {
+        // Test decoding nested structures with unstructured fields
+        let mut unstructured_keys = HashSet::new();
+        unstructured_keys.insert("user.metadata".to_string());
+
+        let settings = JsonStructureSettings::PartialUnstructuredByKey {
+            fields: None,
+            unstructured_keys,
+        };
+
+        // Create a nested struct where user.metadata is stored as unstructured JSON string
+        let user_struct = StructValue::new(
+            vec![
+                Value::String("Alice".into()),
+                Value::String(r#"{"preferences":{"theme":"dark"},"history":[1,2,3]}"#.into()),
+            ],
+            StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "metadata".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            ]),
+        );
+
+        let encoded_struct = StructValue::new(
+            vec![Value::Struct(user_struct)],
+            StructType::new(vec![StructField::new(
+                "user".to_string(),
+                ConcreteDataType::struct_datatype(StructType::new(vec![])),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+
+        // Verify the nested structure is properly decoded
+        if let Value::Struct(decoded_user) = &decoded_struct.items()[0] {
+            if let Value::Struct(metadata_struct) = &decoded_user.items()[1] {
+                let metadata_fields: Vec<&str> = metadata_struct
+                    .struct_type()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect();
+
+                assert!(metadata_fields.contains(&"preferences"));
+                assert!(metadata_fields.contains(&"history"));
+
+                let preference_index = metadata_fields
+                    .iter()
+                    .position(|&field| field == "preferences")
+                    .unwrap();
+                let history_index = metadata_fields
+                    .iter()
+                    .position(|&field| field == "history")
+                    .unwrap();
+
+                // Verify the nested structure within preferences
+                if let Value::Struct(preferences_struct) =
+                    &metadata_struct.items()[preference_index]
+                {
+                    let pref_fields: Vec<&str> = preferences_struct
+                        .struct_type()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name())
+                        .collect();
+                    assert!(pref_fields.contains(&"theme"));
+                } else {
+                    panic!("Expected preferences to be decoded as structured value");
+                }
+
+                // Verify the array within history
+                if let Value::List(history_list) = &metadata_struct.items()[history_index] {
+                    assert_eq!(history_list.items().len(), 3);
+                } else {
+                    panic!("Expected history to be decoded as list value");
+                }
+            } else {
+                panic!("Expected metadata to be decoded as structured value");
+            }
+        } else {
+            panic!("Expected user to be decoded as structured value");
+        }
+    }
+
+    #[test]
+    fn test_decode_struct_unstructured_raw() {
+        // Test decoding with UnstructuredRaw setting
+        let settings = JsonStructureSettings::UnstructuredRaw;
+
+        // With UnstructuredRaw, the entire JSON is encoded as a struct with _raw field
+        let encoded_struct = StructValue::new(
+            vec![Value::String(
+                r#"{"name":"Alice","age":25,"active":true}"#.into(),
+            )],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+
+        // With UnstructuredRaw, the entire struct should be reconstructed from _raw field
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+
+        assert!(decoded_fields.contains(&"name"));
+        assert!(decoded_fields.contains(&"age"));
+        assert!(decoded_fields.contains(&"active"));
+
+        // Verify the actual values
+        let name_index = decoded_fields.iter().position(|&f| f == "name").unwrap();
+        let age_index = decoded_fields.iter().position(|&f| f == "age").unwrap();
+        let active_index = decoded_fields.iter().position(|&f| f == "active").unwrap();
+
+        assert_eq!(
+            decoded_struct.items()[name_index],
+            Value::String("Alice".into())
+        );
+        assert_eq!(decoded_struct.items()[age_index], Value::Int64(25));
+        assert_eq!(decoded_struct.items()[active_index], Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_decode_struct_unstructured_raw_invalid_format() {
+        // Test UnstructuredRaw decoding when the struct doesn't have the expected _raw field format
+        let settings = JsonStructureSettings::UnstructuredRaw;
+
+        // Create a struct that doesn't match the expected UnstructuredRaw format
+        let invalid_struct = StructValue::new(
+            vec![Value::String("Alice".into()), Value::Int64(25)],
+            StructType::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
+            ]),
+        );
+
+        // Should fail with error since it doesn't match expected UnstructuredRaw format
+        let result = settings.decode_struct(&invalid_struct);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("UnstructuredRaw value must be stored as struct with single _raw field")
+        );
+    }
+
+    #[test]
+    fn test_decode_struct_unstructured_raw_primitive_value() {
+        // Test UnstructuredRaw decoding when the _raw field contains a primitive value
+        let settings = JsonStructureSettings::UnstructuredRaw;
+
+        // Test with a string primitive in _raw field
+        let string_struct = StructValue::new(
+            vec![Value::String("\"hello world\"".into())],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&string_struct).unwrap();
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(decoded_fields.contains(&"value"));
+        assert_eq!(
+            decoded_struct.items()[0],
+            Value::String("hello world".into())
+        );
+
+        // Test with a number primitive in _raw field
+        let number_struct = StructValue::new(
+            vec![Value::String("42".into())],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&number_struct).unwrap();
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(decoded_fields.contains(&"value"));
+        assert_eq!(decoded_struct.items()[0], Value::Int64(42));
+
+        // Test with a boolean primitive in _raw field
+        let bool_struct = StructValue::new(
+            vec![Value::String("true".into())],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&bool_struct).unwrap();
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(decoded_fields.contains(&"value"));
+        assert_eq!(decoded_struct.items()[0], Value::Boolean(true));
+
+        // Test with a null primitive in _raw field
+        let null_struct = StructValue::new(
+            vec![Value::String("null".into())],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&null_struct).unwrap();
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(decoded_fields.contains(&"value"));
+        assert_eq!(decoded_struct.items()[0], Value::Null);
+    }
+
+    #[test]
+    fn test_decode_struct_unstructured_raw_array() {
+        // Test UnstructuredRaw decoding when the _raw field contains a JSON array
+        let settings = JsonStructureSettings::UnstructuredRaw;
+
+        // Test with an array in _raw field
+        let array_struct = StructValue::new(
+            vec![Value::String("[1, \"hello\", true, 3.15]".into())],
+            StructType::new(vec![StructField::new(
+                "_raw".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+
+        let decoded_struct = settings.decode_struct(&array_struct).unwrap();
+        let decoded_fields: Vec<&str> = decoded_struct
+            .struct_type()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(decoded_fields.contains(&"value"));
+
+        if let Value::List(list_value) = &decoded_struct.items()[0] {
+            assert_eq!(list_value.items().len(), 4);
+            assert_eq!(list_value.items()[0], Value::Int64(1));
+            assert_eq!(list_value.items()[1], Value::String("hello".into()));
+            assert_eq!(list_value.items()[2], Value::Boolean(true));
+            assert_eq!(list_value.items()[3], Value::Float64(OrderedFloat(3.15)));
+        } else {
+            panic!("Expected array to be decoded as ListValue");
+        }
+    }
+
+    #[test]
+    fn test_decode_struct_comprehensive_flow() {
+        // Test the complete flow: encode JSON with partial unstructured settings,
+        // then decode the resulting StructValue back to fully structured form
+        let mut unstructured_keys = HashSet::new();
+        unstructured_keys.insert("metadata".to_string());
+        unstructured_keys.insert("user.profile.settings".to_string());
+
+        let settings = JsonStructureSettings::PartialUnstructuredByKey {
+            fields: None,
+            unstructured_keys,
+        };
+
+        // Original JSON with nested structure
+        let original_json = json!({
+            "name": "Alice",
+            "age": 25,
+            "metadata": {
+                "tags": ["admin", "premium"],
+                "preferences": {
+                    "theme": "dark",
+                    "notifications": true
+                }
+            },
+            "user": {
+                "profile": {
+                    "name": "Alice Smith",
+                    "settings": {
+                        "language": "en",
+                        "timezone": "UTC"
+                    }
+                },
+                "active": true
+            }
+        });
+
+        // Encode the JSON with partial unstructured settings
+        let encoded_value = settings.encode(&original_json).unwrap();
+
+        // Verify encoding worked - metadata and user.profile.settings should be unstructured
+        if let Value::Struct(encoded_struct) = encoded_value {
+            let fields: Vec<&str> = encoded_struct
+                .struct_type()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect();
+
+            assert!(fields.contains(&"name"));
+            assert!(fields.contains(&"age"));
+            assert!(fields.contains(&"metadata"));
+            assert!(fields.contains(&"user"));
+
+            // Check that metadata is stored as string (unstructured)
+            let metadata_index = fields.iter().position(|&f| f == "metadata").unwrap();
+            if let Value::String(_) = encoded_struct.items()[metadata_index] {
+                // Good - metadata is unstructured
+            } else {
+                panic!("Expected metadata to be encoded as string (unstructured)");
+            }
+
+            // Check that user.profile.settings is unstructured
+            let user_index = fields.iter().position(|&f| f == "user").unwrap();
+            if let Value::Struct(user_struct) = &encoded_struct.items()[user_index] {
+                let user_fields: Vec<&str> = user_struct
+                    .struct_type()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect();
+
+                let profile_index = user_fields.iter().position(|&f| f == "profile").unwrap();
+                if let Value::Struct(profile_struct) = &user_struct.items()[profile_index] {
+                    let profile_fields: Vec<&str> = profile_struct
+                        .struct_type()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name())
+                        .collect();
+
+                    let settings_index = profile_fields
+                        .iter()
+                        .position(|&f| f == "settings")
+                        .unwrap();
+                    if let Value::String(_) = &profile_struct.items()[settings_index] {
+                        // Good - settings is unstructured
+                    } else {
+                        panic!(
+                            "Expected user.profile.settings to be encoded as string (unstructured)"
+                        );
+                    }
+                } else {
+                    panic!("Expected user.profile to be a struct");
+                }
+            } else {
+                panic!("Expected user to be a struct");
+            }
+
+            // Now decode the struct back to fully structured form
+            let decoded_struct = settings.decode_struct(&encoded_struct).unwrap();
+
+            // Verify the decoded struct has proper structure
+            let decoded_fields: Vec<&str> = decoded_struct
+                .struct_type()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect();
+
+            assert!(decoded_fields.contains(&"name"));
+            assert!(decoded_fields.contains(&"age"));
+            assert!(decoded_fields.contains(&"metadata"));
+            assert!(decoded_fields.contains(&"user"));
+
+            // Check that metadata is now properly structured
+            let metadata_index = decoded_fields
+                .iter()
+                .position(|&f| f == "metadata")
+                .unwrap();
+            if let Value::Struct(metadata_struct) = &decoded_struct.items()[metadata_index] {
+                let metadata_fields: Vec<&str> = metadata_struct
+                    .struct_type()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect();
+
+                assert!(metadata_fields.contains(&"tags"));
+                assert!(metadata_fields.contains(&"preferences"));
+
+                // Check nested structure within metadata
+                let preferences_index = metadata_fields
+                    .iter()
+                    .position(|&f| f == "preferences")
+                    .unwrap();
+                if let Value::Struct(prefs_struct) = &metadata_struct.items()[preferences_index] {
+                    let prefs_fields: Vec<&str> = prefs_struct
+                        .struct_type()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name())
+                        .collect();
+
+                    assert!(prefs_fields.contains(&"theme"));
+                    assert!(prefs_fields.contains(&"notifications"));
+                } else {
+                    panic!("Expected metadata.preferences to be a struct");
+                }
+            } else {
+                panic!("Expected metadata to be decoded as struct");
+            }
+
+            // Check that user.profile.settings is now properly structured
+            let user_index = decoded_fields.iter().position(|&f| f == "user").unwrap();
+            if let Value::Struct(user_struct) = &decoded_struct.items()[user_index] {
+                let user_fields: Vec<&str> = user_struct
+                    .struct_type()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect();
+
+                let profile_index = user_fields.iter().position(|&f| f == "profile").unwrap();
+                if let Value::Struct(profile_struct) = &user_struct.items()[profile_index] {
+                    let profile_fields: Vec<&str> = profile_struct
+                        .struct_type()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name())
+                        .collect();
+
+                    let settings_index = profile_fields
+                        .iter()
+                        .position(|&f| f == "settings")
+                        .unwrap();
+                    if let Value::Struct(settings_struct) = &profile_struct.items()[settings_index]
+                    {
+                        let settings_fields: Vec<&str> = settings_struct
+                            .struct_type()
+                            .fields()
+                            .iter()
+                            .map(|f| f.name())
+                            .collect();
+
+                        assert!(settings_fields.contains(&"language"));
+                        assert!(settings_fields.contains(&"timezone"));
+                    } else {
+                        panic!("Expected user.profile.settings to be decoded as struct");
+                    }
+                } else {
+                    panic!("Expected user.profile to be a struct");
+                }
+            } else {
+                panic!("Expected user to be a struct");
+            }
+        } else {
+            panic!("Expected encoded value to be a struct");
         }
     }
 }
