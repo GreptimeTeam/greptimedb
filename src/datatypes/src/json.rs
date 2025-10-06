@@ -53,6 +53,8 @@ pub struct JsonContext<'a> {
 }
 
 impl JsonStructureSettings {
+    pub const RAW_FIELD: &'static str = "_raw";
+
     pub fn decode(&self, value: &Value) -> Result<Json, Error> {
         let context = JsonContext {
             key_path: String::new(),
@@ -115,7 +117,16 @@ pub fn encode_json_with_context<'a>(
 ) -> Result<Value, Error> {
     // Check if the entire encoding should be unstructured
     if matches!(context.settings, JsonStructureSettings::UnstructuredRaw) {
-        return Ok(Value::String(json.to_string().into()));
+        let json_string = json.to_string();
+        let struct_value = StructValue::new(
+            vec![Value::String(json_string.into())],
+            StructType::new(vec![StructField::new(
+                JsonStructureSettings::RAW_FIELD.to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )]),
+        );
+        return Ok(Value::Struct(struct_value));
     }
 
     // Check if current key should be treated as unstructured
@@ -415,6 +426,33 @@ fn decode_list_with_context<'a>(
 /// Decode unstructured value (stored as string)
 fn decode_unstructured_value(value: &Value) -> Result<Json, Error> {
     match value {
+        // Handle new format: StructValue with _raw field
+        Value::Struct(struct_value) => {
+            if struct_value.struct_type().fields().len() == 1 {
+                let field = &struct_value.struct_type().fields()[0];
+                if field.name() == JsonStructureSettings::RAW_FIELD {
+                    if let Some(value) = struct_value.items().first() {
+                        if let Value::String(s) = value {
+                            let json_str = s.as_utf8();
+                            return serde_json::from_str(json_str).context(
+                                error::DeserializeSnafu {
+                                    json: json_str.to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            // Fall back to treating as regular struct
+            decode_struct_with_context(
+                struct_value,
+                &JsonContext {
+                    key_path: String::new(),
+                    settings: &JsonStructureSettings::Structured(None),
+                },
+            )
+        }
+        // Handle old format: plain string (for backward compatibility)
         Value::String(s) => {
             let json_str = s.as_utf8();
             serde_json::from_str(json_str).context(error::DeserializeSnafu {
@@ -422,7 +460,8 @@ fn decode_unstructured_value(value: &Value) -> Result<Json, Error> {
             })
         }
         _ => Err(error::InvalidJsonSnafu {
-            value: "Unstructured value must be stored as string".to_string(),
+            value: "Unstructured value must be stored as string or struct with _raw field"
+                .to_string(),
         }
         .build()),
     }
@@ -1156,6 +1195,26 @@ mod tests {
         }
 
         #[test]
+        fn test_decode_unstructured_raw_struct_format() {
+            let settings = JsonStructureSettings::UnstructuredRaw;
+
+            let json_str = r#"{"name": "Bob", "age": 30}"#;
+            let struct_value = StructValue::new(
+                vec![Value::String(json_str.into())],
+                StructType::new(vec![StructField::new(
+                    JsonStructureSettings::RAW_FIELD.to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )]),
+            );
+            let value = Value::Struct(struct_value);
+
+            let result = settings.decode(&value).unwrap();
+            let expected: Json = serde_json::from_str(json_str).unwrap();
+            assert_eq!(result, expected);
+        }
+
+        #[test]
         fn test_decode_partial_unstructured() {
             let mut unstructured_keys = HashSet::new();
             unstructured_keys.insert("user.metadata".to_string());
@@ -1342,12 +1401,23 @@ mod tests {
         let settings = JsonStructureSettings::UnstructuredRaw;
         let result = settings.encode(&json).unwrap();
 
-        if let Value::String(s) = result {
-            let json_str = s.as_utf8();
-            assert!(json_str.contains("\"name\":\"Frank\""));
-            assert!(json_str.contains("\"score\":88"));
+        if let Value::Struct(struct_value) = result {
+            assert_eq!(struct_value.struct_type().fields().len(), 1);
+            let field = &struct_value.struct_type().fields()[0];
+            assert_eq!(field.name(), JsonStructureSettings::RAW_FIELD);
+            assert_eq!(field.data_type(), &ConcreteDataType::string_datatype());
+
+            let items = struct_value.items();
+            assert_eq!(items.len(), 1);
+            if let Value::String(s) = &items[0] {
+                let json_str = s.as_utf8();
+                assert!(json_str.contains("\"name\":\"Frank\""));
+                assert!(json_str.contains("\"score\":88"));
+            } else {
+                panic!("Expected String value in _raw field");
+            }
         } else {
-            panic!("Expected String value");
+            panic!("Expected Struct value");
         }
     }
 
@@ -1363,13 +1433,17 @@ mod tests {
 
         // Test with encode (no type)
         let result1 = settings.encode(&json).unwrap();
-        if let Value::String(s) = result1 {
-            let json_str = s.as_utf8();
-            assert!(json_str.contains("\"name\":\"Grace\""));
-            assert!(json_str.contains("\"age\":30"));
-            assert!(json_str.contains("\"active\":true"));
+        if let Value::Struct(s) = result1 {
+            if let Value::String(json_str) = &s.items()[0] {
+                let json_str = json_str.as_utf8();
+                assert!(json_str.contains("\"name\":\"Grace\""));
+                assert!(json_str.contains("\"age\":30"));
+                assert!(json_str.contains("\"active\":true"));
+            } else {
+                panic!("Expected String value in _raw field");
+            }
         } else {
-            panic!("Expected String value for encode");
+            panic!("Expected Struct value for encode");
         }
 
         // Test with encode_with_type (with type)
@@ -1391,11 +1465,15 @@ mod tests {
         let result2 = settings
             .encode_with_type(&json, Some(&concrete_type))
             .unwrap();
-        if let Value::String(s) = result2 {
-            let json_str = s.as_utf8();
-            assert!(json_str.contains("\"name\":\"Grace\""));
-            assert!(json_str.contains("\"age\":30"));
-            assert!(json_str.contains("\"active\":true"));
+        if let Value::Struct(s) = result2 {
+            if let Value::String(json_str) = &s.items()[0] {
+                let json_str = json_str.as_utf8();
+                assert!(json_str.contains("\"name\":\"Grace\""));
+                assert!(json_str.contains("\"age\":30"));
+                assert!(json_str.contains("\"active\":true"));
+            } else {
+                panic!("Expected String value for _raw field");
+            }
         } else {
             panic!("Expected String value for encode_with_type");
         }
@@ -1411,13 +1489,17 @@ mod tests {
         });
 
         let result3 = settings.encode(&nested_json).unwrap();
-        if let Value::String(s) = result3 {
-            let json_str = s.as_utf8();
-            assert!(json_str.contains("\"user\""));
-            assert!(json_str.contains("\"profile\""));
-            assert!(json_str.contains("\"name\":\"Alice\""));
-            assert!(json_str.contains("\"settings\""));
-            assert!(json_str.contains("\"theme\":\"dark\""));
+        if let Value::Struct(s) = result3 {
+            if let Value::String(json_str) = &s.items()[0] {
+                let json_str = json_str.as_utf8();
+                assert!(json_str.contains("\"user\""));
+                assert!(json_str.contains("\"profile\""));
+                assert!(json_str.contains("\"name\":\"Alice\""));
+                assert!(json_str.contains("\"settings\""));
+                assert!(json_str.contains("\"theme\":\"dark\""));
+            } else {
+                panic!("Expected String value for _raw field");
+            }
         } else {
             panic!("Expected String value for nested JSON");
         }
@@ -1425,9 +1507,13 @@ mod tests {
         // Test with arrays
         let array_json = json!([1, "hello", true, 3.15]);
         let result4 = settings.encode(&array_json).unwrap();
-        if let Value::String(s) = result4 {
-            let json_str = s.as_utf8();
-            assert!(json_str.contains("[1,\"hello\",true,3.15]"));
+        if let Value::Struct(s) = result4 {
+            if let Value::String(json_str) = &s.items()[0] {
+                let json_str = json_str.as_utf8();
+                assert!(json_str.contains("[1,\"hello\",true,3.15]"));
+            } else {
+                panic!("Expected String value for _raw field")
+            }
         } else {
             panic!("Expected String value for array JSON");
         }
