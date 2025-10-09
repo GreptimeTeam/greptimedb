@@ -147,10 +147,13 @@ monitor,host=127.0.0.2 cpu=0.2,memory=2.0 1719460800002";
         };
         instance.exec(request, QueryContext::arc()).await.unwrap();
 
-        // Insert some influxdb lines with implicit millisecond precision.
+        // Insert some influxdb lines without precision.
+        // According to the specification (both v1 and v2), if precision is not set, it is default
+        // to "nanosecond". The lines here will be converted to insert requests as usual and then
+        // be aligned to millisecond time unit.
         let lines = r"
-monitor,host=127.0.0.1 cpu=0.3,memory=3.0 1719460800003
-monitor,host=127.0.0.2 cpu=0.4,memory=4.0 1719460800004";
+monitor,host=127.0.0.1 cpu=0.3,memory=3.0 1719460800003000000
+monitor,host=127.0.0.2 cpu=0.4,memory=4.0 1719460800004000000";
         let request = InfluxdbRequest {
             precision: None,
             lines: lines.to_string(),

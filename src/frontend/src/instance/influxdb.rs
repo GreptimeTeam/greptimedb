@@ -164,7 +164,7 @@ fn align_time_unit(value: &ValueData, target: TimeUnit) -> servers::error::Resul
         ValueData::TimestampNanosecondValue(x) => Timestamp::new_nanosecond(*x),
         _ => {
             return UnexpectedResultSnafu {
-                reason: format!("Timestamp value '{:?} is not of timestamp type!", value),
+                reason: format!("Timestamp value '{:?}' is not of timestamp type!", value),
             }
             .fail();
         }
