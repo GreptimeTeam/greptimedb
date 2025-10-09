@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::NullBufferBuilder;
@@ -193,19 +192,19 @@ impl VectorOp for StructVector {
 
 impl Serializable for StructVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        let mut vectors = BTreeMap::new();
-        for (field, value) in self.array.fields().iter().zip(self.array.columns().iter()) {
+        let mut vectors = Vec::new();
+        for value in self.array.columns() {
             let value_vector = Helper::try_into_vector(value)?;
-            vectors.insert(field.name().clone(), value_vector);
+            vectors.push(value_vector);
         }
 
         (0..self.array.len())
             .map(|idx| {
                 let mut result = serde_json::Map::with_capacity(vectors.len());
-                for field in vectors.keys() {
-                    let field_value = vectors.get(field).unwrap().get(idx);
+                for (field, vector) in self.fields.fields().iter().zip(vectors.iter()) {
+                    let field_value = vector.get(idx);
                     result.insert(
-                        field.to_string(),
+                        field.name().to_string(),
                         field_value.try_into().context(SerializeSnafu)?,
                     );
                 }
