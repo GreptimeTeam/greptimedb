@@ -105,10 +105,7 @@ impl DfLogicalPlanner {
         }
 
         if analyze {
-            if format.is_some() {
-                return plan_err!("EXPLAIN ANALYZE with FORMAT is not supported")
-                    .context(PlanSqlSnafu);
-            }
+            // notice format is already set in query context, so can be ignore here
             Ok(LogicalPlan::Analyze(Analyze {
                 verbose,
                 input: plan,
