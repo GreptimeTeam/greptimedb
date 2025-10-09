@@ -12,20 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use chrono::Utc;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
-use common_meta::error::Error as MetaError;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::flow::flow_info::{FlowInfoKey, FlowInfoValue};
-use common_meta::key::flow::flow_route::FlowRouteValue;
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
-use common_meta::key::{
-    DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
-};
+use common_meta::key::{DeserializedValueWithBytes, FlowId, MetadataKey, MetadataValue};
 use common_meta::rpc::store::PutRequest;
 use common_query::Output;
 use datatypes::schema::COMMENT_KEY as COLUMN_COMMENT_KEY;
@@ -87,8 +81,7 @@ impl StatementExecutor {
             new_table_info.desc.as_deref(),
         );
 
-        self.update_table_info_with_fallback(&table_info, new_table_info)
-            .await?;
+        self.update_table_info(&table_info, new_table_info).await?;
 
         self.invalidate_table_cache_by_name(table_id, table_name)
             .await?;
@@ -128,8 +121,7 @@ impl StatementExecutor {
 
         update_column_comment_metadata(column_schema, comment);
 
-        self.update_table_info_with_fallback(&table_info, new_table_info)
-            .await?;
+        self.update_table_info(&table_info, new_table_info).await?;
 
         self.invalidate_table_cache_by_name(table_id, table_name)
             .await?;
@@ -184,18 +176,7 @@ impl StatementExecutor {
         new_flow_info.comment = comment.unwrap_or_default();
         new_flow_info.updated_time = Utc::now();
 
-        let flow_routes = self
-            .flow_metadata_manager
-            .flow_route_manager()
-            .routes(flow_id)
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .into_iter()
-            .map(|(key, value)| (key.partition_id(), value))
-            .collect::<Vec<_>>();
-
-        self.update_flow_metadata_with_fallback(flow_id, &flow_info, new_flow_info, flow_routes)
-            .await?;
+        self.update_flow_metadata(flow_id, new_flow_info).await?;
 
         Ok(Output::new_with_affected_rows(0))
     }
@@ -257,63 +238,19 @@ impl StatementExecutor {
         Ok(())
     }
 
-    async fn update_table_info_with_fallback(
+    async fn update_table_info(
         &self,
         current_table_info: &DeserializedValueWithBytes<TableInfoValue>,
         new_table_info: RawTableInfo,
     ) -> Result<()> {
-        let try_update = self
-            .table_metadata_manager
-            .update_table_info(current_table_info, None, new_table_info.clone())
-            .await
-            .context(TableMetadataManagerSnafu);
-
-        match try_update {
-            Ok(()) => Ok(()),
-            Err(err) if Self::is_txn_unsupported(&err) => {
-                self.update_table_info_without_txn(current_table_info, new_table_info)
-                    .await
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn update_flow_metadata_with_fallback(
-        &self,
-        flow_id: FlowId,
-        current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
-        new_flow_info: FlowInfoValue,
-        flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
-    ) -> Result<()> {
-        let try_update = self
-            .flow_metadata_manager
-            .update_flow_metadata(flow_id, current_flow_info, &new_flow_info, flow_routes)
-            .await
-            .context(TableMetadataManagerSnafu);
-
-        match try_update {
-            Ok(()) => Ok(()),
-            Err(err) if Self::is_txn_unsupported(&err) => {
-                self.update_flow_metadata_without_txn(flow_id, new_flow_info)
-                    .await
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn update_table_info_without_txn(
-        &self,
-        current_table_info: &DeserializedValueWithBytes<TableInfoValue>,
-        new_table_info: RawTableInfo,
-    ) -> Result<()> {
-        let kv_backend = Arc::clone(self.table_metadata_manager.kv_backend());
         let table_id = current_table_info.table_info.ident.table_id;
         let new_table_info_value = current_table_info.update(new_table_info);
         let raw_value = new_table_info_value
             .try_as_raw_value()
             .context(TableMetadataManagerSnafu)?;
 
-        kv_backend
+        self.table_metadata_manager
+            .kv_backend()
             .put(
                 PutRequest::new()
                     .with_key(TableInfoKey::new(table_id).to_bytes())
@@ -325,12 +262,11 @@ impl StatementExecutor {
         Ok(())
     }
 
-    async fn update_flow_metadata_without_txn(
+    async fn update_flow_metadata(
         &self,
         flow_id: FlowId,
         new_flow_info: FlowInfoValue,
     ) -> Result<()> {
-        let kv_backend = Arc::clone(self.table_metadata_manager.kv_backend());
         let raw_value = serde_json::to_vec(&new_flow_info)
             .map_err(|err| common_meta::error::Error::SerdeJson {
                 error: err,
@@ -338,7 +274,8 @@ impl StatementExecutor {
             })
             .context(TableMetadataManagerSnafu)?;
 
-        kv_backend
+        self.table_metadata_manager
+            .kv_backend()
             .put(
                 PutRequest::new()
                     .with_key(FlowInfoKey::new(flow_id).to_bytes())
@@ -348,15 +285,6 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?;
 
         Ok(())
-    }
-
-    fn is_txn_unsupported(error: &crate::error::Error) -> bool {
-        matches!(
-            error,
-            crate::error::Error::TableMetadataManager { source, .. }
-                if matches!(source, MetaError::Unsupported { operation, .. }
-                    if operation == "txn" || operation.ends_with("::txn"))
-        )
     }
 }
 
