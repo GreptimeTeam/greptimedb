@@ -94,21 +94,10 @@ pub fn create_subtasks(
 
         left_set.sort_unstable();
         right_set.sort_unstable();
-        let mut right_in_comp = vec![false; to_exprs.len()];
-        for &r in &right_set {
-            right_in_comp[r] = true;
-        }
+
         let transition_map = left_set
             .iter()
-            .map(|&i| {
-                let mut v: Vec<usize> = assoc[i]
-                    .iter()
-                    .copied()
-                    .filter(|&r| right_in_comp[r])
-                    .collect();
-                v.sort_unstable();
-                v
-            })
+            .map(|&i| assoc[i].clone())
             .collect::<Vec<_>>();
 
         subtasks.push(RepartitionSubtask {
