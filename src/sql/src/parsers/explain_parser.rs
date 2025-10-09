@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::{DescribeAlias, Statement as SpStatement};
 use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
@@ -54,10 +53,7 @@ impl ParserContext<'_> {
 #[cfg(test)]
 mod tests {
     use sqlparser::ast::helpers::attached_token::AttachedToken;
-    use sqlparser::ast::{
-        GroupByExpr, Query as SpQuery, SelectFlavor, Statement as SpStatement,
-        WildcardAdditionalOptions,
-    };
+    use sqlparser::ast::{GroupByExpr, Query as SpQuery, SelectFlavor, WildcardAdditionalOptions};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;

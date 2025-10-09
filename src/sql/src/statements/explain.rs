@@ -15,10 +15,9 @@
 use std::fmt::{Display, Formatter};
 
 use serde::Serialize;
-use sqlparser::ast::{AnalyzeFormat, Statement as SpStatement};
+use sqlparser::ast::AnalyzeFormat;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::error::Error;
 use crate::statements::statement::Statement;
 
 /// Explain statement.

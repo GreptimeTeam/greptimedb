@@ -94,7 +94,7 @@ impl DfLogicalPlanner {
 
         let verbose = explain.verbose;
         let analyze = explain.analyze;
-        let format = explain.format.clone().map(|f| f.to_string());
+        let format = explain.format.map(|f| f.to_string());
 
         let plan = Arc::new(plan);
         let schema = LogicalPlan::explain_schema();
