@@ -22,7 +22,9 @@ use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
 use snafu::ResultExt;
 
-use crate::error::{ArrowComputeSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu};
+use crate::error::{
+    ArrowComputeSnafu, ConversionSnafu, Error, Result, SerializeSnafu, UnsupportedOperationSnafu,
+};
 use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StructType;
@@ -210,19 +212,20 @@ impl Serializable for StructVector {
     }
 }
 
-impl From<StructArray> for StructVector {
-    fn from(array: StructArray) -> Self {
+impl TryFrom<StructArray> for StructVector {
+    type Error = Error;
+
+    fn try_from(array: StructArray) -> Result<Self> {
         let fields = match array.data_type() {
-            ArrowDataType::Struct(fields) => {
-                StructType::try_from(fields).expect("Failed to create StructType")
+            ArrowDataType::Struct(fields) => StructType::try_from(fields)?,
+            other => ConversionSnafu {
+                from: other.to_string(),
             }
-            other => panic!("Try to create StructVector from an arrow array with type {other:?}"),
+            .fail()?,
         };
-        Self { array, fields }
+        Ok(Self { array, fields })
     }
 }
-
-vectors::impl_try_from_arrow_array_for_vector!(StructArray, StructVector);
 
 impl ScalarVector for StructVector {
     type OwnedItem = StructValue;
@@ -311,13 +314,11 @@ impl StructVectorBuilder {
         Ok(())
     }
 
-    fn push_null_struct_value(&mut self) -> Result<()> {
+    fn push_null_struct_value(&mut self) {
         for builder in &mut self.value_builders {
             builder.push_null();
         }
         self.null_buffer.append_null();
-
-        Ok(())
     }
 }
 
@@ -379,7 +380,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.push_null_struct_value().expect("failed to push null");
+        self.push_null_struct_value();
     }
 }
 
