@@ -60,14 +60,14 @@ pub fn atomic_exprs_overlap(lhs: &AtomicExpr, rhs: &AtomicExpr) -> bool {
                 rhs_index = rhs_next;
             }
             Ordering::Less => {
-                // column appears only in `a`, skip all nucleons for this column
+                // column appears only in `lhs`, skip all nucleons for this column
                 let col = lhs_col;
                 while lhs_index < lhs.nucleons.len() && lhs.nucleons[lhs_index].column() == col {
                     lhs_index += 1;
                 }
             }
             Ordering::Greater => {
-                // column appears only in `b`, skip all nucleons for this column
+                // column appears only in `rhs`, skip all nucleons for this column
                 let col = rhs_col;
                 while rhs_index < rhs.nucleons.len() && rhs.nucleons[rhs_index].column() == col {
                     rhs_index += 1;
