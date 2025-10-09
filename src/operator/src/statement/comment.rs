@@ -26,8 +26,7 @@ use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
 use common_meta::rpc::store::PutRequest;
 use common_query::Output;
-use common_telemetry::debug;
-use datatypes::schema::COMMENT_KEY;
+use datatypes::schema::COMMENT_KEY as COLUMN_COMMENT_KEY;
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
@@ -35,6 +34,7 @@ use snafu::{GenerateImplicitData, Location, OptionExt, ResultExt};
 use sql::ast::{Ident, ObjectName, ObjectNamePartExt};
 use sql::statements::comment::{Comment, CommentObject};
 use table::metadata::{RawTableInfo, TableId};
+use table::requests::COMMENT_KEY as TABLE_COMMENT_KEY;
 use table::table_name::TableName;
 
 use crate::error::{
@@ -81,6 +81,10 @@ impl StatementExecutor {
 
         let mut new_table_info = table_info.table_info.clone();
         new_table_info.desc = comment;
+        sync_table_comment_option(
+            &mut new_table_info.meta.options,
+            new_table_info.desc.as_deref(),
+        );
 
         self.update_table_info_with_fallback(&table_info, new_table_info)
             .await?;
@@ -266,7 +270,6 @@ impl StatementExecutor {
         match try_update {
             Ok(()) => Ok(()),
             Err(err) if Self::is_txn_unsupported(&err) => {
-                debug!("comment update_table_info fallback due to unsupported txn capability");
                 self.update_table_info_without_txn(current_table_info, new_table_info)
                     .await
             }
@@ -290,7 +293,6 @@ impl StatementExecutor {
         match try_update {
             Ok(()) => Ok(()),
             Err(err) if Self::is_txn_unsupported(&err) => {
-                debug!("comment update_flow fallback due to unsupported txn capability");
                 self.update_flow_metadata_without_txn(flow_id, new_flow_info)
                     .await
             }
@@ -389,10 +391,23 @@ fn update_column_comment_metadata(
         Some(value) => {
             column_schema
                 .mut_metadata()
-                .insert(COMMENT_KEY.to_string(), value);
+                .insert(COLUMN_COMMENT_KEY.to_string(), value);
         }
         None => {
-            column_schema.mut_metadata().remove(COMMENT_KEY);
+            column_schema.mut_metadata().remove(COLUMN_COMMENT_KEY);
+        }
+    }
+}
+
+fn sync_table_comment_option(options: &mut table::requests::TableOptions, comment: Option<&str>) {
+    match comment {
+        Some(value) => {
+            options
+                .extra_options
+                .insert(TABLE_COMMENT_KEY.to_string(), value.to_string());
+        }
+        None => {
+            options.extra_options.remove(TABLE_COMMENT_KEY);
         }
     }
 }
@@ -400,9 +415,10 @@ fn update_column_comment_metadata(
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{COMMENT_KEY, ColumnSchema};
+    use datatypes::schema::{COMMENT_KEY as COLUMN_COMMENT_KEY, ColumnSchema};
+    use table::requests::TableOptions;
 
-    use super::update_column_comment_metadata;
+    use super::{sync_table_comment_option, update_column_comment_metadata};
 
     #[test]
     fn test_update_column_comment_metadata_uses_schema_key() {
@@ -413,7 +429,7 @@ mod tests {
         assert_eq!(
             column_schema
                 .metadata()
-                .get(COMMENT_KEY)
+                .get(COLUMN_COMMENT_KEY)
                 .map(|value| value.as_str()),
             Some("note")
         );
@@ -422,6 +438,20 @@ mod tests {
 
         update_column_comment_metadata(&mut column_schema, None);
 
-        assert!(column_schema.metadata().get(COMMENT_KEY).is_none());
+        assert!(column_schema.metadata().get(COLUMN_COMMENT_KEY).is_none());
+    }
+
+    #[test]
+    fn test_sync_table_comment_option() {
+        let mut options = TableOptions::default();
+
+        sync_table_comment_option(&mut options, Some("table comment"));
+        assert_eq!(
+            options.extra_options.get(super::TABLE_COMMENT_KEY),
+            Some(&"table comment".to_string())
+        );
+
+        sync_table_comment_option(&mut options, None);
+        assert!(!options.extra_options.contains_key(super::TABLE_COMMENT_KEY));
     }
 }

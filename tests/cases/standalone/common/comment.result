@@ -27,7 +27,9 @@ SHOW CREATE TABLE comment_table_test;
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
-|                    |                                                   |
+|                    | WITH(                                             |
+|                    |   comment = 'table level description'             |
+|                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
 -- Remove table comment
@@ -115,8 +117,8 @@ DROP TABLE comment_column_test;
 Affected Rows: 0
 
 -- Test: COMMENT ON FLOW add & remove
--- Prepare base & sink tables
-CREATE TABLE flow_base_comment_test (
+-- Prepare source & sink tables
+CREATE TABLE flow_source_comment_test (
 	desc_str STRING,
 	ts TIMESTAMP TIME INDEX
 );
@@ -133,7 +135,7 @@ Affected Rows: 0
 CREATE FLOW flow_comment_test
 SINK TO flow_sink_comment_test
 AS
-SELECT desc_str, ts FROM flow_base_comment_test;
+SELECT desc_str, ts FROM flow_source_comment_test;
 
 Affected Rows: 0
 
@@ -144,14 +146,14 @@ Affected Rows: 0
 
 SHOW CREATE FLOW flow_comment_test;
 
-+-------------------+----------------------------------------------------+
-| Flow              | Create Flow                                        |
-+-------------------+----------------------------------------------------+
-| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test        |
-|                   | SINK TO flow_sink_comment_test                     |
-|                   | COMMENT 'flow level description'                   |
-|                   | AS SELECT desc_str, ts FROM flow_base_comment_test |
-+-------------------+----------------------------------------------------+
++-------------------+------------------------------------------------------+
+| Flow              | Create Flow                                          |
++-------------------+------------------------------------------------------+
+| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
+|                   | SINK TO flow_sink_comment_test                       |
+|                   | COMMENT 'flow level description'                     |
+|                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
++-------------------+------------------------------------------------------+
 
 -- Remove flow comment
 COMMENT ON FLOW flow_comment_test IS NULL;
@@ -160,19 +162,19 @@ Affected Rows: 0
 
 SHOW CREATE FLOW flow_comment_test;
 
-+-------------------+----------------------------------------------------+
-| Flow              | Create Flow                                        |
-+-------------------+----------------------------------------------------+
-| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test        |
-|                   | SINK TO flow_sink_comment_test                     |
-|                   | AS SELECT desc_str, ts FROM flow_base_comment_test |
-+-------------------+----------------------------------------------------+
++-------------------+------------------------------------------------------+
+| Flow              | Create Flow                                          |
++-------------------+------------------------------------------------------+
+| flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
+|                   | SINK TO flow_sink_comment_test                       |
+|                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
++-------------------+------------------------------------------------------+
 
 DROP FLOW flow_comment_test;
 
 Affected Rows: 0
 
-DROP TABLE flow_base_comment_test;
+DROP TABLE flow_source_comment_test;
 
 Affected Rows: 0
 

@@ -1255,6 +1255,7 @@ CREATE TABLE {table_name} (
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
 |                    | WITH(                                             |
+|                    |   'comment' = 'Created on insertion',             |
 |                    |   'compaction.twcs.time_window' = '1d',           |
 |                    |   'compaction.type' = 'twcs'                      |
 |                    | )                                                 |

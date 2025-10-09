@@ -20,6 +20,7 @@ SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 SHOW CREATE TABLE distinct_basic;
 
+-- SQLNESS REPLACE \d{4} REDACTED
 SHOW CREATE TABLE out_distinct_basic;
 
 -- SQLNESS SLEEP 3s
