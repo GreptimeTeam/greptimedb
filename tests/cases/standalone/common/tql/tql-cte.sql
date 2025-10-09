@@ -32,6 +32,11 @@ WITH tql (the_timestamp, the_value) as (
 )
 SELECT * FROM tql;
 
+-- Explain TQL CTE
+EXPLAIN WITH tql AS (
+    TQL EVAL (0, 40, '10s') metric
+) SELECT * FROM tql;
+
 -- Hybrid CTEs (TQL + SQL)
 WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),

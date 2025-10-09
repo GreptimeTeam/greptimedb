@@ -61,6 +61,13 @@ SELECT * FROM tql;
 | 1970-01-01T00:00:40 | 3.0       |
 +---------------------+-----------+
 
+-- Explain TQL CTE
+EXPLAIN WITH tql AS (
+    TQL EVAL (0, 40, '10s') metric
+) SELECT * FROM tql;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: tql
+
 -- Hybrid CTEs (TQL + SQL)
 WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),
