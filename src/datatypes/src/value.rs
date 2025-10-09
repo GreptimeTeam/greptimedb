@@ -32,7 +32,7 @@ use datafusion_common::scalar::ScalarStructBuilder;
 use greptime_proto::v1::value::ValueData;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::{Number, Value as JsonValue};
+use serde_json::{Map, Number, Value as JsonValue};
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
@@ -854,7 +854,14 @@ impl TryFrom<Value> for serde_json::Value {
             Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
-            Value::List(v) => serde_json::to_value(v.items())?,
+            Value::List(v) => {
+                let items = v
+                    .take_items()
+                    .into_iter()
+                    .map(serde_json::Value::try_from)
+                    .collect::<serde_json::Result<Vec<_>>>()?;
+                serde_json::Value::Array(items)
+            }
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
             Value::Time(v) => serde_json::to_value(v.value())?,
             Value::IntervalYearMonth(v) => serde_json::to_value(v.to_i32())?,
@@ -862,7 +869,22 @@ impl TryFrom<Value> for serde_json::Value {
             Value::IntervalMonthDayNano(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
-            Value::Struct(v) => serde_json::to_value(v.items())?,
+            Value::Struct(v) => {
+                let map = v
+                    .fields
+                    .clone() // TODO:(sunng87) remove in next patch when into_parts is merged
+                    .fields()
+                    .iter()
+                    .zip(v.take_items().into_iter())
+                    .map(|(field, value)| {
+                        Ok((
+                            field.name().to_string(),
+                            serde_json::Value::try_from(value)?,
+                        ))
+                    })
+                    .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
+                serde_json::Value::Object(map)
+            }
         };
 
         Ok(json_value)
@@ -1453,6 +1475,7 @@ pub fn transform_value_ref_to_json_value<'a>(
             }
         }
         ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
+        // TODO(sunng87): correct serialization for list and struct
         ValueRef::List(v) => serde_json::to_value(v)?,
         ValueRef::Timestamp(v) => serde_json::to_value(v.value())?,
         ValueRef::Time(v) => serde_json::to_value(v.value())?,
@@ -1461,6 +1484,7 @@ pub fn transform_value_ref_to_json_value<'a>(
         ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
         ValueRef::Duration(v) => serde_json::to_value(v.value())?,
         ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
+        // TODO(sunng87): correct serialization for list and struct
         ValueRef::Struct(v) => serde_json::to_value(v)?,
     };
 
@@ -2510,13 +2534,43 @@ pub(crate) mod tests {
             to_json(Value::Duration(Duration::new_millisecond(1)))
         );
 
-        let json_value: serde_json::Value = serde_json::from_str(r#"[{"Int32":123}]"#).unwrap();
+        let json_value: serde_json::Value = serde_json::from_str(r#"[123]"#).unwrap();
         assert_eq!(
             json_value,
             to_json(Value::List(ListValue {
                 items: vec![Value::Int32(123)],
                 datatype: ConcreteDataType::int32_datatype(),
             }))
+        );
+
+        let struct_value = StructValue::try_new(
+            vec![
+                Value::Int64(42),
+                Value::String("tomcat".into()),
+                Value::Boolean(true),
+            ],
+            StructType::new(vec![
+                StructField::new("num".to_string(), ConcreteDataType::int64_datatype(), true),
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "yes_or_no".to_string(),
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::Value::try_from(Value::Struct(struct_value)).unwrap(),
+            serde_json::json!({
+                "num": 42,
+                "name": "tomcat",
+                "yes_or_no": true
+            })
         );
     }
 
