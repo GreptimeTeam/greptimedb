@@ -122,13 +122,9 @@ impl StatementExecutor {
         table: TableRef,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let table_info_with_partition_indices = table.table_info();
-        let partition_column_names: Vec<_> = table_info_with_partition_indices
-            .meta
-            .partition_column_names()
-            .cloned()
-            .collect();
-        let mut table_info = table_info_with_partition_indices;
+        let mut table_info = table.table_info();
+        let partition_column_names: Vec<_> =
+            table_info.meta.partition_column_names().cloned().collect();
 
         if let Some(latest) = self
             .table_metadata_manager

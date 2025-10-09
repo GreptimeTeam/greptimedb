@@ -21,9 +21,7 @@ use std::time::Duration;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::CacheNotGet;
-use common_meta::error::{
-    CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result, UnsupportedSnafu,
-};
+use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
 use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::KeyValue;
@@ -370,20 +368,8 @@ impl MetaKvBackend {
     }
 }
 
-#[async_trait::async_trait]
 impl TxnService for MetaKvBackend {
     type Error = Error;
-
-    async fn txn(&self, _txn: Txn) -> std::result::Result<TxnResponse, Self::Error> {
-        UnsupportedSnafu {
-            operation: "MetaKvBackend::txn",
-        }
-        .fail()
-    }
-
-    fn max_txn_ops(&self) -> usize {
-        0
-    }
 }
 
 /// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since
