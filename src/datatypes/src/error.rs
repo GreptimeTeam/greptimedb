@@ -246,6 +246,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
+    InconsistentStructFieldsAndItems {
+        field_len: usize,
+        item_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -284,7 +291,8 @@ impl ErrorExt for Error {
             | TryFromValue { .. }
             | ConvertArrowArrayToScalars { .. }
             | ConvertScalarToArrowArray { .. }
-            | ParseExtendedType { .. } => StatusCode::Internal,
+            | ParseExtendedType { .. }
+            | InconsistentStructFieldsAndItems { .. } => StatusCode::Internal,
         }
     }
 

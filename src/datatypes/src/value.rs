@@ -36,8 +36,8 @@ use serde_json::{Number, Value as JsonValue};
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
-    self, ConvertArrowArrayToScalarsSnafu, ConvertScalarToArrowArraySnafu, Error, Result,
-    TryFromValueSnafu,
+    self, ConvertArrowArrayToScalarsSnafu, ConvertScalarToArrowArraySnafu, Error,
+    InconsistentStructFieldsAndItemsSnafu, Result, TryFromValueSnafu,
 };
 use crate::prelude::*;
 use crate::schema::ColumnSchema;
@@ -950,8 +950,15 @@ pub struct StructValue {
 }
 
 impl StructValue {
-    pub fn new(items: Vec<Value>, fields: StructType) -> Self {
-        Self { items, fields }
+    pub fn try_new(items: Vec<Value>, fields: StructType) -> Result<Self> {
+        ensure!(
+            items.len() == fields.fields().len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: fields.fields().len(),
+                item_len: items.len()
+            }
+        );
+        Ok(Self { items, fields })
     }
 
     pub fn items(&self) -> &[Value] {
@@ -993,7 +1000,7 @@ impl StructValue {
 
 impl Default for StructValue {
     fn default() -> StructValue {
-        StructValue::new(vec![], StructType::new(vec![]))
+        StructValue::try_new(vec![], StructType::new(vec![])).unwrap()
     }
 }
 
@@ -1104,7 +1111,7 @@ impl TryFrom<ScalarValue> for Value {
                         field_scalar_value.try_into()
                     })
                     .collect::<Result<Vec<Value>>>()?;
-                Value::Struct(StructValue::new(items, struct_type))
+                Value::Struct(StructValue::try_new(items, struct_type)?)
             }
             ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
@@ -1557,7 +1564,7 @@ impl<'a> StructValueRef<'a> {
             StructValueRef::Ref(val) => Value::Struct((*val).clone()),
             StructValueRef::RefList { val, fields } => {
                 let items = val.iter().map(|v| Value::from(v.clone())).collect();
-                Value::Struct(StructValue::new(items, fields.clone()))
+                Value::Struct(StructValue::try_new(items, fields.clone()).unwrap())
             }
         }
     }
@@ -1769,7 +1776,7 @@ pub(crate) mod tests {
             Value::UInt8(25),
             Value::String("94038".into()),
         ];
-        StructValue::new(struct_items, struct_type)
+        StructValue::try_new(struct_items, struct_type).unwrap()
     }
 
     pub(crate) fn build_scalar_struct_value() -> ScalarValue {

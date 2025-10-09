@@ -2092,17 +2092,20 @@ mod tests {
     fn test_struct_to_pb_value() {
         let items = vec![Value::Boolean(true), Value::String("tom".into())];
 
-        let value = Value::Struct(StructValue::new(
-            items,
-            StructType::new(vec![
-                StructField::new(
-                    "a.a".to_string(),
-                    ConcreteDataType::boolean_datatype(),
-                    true,
-                ),
-                StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
-            ]),
-        ));
+        let value = Value::Struct(
+            StructValue::try_new(
+                items,
+                StructType::new(vec![
+                    StructField::new(
+                        "a.a".to_string(),
+                        ConcreteDataType::boolean_datatype(),
+                        true,
+                    ),
+                    StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
+                ]),
+            )
+            .unwrap(),
+        );
 
         let pb_value = to_proto_value(value);
 

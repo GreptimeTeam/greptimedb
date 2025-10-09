@@ -372,7 +372,7 @@ impl<'a> ScalarRef<'a> for StructValueRef<'a> {
             StructValueRef::Ref(val) => (*val).clone(),
             StructValueRef::RefList { val, fields } => {
                 let items = val.iter().map(|v| Value::from(v.clone())).collect();
-                StructValue::new(items, fields.clone())
+                StructValue::try_new(items, fields.clone()).unwrap()
             }
         }
     }

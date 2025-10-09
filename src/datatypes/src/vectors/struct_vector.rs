@@ -20,10 +20,11 @@ use arrow::array::NullBufferBuilder;
 use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 
 use crate::error::{
-    ArrowComputeSnafu, ConversionSnafu, Error, Result, SerializeSnafu, UnsupportedOperationSnafu,
+    ArrowComputeSnafu, ConversionSnafu, Error, InconsistentStructFieldsAndItemsSnafu, Result,
+    SerializeSnafu, UnsupportedOperationSnafu,
 };
 use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
@@ -40,8 +41,15 @@ pub struct StructVector {
 }
 
 impl StructVector {
-    pub fn new(fields: StructType, array: StructArray) -> Self {
-        StructVector { array, fields }
+    pub fn try_new(fields: StructType, array: StructArray) -> Result<Self> {
+        ensure!(
+            fields.fields().len() == array.fields().len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: fields.fields().len(),
+                item_len: array.fields().len(),
+            }
+        );
+        Ok(StructVector { array, fields })
     }
 
     pub fn array(&self) -> &StructArray {
@@ -129,7 +137,7 @@ impl Vector for StructVector {
             })
             .collect();
 
-        Value::Struct(StructValue::new(values, self.fields.clone()))
+        Value::Struct(StructValue::try_new(values, self.fields.clone()).unwrap())
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -157,7 +165,7 @@ impl VectorOp for StructVector {
             column_arrays,
             self.array.nulls().cloned(),
         );
-        Arc::new(StructVector::new(self.fields.clone(), replicated_array))
+        Arc::new(StructVector::try_new(self.fields.clone(), replicated_array).unwrap())
     }
 
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
@@ -356,10 +364,10 @@ impl MutableVector for StructVectorBuilder {
                 },
                 StructValueRef::Ref(val) => self.push_struct_value(val)?,
                 StructValueRef::RefList { val, fields } => {
-                    let struct_value = StructValue::new(
+                    let struct_value = StructValue::try_new(
                         val.iter().map(|v| Value::from(v.clone())).collect(),
                         fields.clone(),
-                    );
+                    )?;
                     self.push_struct_value(&struct_value)?;
                 }
             }
@@ -413,7 +421,7 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             self.null_buffer.finish(),
         );
 
-        StructVector::new(self.fields.clone(), struct_array)
+        StructVector::try_new(self.fields.clone(), struct_array).unwrap()
     }
 
     fn finish_cloned(&self) -> Self::VectorType {
@@ -428,7 +436,7 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             arrays,
             self.null_buffer.finish_cloned(),
         );
-        StructVector::new(self.fields.clone(), struct_array)
+        StructVector::try_new(self.fields.clone(), struct_array).unwrap()
     }
 }
 
