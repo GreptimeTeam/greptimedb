@@ -20,6 +20,7 @@ use arrow::array::NullBufferBuilder;
 use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
+use datafusion_common::ScalarValue;
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
@@ -125,14 +126,8 @@ impl Vector for StructVector {
                 if field_array.is_null(i) {
                     Value::Null
                 } else {
-                    let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
-                        panic!(
-                            "arrow array with datatype {:?} cannot converted to our vector",
-                            field_array.data_type()
-                        )
-                    });
-
-                    field_vector.get(index).clone()
+                    let scalar_value = ScalarValue::try_from_array(field_array, index).unwrap();
+                    Value::try_from(scalar_value).unwrap()
                 }
             })
             .collect();
@@ -474,5 +469,23 @@ mod tests {
             }
         }
         assert_eq!(5, null_count);
+
+        let value = vector.get(2);
+        if let Value::Struct(struct_value) = value {
+            assert_eq!(struct_value.struct_type(), &struct_type);
+            assert_eq!(struct_value.items().get(0), Some(&Value::Int32(1)));
+            assert_eq!(
+                struct_value.items().get(1),
+                Some(&Value::String("tom".into()))
+            );
+            assert_eq!(struct_value.items().get(2), Some(&Value::UInt8(25)));
+            assert_eq!(
+                struct_value.items().get(3),
+                Some(&Value::String("94038".into()))
+            );
+            assert_eq!(struct_value.items().get(4), None);
+        } else {
+            panic!("Expected a struct value");
+        }
     }
 }
