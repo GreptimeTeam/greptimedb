@@ -379,6 +379,12 @@ impl ParquetPrimaryKeyToFlat {
         column_ids: impl Iterator<Item = ColumnId>,
         skip_auto_convert: bool,
     ) -> ParquetPrimaryKeyToFlat {
+        assert!(if skip_auto_convert {
+            metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        } else {
+            true
+        });
+
         let column_ids: Vec<_> = column_ids.collect();
 
         // Creates a map to lookup index based on the new format.
