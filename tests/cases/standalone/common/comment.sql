@@ -35,8 +35,8 @@ SHOW CREATE TABLE comment_column_test;
 DROP TABLE comment_column_test;
 
 -- Test: COMMENT ON FLOW add & remove
--- Prepare base & sink tables
-CREATE TABLE flow_base_comment_test (
+-- Prepare source & sink tables
+CREATE TABLE flow_source_comment_test (
 	desc_str STRING,
 	ts TIMESTAMP TIME INDEX
 );
@@ -49,7 +49,7 @@ CREATE TABLE flow_sink_comment_test (
 CREATE FLOW flow_comment_test
 SINK TO flow_sink_comment_test
 AS
-SELECT desc_str, ts FROM flow_base_comment_test;
+SELECT desc_str, ts FROM flow_source_comment_test;
 
 -- Add flow comment
 COMMENT ON FLOW flow_comment_test IS 'flow level description';
@@ -60,6 +60,6 @@ COMMENT ON FLOW flow_comment_test IS NULL;
 SHOW CREATE FLOW flow_comment_test;
 
 DROP FLOW flow_comment_test;
-DROP TABLE flow_base_comment_test;
+DROP TABLE flow_source_comment_test;
 DROP TABLE flow_sink_comment_test;
 

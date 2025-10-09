@@ -27,6 +27,7 @@ use common_meta::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, Meta
 use common_meta::rpc::store::PutRequest;
 use common_query::Output;
 use common_telemetry::debug;
+use datatypes::schema::COMMENT_KEY;
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
@@ -34,7 +35,6 @@ use snafu::{GenerateImplicitData, Location, OptionExt, ResultExt};
 use sql::ast::{Ident, ObjectName, ObjectNamePartExt};
 use sql::statements::comment::{Comment, CommentObject};
 use table::metadata::{RawTableInfo, TableId};
-use table::requests::COMMENT_KEY;
 use table::table_name::TableName;
 
 use crate::error::{
@@ -121,16 +121,7 @@ impl StatementExecutor {
                 msg: format!("{} column `{}`", full_table_name, column_name),
             })?;
 
-        match comment {
-            Some(value) => {
-                column_schema
-                    .mut_metadata()
-                    .insert(COMMENT_KEY.to_string(), value);
-            }
-            None => {
-                column_schema.mut_metadata().remove(COMMENT_KEY);
-            }
-        }
+        update_column_comment_metadata(column_schema, comment);
 
         self.update_table_info_with_fallback(&table_info, new_table_info)
             .await?;
@@ -387,5 +378,50 @@ impl StatementExecutor {
                 if matches!(source, MetaError::Unsupported { operation, .. }
                     if operation == "txn" || operation.ends_with("::txn"))
         )
+    }
+}
+
+fn update_column_comment_metadata(
+    column_schema: &mut datatypes::schema::ColumnSchema,
+    comment: Option<String>,
+) {
+    match comment {
+        Some(value) => {
+            column_schema
+                .mut_metadata()
+                .insert(COMMENT_KEY.to_string(), value);
+        }
+        None => {
+            column_schema.mut_metadata().remove(COMMENT_KEY);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{COMMENT_KEY, ColumnSchema};
+
+    use super::update_column_comment_metadata;
+
+    #[test]
+    fn test_update_column_comment_metadata_uses_schema_key() {
+        let mut column_schema = ColumnSchema::new("col", ConcreteDataType::string_datatype(), true);
+
+        update_column_comment_metadata(&mut column_schema, Some("note".to_string()));
+
+        assert_eq!(
+            column_schema
+                .metadata()
+                .get(COMMENT_KEY)
+                .map(|value| value.as_str()),
+            Some("note")
+        );
+        // Make sure it's not the `COMMENT_KEY` from `table::request`
+        assert!(column_schema.metadata().get("comment").is_none());
+
+        update_column_comment_metadata(&mut column_schema, None);
+
+        assert!(column_schema.metadata().get(COMMENT_KEY).is_none());
     }
 }

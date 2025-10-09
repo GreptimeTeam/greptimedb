@@ -73,20 +73,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE comment_column_test;
 
-+---------------------+----------------------------------------------------+
-| Table               | Create Table                                       |
-+---------------------+----------------------------------------------------+
-| comment_column_test | CREATE TABLE IF NOT EXISTS "comment_column_test" ( |
-|                     |   "pk" INT NULL,                                   |
-|                     |   "val" DOUBLE NULL,                               |
-|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
-|                     |   TIME INDEX ("ts"),                               |
-|                     |   PRIMARY KEY ("pk")                               |
-|                     | )                                                  |
-|                     |                                                    |
-|                     | ENGINE=mito                                        |
-|                     |                                                    |
-+---------------------+----------------------------------------------------+
++---------------------+---------------------------------------------------------+
+| Table               | Create Table                                            |
++---------------------+---------------------------------------------------------+
+| comment_column_test | CREATE TABLE IF NOT EXISTS "comment_column_test" (      |
+|                     |   "pk" INT NULL,                                        |
+|                     |   "val" DOUBLE NULL COMMENT 'value column description', |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                     |   TIME INDEX ("ts"),                                    |
+|                     |   PRIMARY KEY ("pk")                                    |
+|                     | )                                                       |
+|                     |                                                         |
+|                     | ENGINE=mito                                             |
+|                     |                                                         |
++---------------------+---------------------------------------------------------+
 
 -- Remove column comment
 COMMENT ON COLUMN comment_column_test.val IS NULL;
