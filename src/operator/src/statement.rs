@@ -105,10 +105,19 @@ pub struct StatementExecutor {
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
+/// Trait for creating [`TriggerQuerier`] instance.
+#[cfg(feature = "enterprise")]
+pub trait TriggerQuerierFactory: Send + Sync {
+    fn create(&self, kv_backend: KvBackendRef) -> TriggerQuerierRef;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierFactoryRef = Arc<dyn TriggerQuerierFactory>;
+
 /// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
 #[cfg(feature = "enterprise")]
 #[async_trait::async_trait]
-pub trait TriggerQuerier {
+pub trait TriggerQuerier: Send + Sync {
     // Query the `SHOW CREATE TRIGGER` statement for the given trigger.
     async fn show_create_trigger(
         &self,
@@ -121,7 +130,7 @@ pub trait TriggerQuerier {
 }
 
 #[cfg(feature = "enterprise")]
-pub type TriggerQuerierRef = Arc<dyn TriggerQuerier + Send + Sync>;
+pub type TriggerQuerierRef = Arc<dyn TriggerQuerier>;
 
 impl StatementExecutor {
     #[allow(clippy::too_many_arguments)]
