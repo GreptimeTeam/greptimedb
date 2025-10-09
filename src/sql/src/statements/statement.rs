@@ -30,7 +30,7 @@ use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
-use crate::statements::explain::Explain;
+use crate::statements::explain::ExplainStatement;
 use crate::statements::insert::Insert;
 use crate::statements::kill::Kill;
 use crate::statements::query::Query;
@@ -126,7 +126,7 @@ pub enum Statement {
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
-    Explain(Box<Explain>),
+    Explain(Box<ExplainStatement>),
     // COPY
     Copy(Copy),
     // Telemetry Query Language
@@ -301,7 +301,7 @@ impl TryFrom<&Statement> for DfStatement {
     fn try_from(s: &Statement) -> Result<Self, Self::Error> {
         let s = match s {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            Statement::Explain(explain) => explain.inner.clone(),
+            // Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
             Statement::Delete(delete) => delete.inner.clone(),
             _ => {

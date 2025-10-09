@@ -20,10 +20,14 @@ use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use datafusion::common::DFSchema;
+use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
-use datafusion_expr::{Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, col};
+use datafusion_common::ToDFSchema;
+use datafusion_expr::{
+    Analyze, Explain, ExplainFormat, Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, PlanType,
+    ToStringifiedPlan, col,
+};
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use log_query::LogQuery;
 use promql_parser::parser::EvalStmt;
@@ -31,6 +35,7 @@ use session::context::QueryContextRef;
 use snafu::{ResultExt, ensure};
 use sql::CteContent;
 use sql::ast::Expr as SqlExpr;
+use sql::statements::explain::ExplainStatement;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
@@ -75,11 +80,71 @@ impl DfLogicalPlanner {
         }
     }
 
+    /// Basically the same with `explain_to_plan` in DataFusion, but adapted to Greptime's
+    /// `plan_sql` to support Greptime Statements.
+    async fn explain_to_plan(
+        &self,
+        explain: &ExplainStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let plan = self.plan_sql(&explain.statement, query_ctx).await?;
+        if matches!(plan, LogicalPlan::Explain(_)) {
+            return plan_err!("Nested EXPLAINs are not supported").context(PlanSqlSnafu);
+        }
+
+        let verbose = explain.verbose;
+        let analyze = explain.analyze;
+        let format = explain.format.clone().map(|f| f.to_string());
+
+        let plan = Arc::new(plan);
+        let schema = LogicalPlan::explain_schema();
+        let schema = ToDFSchema::to_dfschema_ref(schema)?;
+
+        if verbose && format.is_some() {
+            return plan_err!("EXPLAIN VERBOSE with FORMAT is not supported").context(PlanSqlSnafu);
+        }
+
+        if analyze {
+            if format.is_some() {
+                return plan_err!("EXPLAIN ANALYZE with FORMAT is not supported")
+                    .context(PlanSqlSnafu);
+            }
+            Ok(LogicalPlan::Analyze(Analyze {
+                verbose,
+                input: plan,
+                schema,
+            }))
+        } else {
+            let stringified_plans = vec![plan.to_stringified(PlanType::InitialLogicalPlan)];
+
+            // default to configuration value
+            let options = self.session_state.config().options();
+            let format = format.as_ref().unwrap_or(&options.explain.format);
+
+            let format: ExplainFormat = format.parse()?;
+
+            Ok(LogicalPlan::Explain(Explain {
+                verbose,
+                explain_format: format,
+                plan,
+                stringified_plans,
+                schema,
+                logical_optimization_succeeded: false,
+            }))
+        }
+    }
+
     #[tracing::instrument(skip_all)]
+    #[async_recursion::async_recursion]
     async fn plan_sql(&self, stmt: &Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let mut planner_context = PlannerContext::new();
         let mut stmt = Cow::Borrowed(stmt);
         let mut is_tql_cte = false;
+
+        // handle explain before normal processing so we can explain Greptime Statements
+        if let Statement::Explain(explain) = stmt.as_ref() {
+            return self.explain_to_plan(explain, query_ctx).await;
+        }
 
         // Check for hybrid CTEs before normal processing
         if self.has_hybrid_ctes(stmt.as_ref()) {
@@ -101,10 +166,13 @@ impl DfLogicalPlanner {
 
         // TODO(LFC): Remove this when Datafusion supports **both** the syntax and implementation of "explain with format".
         if let datafusion::sql::parser::Statement::Statement(
-            box datafusion::sql::sqlparser::ast::Statement::Explain { format, .. },
+            box datafusion::sql::sqlparser::ast::Statement::Explain { .. },
         ) = &mut df_stmt
         {
-            format.take();
+            UnimplementedSnafu {
+                operation: "EXPLAIN with FORMAT using raw datafusion planner",
+            }
+            .fail()?;
         }
 
         let table_provider = DfTableSourceProvider::new(
