@@ -108,18 +108,24 @@ impl Vector for StructVector {
             return Value::Null;
         }
 
-        let mut values = Vec::new();
-        for i in 0..self.fields.fields().len() {
-            let field_array = &self.array.column(i);
-            let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
-                panic!(
-                    "arrow array with datatype {:?} cannot converted to our vector",
-                    field_array.data_type()
-                )
-            });
+        let values = (0..self.fields.fields().len())
+            .map(|i| {
+                let field_array = &self.array.column(i);
 
-            values.push(field_vector.get(index));
-        }
+                if field_array.is_null(i) {
+                    Value::Null
+                } else {
+                    let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
+                        panic!(
+                            "arrow array with datatype {:?} cannot converted to our vector",
+                            field_array.data_type()
+                        )
+                    });
+
+                    field_vector.get(index).clone()
+                }
+            })
+            .collect();
 
         Value::Struct(StructValue::new(values, self.fields.clone()))
     }
@@ -188,21 +194,19 @@ impl Serializable for StructVector {
             vectors.insert(field.name().clone(), value_vector);
         }
 
-        let mut results = Vec::with_capacity(self.array().len());
-        for idx in 0..self.array().len() {
-            let mut result = serde_json::Map::new();
-            for field in vectors.keys() {
-                let field_value = vectors.get(field).unwrap().get(idx);
-                result.insert(
-                    field.to_string(),
-                    field_value.try_into().context(SerializeSnafu)?,
-                );
-            }
-
-            results.push(result.into());
-        }
-
-        Ok(results)
+        (0..self.array.len())
+            .map(|idx| {
+                let mut result = serde_json::Map::with_capacity(vectors.len());
+                for field in vectors.keys() {
+                    let field_value = vectors.get(field).unwrap().get(idx);
+                    result.insert(
+                        field.to_string(),
+                        field_value.try_into().context(SerializeSnafu)?,
+                    );
+                }
+                Ok(result.into())
+            })
+            .collect::<Result<Vec<serde_json::Value>>>()
     }
 }
 
@@ -273,7 +277,6 @@ impl<'a> Iterator for StructIter<'a> {
         }
     }
 
-    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.vector.len(), Some(self.vector.len()))
     }
@@ -388,9 +391,6 @@ impl ScalarVectorBuilder for StructVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        // We expect the input ListValue has the same inner type as the builder when using
-        // push(), so just panic if `push_value_ref()` returns error, which indicate an
-        // invalid input value type.
         self.try_push_value_ref(&value.map(ValueRef::Struct).unwrap_or(ValueRef::Null))
             .unwrap_or_else(|e| {
                 panic!(
