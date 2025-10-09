@@ -472,17 +472,12 @@ mod tests {
         let value = vector.get(2);
         if let Value::Struct(struct_value) = value {
             assert_eq!(struct_value.struct_type(), &struct_type);
-            assert_eq!(struct_value.items().get(0), Some(&Value::Int32(1)));
-            assert_eq!(
-                struct_value.items().get(1),
-                Some(&Value::String("tom".into()))
-            );
-            assert_eq!(struct_value.items().get(2), Some(&Value::UInt8(25)));
-            assert_eq!(
-                struct_value.items().get(3),
-                Some(&Value::String("94038".into()))
-            );
-            assert_eq!(struct_value.items().get(4), None);
+            let mut items = struct_value.items().iter();
+            assert_eq!(items.next(), Some(&Value::Int32(1)));
+            assert_eq!(items.next(), Some(&Value::String("tom".into())));
+            assert_eq!(items.next(), Some(&Value::UInt8(25)));
+            assert_eq!(items.next(), Some(&Value::String("94038".into())));
+            assert_eq!(items.next(), None);
         } else {
             panic!("Expected a struct value");
         }
