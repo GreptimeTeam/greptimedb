@@ -374,11 +374,12 @@ pub fn regexp_is_match_dictionary(
     let mut result = BooleanBufferBuilder::new(dict_array.len());
 
     if let Some(re) = regex {
+        let keys = dict_array.keys().values();
         for i in 0..dict_array.len() {
             if dict_array.is_null(i) {
                 result.append(false);
             } else {
-                let key = dict_array.key(i).unwrap();
+                let key = keys[i] as usize;
                 let string_value = string_values.value(key);
                 result.append(re.is_match(string_value));
             }
