@@ -238,6 +238,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Failed to process JSONB value"))]
+    InvalidJsonb {
+        error: jsonb::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -257,6 +263,7 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
