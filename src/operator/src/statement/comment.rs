@@ -23,11 +23,12 @@ use common_meta::instruction::CacheIdent;
 use common_meta::key::flow::flow_info::{FlowInfoKey, FlowInfoValue};
 use common_meta::key::flow::flow_route::FlowRouteValue;
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
-use common_meta::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
+use common_meta::key::{
+    DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
+};
 use common_meta::rpc::store::PutRequest;
 use common_query::Output;
 use datatypes::schema::COMMENT_KEY as COLUMN_COMMENT_KEY;
-use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{GenerateImplicitData, Location, OptionExt, ResultExt};
@@ -307,33 +308,9 @@ impl StatementExecutor {
     ) -> Result<()> {
         let kv_backend = Arc::clone(self.table_metadata_manager.kv_backend());
         let table_id = current_table_info.table_info.ident.table_id;
-        let convert_err = |err| common_meta::error::Error::SerdeJson {
-            error: err,
-            location: Location::generate(),
-        };
-
-        let mut stored_obj: Map<String, Value> =
-            serde_json::from_slice(&current_table_info.get_raw_bytes())
-                .map_err(convert_err)
-                .context(TableMetadataManagerSnafu)?;
-
-        let current_version = stored_obj
-            .get("version")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        stored_obj.insert(
-            "version".to_string(),
-            Value::from(current_version.saturating_add(1)),
-        );
-        stored_obj.insert(
-            "table_info".to_string(),
-            serde_json::to_value(&new_table_info)
-                .map_err(convert_err)
-                .context(TableMetadataManagerSnafu)?,
-        );
-
-        let raw_value = serde_json::to_vec(&stored_obj)
-            .map_err(convert_err)
+        let new_table_info_value = current_table_info.update(new_table_info);
+        let raw_value = new_table_info_value
+            .try_as_raw_value()
             .context(TableMetadataManagerSnafu)?;
 
         kv_backend

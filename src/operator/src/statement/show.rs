@@ -143,9 +143,7 @@ impl StatementExecutor {
             if !partition_column_names.is_empty() {
                 latest_info.meta.partition_key_indices = partition_column_names
                     .iter()
-                    .filter_map(|name| {
-                        latest_info.meta.schema.column_index_by_name(name.as_str())
-                    })
+                    .filter_map(|name| latest_info.meta.schema.column_index_by_name(name.as_str()))
                     .collect();
             }
 

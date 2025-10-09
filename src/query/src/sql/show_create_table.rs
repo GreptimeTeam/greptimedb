@@ -241,10 +241,10 @@ pub fn create_table_stmt(
     let constraints = create_table_constraints(&table_meta.engine, schema, table_meta, quote_style);
 
     let mut options = create_sql_options(table_meta, schema_options);
-    if let Some(comment) = &table_info.desc {
-        if options.get(TABLE_COMMENT_KEY).is_none() {
-            options.insert(format!("'{TABLE_COMMENT_KEY}'"), comment.clone());
-        }
+    if let Some(comment) = &table_info.desc
+        && options.get(TABLE_COMMENT_KEY).is_none()
+    {
+        options.insert(format!("'{TABLE_COMMENT_KEY}'"), comment.clone());
     }
 
     Ok(CreateTable {
