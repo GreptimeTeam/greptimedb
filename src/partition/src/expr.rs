@@ -236,6 +236,50 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
+        // Special handling for null equality.
+        // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
+        let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
+        let rhs_is_null = matches!(self.rhs.as_ref(), Operand::Value(Value::Null));
+
+        match (self.op.clone(), lhs_is_null, rhs_is_null) {
+            (RestrictedOp::Eq, _, true) => {
+                return Ok(self.lhs.try_as_logical_expr()?.is_null());
+            }
+            (RestrictedOp::Eq, true, _) => {
+                return Ok(self.rhs.try_as_logical_expr()?.is_null());
+            }
+            (RestrictedOp::NotEq, _, true) => {
+                return Ok(self.lhs.try_as_logical_expr()?.is_not_null());
+            }
+            (RestrictedOp::NotEq, true, _) => {
+                return Ok(self.rhs.try_as_logical_expr()?.is_not_null());
+            }
+            _ => {}
+        }
+
+        if matches!(self.op, RestrictedOp::Lt | RestrictedOp::LtEq) {
+            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
+                let column_expr = self.lhs.try_as_logical_expr()?;
+                let other_expr = self.rhs.try_as_logical_expr()?;
+                let base = match self.op {
+                    RestrictedOp::Lt => column_expr.clone().lt(other_expr),
+                    RestrictedOp::LtEq => column_expr.clone().lt_eq(other_expr),
+                    _ => unreachable!(),
+                };
+                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
+                let other_expr = self.lhs.try_as_logical_expr()?;
+                let column_expr = self.rhs.try_as_logical_expr()?;
+                let base = match self.op {
+                    RestrictedOp::Lt => other_expr.lt(column_expr.clone()),
+                    RestrictedOp::LtEq => other_expr.lt_eq(column_expr.clone()),
+                    _ => unreachable!(),
+                };
+                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+            }
+        }
+
+        // Normal cases handling, without NULL
         let lhs = self.lhs.try_as_logical_expr()?;
         let rhs = self.rhs.try_as_logical_expr()?;
 
@@ -394,6 +438,55 @@ mod tests {
             let expr = PartitionExpr::new(case.0, case.1.clone(), case.2);
             assert_eq!(case.3, expr.to_string());
         }
+    }
+
+    #[test]
+    fn test_try_as_logical_expr_null_equality() {
+        let eq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Eq,
+            Operand::Value(Value::Null),
+        );
+        assert_eq!(
+            eq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a IS NULL"
+        );
+
+        let neq_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::NotEq,
+            Operand::Value(Value::Null),
+        );
+        assert_eq!(
+            neq_expr.try_as_logical_expr().unwrap().to_string(),
+            "a IS NOT NULL"
+        );
+    }
+
+    #[test]
+    fn test_try_as_logical_expr_null_range_comparison() {
+        let lt_expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Lt,
+            Operand::Value(Value::Int64(10)),
+        );
+        assert_eq!(
+            lt_expr.try_as_logical_expr().unwrap().to_string(),
+            "a < Int64(10) OR a IS NULL"
+        );
+
+        let lt_expr_rhs_column = PartitionExpr::new(
+            Operand::Value(Value::Int64(10)),
+            RestrictedOp::Lt,
+            Operand::Column("a".to_string()),
+        );
+        assert_eq!(
+            lt_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "Int64(10) < a OR a IS NULL"
+        );
     }
 
     #[test]
