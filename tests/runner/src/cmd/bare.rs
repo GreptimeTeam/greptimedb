@@ -48,6 +48,7 @@ pub(crate) struct ServerAddr {
 }
 
 #[derive(Debug, Parser)]
+/// Run sqlness tests in bare mode.
 pub struct BareCommand {
     #[clap(flatten)]
     config: SqlnessConfig,

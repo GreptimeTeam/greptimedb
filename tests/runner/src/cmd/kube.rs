@@ -23,6 +23,7 @@ use crate::env::kube::{Env, NaiveResourcesManager};
 use crate::{protocol_interceptor, util};
 
 #[derive(Debug, Parser)]
+/// Run sqlness tests in kube mode.
 pub struct KubeCommand {
     #[clap(flatten)]
     config: SqlnessConfig,
