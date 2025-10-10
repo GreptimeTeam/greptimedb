@@ -17,41 +17,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use partition::expr::PartitionExpr;
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
+use crate::error;
+pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
-
-/// Error types for manifest remapping operations.
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display("Old manifest missing for region {}", region_id))]
-    MissingOldManifest { region_id: RegionId },
-
-    #[snafu(display("New manifest missing for region {}", region_id))]
-    MissingNewManifest { region_id: RegionId },
-
-    #[snafu(display("File consistency check failed for file {}: {}", file_id, reason))]
-    InconsistentFile { file_id: FileId, reason: String },
-
-    #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
-    FilesLost { old_count: usize, new_count: usize },
-
-    #[snafu(display("No old manifests provided (need at least one for template)"))]
-    NoOldManifests,
-
-    #[snafu(display("Partition expression missing for region {}", region_id))]
-    MissingPartitionExpr { region_id: RegionId },
-
-    #[snafu(display("Failed to serialize partition expression: {}", source))]
-    SerializePartitionExpr { source: partition::error::Error },
-}
-
-/// Result type for manifest remapping operations.
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Remaps file references from old region manifests to new region manifests.
 ///
@@ -194,24 +168,23 @@ impl RemapManifest {
             .old_manifests
             .values()
             .next()
-            .context(NoOldManifestsSnafu)?;
+            .context(error::NoOldManifestsSnafu)?;
 
         // Clone metadata and update region_id
         let mut metadata = (*template_manifest.metadata).clone();
         metadata.region_id = new_region_id;
 
         // Update partition expression to match the new region's partition rule
-        let new_partition_expr =
-            self.new_partition_exprs
-                .get(&new_region_id)
-                .context(MissingPartitionExprSnafu {
-                    region_id: new_region_id,
-                })?;
+        let new_partition_expr = self.new_partition_exprs.get(&new_region_id).context(
+            error::MissingPartitionExprSnafu {
+                region_id: new_region_id,
+            },
+        )?;
 
         metadata.partition_expr = Some(
             new_partition_expr
                 .as_json_str()
-                .context(SerializePartitionExprSnafu)?,
+                .context(error::SerializePartitionExprSnafu)?,
         );
 
         Ok(Arc::new(metadata))
@@ -222,21 +195,19 @@ impl RemapManifest {
         // For each old region and its target new regions
         for (&from_region_id, target_region_ids) in &self.region_mapping {
             // Get old manifest
-            let from_manifest =
-                self.old_manifests
-                    .get(&from_region_id)
-                    .context(MissingOldManifestSnafu {
-                        region_id: from_region_id,
-                    })?;
+            let from_manifest = self.old_manifests.get(&from_region_id).context(
+                error::MissingOldManifestSnafu {
+                    region_id: from_region_id,
+                },
+            )?;
 
             // Copy files to all target new regions
             for &to_region_id in target_region_ids {
-                let target_manifest =
-                    new_manifests
-                        .get_mut(&to_region_id)
-                        .context(MissingNewManifestSnafu {
-                            region_id: to_region_id,
-                        })?;
+                let target_manifest = new_manifests.get_mut(&to_region_id).context(
+                    error::MissingNewManifestSnafu {
+                        region_id: to_region_id,
+                    },
+                )?;
 
                 self.copy_files_to_region(from_manifest, target_manifest, to_region_id)?;
             }
@@ -290,7 +261,7 @@ impl RemapManifest {
 
         ensure!(
             existing.file_id == new.file_id,
-            InconsistentFileSnafu {
+            error::InconsistentFileSnafu {
                 file_id: existing.file_id,
                 reason: "file_id mismatch",
             }
@@ -298,7 +269,7 @@ impl RemapManifest {
 
         ensure!(
             existing.time_range == new.time_range,
-            InconsistentFileSnafu {
+            error::InconsistentFileSnafu {
                 file_id: existing.file_id,
                 reason: "time_range mismatch",
             }
@@ -306,7 +277,7 @@ impl RemapManifest {
 
         ensure!(
             existing.level == new.level,
-            InconsistentFileSnafu {
+            error::InconsistentFileSnafu {
                 file_id: existing.file_id,
                 reason: "level mismatch",
             }
@@ -314,7 +285,7 @@ impl RemapManifest {
 
         ensure!(
             existing.file_size == new.file_size,
-            InconsistentFileSnafu {
+            error::InconsistentFileSnafu {
                 file_id: existing.file_id,
                 reason: "file_size mismatch",
             }
@@ -322,7 +293,7 @@ impl RemapManifest {
 
         ensure!(
             existing.partition_expr == new.partition_expr,
-            InconsistentFileSnafu {
+            error::InconsistentFileSnafu {
                 file_id: existing.file_id,
                 reason: "partition_expr mismatch",
             }
@@ -450,7 +421,7 @@ impl RemapManifest {
         for region_id in self.new_partition_exprs.keys() {
             ensure!(
                 new_manifests.contains_key(region_id),
-                MissingNewManifestSnafu {
+                error::MissingNewManifestSnafu {
                     region_id: *region_id
                 }
             );
@@ -467,7 +438,7 @@ impl RemapManifest {
 
         ensure!(
             stats.unique_files >= old_unique_files.len(),
-            FilesLostSnafu {
+            error::FilesLostSnafu {
                 old_count: old_unique_files.len(),
                 new_count: stats.unique_files,
             }
@@ -909,7 +880,7 @@ mod tests {
 
         let result = remapper.remap_manifests();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::NoOldManifests));
+        assert!(matches!(result.unwrap_err(), Error::NoOldManifests { .. }));
     }
 
     #[test]
@@ -933,7 +904,7 @@ mod tests {
         let remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
 
         match remapper.remap_manifests().unwrap_err() {
-            Error::MissingOldManifest { region_id } => {
+            Error::MissingOldManifest { region_id, .. } => {
                 assert_eq!(region_id, missing_region_id);
             }
             other => panic!("unexpected error: {:?}", other),
@@ -956,7 +927,7 @@ mod tests {
         let remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
 
         match remapper.remap_manifests().unwrap_err() {
-            Error::MissingNewManifest { region_id } => {
+            Error::MissingNewManifest { region_id, .. } => {
                 assert_eq!(region_id, missing_new_region_id);
             }
             other => panic!("unexpected error: {:?}", other),
