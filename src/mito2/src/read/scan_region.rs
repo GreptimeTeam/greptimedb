@@ -442,7 +442,7 @@ impl ScanRegion {
                 predicate.clone(),
                 SequenceRange::new(
                     self.request.memtable_min_sequence,
-                    self.request.max_sequence,
+                    self.request.memtable_max_sequence,
                 ),
                 false,
             )?;
