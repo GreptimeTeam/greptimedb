@@ -160,6 +160,7 @@ impl MultiProtocolClient {
                     }
                 }
             }
+
             result
         }
     }

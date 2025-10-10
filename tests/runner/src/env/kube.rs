@@ -22,7 +22,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::client::MultiProtocolClient;
-use crate::formatter::{MysqlFormatter, OutputFormatter, PostgresqlFormatter};
+use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 
 #[async_trait]
@@ -127,7 +127,7 @@ impl GreptimeDB {
 
         match client.grpc_query(&query).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
-            Err(e) => Box::new(e),
+            Err(e) => Box::new(ErrorFormatter::from(e)),
         }
     }
 }
