@@ -3591,7 +3591,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:37.217+0000"
+                "value": 1716668197217000000i64
             }
         ],
         [
@@ -3629,7 +3629,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:38.217+0000"
+                "value": 1716668198217000000i64
             }
         ]
     ]);
