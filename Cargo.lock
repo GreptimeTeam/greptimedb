@@ -3962,7 +3962,6 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
- "base64 0.22.1",
  "common-base",
  "common-decimal",
  "common-error",
