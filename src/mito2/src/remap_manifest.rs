@@ -12,52 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Manifest remapping for repartition operations.
-//!
-//! This module provides functionality to remap file references from old region
-//! manifests to new region manifests during repartition.
-//!
-//! # Overview
-//!
-//! During repartition, the partition rules change and regions may be split, merged,
-//! or redistributed. The manifest remapping process takes old region manifests with
-//! their partition rules and new partition rules as input, then generates new manifests
-//! for each new region.
-//!
-//! # Key Principle
-//!
-//! Files are references (via FileId UUIDs), not physical copies. We remap which regions
-//! reference which files, without moving data on disk. The `FileMeta.partition_expr` field
-//! is immutable and records the partition rule when the file was created - only the
-//! region's partition expression changes.
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use std::collections::HashMap;
-//! use mito2::remap_manifest::RemapManifest;
-//!
-//! // Define which old regions map to which new regions
-//! let mut region_mapping = HashMap::new();
-//! region_mapping.insert(old_region_1, vec![new_region_1, new_region_2]);
-//! region_mapping.insert(old_region_2, vec![new_region_2]);
-//!
-//! let remapper = RemapManifest::new(
-//!     old_manifests,
-//!     new_partition_exprs,
-//!     region_mapping,
-//! );
-//!
-//! let result = remapper.remap_manifests()?;
-//! // Process result...
-//! ```
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use partition::expr::PartitionExpr;
-use snafu::{OptionExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
@@ -82,6 +42,12 @@ pub enum Error {
 
     #[snafu(display("No old manifests provided (need at least one for template)"))]
     NoOldManifests,
+
+    #[snafu(display("Partition expression missing for region {}", region_id))]
+    MissingPartitionExpr { region_id: RegionId },
+
+    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    SerializePartitionExpr { source: partition::error::Error },
 }
 
 /// Result type for manifest remapping operations.
@@ -234,6 +200,20 @@ impl RemapManifest {
         let mut metadata = (*template_manifest.metadata).clone();
         metadata.region_id = new_region_id;
 
+        // Update partition expression to match the new region's partition rule
+        let new_partition_expr =
+            self.new_partition_exprs
+                .get(&new_region_id)
+                .context(MissingPartitionExprSnafu {
+                    region_id: new_region_id,
+                })?;
+
+        metadata.partition_expr = Some(
+            new_partition_expr
+                .as_json_str()
+                .context(SerializePartitionExprSnafu)?,
+        );
+
         Ok(Arc::new(metadata))
     }
 
@@ -251,12 +231,14 @@ impl RemapManifest {
 
             // Copy files to all target new regions
             for &to_region_id in target_region_ids {
-                self.copy_files_to_region(
-                    from_manifest,
-                    from_region_id,
-                    new_manifests.get_mut(&to_region_id).unwrap(),
-                    to_region_id,
-                )?;
+                let target_manifest =
+                    new_manifests
+                        .get_mut(&to_region_id)
+                        .context(MissingNewManifestSnafu {
+                            region_id: to_region_id,
+                        })?;
+
+                self.copy_files_to_region(from_manifest, target_manifest, to_region_id)?;
             }
         }
 
@@ -267,7 +249,6 @@ impl RemapManifest {
     fn copy_files_to_region(
         &self,
         source_manifest: &RegionManifest,
-        _source_region_id: RegionId,
         target_manifest: &mut RegionManifest,
         target_region_id: RegionId,
     ) -> Result<()> {
@@ -292,6 +273,7 @@ impl RemapManifest {
                 }
                 Entry::Occupied(e) => {
                     // File already exists - verify it's the same physical file
+                    #[cfg(debug_assertions)]
                     self.verify_file_consistency(e.get(), &new_file_meta)?;
                 }
             }
@@ -301,6 +283,7 @@ impl RemapManifest {
     }
 
     /// Verifies that two file metadata entries are consistent.
+    #[cfg(debug_assertions)]
     fn verify_file_consistency(&self, existing: &FileMeta, new: &FileMeta) -> Result<()> {
         // When the same file appears from multiple overlapping old regions,
         // verify they are actually the same physical file
@@ -337,8 +320,15 @@ impl RemapManifest {
             }
         );
 
+        ensure!(
+            existing.partition_expr == new.partition_expr,
+            InconsistentFileSnafu {
+                file_id: existing.file_id,
+                reason: "partition_expr mismatch",
+            }
+        );
+
         // region_id is expected to differ (that's what we're remapping)
-        // partition_expr should be the same (it's immutable)
 
         Ok(())
     }
@@ -348,12 +338,16 @@ impl RemapManifest {
         &self,
         new_manifests: &mut HashMap<RegionId, RegionManifest>,
     ) -> Result<()> {
+        let reverse_mapping = self.build_reverse_mapping();
+
         for (region_id, manifest) in new_manifests.iter_mut() {
-            // Find all old regions that contributed to this new region
-            let source_region_ids = self.find_source_regions(region_id)?;
+            let source_region_ids = reverse_mapping
+                .get(region_id)
+                .map(|ids| ids.as_slice())
+                .unwrap_or(&[]);
 
             // Merge metadata from all source regions
-            let merged_metadata = self.merge_manifest_metadata(&source_region_ids)?;
+            let merged_metadata = self.merge_manifest_metadata(source_region_ids)?;
 
             // Apply merged metadata
             manifest.flushed_entry_id = merged_metadata.flushed_entry_id;
@@ -367,6 +361,21 @@ impl RemapManifest {
         }
 
         Ok(())
+    }
+
+    fn build_reverse_mapping(&self) -> HashMap<RegionId, Vec<RegionId>> {
+        let mut reverse_mapping: HashMap<RegionId, Vec<RegionId>> = HashMap::new();
+
+        for (&source_region_id, target_regions) in &self.region_mapping {
+            for &target_region_id in target_regions {
+                reverse_mapping
+                    .entry(target_region_id)
+                    .or_default()
+                    .push(source_region_id);
+            }
+        }
+
+        reverse_mapping
     }
 
     /// Merges metadata from multiple source regions.
@@ -400,20 +409,6 @@ impl RemapManifest {
             truncated_entry_id: max_truncated_entry_id,
             compaction_time_window,
         })
-    }
-
-    /// Finds all source regions that contributed to a target region.
-    fn find_source_regions(&self, target_region_id: &RegionId) -> Result<Vec<RegionId>> {
-        let mut sources = Vec::new();
-
-        // Find all old regions that map to this new region
-        for (&source_region_id, target_regions) in &self.region_mapping {
-            if target_regions.contains(target_region_id) {
-                sources.push(source_region_id);
-            }
-        }
-
-        Ok(sources)
     }
 
     /// Computes statistics about the remapping.
@@ -915,5 +910,56 @@ mod tests {
         let result = remapper.remap_manifests();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::NoOldManifests));
+    }
+
+    #[test]
+    fn test_missing_old_manifest_error() {
+        let template_region_id = RegionId::new(2, 1);
+        let missing_region_id = RegionId::new(2, 2);
+        let new_region_id = RegionId::new(2, 3);
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(
+            template_region_id,
+            create_manifest(template_region_id, 1, None, 0, 0),
+        );
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 10));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(missing_region_id, vec![new_region_id]);
+
+        let remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        match remapper.remap_manifests().unwrap_err() {
+            Error::MissingOldManifest { region_id } => {
+                assert_eq!(region_id, missing_region_id);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_missing_new_manifest_error() {
+        let old_region_id = RegionId::new(3, 1);
+        let missing_new_region_id = RegionId::new(3, 2);
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(old_region_id, create_manifest(old_region_id, 1, None, 0, 0));
+
+        let new_partition_exprs = HashMap::new();
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id, vec![missing_new_region_id]);
+
+        let remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        match remapper.remap_manifests().unwrap_err() {
+            Error::MissingNewManifest { region_id } => {
+                assert_eq!(region_id, missing_new_region_id);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 }
