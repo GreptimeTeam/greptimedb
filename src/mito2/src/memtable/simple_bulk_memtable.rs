@@ -834,7 +834,7 @@ mod tests {
 
         // Filter with sequence 0 should only return first write
         let mut iter = memtable
-            .iter(None, None, Some(SequenceRange::To { max: 0 }))
+            .iter(None, None, Some(SequenceRange::LtEq { max: 0 }))
             .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());

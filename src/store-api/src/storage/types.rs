@@ -23,15 +23,15 @@ pub type SequenceNumber = u64;
 /// A range of sequence numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SequenceRange {
-    From {
+    Gt {
         /// Exclusive lower bound
         min: SequenceNumber,
     },
-    To {
+    LtEq {
         /// Inclusive upper bound
         max: SequenceNumber,
     },
-    Range {
+    GtLtEq {
         /// Exclusive lower bound
         min: SequenceNumber,
         /// Inclusive upper bound
@@ -42,9 +42,9 @@ pub enum SequenceRange {
 impl SequenceRange {
     pub fn new(min: Option<SequenceNumber>, max: Option<SequenceNumber>) -> Option<Self> {
         match (min, max) {
-            (Some(min), Some(max)) => Some(SequenceRange::Range { min, max }),
-            (Some(min), None) => Some(SequenceRange::From { min }),
-            (None, Some(max)) => Some(SequenceRange::To { max }),
+            (Some(min), Some(max)) => Some(SequenceRange::GtLtEq { min, max }),
+            (Some(min), None) => Some(SequenceRange::Gt { min }),
+            (None, Some(max)) => Some(SequenceRange::LtEq { max }),
             (None, None) => None,
         }
     }
@@ -54,17 +54,17 @@ impl SequenceRange {
         seqs: ArrayRef,
     ) -> Result<BooleanArray, datatypes::arrow::error::ArrowError> {
         match self {
-            SequenceRange::From { min } => {
+            SequenceRange::Gt { min } => {
                 let min = UInt64Array::new_scalar(*min);
                 let pred = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;
                 Ok(pred)
             }
-            SequenceRange::To { max } => {
+            SequenceRange::LtEq { max } => {
                 let max = UInt64Array::new_scalar(*max);
                 let pred = datafusion_common::arrow::compute::kernels::cmp::lt_eq(&seqs, &max)?;
                 Ok(pred)
             }
-            SequenceRange::Range { min, max } => {
+            SequenceRange::GtLtEq { min, max } => {
                 let min = UInt64Array::new_scalar(*min);
                 let max = UInt64Array::new_scalar(*max);
                 let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;

@@ -370,9 +370,9 @@ impl Batch {
                     return Ok(());
                 };
                 let is_subset = match seq_range {
-                    SequenceRange::From { min } => min < first,
-                    SequenceRange::To { max } => max >= last,
-                    SequenceRange::Range { min, max } => min < first && max >= last,
+                    SequenceRange::Gt { min } => min < first,
+                    SequenceRange::LtEq { max } => max >= last,
+                    SequenceRange::GtLtEq { min, max } => min < first && max >= last,
                 };
                 if is_subset {
                     return Ok(());
@@ -383,17 +383,17 @@ impl Batch {
 
         let seqs = self.sequences.as_arrow();
         let predicate = match seq_range {
-            SequenceRange::From { min } => {
+            SequenceRange::Gt { min } => {
                 let min = UInt64Array::new_scalar(min);
                 datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
                     .context(ComputeArrowSnafu)?
             }
-            SequenceRange::To { max } => {
+            SequenceRange::LtEq { max } => {
                 let max = UInt64Array::new_scalar(max);
                 datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)
                     .context(ComputeArrowSnafu)?
             }
-            SequenceRange::Range { min, max } => {
+            SequenceRange::GtLtEq { min, max } => {
                 let min = UInt64Array::new_scalar(min);
                 let max = UInt64Array::new_scalar(max);
                 let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
@@ -1326,7 +1326,7 @@ mod tests {
             &[21, 22, 23, 24],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::To { max: 13 }))
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 13 }))
             .unwrap();
         let expect = new_batch(
             &[1, 2, 3],
@@ -1345,7 +1345,7 @@ mod tests {
         );
 
         batch
-            .filter_by_sequence(Some(SequenceRange::To { max: 10 }))
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 10 }))
             .unwrap();
         assert!(batch.is_empty());
 
@@ -1363,7 +1363,7 @@ mod tests {
         // Filter a empty batch
         let mut batch = new_batch(&[], &[], &[], &[]);
         batch
-            .filter_by_sequence(Some(SequenceRange::To { max: 10 }))
+            .filter_by_sequence(Some(SequenceRange::LtEq { max: 10 }))
             .unwrap();
         assert!(batch.is_empty());
 
@@ -1380,7 +1380,7 @@ mod tests {
             &[21, 22, 23, 24],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::From { min: 12 }))
+            .filter_by_sequence(Some(SequenceRange::Gt { min: 12 }))
             .unwrap();
         let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
         assert_eq!(expect, batch);
@@ -1393,7 +1393,7 @@ mod tests {
             &[21, 22, 23, 24],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::From { min: 20 }))
+            .filter_by_sequence(Some(SequenceRange::Gt { min: 20 }))
             .unwrap();
         assert!(batch.is_empty());
 
@@ -1411,7 +1411,7 @@ mod tests {
             &[21, 22, 23, 24, 25],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::Range { min: 12, max: 14 }))
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 12, max: 14 }))
             .unwrap();
         let expect = new_batch(&[3, 4], &[13, 14], &[OpType::Put, OpType::Put], &[23, 24]);
         assert_eq!(expect, batch);
@@ -1430,7 +1430,7 @@ mod tests {
             &[21, 22, 23, 24, 25],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::Range { min: 11, max: 13 }))
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 11, max: 13 }))
             .unwrap();
         let expect = new_batch(
             &[2, 3],
@@ -1448,7 +1448,7 @@ mod tests {
             &[21, 22, 23, 24],
         );
         batch
-            .filter_by_sequence(Some(SequenceRange::Range { min: 20, max: 25 }))
+            .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 20, max: 25 }))
             .unwrap();
         assert!(batch.is_empty());
     }

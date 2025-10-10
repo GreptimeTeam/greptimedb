@@ -384,7 +384,7 @@ mod tests {
         let iter = BulkPartRecordBatchIter::new(
             record_batch.clone(),
             context,
-            Some(SequenceRange::To { max: 2 }),
+            Some(SequenceRange::LtEq { max: 2 }),
         );
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());

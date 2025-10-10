@@ -440,7 +440,10 @@ impl ScanRegion {
             let ranges_in_memtable = m.ranges(
                 Some(mapper.column_ids()),
                 predicate.clone(),
-                SequenceRange::new(self.request.memtable_min_sequence, self.request.sequence),
+                SequenceRange::new(
+                    self.request.memtable_min_sequence,
+                    self.request.max_sequence,
+                ),
                 false,
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
