@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_function::function::FunctionContext;
-use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::function_registry::ADMIN_FUNCTION_REGISTRY;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
@@ -49,11 +49,9 @@ impl StatementExecutor {
         let Admin::Func(func) = &stmt;
         // the function name should be in lower case.
         let func_name = func.name.to_string().to_lowercase();
-        let factory = FUNCTION_REGISTRY.get_function(&func_name).context(
-            error::AdminFunctionNotFoundSnafu {
-                name: func_name.clone(),
-            },
-        )?;
+        let factory = ADMIN_FUNCTION_REGISTRY
+            .get_function(&func_name)
+            .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
 
         let func_ctx = FunctionContext {
             query_ctx: query_ctx.clone(),
@@ -61,9 +59,6 @@ impl StatementExecutor {
         };
 
         let admin_udf = factory.provide(func_ctx);
-        let admin_async_fn = admin_udf
-            .as_async()
-            .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
 
         let fn_name = admin_udf.name();
         let signature = admin_udf.signature();
@@ -129,7 +124,11 @@ impl StatementExecutor {
         };
 
         // Execute the async UDF
-        let result_columnar = admin_async_fn
+        let result_columnar = admin_udf
+            .as_async()
+            .with_context(|| error::BuildAdminFunctionArgsSnafu {
+                msg: format!("Function {} is not async", fn_name),
+            })?
             .invoke_async_with_args(func_args)
             .await
             .with_context(|_| ExecuteAdminFunctionSnafu {

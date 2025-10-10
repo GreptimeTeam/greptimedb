@@ -147,9 +147,8 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
 
-    // System and administration functions
+    // System functions
     SystemFunction::register(&function_registry);
-    AdminFunction::register(&function_registry);
 
     // Json related functions
     JsonFunction::register(&function_registry);
@@ -175,6 +174,15 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
 
     // state function of supported aggregate functions
     StateMergeHelper::register(&function_registry);
+
+    Arc::new(function_registry)
+});
+
+pub static ADMIN_FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(|| {
+    let function_registry = FunctionRegistry::default();
+
+    // Administration functions
+    AdminFunction::register(&function_registry);
 
     Arc::new(function_registry)
 });
