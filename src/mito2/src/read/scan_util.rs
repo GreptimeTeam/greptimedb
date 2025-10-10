@@ -748,14 +748,17 @@ pub(crate) fn should_split_flat_batches_for_merge(
 
     if num_scan_files > 0 {
         true
-    } else {
+    } else if num_mem_series > 0 && num_mem_rows > 0 {
         // If we don't have files to scan, we check whether to split by the memtable.
         can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    } else {
+        false
     }
 }
 
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {
     assert!(num_series > 0);
+    assert!(num_rows > 0);
 
     // It doesn't have too many series or it will have enough rows for each batch.
     num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
