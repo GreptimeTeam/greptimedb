@@ -64,19 +64,19 @@ run_test() {
     then
         echo " === Running forward compat test ..."
         echo " === Run test: write with current GreptimeDB"
-        $runner --bins-dir $(dirname $bin_new) --case-dir $write_case_dir
+        $runner bare --bins-dir $(dirname $bin_new) --case-dir $write_case_dir
     else
         echo " === Running backward compat test ..."
         echo " === Run test: write with old GreptimeDB"
-        $runner --bins-dir $(dirname $bin_old) --case-dir $write_case_dir
+        $runner bare --bins-dir $(dirname $bin_old) --case-dir $write_case_dir
     fi
 
     if [ "$forward" == 'forward' ]
     then
         echo " === Run test: read with old GreptimeDB"
-        $runner --bins-dir $(dirname $bin_old) --case-dir $read_case_dir
+        $runner bare --bins-dir $(dirname $bin_old) --case-dir $read_case_dir
     else
         echo " === Run test: read with current GreptimeDB"
-        $runner --bins-dir $(dirname $bin_new) --case-dir $read_case_dir
+        $runner bare --bins-dir $(dirname $bin_new) --case-dir $read_case_dir
     fi
 }
