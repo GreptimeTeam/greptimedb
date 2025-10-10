@@ -40,7 +40,6 @@ pub enum JsonStructureSettings {
         fields: Option<StructType>,
         unstructured_keys: HashSet<String>,
     },
-    // TODO(sung87): add a new setting to flatten nested objects
 }
 
 /// Context for JSON encoding/decoding that tracks the current key path

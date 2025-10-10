@@ -866,17 +866,13 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
             Value::Struct(v) => {
-                let map = v
-                    .fields
-                    .clone() // TODO:(sunng87) remove in next patch when into_parts is merged
-                    .fields()
-                    .iter()
-                    .zip(v.take_items().into_iter())
+                let (items, struct_type) = v.into_parts();
+                let map = struct_type
+                    .take_fields()
+                    .into_iter()
+                    .zip(items.into_iter())
                     .map(|(field, value)| {
-                        Ok((
-                            field.name().to_string(),
-                            serde_json::Value::try_from(value)?,
-                        ))
+                        Ok((field.take_name(), serde_json::Value::try_from(value)?))
                     })
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
@@ -1664,6 +1660,11 @@ pub(crate) mod tests {
                 ConcreteDataType::string_datatype(),
                 true,
             ),
+            StructField::new(
+                "awards".to_string(),
+                ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()),
+                true,
+            ),
         ])
     }
 
@@ -1675,6 +1676,7 @@ pub(crate) mod tests {
             Value::String("tom".into()),
             Value::UInt8(25),
             Value::String("94038".into()),
+            Value::List(build_list_value()),
         ];
         StructValue::try_new(struct_items, struct_type).unwrap()
     }
@@ -1686,6 +1688,7 @@ pub(crate) mod tests {
             ScalarValue::Utf8(Some("tom".into())).to_array().unwrap(),
             ScalarValue::UInt8(Some(25)).to_array().unwrap(),
             ScalarValue::Utf8(Some("94038".into())).to_array().unwrap(),
+            build_scalar_list_value().to_array().unwrap(),
         ];
         let struct_arrow_array = StructArray::new(struct_type.as_arrow_fields(), arrays, None);
         ScalarValue::Struct(Arc::new(struct_arrow_array))
@@ -2504,7 +2507,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             Value::Struct(build_struct_value()).to_string(),
-            "{ id: 1, name: tom, age: 25, address: 94038 }"
+            "{ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] }"
         );
     }
 
@@ -2992,7 +2995,7 @@ pub(crate) mod tests {
 
         check_value_ref_size_eq(
             &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
-            13,
+            15,
         );
     }
 
