@@ -129,14 +129,14 @@ pub fn encode_json_with_context<'a>(
     // Check if the entire encoding should be unstructured
     if matches!(context.settings, JsonStructureSettings::UnstructuredRaw) {
         let json_string = json.to_string();
-        let struct_value = StructValue::new(
+        let struct_value = StructValue::try_new(
             vec![Value::String(json_string.into())],
             StructType::new(vec![StructField::new(
                 JsonStructureSettings::RAW_FIELD.to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
             )]),
-        );
+        )?;
         return Ok(Value::Struct(struct_value));
     }
 
@@ -247,7 +247,7 @@ fn encode_json_object_with_context<'a>(
     }
 
     let struct_type = StructType::new(struct_fields);
-    Ok(StructValue::new(items, struct_type))
+    StructValue::try_new(items, struct_type)
 }
 
 fn encode_json_array_with_context<'a>(
@@ -584,7 +584,7 @@ fn decode_struct_with_settings<'a>(
     }
 
     let struct_type = StructType::new(struct_fields);
-    Ok(StructValue::new(items, struct_type))
+    StructValue::try_new(items, struct_type)
 }
 
 /// Decode a ListValue that was encoded with current settings back into a fully structured ListValue
@@ -643,7 +643,7 @@ fn decode_unstructured_raw_struct(struct_value: StructValue) -> Result<StructVal
                 // If the decoded value is not a struct, wrap it in a struct
                 let struct_type =
                     StructType::new(vec![StructField::new("value".to_string(), data_type, true)]);
-                return Ok(StructValue::new(vec![decoded_value], struct_type));
+                return StructValue::try_new(vec![decoded_value], struct_type);
             }
         }
     }

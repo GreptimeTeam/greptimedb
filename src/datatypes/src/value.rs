@@ -983,6 +983,13 @@ impl StructValue {
         Ok(Self { items, fields })
     }
 
+    /// Create a new struct value.
+    ///
+    /// Panics if the number of items does not match the number of fields.
+    pub fn new(items: Vec<Value>, fields: StructType) -> Self {
+        Self::try_new(items, fields).unwrap()
+    }
+
     pub fn items(&self) -> &[Value] {
         &self.items
     }
