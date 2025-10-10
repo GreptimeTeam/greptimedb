@@ -1356,20 +1356,20 @@ impl PredicateGroup {
 
         if let Some(expr_json) = metadata.partition_expr.as_ref()
             && !expr_json.is_empty()
-                && let Some(expr) =
-                    PartitionExpr::from_json_str(expr_json).context(InvalidPartitionExprSnafu {
-                        expr: expr_json.clone(),
-                    })?
-                {
-                    let logical_expr =
-                        expr.try_as_logical_expr()
-                            .context(InvalidPartitionExprSnafu {
-                                expr: expr_json.clone(),
-                            })?;
+            && let Some(expr) =
+                PartitionExpr::from_json_str(expr_json).context(InvalidPartitionExprSnafu {
+                    expr: expr_json.clone(),
+                })?
+        {
+            let logical_expr = expr
+                .try_as_logical_expr()
+                .context(InvalidPartitionExprSnafu {
+                    expr: expr_json.clone(),
+                })?;
 
-                    combined_exprs.push(logical_expr);
-                    region_partition_expr = Some(expr);
-                }
+            combined_exprs.push(logical_expr);
+            region_partition_expr = Some(expr);
+        }
 
         let mut time_filters = Vec::with_capacity(combined_exprs.len());
         // Columns in the expr.
