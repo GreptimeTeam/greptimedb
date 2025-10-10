@@ -516,7 +516,7 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        let iter = values.iter().map(|(_, v)| *v);
+        let iter = values.iter().map(|(_, v)| v.clone());
         self.encode_dense(iter, buffer)
     }
 

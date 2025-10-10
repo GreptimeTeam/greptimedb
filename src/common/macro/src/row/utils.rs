@@ -184,7 +184,7 @@ pub(crate) fn convert_semantic_type_to_proto_semantic_type(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ColumnDataTypeWithExtension {
     pub(crate) data_type: ColumnDataType,
     pub(crate) extension: Option<ColumnDataTypeExtension>,
@@ -260,7 +260,10 @@ pub(crate) fn get_column_data_type(
     infer_column_data_type: &Option<ColumnDataTypeWithExtension>,
     attribute: &ColumnAttribute,
 ) -> Option<ColumnDataTypeWithExtension> {
-    attribute.datatype.or(*infer_column_data_type)
+    attribute
+        .datatype
+        .clone()
+        .or_else(|| infer_column_data_type.clone())
 }
 
 /// Convert a column data type to a value data ident.
@@ -304,5 +307,7 @@ pub(crate) fn convert_column_data_type_to_value_data_ident(
         // Json is a special case, it is actually a string column.
         ColumnDataType::Json => format_ident!("StringValue"),
         ColumnDataType::Vector => format_ident!("VectorValue"),
+        ColumnDataType::List => format_ident!("ListValue"),
+        ColumnDataType::Struct => format_ident!("StructValue"),
     }
 }

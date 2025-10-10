@@ -83,10 +83,10 @@ impl LogicalPrimitiveType for DateType {
             })
     }
 
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Date>> {
+    fn cast_value_ref(value: &ValueRef) -> Result<Option<Date>> {
         match value {
             ValueRef::Null => Ok(None),
-            ValueRef::Date(v) => Ok(Some(v)),
+            ValueRef::Date(v) => Ok(Some(*v)),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value {other:?} to Date"),
             }

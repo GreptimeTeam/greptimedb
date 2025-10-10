@@ -262,7 +262,7 @@ impl PrimaryKeyColumnBuilder {
                 }
             }
             PrimaryKeyColumnBuilder::Vector(builder) => {
-                builder.push_value_ref(value);
+                builder.push_value_ref(&value);
             }
         }
         Ok(())
@@ -785,11 +785,11 @@ fn mutations_to_record_batch(
                 .encode_to_vec(row.primary_keys(), &mut pk_buffer)
                 .context(EncodeSnafu)?;
             pk_builder.append_value(pk_buffer.as_bytes());
-            ts_vector.push_value_ref(row.timestamp());
+            ts_vector.push_value_ref(&row.timestamp());
             sequence_builder.append_value(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);
             for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
-                builder.push_value_ref(field);
+                builder.push_value_ref(&field);
             }
         }
     }

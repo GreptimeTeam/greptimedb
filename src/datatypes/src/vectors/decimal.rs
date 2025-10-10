@@ -314,7 +314,7 @@ impl MutableVector for Decimal128VectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         let decimal_val = value.as_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
         Ok(())
