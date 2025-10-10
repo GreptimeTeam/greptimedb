@@ -53,8 +53,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId};
-use store_api::storage::{SequenceNumber, SequenceRange};
+use store_api::storage::{FileId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
