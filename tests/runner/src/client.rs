@@ -75,6 +75,16 @@ impl MultiProtocolClient {
         }
     }
 
+    /// Reconnect the MySQL client.
+    pub async fn reconnect_mysql_client(&mut self, mysql_server_addr: &str) {
+        self.mysql_client = create_mysql_client(mysql_server_addr).await;
+    }
+
+    /// Reconnect the Postgres client.
+    pub async fn reconnect_pg_client(&mut self, pg_server_addr: &str) {
+        self.pg_client = create_postgres_client(pg_server_addr).await;
+    }
+
     /// Execute a query on the Postgres server.
     pub async fn postgres_query(&mut self, query: &str) -> Result<Vec<PgRow>, String> {
         match self.pg_client.simple_query(query).await {

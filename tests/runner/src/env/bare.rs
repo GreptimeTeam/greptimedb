@@ -381,12 +381,13 @@ impl Env {
             let server_addr = server_mode.server_addr().unwrap();
             let new_server_process = self.start_server(server_mode, &db.ctx, db.id, false).await;
 
-            *db.client.lock().await = MultiProtocolClient::connect(
-                &server_addr.server_addr.unwrap(),
-                &server_addr.pg_server_addr.unwrap(),
-                &server_addr.mysql_server_addr.unwrap(),
-            )
-            .await;
+            let mut client = db.client.lock().await;
+            client
+                .reconnect_mysql_client(&server_addr.mysql_server_addr.unwrap())
+                .await;
+            client
+                .reconnect_pg_client(&server_addr.pg_server_addr.unwrap())
+                .await;
             vec![new_server_process]
         } else {
             db.ctx.reset_datanode_id();
