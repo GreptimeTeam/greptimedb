@@ -725,24 +725,27 @@ pub(crate) fn should_split_flat_batches_for_merge(
             num_mem_series += stats.series_count();
         } else if !stream_ctx.is_file_range_index(*index) {
             // Skips non-file and non-mem ranges.
-            continue;
-        }
-        let file_index = index.index - stream_ctx.input.num_memtables();
-        let file = &stream_ctx.input.files[file_index];
-        if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD {
-            // If the file doesn't have enough rows, skips it.
-            continue;
-        }
-        if file.meta_ref().num_series == 0 {
-            // Number of series is unavailable.
-            continue;
-        }
-        debug_assert!(file.meta_ref().num_rows > 0);
-        if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
-            // We don't skip if we find that we can't split batches in a file.
-            return false;
         } else {
-            num_scan_files += 1;
+            assert!(stream_ctx.is_file_range_index(*index));
+
+            // This is a file range.
+            let file_index = index.index - stream_ctx.input.num_memtables();
+            let file = &stream_ctx.input.files[file_index];
+            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD {
+                // If the file doesn't have enough rows, skips it.
+                continue;
+            }
+            if file.meta_ref().num_series == 0 {
+                // Number of series is unavailable.
+                continue;
+            }
+            debug_assert!(file.meta_ref().num_rows > 0);
+            if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
+                // We don't skip if we find that we can't split batches in a file.
+                return false;
+            } else {
+                num_scan_files += 1;
+            }
         }
     }
 
