@@ -15,6 +15,7 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::precision::Precision;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use hyper::Request;
 use influxdb_line_protocol::{FieldValue, parse_lines};
 use snafu::ResultExt;
@@ -24,7 +25,6 @@ use crate::row_writer::{self, MultiTableData};
 
 const INFLUXDB_API_PATH_NAME: &str = "influxdb";
 const INFLUXDB_API_V2_PATH_NAME: &str = "influxdb/api/v2";
-const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 
 #[inline]
@@ -91,7 +91,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             // timestamp
             row_writer::write_ts_to_nanos(
                 table_data,
-                INFLUXDB_TIMESTAMP_COLUMN_NAME,
+                GREPTIME_TIMESTAMP,
                 ts,
                 precision,
                 &mut one_row,
@@ -193,7 +193,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                "greptime_timestamp" => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
@@ -268,7 +268,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "ts" => {
+                "greptime_timestamp" => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
