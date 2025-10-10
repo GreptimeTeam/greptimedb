@@ -19,8 +19,9 @@ use std::sync::{Mutex, OnceLock};
 use serde::Serialize;
 use tinytemplate::TinyTemplate;
 
-use crate::env::{Env, GreptimeDBContext, ServiceProvider};
-use crate::{ServerAddr, util};
+use crate::cmd::bare::ServerAddr;
+use crate::env::bare::{Env, GreptimeDBContext, ServiceProvider};
+use crate::util;
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
