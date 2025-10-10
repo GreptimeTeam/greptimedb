@@ -214,6 +214,7 @@ impl Debug for FileMeta {
                 }
             })
             .field("partition_expr", &self.partition_expr)
+            .field("num_series", &self.num_series)
             .finish()
     }
 }
