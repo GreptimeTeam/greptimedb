@@ -19,8 +19,8 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::Output;
 use common_error::ext::BoxedError;
-use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use servers::error::{
     AuthSnafu, CatalogSnafu, Error, OtherSnafu, TimestampOverflowSnafu, UnexpectedResultSnafu,
 };
