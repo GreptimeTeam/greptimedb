@@ -192,11 +192,12 @@ impl VectorOp for StructVector {
 
 impl Serializable for StructVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        let mut vectors = Vec::new();
-        for value in self.array.columns() {
-            let value_vector = Helper::try_into_vector(value)?;
-            vectors.push(value_vector);
-        }
+        let vectors = self
+            .array
+            .columns()
+            .iter()
+            .map(|value_array| Helper::try_into_vector(value_array))
+            .collect::<Result<Vec<_>>>()?;
 
         (0..self.array.len())
             .map(|idx| {
