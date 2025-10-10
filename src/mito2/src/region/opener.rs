@@ -62,6 +62,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
 use crate::sst::file_purger::create_local_file_purger;
+use crate::sst::file_purger::create_file_purger;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -312,7 +313,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
-            file_purger: create_local_file_purger(
+            file_purger: create_file_purger(
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
@@ -442,7 +443,7 @@ impl RegionOpener {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
-        let file_purger = create_local_file_purger(
+        let file_purger = create_file_purger(
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),

@@ -46,7 +46,10 @@ const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 /// Configuration for GC operations.
 #[derive(Debug, Clone)]
 pub struct GcSchedulerConfig {
-    /// Whether GC is enabled.
+    /// Whether GC is enabled. Default to true. If set to false, no GC will be performed, and potentially some
+    /// files from datanodes will never be deleted.
+    ///
+    /// TODO(discord9): If `enabled` is set to false, datanode side should also use `LocalFilePurger` instead of `ObjectStoreFilePurger`, maybe add some check?
     pub enabled: bool,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
@@ -281,7 +284,8 @@ impl GcScheduler {
             RegionManifestInfo::Mito {
                 file_removal_rate, ..
             } => *file_removal_rate as f64 * self.config.file_removal_rate_weight,
-            RegionManifestInfo::Metric { .. } => 0.0, // Metric engine doesn't have file_removal_rate
+            // Metric engine doesn't have file_removal_rate, also this should be unreachable since metrics engine doesn't support gc
+            RegionManifestInfo::Metric { .. } => 0.0,
         };
 
         sst_count_score + file_removal_rate_score
