@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use arrow::datatypes::DataType as ArrowDataType;
 use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use crate::data_type::DataType;
-use crate::error::{InvalidJsonSnafu, Result};
+use crate::error::{DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result};
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
@@ -83,7 +86,24 @@ impl DataType for JsonType {
 /// Converts a json type value to string
 pub fn json_type_value_to_string(val: &[u8], format: &JsonFormat) -> Result<String> {
     match format {
-        JsonFormat::Jsonb => Ok(jsonb::to_string(val)),
+        JsonFormat::Jsonb => match jsonb::from_slice(val) {
+            Ok(jsonb_value) => {
+                let serialized = jsonb_value.to_string();
+                Ok(serialized)
+            }
+            Err(e) => InvalidJsonbSnafu { error: e }.fail(),
+        },
+    }
+}
+
+/// Converts a json type value to serde_json::Value
+pub fn json_type_value_to_serde_json(val: &[u8], format: &JsonFormat) -> Result<serde_json::Value> {
+    match format {
+        JsonFormat::Jsonb => {
+            let json_string = json_type_value_to_string(val, format)?;
+            serde_json::Value::from_str(json_string.as_str())
+                .context(DeserializeSnafu { json: json_string })
+        }
     }
 }
 
