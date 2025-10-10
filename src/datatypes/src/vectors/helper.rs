@@ -241,7 +241,7 @@ impl Helper {
             ScalarValue::Struct(v) => {
                 let struct_type = StructType::try_from(v.fields())?;
                 ConstantVector::new(
-                    Arc::new(StructVector::new(struct_type, (*v).clone())),
+                    Arc::new(StructVector::try_new(struct_type, (*v).clone())?),
                     length,
                 )
             }
@@ -399,10 +399,10 @@ impl Helper {
                     .as_any()
                     .downcast_ref::<StructArray>()
                     .unwrap();
-                Arc::new(StructVector::new(
+                Arc::new(StructVector::try_new(
                     StructType::try_from(fields)?,
                     array.clone(),
-                ))
+                )?)
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)

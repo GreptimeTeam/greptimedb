@@ -291,6 +291,7 @@ impl ColumnDataTypeWrapper {
         }
     }
 
+    /// Create a list datatype with the given item type.
     pub fn list_datatype(item_type: ColumnDataTypeWrapper) -> Self {
         ColumnDataTypeWrapper {
             datatype: ColumnDataType::List,
@@ -303,6 +304,7 @@ impl ColumnDataTypeWrapper {
         }
     }
 
+    /// Create a struct datatype with the given field tuples (name, datatype).
     pub fn struct_datatype(fields: Vec<(String, ColumnDataTypeWrapper)>) -> Self {
         let struct_fields = fields
             .into_iter()
@@ -1239,8 +1241,23 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 convert_month_day_nano_to_pb(v),
             )),
             Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-            // TODO
-            Value::List(_) | Value::Duration(_) | Value::Struct(_) => unreachable!(),
+            Value::List(list_value) => {
+                let items = list_value
+                    .take_items()
+                    .into_iter()
+                    .map(value_to_grpc_value)
+                    .collect();
+                Some(ValueData::ListValue(v1::ListValue { items }))
+            }
+            Value::Struct(struct_value) => {
+                let items = struct_value
+                    .take_items()
+                    .into_iter()
+                    .map(value_to_grpc_value)
+                    .collect();
+                Some(ValueData::StructValue(v1::StructValue { items }))
+            }
+            Value::Duration(_) => unreachable!(),
         },
     }
 }
@@ -2075,17 +2092,20 @@ mod tests {
     fn test_struct_to_pb_value() {
         let items = vec![Value::Boolean(true), Value::String("tom".into())];
 
-        let value = Value::Struct(StructValue::new(
-            items,
-            StructType::new(vec![
-                StructField::new(
-                    "a.a".to_string(),
-                    ConcreteDataType::boolean_datatype(),
-                    true,
-                ),
-                StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
-            ]),
-        ));
+        let value = Value::Struct(
+            StructValue::try_new(
+                items,
+                StructType::new(vec![
+                    StructField::new(
+                        "a.a".to_string(),
+                        ConcreteDataType::boolean_datatype(),
+                        true,
+                    ),
+                    StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
+                ]),
+            )
+            .unwrap(),
+        );
 
         let pb_value = to_proto_value(value);
 

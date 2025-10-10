@@ -13,16 +13,19 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::NullBufferBuilder;
 use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
-use snafu::ResultExt;
+use datafusion_common::ScalarValue;
+use snafu::{ResultExt, ensure};
 
-use crate::error::{ArrowComputeSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu};
+use crate::error::{
+    ArrowComputeSnafu, ConversionSnafu, Error, InconsistentStructFieldsAndItemsSnafu, Result,
+    SerializeSnafu, UnsupportedOperationSnafu,
+};
 use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::StructType;
@@ -38,8 +41,15 @@ pub struct StructVector {
 }
 
 impl StructVector {
-    pub fn new(fields: StructType, array: StructArray) -> Self {
-        StructVector { array, fields }
+    pub fn try_new(fields: StructType, array: StructArray) -> Result<Self> {
+        ensure!(
+            fields.fields().len() == array.fields().len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: fields.fields().len(),
+                item_len: array.fields().len(),
+            }
+        );
+        Ok(StructVector { array, fields })
     }
 
     pub fn array(&self) -> &StructArray {
@@ -108,20 +118,20 @@ impl Vector for StructVector {
             return Value::Null;
         }
 
-        let mut values = Vec::new();
-        for i in 0..self.fields.fields().len() {
-            let field_array = &self.array.column(i);
-            let field_vector = Helper::try_into_vector(field_array).unwrap_or_else(|_| {
-                panic!(
-                    "arrow array with datatype {:?} cannot converted to our vector",
-                    field_array.data_type()
-                )
-            });
+        let values = (0..self.fields.fields().len())
+            .map(|i| {
+                let field_array = &self.array.column(i);
 
-            values.push(field_vector.get(index));
-        }
+                if field_array.is_null(i) {
+                    Value::Null
+                } else {
+                    let scalar_value = ScalarValue::try_from_array(field_array, index).unwrap();
+                    Value::try_from(scalar_value).unwrap()
+                }
+            })
+            .collect();
 
-        Value::Struct(StructValue::new(values, self.fields.clone()))
+        Value::Struct(StructValue::try_new(values, self.fields.clone()).unwrap())
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -149,7 +159,7 @@ impl VectorOp for StructVector {
             column_arrays,
             self.array.nulls().cloned(),
         );
-        Arc::new(StructVector::new(self.fields.clone(), replicated_array))
+        Arc::new(StructVector::try_new(self.fields.clone(), replicated_array).unwrap())
     }
 
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
@@ -182,43 +192,43 @@ impl VectorOp for StructVector {
 
 impl Serializable for StructVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        let mut vectors = BTreeMap::new();
-        for (field, value) in self.array.fields().iter().zip(self.array.columns().iter()) {
-            let value_vector = Helper::try_into_vector(value)?;
-            vectors.insert(field.name().clone(), value_vector);
-        }
+        let vectors = self
+            .array
+            .columns()
+            .iter()
+            .map(|value_array| Helper::try_into_vector(value_array))
+            .collect::<Result<Vec<_>>>()?;
 
-        let mut results = Vec::with_capacity(self.array().len());
-        for idx in 0..self.array().len() {
-            let mut result = serde_json::Map::new();
-            for field in vectors.keys() {
-                let field_value = vectors.get(field).unwrap().get(idx);
-                result.insert(
-                    field.to_string(),
-                    field_value.try_into().context(SerializeSnafu)?,
-                );
-            }
-
-            results.push(result.into());
-        }
-
-        Ok(results)
+        (0..self.array.len())
+            .map(|idx| {
+                let mut result = serde_json::Map::with_capacity(vectors.len());
+                for (field, vector) in self.fields.fields().iter().zip(vectors.iter()) {
+                    let field_value = vector.get(idx);
+                    result.insert(
+                        field.name().to_string(),
+                        field_value.try_into().context(SerializeSnafu)?,
+                    );
+                }
+                Ok(result.into())
+            })
+            .collect::<Result<Vec<serde_json::Value>>>()
     }
 }
 
-impl From<StructArray> for StructVector {
-    fn from(array: StructArray) -> Self {
+impl TryFrom<StructArray> for StructVector {
+    type Error = Error;
+
+    fn try_from(array: StructArray) -> Result<Self> {
         let fields = match array.data_type() {
-            ArrowDataType::Struct(fields) => {
-                StructType::try_from(fields).expect("Failed to create StructType")
+            ArrowDataType::Struct(fields) => StructType::try_from(fields)?,
+            other => ConversionSnafu {
+                from: other.to_string(),
             }
-            other => panic!("Try to create StructVector from an arrow array with type {other:?}"),
+            .fail()?,
         };
-        Self { array, fields }
+        Ok(Self { array, fields })
     }
 }
-
-vectors::impl_try_from_arrow_array_for_vector!(StructArray, StructVector);
 
 impl ScalarVector for StructVector {
     type OwnedItem = StructValue;
@@ -273,7 +283,6 @@ impl<'a> Iterator for StructIter<'a> {
         }
     }
 
-    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.vector.len(), Some(self.vector.len()))
     }
@@ -308,13 +317,11 @@ impl StructVectorBuilder {
         Ok(())
     }
 
-    fn push_null_struct_value(&mut self) -> Result<()> {
+    fn push_null_struct_value(&mut self) {
         for builder in &mut self.value_builders {
             builder.push_null();
         }
         self.null_buffer.append_null();
-
-        Ok(())
     }
 }
 
@@ -352,10 +359,10 @@ impl MutableVector for StructVectorBuilder {
                 },
                 StructValueRef::Ref(val) => self.push_struct_value(val)?,
                 StructValueRef::RefList { val, fields } => {
-                    let struct_value = StructValue::new(
+                    let struct_value = StructValue::try_new(
                         val.iter().map(|v| Value::from(v.clone())).collect(),
                         fields.clone(),
-                    );
+                    )?;
                     self.push_struct_value(&struct_value)?;
                 }
             }
@@ -376,7 +383,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.push_null_struct_value().expect("failed to push null");
+        self.push_null_struct_value();
     }
 }
 
@@ -388,9 +395,6 @@ impl ScalarVectorBuilder for StructVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        // We expect the input ListValue has the same inner type as the builder when using
-        // push(), so just panic if `push_value_ref()` returns error, which indicate an
-        // invalid input value type.
         self.try_push_value_ref(&value.map(ValueRef::Struct).unwrap_or(ValueRef::Null))
             .unwrap_or_else(|e| {
                 panic!(
@@ -412,7 +416,7 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             self.null_buffer.finish(),
         );
 
-        StructVector::new(self.fields.clone(), struct_array)
+        StructVector::try_new(self.fields.clone(), struct_array).unwrap()
     }
 
     fn finish_cloned(&self) -> Self::VectorType {
@@ -427,7 +431,7 @@ impl ScalarVectorBuilder for StructVectorBuilder {
             arrays,
             self.null_buffer.finish_cloned(),
         );
-        StructVector::new(self.fields.clone(), struct_array)
+        StructVector::try_new(self.fields.clone(), struct_array).unwrap()
     }
 }
 
@@ -465,5 +469,18 @@ mod tests {
             }
         }
         assert_eq!(5, null_count);
+
+        let value = vector.get(2);
+        if let Value::Struct(struct_value) = value {
+            assert_eq!(struct_value.struct_type(), &struct_type);
+            let mut items = struct_value.items().iter();
+            assert_eq!(items.next(), Some(&Value::Int32(1)));
+            assert_eq!(items.next(), Some(&Value::String("tom".into())));
+            assert_eq!(items.next(), Some(&Value::UInt8(25)));
+            assert_eq!(items.next(), Some(&Value::String("94038".into())));
+            assert_eq!(items.next(), None);
+        } else {
+            panic!("Expected a struct value");
+        }
     }
 }

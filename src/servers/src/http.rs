@@ -32,8 +32,9 @@ use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::value::transform_value_ref_to_json_value;
+use datatypes::types::json_type_value_to_serde_json;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
@@ -54,8 +55,8 @@ use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
-    ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, ConvertSqlValueSnafu, Error, InternalIoSnafu,
+    InvalidHeaderValueSnafu, Result, ToJsonSnafu,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::otlp::OtlpState;
@@ -299,8 +300,16 @@ impl HttpRecordsOutput {
                     // safety here: schemas length is equal to the number of columns in the recordbatch
                     let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
-                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
-                            .context(ToJsonSnafu)?;
+                        let value = col.get(row_idx);
+                        let value = if let ConcreteDataType::Json(json_type) = schema.data_type
+                            && let datatypes::value::Value::Binary(bytes) = value
+                        {
+                            json_type_value_to_serde_json(bytes.as_ref(), &json_type.format)
+                                .context(ConvertSqlValueSnafu)?
+                        } else {
+                            serde_json::Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?
+                        };
+
                         rows[row_idx + finished_row_cursor].push(value);
                     }
                 }

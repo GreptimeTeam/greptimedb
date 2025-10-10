@@ -19,7 +19,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::Serialize;
 use tinytemplate::TinyTemplate;
 
-use crate::env::{Env, GreptimeDBContext};
+use crate::env::{Env, GreptimeDBContext, ServiceProvider};
 use crate::{ServerAddr, util};
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
@@ -261,7 +261,8 @@ impl ServerMode {
 
         let mut path = util::sqlness_conf_path();
         path.push(format!("{}-test.toml.template", self.name()));
-        let template = std::fs::read_to_string(path).unwrap();
+        let template = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read file '{}' error: {e}", path.display()));
         tt.add_template(self.name(), &template).unwrap();
 
         let data_home = sqlness_home.join(format!("greptimedb-{}-{}", id, self.name()));
@@ -347,15 +348,17 @@ impl ServerMode {
     pub fn get_args(
         &self,
         sqlness_home: &Path,
-        _env: &Env,
+        env: &Env,
         db_ctx: &GreptimeDBContext,
         id: usize,
     ) -> Vec<String> {
-        let mut args = vec![
-            DEFAULT_LOG_LEVEL.to_string(),
-            self.name().to_string(),
-            "start".to_string(),
-        ];
+        let mut args = env
+            .extra_args()
+            .iter()
+            .map(String::as_str)
+            .chain([DEFAULT_LOG_LEVEL, self.name(), "start"])
+            .map(ToString::to_string)
+            .collect::<Vec<String>>();
 
         match self {
             ServerMode::Standalone {
@@ -425,7 +428,10 @@ impl ServerMode {
                     self.generate_config_file(sqlness_home, db_ctx, id),
                 ]);
 
-                if db_ctx.store_config().setup_pg {
+                if matches!(
+                    db_ctx.store_config().setup_pg,
+                    Some(ServiceProvider::Create)
+                ) {
                     let client_ports = db_ctx
                         .store_config()
                         .store_addrs
@@ -439,7 +445,20 @@ impl ServerMode {
                     );
                     args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
                     args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
-                } else if db_ctx.store_config().setup_mysql {
+                } else if let Some(ServiceProvider::External(connection_string)) =
+                    db_ctx.store_config().setup_pg
+                {
+                    println!("Using external PostgreSQL '{connection_string}' as Kvbackend");
+                    args.extend([
+                        "--backend".to_string(),
+                        "postgres-store".to_string(),
+                        "--store-addrs".to_string(),
+                        connection_string,
+                    ]);
+                } else if matches!(
+                    db_ctx.store_config().setup_mysql,
+                    Some(ServiceProvider::Create)
+                ) {
                     let client_ports = db_ctx
                         .store_config()
                         .store_addrs
@@ -451,6 +470,16 @@ impl ServerMode {
                         format!("mysql://greptimedb:admin@127.0.0.1:{}/mysql", client_port);
                     args.extend(vec!["--backend".to_string(), "mysql-store".to_string()]);
                     args.extend(vec!["--store-addrs".to_string(), mysql_server_addr]);
+                } else if let Some(ServiceProvider::External(connection_string)) =
+                    db_ctx.store_config().setup_mysql
+                {
+                    println!("Using external MySQL '{connection_string}' as Kvbackend");
+                    args.extend([
+                        "--backend".to_string(),
+                        "mysql-store".to_string(),
+                        "--store-addrs".to_string(),
+                        connection_string,
+                    ]);
                 } else if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }

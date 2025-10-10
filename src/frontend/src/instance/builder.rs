@@ -186,14 +186,14 @@ impl FrontendBuilder {
             table_route_cache,
             Some(process_manager.clone()),
         );
+
         #[cfg(feature = "enterprise")]
-        let statement_executor = if let Some(trigger_querier) =
-            plugins.get::<operator::statement::TriggerQuerierRef>()
-        {
-            statement_executor.with_trigger_querier(trigger_querier.clone())
-        } else {
-            statement_executor
-        };
+        let statement_executor =
+            if let Some(factory) = plugins.get::<operator::statement::TriggerQuerierFactoryRef>() {
+                statement_executor.with_trigger_querier(factory.create(kv_backend.clone()))
+            } else {
+                statement_executor
+            };
 
         let statement_executor = Arc::new(statement_executor);
 

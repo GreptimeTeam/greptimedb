@@ -22,7 +22,7 @@ use env::{Env, WalConfig};
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
-use crate::env::StoreConfig;
+use crate::env::{ServiceProvider, StoreConfig};
 
 mod env;
 mod protocol_interceptor;
@@ -109,16 +109,20 @@ struct Args {
     setup_etcd: bool,
 
     /// Whether to setup pg, by default it is false.
-    #[clap(long, default_value = "false")]
-    setup_pg: bool,
+    #[clap(long, default_missing_value = "", num_args(0..=1))]
+    setup_pg: Option<ServiceProvider>,
 
     /// Whether to setup mysql, by default it is false.
-    #[clap(long, default_value = "false")]
-    setup_mysql: bool,
+    #[clap(long, default_missing_value = "", num_args(0..=1))]
+    setup_mysql: Option<ServiceProvider>,
 
     /// The number of jobs to run in parallel. Default to half of the cores.
     #[clap(short, long, default_value = "0")]
     jobs: usize,
+
+    /// Extra command line arguments when starting GreptimeDB binaries.
+    #[clap(long)]
+    extra_args: Vec<String>,
 }
 
 #[tokio::main]
@@ -150,8 +154,8 @@ async fn main() {
     // Note: parallelism in pg and mysql is possible, but need configuration.
     if args.server_addr.server_addr.is_some()
         || args.setup_etcd
-        || args.setup_pg
-        || args.setup_mysql
+        || args.setup_pg.is_some()
+        || args.setup_mysql.is_some()
         || args.kafka_wal_broker_endpoints.is_some()
         || args.test_filter != ".*"
     {
@@ -200,6 +204,7 @@ async fn main() {
             args.pull_version_on_need,
             args.bins_dir,
             store,
+            args.extra_args,
         ),
     );
     match runner.run().await {

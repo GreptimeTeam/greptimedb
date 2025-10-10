@@ -152,13 +152,11 @@ macro_rules! impl_scalar_for_native {
             type VectorType = PrimitiveVector<$DataType>;
             type RefType<'a> = $Native;
 
-            #[inline]
             fn as_scalar_ref(&self) -> $Native {
                 *self
             }
 
             #[allow(clippy::needless_lifetimes)]
-            #[inline]
             fn upcast_gat<'short, 'long: 'short>(long: $Native) -> $Native {
                 long
             }
@@ -168,7 +166,6 @@ macro_rules! impl_scalar_for_native {
         impl<'a> ScalarRef<'a> for $Native {
             type ScalarType = $Native;
 
-            #[inline]
             fn to_owned_scalar(&self) -> $Native {
                 *self
             }
@@ -191,11 +188,9 @@ impl Scalar for () {
     type VectorType = NullVector;
     type RefType<'a> = ();
 
-    #[inline]
     fn as_scalar_ref(&self) {}
 
     #[allow(clippy::needless_lifetimes)]
-    #[inline]
     fn upcast_gat<'short, 'long: 'short>(long: ()) {
         long
     }
@@ -204,7 +199,6 @@ impl Scalar for () {
 impl ScalarRef<'_> for () {
     type ScalarType = ();
 
-    #[inline]
     fn to_owned_scalar(&self) {}
 }
 
@@ -212,13 +206,11 @@ impl Scalar for bool {
     type VectorType = BooleanVector;
     type RefType<'a> = bool;
 
-    #[inline]
     fn as_scalar_ref(&self) -> bool {
         *self
     }
 
     #[allow(clippy::needless_lifetimes)]
-    #[inline]
     fn upcast_gat<'short, 'long: 'short>(long: bool) -> bool {
         long
     }
@@ -227,7 +219,6 @@ impl Scalar for bool {
 impl ScalarRef<'_> for bool {
     type ScalarType = bool;
 
-    #[inline]
     fn to_owned_scalar(&self) -> bool {
         *self
     }
@@ -237,12 +228,10 @@ impl Scalar for String {
     type VectorType = StringVector;
     type RefType<'a> = &'a str;
 
-    #[inline]
     fn as_scalar_ref(&self) -> &str {
         self
     }
 
-    #[inline]
     fn upcast_gat<'short, 'long: 'short>(long: &'long str) -> &'short str {
         long
     }
@@ -251,7 +240,6 @@ impl Scalar for String {
 impl<'a> ScalarRef<'a> for &'a str {
     type ScalarType = String;
 
-    #[inline]
     fn to_owned_scalar(&self) -> String {
         self.to_string()
     }
@@ -261,12 +249,10 @@ impl Scalar for Vec<u8> {
     type VectorType = BinaryVector;
     type RefType<'a> = &'a [u8];
 
-    #[inline]
     fn as_scalar_ref(&self) -> &[u8] {
         self
     }
 
-    #[inline]
     fn upcast_gat<'short, 'long: 'short>(long: &'long [u8]) -> &'short [u8] {
         long
     }
@@ -275,7 +261,6 @@ impl Scalar for Vec<u8> {
 impl<'a> ScalarRef<'a> for &'a [u8] {
     type ScalarType = Vec<u8>;
 
-    #[inline]
     fn to_owned_scalar(&self) -> Vec<u8> {
         self.to_vec()
     }
@@ -387,7 +372,7 @@ impl<'a> ScalarRef<'a> for StructValueRef<'a> {
             StructValueRef::Ref(val) => (*val).clone(),
             StructValueRef::RefList { val, fields } => {
                 let items = val.iter().map(|v| Value::from(v.clone())).collect();
-                StructValue::new(items, fields.clone())
+                StructValue::try_new(items, fields.clone()).unwrap()
             }
         }
     }
