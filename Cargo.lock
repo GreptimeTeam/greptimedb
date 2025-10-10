@@ -3971,7 +3971,6 @@ dependencies = [
  "common-time",
  "datafusion-common",
  "enum_dispatch",
- "greptime-proto",
  "jsonb",
  "num",
  "num-traits",

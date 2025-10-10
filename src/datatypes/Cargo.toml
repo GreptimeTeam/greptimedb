@@ -24,7 +24,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datafusion-common.workspace = true
 enum_dispatch = "0.3"
-greptime-proto.workspace = true
 jsonb.workspace = true
 num = "0.4"
 num-traits = "0.2"
