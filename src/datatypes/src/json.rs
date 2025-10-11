@@ -467,7 +467,7 @@ fn decode_unstructured_value(value: Value) -> Result<Json, Error> {
         // Handle old format: plain string (for backward compatibility)
         Value::String(s) => {
             let json_str = s.as_utf8();
-            serde_json::from_str(json_str).context(error::DeserializeSnafu {
+            serde_json::from_str(json_str).with_context(|_| error::DeserializeSnafu {
                 json: json_str.to_string(),
             })
         }
