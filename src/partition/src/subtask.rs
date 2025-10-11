@@ -116,6 +116,57 @@ mod tests {
 
     use super::*;
     use crate::expr::col;
+    #[test]
+    fn test_split_one_to_two() {
+        // Left: [0, 40)
+        let from = vec![
+            col("u")
+                .gt_eq(Value::Int64(0))
+                .and(col("u").lt(Value::Int64(20))),
+        ];
+
+        // Right: [0, 10), [10, 20)
+        let to = vec![
+            col("u")
+                .gt_eq(Value::Int64(0))
+                .and(col("u").lt(Value::Int64(10))),
+            col("u")
+                .gt_eq(Value::Int64(10))
+                .and(col("u").lt(Value::Int64(20))),
+        ];
+
+        let subtasks = create_subtasks(&from, &to).unwrap();
+        assert_eq!(subtasks.len(), 1);
+        assert_eq!(subtasks[0].from_expr_indices, vec![0]);
+        assert_eq!(subtasks[0].to_expr_indices, vec![0, 1]);
+        assert_eq!(subtasks[0].transition_map[0], vec![0, 1]);
+    }
+
+    #[test]
+    fn test_merge_two_to_one() {
+        // Left: [0, 10), [10, 20)
+        let from = vec![
+            col("u")
+                .gt_eq(Value::Int64(0))
+                .and(col("u").lt(Value::Int64(10))),
+            col("u")
+                .gt_eq(Value::Int64(10))
+                .and(col("u").lt(Value::Int64(20))),
+        ];
+        // Right: [0, 40)
+        let to = vec![
+            col("u")
+                .gt_eq(Value::Int64(0))
+                .and(col("u").lt(Value::Int64(20))),
+        ];
+
+        let subtasks = create_subtasks(&from, &to).unwrap();
+        assert_eq!(subtasks.len(), 1);
+        assert_eq!(subtasks[0].from_expr_indices, vec![0, 1]);
+        assert_eq!(subtasks[0].to_expr_indices, vec![0]);
+        assert_eq!(subtasks[0].transition_map[0], vec![0]);
+        assert_eq!(subtasks[0].transition_map[1], vec![0]);
+    }
 
     #[test]
     fn test_create_subtasks_disconnected() {
