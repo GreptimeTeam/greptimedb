@@ -636,7 +636,7 @@ fn decode_unstructured_raw_struct(struct_value: StructValue) -> Result<StructVal
         {
             let json_str = s.as_utf8();
             let json_value: Json =
-                serde_json::from_str(json_str).context(error::DeserializeSnafu {
+                serde_json::from_str(json_str).with_context(|_| error::DeserializeSnafu {
                     json: json_str.to_string(),
                 })?;
 
