@@ -45,6 +45,29 @@ SELECT * FROM tql;
 | 1970-01-01T00:00:40 | 3.0 |
 +---------------------+-----+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql as (
+    TQL EVAL (0, 40, '10s') metric
+)
+SELECT * FROM tql;
+
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                 |
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                      |
+|               | Projection: tql.ts, tql.val                                                                                          |
+|               |   SubqueryAlias: tql                                                                                                 |
+|               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |       PromSeriesDivide: tags=[]                                                                                      |
+|               |         Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |           TableScan: metric                                                                                          |
+|               | ]]                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                      |
++---------------+----------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with column aliases
 WITH tql (the_timestamp, the_value) as (
     TQL EVAL (0, 40, '10s') metric
@@ -61,12 +84,52 @@ SELECT * FROM tql;
 | 1970-01-01T00:00:40 | 3.0       |
 +---------------------+-----------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql (the_timestamp, the_value) as (
+    TQL EVAL (0, 40, '10s') metric
+)
+SELECT * FROM tql;
+
++---------------+------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                   |
++---------------+------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                        |
+|               | Projection: tql.the_timestamp, tql.the_value                                                                           |
+|               |   SubqueryAlias: tql                                                                                                   |
+|               |     Projection: metric.ts AS the_timestamp, metric.val AS the_value                                                    |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |         PromSeriesDivide: tags=[]                                                                                      |
+|               |           Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |             TableScan: metric                                                                                          |
+|               | ]]                                                                                                                     |
+| physical_plan | CooperativeExec                                                                                                        |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                        |
++---------------+------------------------------------------------------------------------------------------------------------------------+
+
 -- Explain TQL CTE
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN WITH tql AS (
     TQL EVAL (0, 40, '10s') metric
 ) SELECT * FROM tql;
 
-Error: 1001(Unsupported), SQL statement is not supported, keyword: tql
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                 |
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                      |
+|               | Projection: tql.ts, tql.val                                                                                          |
+|               |   SubqueryAlias: tql                                                                                                 |
+|               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |       PromSeriesDivide: tags=[]                                                                                      |
+|               |         Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |           TableScan: metric                                                                                          |
+|               | ]]                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                      |
++---------------+----------------------------------------------------------------------------------------------------------------------+
 
 -- Hybrid CTEs (TQL + SQL)
 WITH
@@ -80,6 +143,34 @@ SELECT count(*) FROM filtered;
 | 2        |
 +----------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH
+    tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),
+    filtered AS (SELECT * FROM tql_data WHERE val > 5)
+SELECT count(*) FROM filtered;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                           |
++---------------+--------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                |
+|               | Projection: count(Int64(1)) AS count(*)                                                                                        |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                            |
+|               |     SubqueryAlias: filtered                                                                                                    |
+|               |       Projection: tql_data.ts, tql_data.val                                                                                    |
+|               |         Filter: tql_data.val > CAST(Int64(5) AS Float64)                                                                       |
+|               |           SubqueryAlias: tql_data                                                                                              |
+|               |             Projection: metric.ts AS ts, metric.val AS val                                                                     |
+|               |               PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |                 PromSeriesDivide: tags=[]                                                                                      |
+|               |                   Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |                     TableScan: metric                                                                                          |
+|               | ]]                                                                                                                             |
+| physical_plan | CooperativeExec                                                                                                                |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                |
++---------------+--------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with complex PromQL expressions
 WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
@@ -91,6 +182,38 @@ SELECT sum(val) FROM filtered;
 +-------------------+
 | 1.05              |
 +-------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH
+    tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
+    filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
+SELECT sum(val) FROM filtered;
+
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                   |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                        |
+|               | Projection: sum(filtered.val)                                                                                                          |
+|               |   Aggregate: groupBy=[[]], aggr=[[sum(filtered.val)]]                                                                                  |
+|               |     SubqueryAlias: filtered                                                                                                            |
+|               |       Projection: tql_data.ts AS ts, tql_data.val AS val                                                                               |
+|               |         Projection: tql_data.ts, tql_data.val                                                                                          |
+|               |           Filter: tql_data.val > CAST(Int64(0) AS Float64)                                                                             |
+|               |             SubqueryAlias: tql_data                                                                                                    |
+|               |               Projection: metric.ts AS ts, prom_rate(ts_range,val,ts,Int64(20000)) AS val                                              |
+|               |                 Filter: prom_rate(ts_range,val,ts,Int64(20000)) IS NOT NULL                                                            |
+|               |                   Projection: metric.ts, prom_rate(ts_range, val, metric.ts, Int64(20000)) AS prom_rate(ts_range,val,ts,Int64(20000))  |
+|               |                     PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[20000], time index=[ts], values=["val"]   |
+|               |                       PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                             |
+|               |                         PromSeriesDivide: tags=[]                                                                                      |
+|               |                           Filter: metric.ts >= TimestampMillisecond(-320000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |                             TableScan: metric                                                                                          |
+|               | ]]                                                                                                                                     |
+| physical_plan | CooperativeExec                                                                                                                        |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                        |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with aggregation functions
 WITH tql_agg(ts, summary) AS (
@@ -104,6 +227,32 @@ SELECT round(avg(summary)) as avg_sum FROM tql_agg;
 | 1.0     |
 +---------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_agg(ts, summary) AS (
+    TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
+)
+SELECT round(avg(summary)) as avg_sum FROM tql_agg;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                              |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                   |
+|               | Projection: round(avg(tql_agg.summary)) AS avg_sum                                                                                                                |
+|               |   Aggregate: groupBy=[[]], aggr=[[avg(tql_agg.summary)]]                                                                                                          |
+|               |     SubqueryAlias: tql_agg                                                                                                                                        |
+|               |       Projection: labels.ts AS ts, sum(labels.cpu) AS summary                                                                                                     |
+|               |         Aggregate: groupBy=[[labels.ts]], aggr=[[sum(labels.cpu)]]                                                                                                |
+|               |           PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                           |
+|               |             PromSeriesDivide: tags=["host"]                                                                                                                       |
+|               |               Filter: labels.host ~ Utf8("^(?:host.*)$") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |                 TableScan: labels                                                                                                                                 |
+|               | ]]                                                                                                                                                                |
+| physical_plan | CooperativeExec                                                                                                                                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with label selectors
 WITH host_metrics AS (
     TQL EVAL (0, 40, '10s') labels{host="host1"}
@@ -115,6 +264,30 @@ SELECT count(*) as host1_points FROM host_metrics;
 +--------------+
 | 5            |
 +--------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH host_metrics AS (
+    TQL EVAL (0, 40, '10s') labels{host="host1"}
+)
+SELECT count(*) as host1_points FROM host_metrics;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                   |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                        |
+|               | Projection: count(Int64(1)) AS count(*) AS host1_points                                                                                                |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(host_metrics.ts) AS count(Int64(1))]]                                                                          |
+|               |     SubqueryAlias: host_metrics                                                                                                                        |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |         PromSeriesDivide: tags=["host"]                                                                                                                |
+|               |           Filter: labels.host = Utf8("host1") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |             TableScan: labels                                                                                                                          |
+|               | ]]                                                                                                                                                     |
+| physical_plan | CooperativeExec                                                                                                                                        |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                        |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with column reference
 WITH host_metrics AS (
@@ -131,6 +304,29 @@ SELECT host_metrics.ts, host_metrics.host FROM host_metrics;
 | 1970-01-01T00:00:30 | host1 |
 | 1970-01-01T00:00:40 | host1 |
 +---------------------+-------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH host_metrics AS (
+    TQL EVAL (0, 40, '10s') labels{host="host1"}
+)
+SELECT host_metrics.ts, host_metrics.host FROM host_metrics;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                 |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                      |
+|               | Projection: host_metrics.ts, host_metrics.host                                                                                                       |
+|               |   SubqueryAlias: host_metrics                                                                                                                        |
+|               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |       PromSeriesDivide: tags=["host"]                                                                                                                |
+|               |         Filter: labels.host = Utf8("host1") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |           TableScan: labels                                                                                                                          |
+|               | ]]                                                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                      |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Multiple TQL CTEs referencing different tables
 WITH
@@ -152,6 +348,63 @@ LIMIT 3;
 | 8.0        | 0.7       |
 +------------+-----------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH
+    metric_data(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
+    label_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host2"})
+SELECT
+    m.val as metric_val,
+    l.cpu as label_val
+FROM metric_data m, label_data l
+WHERE m.ts = l.ts
+ORDER BY m.ts
+LIMIT 3;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                   |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: metric_val, label_val                                                                                                                      |
+|               |   Sort: m.ts ASC NULLS LAST, fetch=3                                                                                                                   |
+|               |     Projection: m.val AS metric_val, l.cpu AS label_val, m.ts                                                                                          |
+|               |       Inner Join: m.ts = l.ts                                                                                                                          |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                |
+|               | SubqueryAlias: m                                                                                                                                       |
+|               |   SubqueryAlias: metric_data                                                                                                                           |
+|               |     Projection: metric.ts AS ts, metric.val AS val                                                                                                     |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |         PromSeriesDivide: tags=[]                                                                                                                      |
+|               |           Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None)                                 |
+|               |             TableScan: metric                                                                                                                          |
+|               | ]]                                                                                                                                                     |
+|               |         Projection: l.ts, l.cpu                                                                                                                        |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                              |
+|               | SubqueryAlias: l                                                                                                                                       |
+|               |   SubqueryAlias: label_data                                                                                                                            |
+|               |     Projection: labels.ts AS ts, labels.host AS host, labels.cpu AS cpu                                                                                |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |         PromSeriesDivide: tags=["host"]                                                                                                                |
+|               |           Filter: labels.host = Utf8("host2") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |             TableScan: labels                                                                                                                          |
+|               | ]]                                                                                                                                                     |
+| physical_plan | ProjectionExec: expr=[metric_val@0 as metric_val, label_val@1 as label_val]                                                                            |
+|               |   SortPreservingMergeExec: [ts@2 ASC NULLS LAST], fetch=3                                                                                              |
+|               |     SortExec: TopK(fetch=3), expr=[ts@2 ASC NULLS LAST], preserve_REDACTED
+|               |       ProjectionExec: expr=[val@1 as metric_val, cpu@2 as label_val, ts@0 as ts]                                                                       |
+|               |         CoalesceBatchesExec: target_batch_size=8192                                                                                                    |
+|               |           HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ts@0, ts@0)], projection=[ts@0, val@1, cpu@3]                                          |
+|               |             CoalesceBatchesExec: target_batch_size=8192                                                                                                |
+|               |               RepartitionExec: REDACTED
+|               |                 CooperativeExec                                                                                                                        |
+|               |                   MergeScanExec: REDACTED
+|               |             CoalesceBatchesExec: target_batch_size=8192                                                                                                |
+|               |               RepartitionExec: REDACTED
+|               |                 ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu]                                                                                        |
+|               |                   CooperativeExec                                                                                                                      |
+|               |                     MergeScanExec: REDACTED
+|               |                                                                                                                                                        |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with mathematical operations
 WITH computed(ts, val) AS (
     TQL EVAL (0, 40, '10s') metric * 2 + 1
@@ -163,6 +416,33 @@ SELECT min(val) as min_computed, max(val) as max_computed FROM computed;
 +--------------+--------------+
 | 1.0          | 17.0         |
 +--------------+--------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH computed(ts, val) AS (
+    TQL EVAL (0, 40, '10s') metric * 2 + 1
+)
+SELECT min(val) as min_computed, max(val) as max_computed FROM computed;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                         |
++---------------+------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                              |
+|               | Projection: min(computed.val) AS min_computed, max(computed.val) AS max_computed                                             |
+|               |   Aggregate: groupBy=[[]], aggr=[[min(computed.val), max(computed.val)]]                                                     |
+|               |     SubqueryAlias: computed                                                                                                  |
+|               |       Projection: metric.ts AS ts, val * Float64(2) + Float64(1) AS val                                                      |
+|               |         Projection: metric.ts, val * Float64(2) + Float64(1) AS val * Float64(2) + Float64(1)                                |
+|               |           Projection: metric.ts, metric.val * Float64(2) AS val * Float64(2)                                                 |
+|               |             PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |               PromSeriesDivide: tags=[]                                                                                      |
+|               |                 Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |                   TableScan: metric                                                                                          |
+|               | ]]                                                                                                                           |
+| physical_plan | CooperativeExec                                                                                                              |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                              |
++---------------+------------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with window functions in SQL part
 WITH tql_base(ts, val) AS (
@@ -185,6 +465,41 @@ ORDER BY ts;
 | 1970-01-01T00:00:40 | 3.0 | 2.0        |
 +---------------------+-----+------------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_base(ts, val) AS (
+    TQL EVAL (0, 40, '10s') metric
+)
+SELECT
+    ts,
+    val,
+    LAG(val, 1) OVER (ORDER BY ts) as prev_value
+FROM tql_base
+ORDER BY ts;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: tql_base.ts ASC NULLS LAST                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|               |   Projection: tql_base.ts, tql_base.val, lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS prev_value                                                                                                                                                                                                                                                                             |
+|               |     WindowAggr: windowExpr=[[lag(tql_base.val, Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]                                                                                                                                                                                                                                                                                                    |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                                 |
+|               | SubqueryAlias: tql_base                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|               |   Projection: metric.ts AS ts, metric.val AS val                                                                                                                                                                                                                                                                                                                                                                                                      |
+|               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                                                                                                                                                                                                                                                                                                                     |
+|               |       PromSeriesDivide: tags=[]                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|               |         Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None)                                                                                                                                                                                                                                                                                                                                  |
+|               |           TableScan: metric                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| physical_plan | ProjectionExec: expr=[ts@0 as ts, val@1 as val, lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@2 as prev_value]                                                                                                                                                                                                                                                                   |
+|               |   BoundedWindowAggExec: wdw=[lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { name: "lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
+|               |     SortPreservingMergeExec: [ts@0 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                                                                                                    |
+|               |       SortExec: expr=[ts@0 ASC NULLS LAST], preserve_REDACTED
+|               |         CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                               |
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with HAVING clause
 WITH tql_grouped(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') labels
@@ -201,6 +516,37 @@ HAVING count(*) > 1;
 +---------------------+-------------+
 | 1970-01-01T00:00:00 | 10          |
 +---------------------+-------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_grouped(ts, host, cpu) AS (
+    TQL EVAL (0, 40, '10s') labels
+)
+SELECT
+    DATE_TRUNC('minute', ts) as minute,
+    count(*) as point_count
+FROM tql_grouped
+GROUP BY minute
+HAVING count(*) > 1;
+
++---------------+----------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                       |
++---------------+----------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                            |
+|               | Projection: date_trunc(Utf8("minute"),tql_grouped.ts) AS minute, count(Int64(1)) AS count(*) AS point_count                |
+|               |   Filter: count(Int64(1)) > Int64(1)                                                                                       |
+|               |     Aggregate: groupBy=[[date_trunc(Utf8("minute"), tql_grouped.ts)]], aggr=[[count(tql_grouped.ts) AS count(Int64(1))]]   |
+|               |       SubqueryAlias: tql_grouped                                                                                           |
+|               |         Projection: labels.ts AS ts, labels.host AS host, labels.cpu AS cpu                                                |
+|               |           PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |             PromSeriesDivide: tags=["host"]                                                                                |
+|               |               Filter: labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |                 TableScan: labels                                                                                          |
+|               | ]]                                                                                                                         |
+| physical_plan | CooperativeExec                                                                                                            |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                            |
++---------------+----------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with UNION
 -- SQLNESS SORT_RESULT 3 1
@@ -226,6 +572,45 @@ SELECT 'host2' as source, ts, cpu FROM host2_data;
 | host2  | 1970-01-01T00:00:40 | 0.5 |
 +--------+---------------------+-----+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH
+    host1_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host1"}),
+    host2_data(ts, host, cpu) AS (TQL EVAL (0, 40, '10s') labels{host="host2"})
+SELECT 'host1' as source, ts, cpu FROM host1_data
+UNION ALL
+SELECT 'host2' as source, ts, cpu FROM host2_data;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                   |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Union                                                                                                                                                  |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                      |
+|               | Projection: Utf8("host1") AS source, host1_data.ts, host1_data.cpu                                                                                     |
+|               |   SubqueryAlias: host1_data                                                                                                                            |
+|               |     Projection: labels.ts AS ts, labels.host AS host, labels.cpu AS cpu                                                                                |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |         PromSeriesDivide: tags=["host"]                                                                                                                |
+|               |           Filter: labels.host = Utf8("host1") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |             TableScan: labels                                                                                                                          |
+|               | ]]                                                                                                                                                     |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                      |
+|               | Projection: Utf8("host2") AS source, host2_data.ts, host2_data.cpu                                                                                     |
+|               |   SubqueryAlias: host2_data                                                                                                                            |
+|               |     Projection: labels.ts AS ts, labels.host AS host, labels.cpu AS cpu                                                                                |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                    |
+|               |         PromSeriesDivide: tags=["host"]                                                                                                                |
+|               |           Filter: labels.host = Utf8("host2") AND labels.ts >= TimestampMillisecond(-300000, None) AND labels.ts <= TimestampMillisecond(340000, None) |
+|               |             TableScan: labels                                                                                                                          |
+|               | ]]                                                                                                                                                     |
+| physical_plan | InterleaveExec                                                                                                                                         |
+|               |   CooperativeExec                                                                                                                                      |
+|               |     MergeScanExec: REDACTED
+|               |   CooperativeExec                                                                                                                                      |
+|               |     MergeScanExec: REDACTED
+|               |                                                                                                                                                        |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- Nested CTEs with TQL
 WITH
     base_tql(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
@@ -245,6 +630,46 @@ SELECT count(*) as high_values FROM final;
 | 3           |
 +-------------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH
+    base_tql(ts, val) AS (TQL EVAL (0, 40, '10s') metric),
+    processed(ts, percent) AS (
+        SELECT ts, val * 100 as percent
+        FROM base_tql
+        WHERE val > 0
+    ),
+    final(ts, percent) AS (
+        SELECT * FROM processed WHERE percent > 200
+    )
+SELECT count(*) as high_values FROM final;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                     |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                          |
+|               | Projection: count(Int64(1)) AS count(*) AS high_values                                                                                   |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                                      |
+|               |     SubqueryAlias: final                                                                                                                 |
+|               |       Projection: processed.ts AS ts, processed.percent AS percent                                                                       |
+|               |         Projection: processed.ts, processed.percent                                                                                      |
+|               |           Filter: processed.percent > CAST(Int64(200) AS Float64)                                                                        |
+|               |             SubqueryAlias: processed                                                                                                     |
+|               |               Projection: base_tql.ts AS ts, percent AS percent                                                                          |
+|               |                 Projection: base_tql.ts, base_tql.val * CAST(Int64(100) AS Float64) AS percent                                           |
+|               |                   Filter: base_tql.val > CAST(Int64(0) AS Float64)                                                                       |
+|               |                     SubqueryAlias: base_tql                                                                                              |
+|               |                       Projection: metric.ts AS ts, metric.val AS val                                                                     |
+|               |                         PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                    |
+|               |                           PromSeriesDivide: tags=[]                                                                                      |
+|               |                             Filter: metric.ts >= TimestampMillisecond(-300000, None) AND metric.ts <= TimestampMillisecond(340000, None) |
+|               |                               TableScan: metric                                                                                          |
+|               | ]]                                                                                                                                       |
+| physical_plan | CooperativeExec                                                                                                                          |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                          |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with time-based functions
 WITH time_shifted AS (
     TQL EVAL (0, 40, '10s') metric offset 50s
@@ -260,6 +685,30 @@ SELECT * FROM time_shifted;
 | 1970-01-01T00:00:30 | 3.0 |
 | 1970-01-01T00:00:40 | 3.0 |
 +---------------------+-----+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH time_shifted AS (
+    TQL EVAL (0, 40, '10s') metric offset 50s
+)
+SELECT * FROM time_shifted;
+
++---------------+------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                   |
++---------------+------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                        |
+|               | Projection: time_shifted.ts, time_shifted.val                                                                          |
+|               |   SubqueryAlias: time_shifted                                                                                          |
+|               |     PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                      |
+|               |       PromSeriesNormalize: offset=[50000], time index=[ts], filter NaN: [false]                                        |
+|               |         PromSeriesDivide: tags=[]                                                                                      |
+|               |           Filter: metric.ts >= TimestampMillisecond(-250000, None) AND metric.ts <= TimestampMillisecond(390000, None) |
+|               |             TableScan: metric                                                                                          |
+|               | ]]                                                                                                                     |
+| physical_plan | CooperativeExec                                                                                                        |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                        |
++---------------+------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with JOIN between TQL and regular table
 -- SQLNESS SORT_RESULT 3 1
@@ -286,6 +735,67 @@ LIMIT 5;
 | 1970-01-01T00:00:20 | host1     | host1 |
 +---------------------+-----------+-------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_summary(ts, host, cpu) AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
+)
+SELECT
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                   |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                    |
+|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                         |
+|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                    |
+|               |       Projection: t.ts, t.cpu                                                                                                                                          |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
+|               | SubqueryAlias: t                                                                                                                                                       |
+|               |   SubqueryAlias: tql_summary                                                                                                                                           |
+|               |     Projection: labels.ts AS ts, prom_avg_over_time(ts_range,cpu) AS host, labels.host AS cpu                                                                          |
+|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                             |
+|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                      |
+|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                             |
+|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                       |
+|               |               PromSeriesDivide: tags=["host"]                                                                                                                          |
+|               |                 Filter: labels.ts >= TimestampMillisecond(-330000, None) AND labels.ts <= TimestampMillisecond(340000, None)                                           |
+|               |                   TableScan: labels                                                                                                                                    |
+|               | ]]                                                                                                                                                                     |
+|               |       Filter: l.host = Utf8("host1")                                                                                                                                   |
+|               |         Projection: l.ts, l.host                                                                                                                                       |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
+|               | SubqueryAlias: l                                                                                                                                                       |
+|               |   TableScan: labels                                                                                                                                                    |
+|               | ]]                                                                                                                                                                     |
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                             |
+|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
+|               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                              |
+|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
+|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@0, cpu@1, host@4] |
+|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu, date_trunc(second, ts@0) as date_trunc(Utf8("second"),t.ts)]                                             |
+|               |                 CooperativeExec                                                                                                                                        |
+|               |                   MergeScanExec: REDACTED
+|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                           |
+|               |                 CoalesceBatchesExec: target_batch_size=8192                                                                                                            |
+|               |                   FilterExec: host@1 = host1                                                                                                                           |
+|               |                     ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                  |
+|               |                       CooperativeExec                                                                                                                                  |
+|               |                         MergeScanExec: REDACTED
+|               |                                                                                                                                                                        |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- TQL CTE with JOIN and value aliasing
 -- SQLNESS SORT_RESULT 3 1
 WITH tql_summary AS (
@@ -311,6 +821,67 @@ LIMIT 5;
 | 1970-01-01T00:00:20 | 0.5666666666666668 | host1 |
 +---------------------+--------------------+-------+
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_summary AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s]) AS cpu
+)
+SELECT
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                   |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                    |
+|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                         |
+|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                    |
+|               |       Projection: t.cpu, t.ts                                                                                                                                          |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
+|               | SubqueryAlias: t                                                                                                                                                       |
+|               |   SubqueryAlias: tql_summary                                                                                                                                           |
+|               |     Projection: prom_avg_over_time(ts_range,cpu) AS cpu, labels.host, labels.ts                                                                                        |
+|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                             |
+|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                      |
+|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                             |
+|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                       |
+|               |               PromSeriesDivide: tags=["host"]                                                                                                                          |
+|               |                 Filter: labels.ts >= TimestampMillisecond(-330000, None) AND labels.ts <= TimestampMillisecond(340000, None)                                           |
+|               |                   TableScan: labels                                                                                                                                    |
+|               | ]]                                                                                                                                                                     |
+|               |       Filter: l.host = Utf8("host1")                                                                                                                                   |
+|               |         Projection: l.ts, l.host                                                                                                                                       |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
+|               | SubqueryAlias: l                                                                                                                                                       |
+|               |   TableScan: labels                                                                                                                                                    |
+|               | ]]                                                                                                                                                                     |
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                             |
+|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
+|               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                              |
+|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
+|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
+|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts, date_trunc(second, ts@2) as date_trunc(Utf8("second"),t.ts)]                                             |
+|               |                 CooperativeExec                                                                                                                                        |
+|               |                   MergeScanExec: REDACTED
+|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
+|               |             RepartitionExec: REDACTED
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                           |
+|               |                 CoalesceBatchesExec: target_batch_size=8192                                                                                                            |
+|               |                   FilterExec: host@1 = host1                                                                                                                           |
+|               |                     ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                  |
+|               |                       CooperativeExec                                                                                                                                  |
+|               |                         MergeScanExec: REDACTED
+|               |                                                                                                                                                                        |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (
     TQL ANALYZE (0, 40, '10s') metric
@@ -319,8 +890,26 @@ SELECT * FROM tql_analyze limit 1;
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: Only TQL EVAL is supported in CTEs
 
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_analyze AS (
+    TQL ANALYZE (0, 40, '10s') metric
+)
+SELECT * FROM tql_analyze limit 1;
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: Only TQL EVAL is supported in CTEs
+
 -- Error case - TQL EXPLAIN should fail
 WITH tql_explain AS (
+    TQL EXPLAIN (0, 40, '10s') metric
+)
+SELECT * FROM tql_explain limit 1;
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: Only TQL EVAL is supported in CTEs
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_explain AS (
     TQL EXPLAIN (0, 40, '10s') metric
 )
 SELECT * FROM tql_explain limit 1;
@@ -338,6 +927,30 @@ SELECT count(*) FROM tql_lookback;
 +----------+
 | 5        |
 +----------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN WITH tql_lookback AS (
+    TQL EVAL (0, 40, '10s', '15s') metric
+)
+SELECT count(*) FROM tql_lookback;
+
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                 |
++---------------+----------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                      |
+|               | Projection: count(Int64(1)) AS count(*)                                                                              |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(tql_lookback.ts) AS count(Int64(1))]]                                        |
+|               |     SubqueryAlias: tql_lookback                                                                                      |
+|               |       PromInstantManipulate: range=[0..40000], lookback=[15000], interval=[10000], time index=[ts]                   |
+|               |         PromSeriesDivide: tags=[]                                                                                    |
+|               |           Filter: metric.ts >= TimestampMillisecond(-15000, None) AND metric.ts <= TimestampMillisecond(55000, None) |
+|               |             TableScan: metric                                                                                        |
+|               | ]]                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                      |
++---------------+----------------------------------------------------------------------------------------------------------------------+
 
 drop table metric;
 
