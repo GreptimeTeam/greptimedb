@@ -37,8 +37,6 @@ use crate::wal::EntryId;
 ///
 /// * All new regions will have manifests
 /// * No files will be lost (total references >= original file count)
-/// * File metadata consistency is verified
-/// * FileMeta.partition_expr remains unchanged (immutable)
 pub struct RemapManifest {
     /// Old region manifests indexed by region ID
     old_manifests: HashMap<RegionId, RegionManifest>,
@@ -106,15 +104,8 @@ impl RemapManifest {
     /// the subtask, copying files from old regions to new regions based on
     /// partition expression overlaps.
     ///
-    /// # Returns
-    /// * `Ok(RemapResult)` - Successfully remapped manifests with statistics
-    /// * `Err(Error)` - Remapping failed (missing manifests, inconsistent data, etc.)
-    ///
-    /// # Guarantees
-    /// * All new regions will have manifests
-    /// * No files will be lost (total references >= original file count)
-    /// * File metadata consistency is verified
-    /// * FileMeta.partition_expr remains unchanged (immutable)
+    /// FileMeta entries are copied without modification - the region_id field
+    /// indicates which region originally created the file and never changes.
     pub fn remap_manifests(&self) -> Result<RemapResult> {
         // Step 1: Initialize new manifests
         let mut new_manifests = self.initialize_new_manifests()?;
@@ -209,7 +200,7 @@ impl RemapManifest {
                     },
                 )?;
 
-                self.copy_files_to_region(from_manifest, target_manifest, to_region_id)?;
+                self.copy_files_to_region(from_manifest, target_manifest)?;
             }
         }
 
@@ -221,31 +212,21 @@ impl RemapManifest {
         &self,
         source_manifest: &RegionManifest,
         target_manifest: &mut RegionManifest,
-        target_region_id: RegionId,
     ) -> Result<()> {
         for (file_id, file_meta) in &source_manifest.files {
-            // Clone file metadata with updated region_id
-            let mut new_file_meta = file_meta.clone();
-
-            // CRITICAL: Update the region_id to point to new region
-            // The file_id (UUID) stays the same - this is a reference remap
-            new_file_meta.region_id = target_region_id;
-
-            // IMPORTANT: Do NOT update partition_expr
-            // partition_expr is immutable and records the rule when file was created
-            // Only the region's partition expression (in region metadata) changes
+            let file_meta_clone = file_meta.clone();
 
             // Insert or merge into target manifest
             // Same file might be added from multiple overlapping old regions
             use std::collections::hash_map::Entry;
             match target_manifest.files.entry(*file_id) {
                 Entry::Vacant(e) => {
-                    e.insert(new_file_meta);
+                    e.insert(file_meta_clone);
                 }
                 Entry::Occupied(e) => {
                     // File already exists - verify it's the same physical file
                     #[cfg(debug_assertions)]
-                    self.verify_file_consistency(e.get(), &new_file_meta)?;
+                    self.verify_file_consistency(e.get(), &file_meta_clone)?;
                 }
             }
         }
@@ -257,7 +238,15 @@ impl RemapManifest {
     #[cfg(debug_assertions)]
     fn verify_file_consistency(&self, existing: &FileMeta, new: &FileMeta) -> Result<()> {
         // When the same file appears from multiple overlapping old regions,
-        // verify they are actually the same physical file
+        // verify they are actually the same physical file with identical metadata
+
+        ensure!(
+            existing.region_id == new.region_id,
+            error::InconsistentFileSnafu {
+                file_id: existing.file_id,
+                reason: "region_id mismatch",
+            }
+        );
 
         ensure!(
             existing.file_id == new.file_id,
@@ -298,8 +287,6 @@ impl RemapManifest {
                 reason: "partition_expr mismatch",
             }
         );
-
-        // region_id is expected to differ (that's what we're remapping)
 
         Ok(())
     }
@@ -599,12 +586,12 @@ mod tests {
         assert_eq!(result.stats.unique_files, 10);
         assert!(result.stats.empty_regions.is_empty());
 
-        // Verify all files have correct region_id
+        // Verify FileMeta is immutable - region_id stays as old_region_id
         for file_meta in result.new_manifests[&new_region_id_1].files.values() {
-            assert_eq!(file_meta.region_id, new_region_id_1);
+            assert_eq!(file_meta.region_id, old_region_id);
         }
         for file_meta in result.new_manifests[&new_region_id_2].files.values() {
-            assert_eq!(file_meta.region_id, new_region_id_2);
+            assert_eq!(file_meta.region_id, old_region_id);
         }
     }
 
@@ -683,10 +670,9 @@ mod tests {
 
         let result = remapper.remap_manifests().unwrap();
 
-        // CRITICAL: Verify partition_expr remains unchanged
         for file_meta in result.new_manifests[&new_region_id].files.values() {
             assert_eq!(file_meta.partition_expr, Some(file_partition_expr.clone()));
-            assert_eq!(file_meta.region_id, new_region_id); // Only region_id should change
+            assert_eq!(file_meta.region_id, old_region_id);
         }
     }
 
