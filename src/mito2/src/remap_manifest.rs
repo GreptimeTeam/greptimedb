@@ -110,6 +110,7 @@ impl RemapManifest {
                 removed_files: RemovedFilesRecord::default(),
                 flushed_entry_id: 0,
                 flushed_sequence: 0,
+                committed_sequence: None,
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
@@ -241,6 +242,7 @@ impl RemapManifest {
                 manifest.manifest_version = previous_manifest.manifest_version;
                 manifest.truncated_entry_id = previous_manifest.truncated_entry_id;
                 manifest.compaction_time_window = previous_manifest.compaction_time_window;
+                manifest.committed_sequence = previous_manifest.committed_sequence;
             } else {
                 // new region
                 manifest.flushed_entry_id = 0;
@@ -248,6 +250,7 @@ impl RemapManifest {
                 manifest.manifest_version = 0;
                 manifest.truncated_entry_id = None;
                 manifest.compaction_time_window = None;
+                manifest.committed_sequence = None;
             }
 
             // removed_files are tracked by old manifests, don't copy
@@ -364,11 +367,11 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
     use smallvec::SmallVec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
-    use store_api::storage::{RegionId, SequenceNumber};
+    use store_api::storage::{FileId, RegionId, SequenceNumber};
 
     use super::*;
     use crate::manifest::action::RegionManifest;
-    use crate::sst::file::{FileId, FileMeta, FileTimeRange};
+    use crate::sst::file::{FileMeta, FileTimeRange};
     use crate::wal::EntryId;
 
     /// Helper to create a basic region metadata for testing.
@@ -447,6 +450,7 @@ mod tests {
             manifest_version: 1,
             truncated_entry_id: None,
             compaction_time_window: None,
+            committed_sequence: None,
         }
     }
 
