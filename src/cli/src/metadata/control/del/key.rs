@@ -41,7 +41,7 @@ impl DelKeyCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kv_backend = self.store.build().await?;
         Ok(Box::new(DelKeyTool {
-            key: self.key.to_string(),
+            key: self.key.clone(),
             prefix: self.prefix,
             key_deleter: KeyDeleter::new(kv_backend),
         }))

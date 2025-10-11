@@ -227,7 +227,7 @@ impl Value {
     }
 
     /// Cast itself to [ValueRef].
-    pub fn as_value_ref(&self) -> ValueRef {
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
         match self {
             Value::Null => ValueRef::Null,
             Value::Boolean(v) => ValueRef::Boolean(*v),
@@ -1351,11 +1351,11 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to [ListValueRef].
-    pub fn as_list(&self) -> Result<Option<ListValueRef>> {
+    pub fn as_list(&self) -> Result<Option<ListValueRef<'_>>> {
         impl_as_for_value_ref!(self, List)
     }
 
-    pub fn as_struct(&self) -> Result<Option<StructValueRef>> {
+    pub fn as_struct(&self) -> Result<Option<StructValueRef<'_>>> {
         impl_as_for_value_ref!(self, Struct)
     }
 

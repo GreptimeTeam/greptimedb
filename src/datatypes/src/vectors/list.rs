@@ -121,7 +121,7 @@ impl Vector for ListVector {
         Value::List(ListValue::new(values, self.item_type.clone()))
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         ValueRef::List(ListValueRef::Indexed {
             vector: self,
             idx: index,

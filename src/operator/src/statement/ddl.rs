@@ -1014,7 +1014,7 @@ impl StatementExecutor {
             let schema = if expr.schema_name.is_empty() {
                 query_context.current_schema()
             } else {
-                expr.schema_name.to_string()
+                expr.schema_name.clone()
             };
             let table_name = &expr.table_name;
             let table = self
@@ -1446,9 +1446,9 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
                 drop_if_exists,
             ),
@@ -1504,9 +1504,9 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_truncate_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
                 time_ranges,
             ),

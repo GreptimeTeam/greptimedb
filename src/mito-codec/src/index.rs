@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_decode_primary_key_basic() {
-        let tag_columns = vec![
+        let tag_columns = [
             ColumnMetadata {
                 column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
                 semantic_type: api::v1::SemanticType::Tag,

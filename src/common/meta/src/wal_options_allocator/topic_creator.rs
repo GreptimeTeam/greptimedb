@@ -104,8 +104,8 @@ impl KafkaTopicCreator {
         let end_offset = partition_client
             .get_offset(OffsetAt::Latest)
             .await
-            .context(KafkaGetOffsetSnafu {
-                topic: topic.to_string(),
+            .with_context(|_| KafkaGetOffsetSnafu {
+                topic: topic.clone(),
                 partition: DEFAULT_PARTITION,
             })?;
         if end_offset > 0 {
@@ -284,9 +284,11 @@ mod tests {
         let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
+        let topics = std::slice::from_ref(&topic);
+
         // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        creator.delete_topics(topics).await.unwrap();
+        creator.create_topics(topics).await.unwrap();
 
         let partition_client = creator.partition_client(&topic).await.unwrap();
         let end_offset = partition_client.get_offset(OffsetAt::Latest).await.unwrap();
@@ -309,10 +311,12 @@ mod tests {
         let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
-        // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
+        let topics = std::slice::from_ref(&topic);
 
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        // Clean up the topics before test
+        creator.delete_topics(topics).await.unwrap();
+
+        creator.create_topics(topics).await.unwrap();
         let partition_client = creator.partition_client(&topic).await.unwrap();
         append_records(&partition_client, 2).await.unwrap();
 
@@ -336,12 +340,14 @@ mod tests {
         let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
-        // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
+        let topics = std::slice::from_ref(&topic);
 
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        // Clean up the topics before test
+        creator.delete_topics(topics).await.unwrap();
+
+        creator.create_topics(topics).await.unwrap();
         // Should be ok
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        creator.create_topics(topics).await.unwrap();
 
         let partition_client = creator.partition_client(&topic).await.unwrap();
         let end_offset = partition_client.get_offset(OffsetAt::Latest).await.unwrap();
@@ -356,10 +362,12 @@ mod tests {
         let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
-        // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
+        let topics = std::slice::from_ref(&topic);
 
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        // Clean up the topics before test
+        creator.delete_topics(topics).await.unwrap();
+
+        creator.create_topics(topics).await.unwrap();
         creator.prepare_topic(&topic).await.unwrap();
 
         let partition_client = creator.partition_client(&topic).await.unwrap();
@@ -382,10 +390,12 @@ mod tests {
         let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
-        // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
+        let topics = std::slice::from_ref(&topic);
 
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
+        // Clean up the topics before test
+        creator.delete_topics(topics).await.unwrap();
+
+        creator.create_topics(topics).await.unwrap();
         let partition_client = creator.partition_client(&topic).await.unwrap();
         append_records(&partition_client, 10).await.unwrap();
 

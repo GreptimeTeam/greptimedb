@@ -28,15 +28,12 @@ use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 pub enum JsonFormat {
+    #[default]
     Jsonb,
-}
-
-impl Default for JsonFormat {
-    fn default() -> Self {
-        Self::Jsonb
-    }
 }
 
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.

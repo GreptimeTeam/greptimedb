@@ -106,7 +106,7 @@ fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
 
 fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
     match args.get(i) {
-        Some(Expr::Literal(ScalarValue::Utf8(Some(str)), _)) => Ok(str.to_string()),
+        Some(Expr::Literal(ScalarValue::Utf8(Some(str)), _)) => Ok(str.clone()),
         Some(expr) => Ok(expr.schema_name().to_string()),
         None => Err(dispose_parse_error(None)),
     }

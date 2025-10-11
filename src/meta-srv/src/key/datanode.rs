@@ -26,13 +26,11 @@ use crate::error::Result;
 pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
 const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
 
-const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
-
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+        Regex::new("^__meta_datanode_stat-([0-9]+)-([0-9]+)$").unwrap();
     static ref INACTIVE_REGION_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{INACTIVE_REGION_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
     ))

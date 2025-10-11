@@ -134,7 +134,7 @@ impl Vector for StructVector {
         Value::Struct(StructValue::try_new(values, self.fields.clone()).unwrap())
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         ValueRef::Struct(StructValueRef::Indexed {
             vector: self,
             idx: index,

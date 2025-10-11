@@ -172,7 +172,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
         }
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
             let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };

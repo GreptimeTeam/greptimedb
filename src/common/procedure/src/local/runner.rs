@@ -1616,7 +1616,7 @@ mod tests {
             .unwrap();
 
         // If the procedure is poisoned, the poison key shouldn't be deleted.
-        assert_eq!(&procedure_id.to_string(), ROOT_ID);
+        assert_eq!(&procedure_id.clone(), ROOT_ID);
     }
 
     #[tokio::test]

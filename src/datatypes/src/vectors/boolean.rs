@@ -126,7 +126,7 @@ impl Vector for BooleanVector {
         vectors::impl_get_for_vector!(self.array, index)
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }

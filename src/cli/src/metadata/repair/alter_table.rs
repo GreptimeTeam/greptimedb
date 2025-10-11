@@ -32,9 +32,9 @@ pub fn generate_alter_table_expr_for_all_columns(
     let schema = &table_info.meta.schema;
 
     let mut alter_table_expr = AlterTableExpr {
-        catalog_name: table_info.catalog_name.to_string(),
-        schema_name: table_info.schema_name.to_string(),
-        table_name: table_info.name.to_string(),
+        catalog_name: table_info.catalog_name.clone(),
+        schema_name: table_info.schema_name.clone(),
+        table_name: table_info.name.clone(),
         ..Default::default()
     };
 

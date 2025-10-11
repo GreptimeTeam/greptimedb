@@ -207,7 +207,7 @@ impl Vector for Decimal128Vector {
         }
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if let Some(decimal) = self.get_decimal128_value_from_array(index) {
             ValueRef::Decimal128(decimal)
         } else {

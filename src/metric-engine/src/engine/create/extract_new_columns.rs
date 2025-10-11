@@ -37,7 +37,7 @@ pub fn extract_new_columns<'a>(
                 ensure!(
                     col.semantic_type != SemanticType::Field,
                     AddingFieldColumnSnafu {
-                        name: col.column_schema.name.to_string(),
+                        name: col.column_schema.name.clone(),
                     }
                 );
                 new_column_names.insert(&col.column_schema.name);

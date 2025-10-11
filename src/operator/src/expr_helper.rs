@@ -194,7 +194,7 @@ pub(crate) async fn create_external_expr(
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        engine: create.engine.to_string(),
+        engine: create.engine.clone(),
     };
 
     Ok(expr)
@@ -234,7 +234,7 @@ pub fn create_to_expr(
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        engine: create.engine.to_string(),
+        engine: create.engine.clone(),
     };
 
     validate_create_expr(&expr)?;
@@ -604,7 +604,7 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
             err_msg: "must have one and only one TimeIndex columns",
         }
     );
-    Ok(time_index.first().unwrap().to_string())
+    Ok(time_index[0].clone())
 }
 
 fn columns_to_expr(
@@ -748,12 +748,12 @@ pub(crate) fn to_alter_table_expr(
         }
         AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {
             drop_columns: vec![DropColumn {
-                name: name.value.to_string(),
+                name: name.value.clone(),
             }],
         }),
         AlterTableOperation::RenameTable { new_table_name } => {
             AlterTableKind::RenameTable(RenameTable {
-                new_table_name: new_table_name.to_string(),
+                new_table_name: new_table_name.clone(),
             })
         }
         AlterTableOperation::SetTableOptions { options } => {

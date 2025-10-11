@@ -167,7 +167,7 @@ pub(crate) enum DataSource {
 }
 
 impl DataSource {
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         match self {
             DataSource::Buffer(buffer) => buffer.current_data_batch(),
             DataSource::Part(p) => p.current_data_batch(),
@@ -207,7 +207,7 @@ impl DataNode {
         }
     }
 
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range();
         let batch = self.source.current_data_batch();
         batch.slice(range.start, range.len())

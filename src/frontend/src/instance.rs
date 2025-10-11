@@ -375,7 +375,7 @@ impl Instance {
                 .entry(db_string)
                 .or_default();
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), false);
+                cache.insert((*name).clone(), false);
             });
             return Ok(false);
         }
@@ -411,13 +411,13 @@ impl Instance {
             ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
             let flag = has_legacy;
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), flag);
+                cache.insert((*name).clone(), flag);
             });
             Ok(flag)
         } else {
             // no table info, use new mode
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), false);
+                cache.insert((*name).clone(), false);
             });
             Ok(false)
         }
@@ -448,7 +448,7 @@ fn fast_legacy_check(
         // set cache for all names
         names.iter().for_each(|name| {
             if !cache.contains_key(*name) {
-                cache.insert(name.to_string(), flag);
+                cache.insert((*name).clone(), flag);
             }
         });
         Ok(Some(flag))

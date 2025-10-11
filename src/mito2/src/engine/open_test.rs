@@ -305,7 +305,7 @@ async fn test_open_region_skip_wal_replay() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                table_dir: table_dir.to_string(),
+                table_dir: table_dir.clone(),
                 path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: true,

@@ -36,7 +36,7 @@ pub fn as_veclit(arg: &ScalarValue) -> Result<Option<Cow<'_, [f32]>>> {
 
 /// Convert a u8 slice to a vector literal.
 pub fn binlit_as_veclit(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(size_of::<f32>()) {
         return InvalidFuncArgsSnafu {
             err_msg: format!("Invalid binary length of vector: {}", bytes.len()),
         }

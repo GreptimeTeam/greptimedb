@@ -214,11 +214,8 @@ impl DistExtensionPlanner {
         let all_regions = table_info.region_ids();
 
         // Extract partition columns
-        let partition_columns: Vec<String> = table_info
-            .meta
-            .partition_column_names()
-            .map(|s| s.to_string())
-            .collect();
+        let partition_columns: Vec<String> =
+            table_info.meta.partition_column_names().cloned().collect();
         if partition_columns.is_empty() {
             return Ok(all_regions);
         }

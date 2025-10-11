@@ -104,7 +104,7 @@ impl IndexEncoder for JsonIndexEncoder {
         self.buf
             .lock()
             .unwrap()
-            .insert(provider.topic.to_string(), region_index);
+            .insert(provider.topic.clone(), region_index);
     }
 
     fn finish(&self) -> Result<Vec<u8>> {

@@ -375,7 +375,7 @@ impl RegionOpener {
                         region: "`kafka`",
                     }
                 );
-                Ok(Provider::kafka_provider(options.topic.to_string()))
+                Ok(Provider::kafka_provider(options.topic.clone()))
             }
             WalOptions::Noop => Ok(Provider::noop_provider()),
         }
@@ -579,7 +579,7 @@ pub fn get_object_store(
         Ok(object_store_manager
             .find(name)
             .with_context(|| ObjectStoreNotFoundSnafu {
-                object_store: name.to_string(),
+                object_store: name.clone(),
             })?
             .clone())
     } else {

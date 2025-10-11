@@ -880,7 +880,7 @@ impl PgStore {
             .execute(&sql_template_set.create_table_statement, &[])
             .await
             .with_context(|_| PostgresExecutionSnafu {
-                sql: sql_template_set.create_table_statement.to_string(),
+                sql: sql_template_set.create_table_statement.clone(),
             })?;
         Ok(Arc::new(Self {
             max_txn_ops,
@@ -926,8 +926,8 @@ mod tests {
         client
             .execute(&sql_templates.create_table_statement, &[])
             .await
-            .context(PostgresExecutionSnafu {
-                sql: sql_templates.create_table_statement.to_string(),
+            .with_context(|_| PostgresExecutionSnafu {
+                sql: sql_templates.create_table_statement.clone(),
             })
             .unwrap();
         Some(PgStore {

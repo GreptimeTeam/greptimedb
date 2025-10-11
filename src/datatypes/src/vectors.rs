@@ -166,7 +166,7 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     ///
     /// # Panics
     /// Panic if `index` is out of bound.
-    fn get_ref(&self, index: usize) -> ValueRef;
+    fn get_ref(&self, index: usize) -> ValueRef<'_>;
 }
 
 pub type VectorRef = Arc<dyn Vector>;

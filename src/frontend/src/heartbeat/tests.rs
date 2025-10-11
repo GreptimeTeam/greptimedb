@@ -26,8 +26,6 @@ use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::MetadataKey;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
-use partition::manager::TableRouteCacheInvalidator;
-use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 #[derive(Default)]
@@ -39,17 +37,6 @@ pub struct MockKvCacheInvalidator {
 impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
         let _ = self.inner.lock().unwrap().remove(key);
-    }
-}
-
-pub struct MockTableRouteCacheInvalidator {
-    inner: Mutex<HashMap<TableId, i32>>,
-}
-
-#[async_trait::async_trait]
-impl TableRouteCacheInvalidator for MockTableRouteCacheInvalidator {
-    async fn invalidate_table_route(&self, table_id: TableId) {
-        let _ = self.inner.lock().unwrap().remove(&table_id);
     }
 }
 

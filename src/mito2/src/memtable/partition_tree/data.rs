@@ -550,7 +550,7 @@ impl DataBufferReader {
     /// Returns current data batch.
     /// # Panics
     /// If Current reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: &self.batch,
@@ -881,7 +881,7 @@ impl DataPartReader {
     /// Returns current data batch of reader.
     /// # Panics
     /// If reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: self.current_batch.as_ref().unwrap(),
@@ -1041,7 +1041,7 @@ impl Drop for DataPartsReader {
 }
 
 impl DataPartsReader {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
     }

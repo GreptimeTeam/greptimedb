@@ -192,7 +192,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
 
                                 let expr = PreCompiledMatchesTermExpr {
                                     text: args[0].clone(),
-                                    term: term.to_string(),
+                                    term: term.clone(),
                                     finder,
                                     probes,
                                 };

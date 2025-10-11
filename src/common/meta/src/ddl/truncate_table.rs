@@ -218,7 +218,7 @@ impl TruncateTableData {
         }
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
     }
 
