@@ -330,6 +330,9 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
         Expr::DropView(expr) => {
             check_and_fill!(expr);
         }
+        Expr::CommentOn(expr) => {
+            check_and_fill!(expr);
+        }
     }
 }
 
