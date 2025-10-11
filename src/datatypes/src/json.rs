@@ -38,7 +38,7 @@ use crate::value::{ListValue, StructValue, Value};
 /// - Structured: Encodes JSON objects as StructValue with an optional predefined StructType.
 /// - UnstructuredRaw: Encodes JSON data as string and store it in a struct with a field named "_raw".
 /// - PartialUnstructuredByKey: Encodes JSON objects as StructValue with an optional predefined StructType
-/// and a set of unstructured keys, these keys are provided as flattened names, for example: `a.b.c`.
+///   and a set of unstructured keys, these keys are provided as flattened names, for example: `a.b.c`.
 ///
 /// We provide a few methods to convert JSON data to StructValue based on the settings. And we also
 /// convert them to fully structured StructValue for user-facing APIs: the UI protocol and the UDF interface.
