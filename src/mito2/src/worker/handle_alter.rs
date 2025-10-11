@@ -154,9 +154,9 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
-        let change = RegionChange { 
+        let change = RegionChange {
             metadata: new_meta,
-            sst_format: region.sst_format(), 
+            sst_format: region.sst_format(),
         };
         self.handle_manifest_region_change(region, change, sender)
     }
