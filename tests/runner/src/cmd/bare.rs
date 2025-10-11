@@ -32,7 +32,6 @@ enum Wal {
 
 // add a group to ensure that all server addresses are set together
 #[derive(clap::Args, Debug, Clone, Default)]
-#[group(multiple = true, requires_all=["server_addr", "pg_server_addr", "mysql_server_addr"])]
 pub(crate) struct ServerAddr {
     /// Address of the grpc server.
     #[clap(short, long)]
@@ -199,6 +198,7 @@ impl BareCommand {
                 println!("Stopping etcd");
                 util::stop_rm_etcd();
             }
+            // TODO(weny): remove postgre and mysql containers
             println!("Removing state in {:?}", sqlness_home);
             tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
         }
