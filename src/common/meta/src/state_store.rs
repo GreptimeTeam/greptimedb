@@ -121,7 +121,7 @@ impl StateStore for KvStateStore {
                 self.kv_backend
                     .put(
                         PutRequest::new()
-                            .with_key(key.to_string().into_bytes())
+                            .with_key(key.clone().into_bytes())
                             .with_value(value),
                     )
                     .await
@@ -145,7 +145,7 @@ impl StateStore for KvStateStore {
                         let key = if idx > 0 {
                             KeySet::with_segment_suffix(&key, idx)
                         } else {
-                            key.to_string()
+                            key.clone()
                         };
                         let kv_backend = self.kv_backend.clone();
                         async move {

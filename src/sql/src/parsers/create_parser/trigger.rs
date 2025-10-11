@@ -379,9 +379,7 @@ impl<'a> ParserContext<'a> {
         for key in options.keys() {
             ensure!(
                 validate_webhook_option(key),
-                error::InvalidTriggerWebhookOptionSnafu {
-                    key: key.to_string()
-                }
+                error::InvalidTriggerWebhookOptionSnafu { key: key.clone() }
             );
         }
 
@@ -486,7 +484,7 @@ IF NOT EXISTS cpu_monitor
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
         );
         assert_eq!(*interval, Duration::from_secs(300));
-        assert_eq!(raw_interval_expr.to_string(), "'5 minute'::INTERVAL");
+        assert_eq!(raw_interval_expr.clone(), "'5 minute'::INTERVAL");
         assert_eq!(create_trigger.labels.len(), 1);
         assert_eq!(
             create_trigger.labels.get("label_name").unwrap(),

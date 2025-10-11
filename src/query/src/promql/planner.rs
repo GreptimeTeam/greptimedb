@@ -702,7 +702,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
         self.ctx.reset_table_name_and_schema();
-        let literal_expr = df_prelude::lit(val.to_string());
+        let literal_expr = df_prelude::lit(val.clone());
 
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -1032,7 +1032,7 @@ impl PromPlanner {
                 ensure!(
                     matcher.op == MatchOp::Equal,
                     UnsupportedMatcherOpSnafu {
-                        matcher: matcher.name.to_string(),
+                        matcher: matcher.name.clone(),
                         matcher_op: matcher.op.to_string(),
                     }
                 );
@@ -3144,7 +3144,7 @@ impl PromPlanner {
         // step 1: align schema using project, fill non-exist columns with null
         let left_proj_exprs = all_columns.iter().map(|col| {
             if tags_not_in_left.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3161,8 +3161,8 @@ impl PromPlanner {
             .iter()
             .find(|(_, f)| f.name() == right_field_col)
             .map(|(q, _)| q)
-            .context(ColumnNotFoundSnafu {
-                col: right_field_col.to_string(),
+            .with_context(|| ColumnNotFoundSnafu {
+                col: right_field_col.clone(),
             })?
             .cloned();
 
@@ -3176,7 +3176,7 @@ impl PromPlanner {
                     right_field_col,
                 ))
             } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3234,7 +3234,7 @@ impl PromPlanner {
         // step 4: update context
         self.ctx.time_index_column = Some(left_time_index_column);
         self.ctx.tag_columns = all_tags.into_iter().collect();
-        self.ctx.field_columns = vec![left_field_col.to_string()];
+        self.ctx.field_columns = vec![left_field_col.clone()];
 
         Ok(result)
     }
@@ -3451,7 +3451,7 @@ mod test {
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
-                .name(table_name.to_string())
+                .name(table_name.clone())
                 .meta(table_meta)
                 .build()
                 .unwrap();
@@ -3461,8 +3461,8 @@ mod test {
                 catalog_list
                     .register_table_sync(RegisterTableRequest {
                         catalog: DEFAULT_CATALOG_NAME.to_string(),
-                        schema: schema_name.to_string(),
-                        table_name: table_name.to_string(),
+                        schema: schema_name.clone(),
+                        table_name: table_name.clone(),
                         table_id: 1024,
                         table,
                     })
@@ -3515,7 +3515,7 @@ mod test {
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
-                .name(table_name.to_string())
+                .name(table_name.clone())
                 .meta(table_meta)
                 .build()
                 .unwrap();
@@ -3525,8 +3525,8 @@ mod test {
                 catalog_list
                     .register_table_sync(RegisterTableRequest {
                         catalog: DEFAULT_CATALOG_NAME.to_string(),
-                        schema: schema_name.to_string(),
-                        table_name: table_name.to_string(),
+                        schema: schema_name.clone(),
+                        table_name: table_name.clone(),
                         table_id: 1024,
                         table,
                     })

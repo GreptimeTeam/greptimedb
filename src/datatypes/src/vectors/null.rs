@@ -107,7 +107,7 @@ impl Vector for NullVector {
         Value::Null
     }
 
-    fn get_ref(&self, _index: usize) -> ValueRef {
+    fn get_ref(&self, _index: usize) -> ValueRef<'_> {
         // Skips bound check for null array.
         ValueRef::Null
     }

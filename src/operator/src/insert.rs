@@ -306,7 +306,7 @@ impl Inserter {
             .create_or_alter_tables_on_demand(
                 &mut requests,
                 &ctx,
-                AutoCreateTableType::Logical(physical_table.to_string()),
+                AutoCreateTableType::Logical(physical_table.clone()),
                 statement_executor,
                 true,
                 true,
@@ -881,8 +881,8 @@ impl Inserter {
 
         Ok(Some(AlterTableExpr {
             catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
-            table_name: table_name.to_string(),
+            schema_name: schema_name.clone(),
+            table_name: table_name.clone(),
             kind: Some(Kind::AddColumns(add_columns)),
         }))
     }
@@ -1010,7 +1010,7 @@ pub fn fill_table_options_for_create(
         AutoCreateTableType::Logical(physical_table) => {
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
-                physical_table.to_string(),
+                physical_table.clone(),
             );
         }
         AutoCreateTableType::Physical => {

@@ -552,7 +552,6 @@ pub fn format_columns(columns: &[Column]) -> String {
         .map(|c| c.name.to_string())
         .collect::<Vec<_>>()
         .join(", ")
-        .to_string()
 }
 
 #[cfg(test)]

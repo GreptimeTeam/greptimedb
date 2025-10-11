@@ -100,7 +100,7 @@ mod tests {
         fetcher.run().await;
 
         let topic = topics[0].clone();
-        let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+        let provider = Arc::new(KafkaProvider::new(topic.clone()));
         let producer = manager
             .get_or_insert(&provider)
             .await

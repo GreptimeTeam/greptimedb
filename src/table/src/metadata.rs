@@ -271,9 +271,7 @@ impl TableMeta {
                 }
                 SetRegionOption::Twsc(key, value) => {
                     if !value.is_empty() {
-                        new_options
-                            .extra_options
-                            .insert(key.to_string(), value.to_string());
+                        new_options.extra_options.insert(key.clone(), value.clone());
                         // Ensure node restart correctly.
                         new_options.extra_options.insert(
                             COMPACTION_TYPE.to_string(),
@@ -1291,7 +1289,7 @@ impl RawTableInfo {
     }
 
     /// Returns the table reference.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference::full(
             self.catalog_name.as_str(),
             self.schema_name.as_str(),

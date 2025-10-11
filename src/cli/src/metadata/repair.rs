@@ -138,13 +138,7 @@ impl RepairTool {
 
             let table_names = table_names
                 .iter()
-                .map(|table_name| {
-                    (
-                        catalog.to_string(),
-                        schema_name.to_string(),
-                        table_name.to_string(),
-                    )
-                })
+                .map(|table_name| (catalog.clone(), schema_name.clone(), table_name.clone()))
                 .collect::<Vec<_>>();
             return Ok(IteratorInput::new_table_names(table_names));
         } else if !self.table_ids.is_empty() {

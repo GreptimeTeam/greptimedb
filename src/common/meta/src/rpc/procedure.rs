@@ -128,7 +128,7 @@ pub fn procedure_details_to_pb_response(metas: Vec<ProcedureInfo>) -> PbProcedur
             let (status, error) = procedure_state_to_pb_state(&meta.state);
             PbProcedureMeta {
                 id: Some(pid_to_pb_pid(meta.id)),
-                type_name: meta.type_name.to_string(),
+                type_name: meta.type_name.clone(),
                 status: status.into(),
                 start_time_ms: meta.start_time_ms,
                 end_time_ms: meta.end_time_ms,

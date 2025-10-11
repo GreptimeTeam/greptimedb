@@ -262,7 +262,7 @@ impl DfLogicalPlanner {
                                 cte_name: cte.name.value.clone(),
                                 original: schema_fields
                                     .iter()
-                                    .map(|field| field.name().to_string())
+                                    .map(|field| field.name().clone())
                                     .collect::<Vec<_>>(),
                                 expected: cte
                                     .columns

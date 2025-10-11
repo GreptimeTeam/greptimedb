@@ -191,7 +191,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                                 datatype: f.datatype(),
                                 datatype_ext: f.datatype_extension.clone(),
                             };
-                            StructField::new(f.name.to_string(), field_type.into(), true)
+                            StructField::new(f.name.clone(), field_type.into(), true)
                         })
                         .collect::<Vec<_>>();
                     ConcreteDataType::struct_datatype(StructType::from(fields))
@@ -744,7 +744,7 @@ pub fn pb_value_to_value_ref<'a>(
                         field.datatype(),
                         field.datatype_extension.clone(),
                     ));
-                    let field_name = field.name.to_string();
+                    let field_name = field.name.clone();
                     StructField::new(field_name, field_type, true)
                 })
                 .collect::<Vec<_>>();

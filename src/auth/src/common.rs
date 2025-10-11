@@ -35,7 +35,7 @@ pub fn userinfo_by_name(username: Option<String>) -> UserInfoRef {
     DefaultUserInfo::with_name(username.unwrap_or_else(|| DEFAULT_USERNAME.to_string()))
 }
 
-pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
+pub fn user_provider_from_option(opt: &str) -> Result<UserProviderRef> {
     let (name, content) = opt.split_once(':').with_context(|| InvalidConfigSnafu {
         value: opt.to_string(),
         msg: "UserProviderOption must be in format `<option>:<value>`",
@@ -57,7 +57,7 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     }
 }
 
-pub fn static_user_provider_from_option(opt: &String) -> Result<StaticUserProvider> {
+pub fn static_user_provider_from_option(opt: &str) -> Result<StaticUserProvider> {
     let (name, content) = opt.split_once(':').with_context(|| InvalidConfigSnafu {
         value: opt.to_string(),
         msg: "UserProviderOption must be in format `<option>:<value>`",

@@ -137,7 +137,7 @@ pub fn map_json_type_to_string_schema(schema: SchemaRef) -> (SchemaRef, bool) {
     for column in schema.column_schemas() {
         if matches!(column.data_type, ConcreteDataType::Json(_)) {
             new_columns.push(ColumnSchema::new(
-                column.name.to_string(),
+                column.name.clone(),
                 ConcreteDataType::string_datatype(),
                 column.is_nullable(),
             ));

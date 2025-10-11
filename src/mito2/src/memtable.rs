@@ -64,17 +64,12 @@ pub use time_partition::filter_record_batch;
 pub type MemtableId = u32;
 
 /// Config for memtables.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
     PartitionTree(PartitionTreeConfig),
+    #[default]
     TimeSeries,
-}
-
-impl Default for MemtableConfig {
-    fn default() -> Self {
-        Self::TimeSeries
-    }
 }
 
 #[derive(Debug, Default, Clone)]

@@ -47,7 +47,7 @@ impl KafkaTopicManager {
         let mut topics_to_create = Vec::with_capacity(all_topics.len());
         for topic in all_topics {
             if !existing_topic_set.contains(topic) {
-                topics_to_create.push(topic.to_string());
+                topics_to_create.push(topic.clone());
             }
         }
         Ok(topics_to_create)

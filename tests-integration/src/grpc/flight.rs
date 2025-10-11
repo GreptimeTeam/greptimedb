@@ -89,10 +89,7 @@ mod test {
         let runtime = common_runtime::global_runtime().clone();
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(db.frontend.instance.clone()),
-            user_provider_from_option(
-                &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-            )
-            .ok(),
+            user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").ok(),
             Some(runtime.clone()),
             FlightCompression::default(),
         );

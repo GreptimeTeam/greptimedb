@@ -278,7 +278,7 @@ impl RowsIter {
     }
 
     /// Returns the iterator of rows.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = RowIter> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = RowIter<'_>> {
         self.rows.rows.iter_mut().map(|row| RowIter {
             row,
             index: &self.index,
@@ -315,7 +315,7 @@ impl RowIter<'_> {
     }
 
     /// Returns the primary keys.
-    pub fn primary_keys(&self) -> impl Iterator<Item = (ColumnId, ValueRef)> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = (ColumnId, ValueRef<'_>)> {
         self.index.indices[..self.index.num_primary_key_column]
             .iter()
             .map(|idx| {

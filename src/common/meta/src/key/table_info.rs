@@ -113,7 +113,7 @@ impl TableInfoValue {
         }
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference::full(
             &self.table_info.catalog_name,
             &self.table_info.schema_name,
@@ -123,9 +123,9 @@ impl TableInfoValue {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.table_info.catalog_name.to_string(),
-            schema_name: self.table_info.schema_name.to_string(),
-            table_name: self.table_info.name.to_string(),
+            catalog_name: self.table_info.catalog_name.clone(),
+            schema_name: self.table_info.schema_name.clone(),
+            table_name: self.table_info.name.clone(),
         }
     }
 

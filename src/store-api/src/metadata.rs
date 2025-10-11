@@ -818,7 +818,7 @@ impl RegionMetadataBuilder {
                     .column_schema
                     .fulltext_options()
                     .with_context(|_| GetFulltextOptionsSnafu {
-                        column_name: column_name.to_string(),
+                        column_name: column_name.clone(),
                     })?;
                 set_column_fulltext_options(
                     column_metadata,
@@ -859,7 +859,7 @@ impl RegionMetadataBuilder {
                     .column_schema
                     .fulltext_options()
                     .with_context(|_| GetFulltextOptionsSnafu {
-                        column_name: column_name.to_string(),
+                        column_name: column_name.clone(),
                     })?;
 
                 unset_column_fulltext_options(

@@ -424,7 +424,7 @@ pub struct TruncateTableRequest {
 }
 
 impl TruncateTableRequest {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog_name,
             schema: &self.schema_name,

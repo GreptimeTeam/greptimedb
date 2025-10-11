@@ -166,7 +166,7 @@ impl CatalogInfo for CatalogManagerWrapper {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))
         } else {
-            Ok(vec![self.catalog_name.to_string()])
+            Ok(vec![self.catalog_name.clone()])
         }
     }
 

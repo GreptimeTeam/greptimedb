@@ -192,7 +192,7 @@ impl PromStoreProtocolHandler for Instance {
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
-            self.handle_metric_row_inserts(request, ctx.clone(), physical_table.to_string())
+            self.handle_metric_row_inserts(request, ctx.clone(), physical_table.clone())
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?

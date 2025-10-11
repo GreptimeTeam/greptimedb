@@ -56,7 +56,7 @@ impl KeyValues {
     }
 
     /// Returns a key value iterator.
-    pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
+    pub fn iter(&self) -> impl Iterator<Item = KeyValue<'_>> {
         let rows = self.mutation.rows.as_ref().unwrap();
         let schema = &rows.schema;
         rows.rows.iter().enumerate().map(|(idx, row)| {
@@ -130,7 +130,7 @@ impl<'a> KeyValuesRef<'a> {
     }
 
     /// Returns a key value iterator.
-    pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
+    pub fn iter(&self) -> impl Iterator<Item = KeyValue<'_>> {
         let rows = self.mutation.rows.as_ref().unwrap();
         let schema = &rows.schema;
         rows.rows.iter().enumerate().map(|(idx, row)| {
@@ -199,7 +199,7 @@ impl KeyValue<'_> {
     }
 
     /// Get primary key columns.
-    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef<'_>> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
             .map(|idx| match idx {
@@ -212,7 +212,7 @@ impl KeyValue<'_> {
     }
 
     /// Get field columns.
-    pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
+    pub fn fields(&self) -> impl Iterator<Item = ValueRef<'_>> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
             .map(|idx| match idx {
@@ -225,7 +225,7 @@ impl KeyValue<'_> {
     }
 
     /// Get timestamp.
-    pub fn timestamp(&self) -> ValueRef {
+    pub fn timestamp(&self) -> ValueRef<'_> {
         // Timestamp is primitive, we clone it.
         let index = self.helper.indices[self.helper.num_primary_key_column].unwrap();
         api::helper::pb_value_to_value_ref(

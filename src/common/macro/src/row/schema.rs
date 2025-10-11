@@ -98,7 +98,7 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
                         }
                         Some(TypeExt::StructType(ext)) => {
                             let fields = ext.fields.iter().map(|field| {
-                                let field_name = syn::Ident::new(&field.name.to_string(), ident.span());
+                                let field_name = syn::Ident::new(&field.name.clone(), ident.span());
                                 let field_type = syn::Ident::new(&field.datatype.to_string(), ident.span());
                                 quote! {
                                     StructField { name: #field_name, type_: #field_type }

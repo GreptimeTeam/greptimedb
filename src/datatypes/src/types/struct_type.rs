@@ -32,7 +32,7 @@ impl TryFrom<&Fields> for StructType {
             .iter()
             .map(|field| {
                 Ok(StructField::new(
-                    field.name().to_string(),
+                    field.name().clone(),
                     ConcreteDataType::try_from(field.data_type())?,
                     field.is_nullable(),
                 ))

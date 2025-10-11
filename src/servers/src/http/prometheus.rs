@@ -784,7 +784,7 @@ fn record_batches_to_labels_name(
 
             // if a field is not null, record the tag name and return
             names.iter().for_each(|name| {
-                let _ = labels.insert(name.to_string());
+                let _ = labels.insert(name.clone());
             });
             return Ok(());
         }
@@ -811,7 +811,7 @@ pub(crate) fn get_catalog_schema(db: &Option<String>, ctx: &QueryContext) -> (St
     } else {
         (
             ctx.current_catalog().to_string(),
-            ctx.current_schema().to_string(),
+            ctx.current_schema().clone(),
         )
     }
 }
@@ -1091,14 +1091,7 @@ pub async fn label_values_query(
         // Only use and filter matchers.
         let matchers = matchers.matchers;
         let result = handler
-            .query_label_values(
-                name,
-                label_name.to_string(),
-                matchers,
-                start,
-                end,
-                &query_ctx,
-            )
+            .query_label_values(name, label_name.clone(), matchers, start, end, &query_ctx)
             .await;
         if let Some(result) = handle_schema_err!(result) {
             label_values.extend(result.into_iter());
@@ -1243,8 +1236,8 @@ async fn retrieve_field_names(
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
                 catalog: catalog.to_string(),
-                schema: schema.to_string(),
-                table: table_name.to_string(),
+                schema: schema.clone(),
+                table: table_name.clone(),
             })?;
 
         for column in table.field_columns() {

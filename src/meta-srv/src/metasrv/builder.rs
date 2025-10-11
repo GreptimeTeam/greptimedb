@@ -192,8 +192,8 @@ impl MetasrvBuilder {
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
 
         let state = Arc::new(RwLock::new(match election {
-            None => State::leader(options.grpc.server_addr.to_string(), true),
-            Some(_) => State::follower(options.grpc.server_addr.to_string()),
+            None => State::leader(options.grpc.server_addr.clone(), true),
+            Some(_) => State::follower(options.grpc.server_addr.clone()),
         }));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
