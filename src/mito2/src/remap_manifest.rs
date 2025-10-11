@@ -14,17 +14,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::RegionId;
 
 use crate::error;
 pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
 use crate::sst::file::FileMeta;
-use crate::wal::EntryId;
 
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
@@ -236,87 +234,32 @@ impl RemapManifest {
 
     /// Finalizes manifests by merging metadata from source regions.
     fn finalize_manifests(&mut self) -> Result<()> {
-        let reverse_mapping = self.build_reverse_mapping();
-
-        // let target_region_ids: Vec<RegionId> = self.new_manifests.keys().cloned().collect();
-
         for (region_id, manifest) in self.new_manifests.iter_mut() {
-            let merged_metadata = {
-                let source_region_ids = reverse_mapping
-                    .get(&region_id)
-                    .map(|ids| ids.as_slice())
-                    .unwrap_or(&[]);
-
-                self.merge_manifest_metadata(source_region_ids)?
-            };
-
-            // if let Some(manifest) = self.new_manifests.get_mut(&region_id) {
-            // Apply merged metadata
-            manifest.flushed_entry_id = merged_metadata.flushed_entry_id;
-            manifest.flushed_sequence = merged_metadata.flushed_sequence;
-            manifest.manifest_version = 0; // Start fresh for new manifest
-            manifest.truncated_entry_id = merged_metadata.truncated_entry_id;
-            manifest.compaction_time_window = merged_metadata.compaction_time_window;
+            if let Some(previous_manifest) = self.old_manifests.get(region_id) {
+                manifest.flushed_entry_id = previous_manifest.flushed_entry_id;
+                manifest.flushed_sequence = previous_manifest.flushed_sequence;
+                manifest.manifest_version = previous_manifest.manifest_version;
+                manifest.truncated_entry_id = previous_manifest.truncated_entry_id;
+                manifest.compaction_time_window = previous_manifest.compaction_time_window;
+            } else {
+                // new region
+                manifest.flushed_entry_id = 0;
+                manifest.flushed_sequence = 0;
+                manifest.manifest_version = 0;
+                manifest.truncated_entry_id = None;
+                manifest.compaction_time_window = None;
+            }
 
             // removed_files are tracked by old manifests, don't copy
             manifest.removed_files = RemovedFilesRecord::default();
-            // }
         }
 
         Ok(())
     }
 
-    fn build_reverse_mapping(&self) -> HashMap<RegionId, Vec<RegionId>> {
-        let mut reverse_mapping: HashMap<RegionId, Vec<RegionId>> = HashMap::new();
-
-        for (&source_region_id, target_regions) in &self.region_mapping {
-            for &target_region_id in target_regions {
-                reverse_mapping
-                    .entry(target_region_id)
-                    .or_default()
-                    .push(source_region_id);
-            }
-        }
-
-        reverse_mapping
-    }
-
-    /// Merges metadata from multiple source regions.
-    fn merge_manifest_metadata(&self, source_region_ids: &[RegionId]) -> Result<MergedMetadata> {
-        let mut max_flushed_entry_id = 0;
-        let mut max_flushed_sequence = 0;
-        let mut max_truncated_entry_id = None;
-        let mut compaction_time_window = None;
-
-        for &region_id in source_region_ids {
-            if let Some(manifest) = self.old_manifests.get(&region_id) {
-                // Take maximum of all entry IDs and sequences
-                max_flushed_entry_id = max_flushed_entry_id.max(manifest.flushed_entry_id);
-                max_flushed_sequence = max_flushed_sequence.max(manifest.flushed_sequence);
-
-                if let Some(tid) = manifest.truncated_entry_id {
-                    max_truncated_entry_id = Some(max_truncated_entry_id.unwrap_or(0).max(tid));
-                }
-
-                // Use the largest compaction window (conservative)
-                if let Some(window) = manifest.compaction_time_window {
-                    compaction_time_window =
-                        Some(compaction_time_window.map_or(window, |w: Duration| w.max(window)));
-                }
-            }
-        }
-
-        Ok(MergedMetadata {
-            flushed_entry_id: max_flushed_entry_id,
-            flushed_sequence: max_flushed_sequence,
-            truncated_entry_id: max_truncated_entry_id,
-            compaction_time_window,
-        })
-    }
-
     /// Computes statistics about the remapping.
     fn compute_stats(&self) -> RemapStats {
-        let mut files_per_region = HashMap::new();
+        let mut files_per_region = HashMap::with_capacity(self.new_manifests.len());
         let mut total_file_refs = 0;
         let mut empty_regions = Vec::new();
         let mut all_files = HashSet::new();
@@ -345,7 +288,7 @@ impl RemapManifest {
 
     /// Validates the remapping result.
     fn validate_result(&self, stats: &RemapStats) -> Result<()> {
-        // 1. Verify all new regions have manifests
+        // all new regions have manifests
         for region_id in self.new_partition_exprs.keys() {
             ensure!(
                 self.new_manifests.contains_key(region_id),
@@ -355,7 +298,7 @@ impl RemapManifest {
             );
         }
 
-        // 2. Verify no unique files were lost
+        // no unique files were lost
         // Count unique files in old manifests (files may be duplicated across regions)
         let mut old_unique_files = HashSet::new();
         for manifest in self.old_manifests.values() {
@@ -407,14 +350,6 @@ pub struct RemapStats {
     pub unique_files: usize,
 }
 
-/// Merged metadata from multiple source regions.
-struct MergedMetadata {
-    flushed_entry_id: EntryId,
-    flushed_sequence: SequenceNumber,
-    truncated_entry_id: Option<EntryId>,
-    compaction_time_window: Option<Duration>,
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -429,11 +364,12 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
     use smallvec::SmallVec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, SequenceNumber};
 
     use super::*;
     use crate::manifest::action::RegionManifest;
     use crate::sst::file::{FileId, FileMeta, FileTimeRange};
+    use crate::wal::EntryId;
 
     /// Helper to create a basic region metadata for testing.
     fn create_region_metadata(region_id: RegionId) -> RegionMetadataRef {
@@ -603,10 +539,13 @@ mod tests {
         assert_eq!(result.stats.unique_files, 10);
         assert!(result.stats.empty_regions.is_empty());
 
-        // Verify metadata was merged (should take max values)
+        // Verify metadata falls back to defaults when no prior manifest exists for the region
         let new_manifest = &result.new_manifests[&new_region_id];
-        assert_eq!(new_manifest.flushed_entry_id, 150);
-        assert_eq!(new_manifest.flushed_sequence, 250);
+        assert_eq!(new_manifest.flushed_entry_id, 0);
+        assert_eq!(new_manifest.flushed_sequence, 0);
+        assert_eq!(new_manifest.manifest_version, 0);
+        assert_eq!(new_manifest.truncated_entry_id, None);
+        assert_eq!(new_manifest.compaction_time_window, None);
     }
 
     #[test]
@@ -648,8 +587,8 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_merge_max_values() {
-        // Test that metadata merging takes maximum values from all sources
+    fn test_metadata_preserved_for_existing_region() {
+        // Test that metadata is preserved when a previous manifest exists for the same region id
         let old_region_id_1 = RegionId::new(1, 1);
         let old_region_id_2 = RegionId::new(1, 2);
         let old_region_id_3 = RegionId::new(1, 3);
@@ -666,11 +605,21 @@ mod tests {
         manifest_2.compaction_time_window = Some(Duration::from_secs(7200)); // Larger window
 
         let manifest_3 = create_manifest(old_region_id_3, 2, None, 15, 30); // Lower entry_id, higher sequence
+        let mut previous_manifest = create_manifest(new_region_id, 0, None, 200, 300);
+        previous_manifest.truncated_entry_id = Some(40);
+        previous_manifest.compaction_time_window = Some(Duration::from_secs(1800));
+        previous_manifest.manifest_version = 7;
+        let expected_flushed_entry_id = previous_manifest.flushed_entry_id;
+        let expected_flushed_sequence = previous_manifest.flushed_sequence;
+        let expected_truncated_entry_id = previous_manifest.truncated_entry_id;
+        let expected_compaction_window = previous_manifest.compaction_time_window;
+        let expected_manifest_version = previous_manifest.manifest_version;
 
         let mut old_manifests = HashMap::new();
         old_manifests.insert(old_region_id_1, manifest_1);
         old_manifests.insert(old_region_id_2, manifest_2);
         old_manifests.insert(old_region_id_3, manifest_3);
+        old_manifests.insert(new_region_id, previous_manifest);
 
         let mut new_partition_exprs = HashMap::new();
         new_partition_exprs.insert(new_region_id, new_expr);
@@ -686,15 +635,15 @@ mod tests {
         let result = remapper.remap_manifests().unwrap();
 
         let new_manifest = &result.new_manifests[&new_region_id];
-        // Should take max of all values
-        assert_eq!(new_manifest.flushed_entry_id, 25); // max(10, 25, 15)
-        assert_eq!(new_manifest.flushed_sequence, 30); // max(20, 15, 30)
-        assert_eq!(new_manifest.truncated_entry_id, Some(20)); // max(5, 20, None)
+        // Should reuse metadata from previous manifest of the same region id
+        assert_eq!(new_manifest.flushed_entry_id, expected_flushed_entry_id);
+        assert_eq!(new_manifest.flushed_sequence, expected_flushed_sequence);
+        assert_eq!(new_manifest.truncated_entry_id, expected_truncated_entry_id);
         assert_eq!(
             new_manifest.compaction_time_window,
-            Some(Duration::from_secs(7200))
-        ); // max window
-        assert_eq!(new_manifest.manifest_version, 0); // Starts fresh
+            expected_compaction_window
+        );
+        assert_eq!(new_manifest.manifest_version, expected_manifest_version);
     }
 
     #[test]
