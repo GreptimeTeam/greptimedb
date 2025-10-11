@@ -21,7 +21,7 @@ use datafusion::catalog::TableFunction;
 use datafusion::common::ScalarValue;
 use datafusion::common::utils::SingleRowListArrayBuilder;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use datafusion_pg_catalog::pg_catalog::{self, PgCatalogStaticTables};
+use datafusion_postgres::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
 use version::PGVersionFunction;
 

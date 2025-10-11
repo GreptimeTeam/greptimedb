@@ -115,6 +115,7 @@ impl WindowedSortPhysicalRule {
                             sort_exec.fetch(),
                             scanner_info.partition_ranges.clone(),
                             sort_input,
+                            sort_exec.create_filter(),
                         ))
                     };
 
