@@ -452,7 +452,7 @@ fn decode_unstructured_value(value: Value) -> Result<Json, Error> {
                     && let Some(Value::String(s)) = struct_value.items().first()
                 {
                     let json_str = s.as_utf8();
-                    return serde_json::from_str(json_str).context(error::DeserializeSnafu {
+                    return serde_json::from_str(json_str).with_context(|_| error::DeserializeSnafu {
                         json: json_str.to_string(),
                     });
                 }
