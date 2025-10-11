@@ -161,19 +161,16 @@ pub fn encode_json_with_context<'a>(
 
     match json {
         Json::Object(json_object) => {
-            if let Some(ConcreteDataType::Struct(struct_type)) = data_type {
-                let struct_value =
-                    encode_json_object_with_context(json_object, Some(struct_type), context)?;
-                Ok(Value::Struct(struct_value))
-            } else if data_type.is_some() {
-                Err(error::InvalidJsonSnafu {
+            ensure!(
+                matches!(data_type, Some(ConcreteDataType::Struct(_) | None)),
+                error::InvalidJsonSnafu {
                     value: "JSON object can only be encoded to Struct type".to_string(),
                 }
-                .build())
-            } else {
-                let struct_value = encode_json_object_with_context(json_object, None, context)?;
-                Ok(Value::Struct(struct_value))
-            }
+            )
+
+            let data_type = data_type.and_then(|x| x.as_struct());
+            let struct_value = encode_json_object_with_context(json_object, data_type, context)?;
+            Ok(Value::Struct(struct_value))
         }
         Json::Array(json_array) => {
             let item_type = if let Some(ConcreteDataType::List(list_type)) = data_type {
