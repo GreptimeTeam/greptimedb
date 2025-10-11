@@ -395,6 +395,13 @@ pub struct FlushTableRequest {
     pub table_name: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BuildIndexTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactTableRequest {
     pub catalog_name: String,

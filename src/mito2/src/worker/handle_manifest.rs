@@ -26,6 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::config::IndexBuildMode;
 use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
@@ -34,9 +35,10 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
-    RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
+    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
+use crate::sst::index::IndexBuildType;
 use crate::sst::location;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
 
@@ -117,6 +119,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Sends the result.
         change_result.sender.send(change_result.result.map(|_| 0));
 
+        // In async mode, rebuild index after index metadata changed.
+        if self.config.index.build_mode == IndexBuildMode::Async {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id: region.region_id,
+                    build_type: IndexBuildType::SchemaChange,
+                    file_metas: Vec::new(),
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id)
             .await;
@@ -357,6 +371,7 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
+            let need_index = change.need_index;
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
 
             let result = region
@@ -371,6 +386,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     result,
                     new_meta,
+                    need_index,
                 }),
             };
             listener

@@ -353,3 +353,6 @@ strip = true
 [profile.dev.package.tests-fuzz]
 debug = false
 strip = true
+
+[patch."https://github.com/GreptimeTeam/greptime-proto.git"]
+greptime-proto = { path = "../greptime-proto" }

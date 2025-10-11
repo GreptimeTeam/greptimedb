@@ -931,9 +931,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
-                WorkerRequest::BuildIndexRegion(request) => {
-                    self.handle_rebuild_index(request).await;
-                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1002,6 +999,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 DdlRequest::Compact(req) => {
                     self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
+                DdlRequest::BuildIndex(req) => {
+                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;
                 }

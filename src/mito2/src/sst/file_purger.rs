@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId};
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -231,6 +231,7 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: Default::default(),
+                    indexes: Default::default(),
                     index_file_size: 0,
                     num_rows: 0,
                     num_row_groups: 0,
@@ -297,6 +298,10 @@ mod tests {
                     level: 0,
                     file_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    indexes: vec![ColumnIndexMetadata {
+                        column_id: 0,
+                        created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                    }],
                     index_file_size: 4096,
                     num_rows: 1024,
                     num_row_groups: 1,
