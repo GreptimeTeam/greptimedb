@@ -214,13 +214,10 @@ fn encode_json_object_with_context<'a>(
     let total_json_keys = json_object.len();
     let mut items = Vec::with_capacity(total_json_keys);
     let mut struct_fields = Vec::with_capacity(total_json_keys);
-    let mut processed_keys = HashSet::with_capacity(total_json_keys);
-
     // First, process fields from the provided schema in their original order
     if let Some(fields) = fields {
         for field in fields.fields() {
             let field_name = field.name();
-            processed_keys.insert(field_name.to_string());
 
             if let Some(value) = json_object.remove(field_name) {
                 let field_context = context.with_key(field_name);
@@ -242,10 +239,6 @@ fn encode_json_object_with_context<'a>(
 
     // Then, process any remaining JSON fields that weren't in the schema
     for (key, value) in json_object {
-        if processed_keys.contains(&key) {
-            continue; // Skip fields already processed from schema
-        }
-
         let field_context = context.with_key(&key);
 
         let (value, data_type) = encode_json_value_with_context(value, None, &field_context)?;
