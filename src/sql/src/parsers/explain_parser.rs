@@ -30,7 +30,7 @@ impl ParserContext<'_> {
             if self.parser.parse_keyword(Keyword::FORMAT) {
                 Some(self.parser.parse_analyze_format().with_context(|_| {
                     error::UnexpectedSnafu {
-                        expected: "a query statement",
+                        expected: "analyze format",
                         actual: self.peek_token_as_string(),
                     }
                 })?)
