@@ -195,7 +195,7 @@ impl<'a> ParserContext<'a> {
             expected: "a database name",
             actual: self.peek_token_as_string(),
         })?;
-        let database_name = Self::canonicalize_object_name(database_name);
+        let database_name = Self::canonicalize_object_name(database_name)?;
 
         let options = self
             .parser

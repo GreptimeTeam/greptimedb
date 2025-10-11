@@ -33,7 +33,7 @@ impl ParserContext<'_> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let table_ident = Self::canonicalize_object_name(raw_table_ident);
+        let table_ident = Self::canonicalize_object_name(raw_table_ident)?;
 
         ensure!(
             !table_ident.0.is_empty(),

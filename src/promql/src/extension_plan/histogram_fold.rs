@@ -181,7 +181,7 @@ impl HistogramFold {
             .index_of_column_by_name(None, &self.ts_column)
             .unwrap();
 
-        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -805,14 +805,13 @@ mod test {
     async fn fold_overall() {
         let memory_exec = Arc::new(prepare_test_data());
         let output_schema: SchemaRef = Arc::new(
-            (*HistogramFold::convert_schema(
+            HistogramFold::convert_schema(
                 &Arc::new(memory_exec.schema().to_dfschema().unwrap()),
                 "le",
             )
             .unwrap()
-            .as_ref())
-            .clone()
-            .into(),
+            .as_arrow()
+            .clone(),
         );
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),

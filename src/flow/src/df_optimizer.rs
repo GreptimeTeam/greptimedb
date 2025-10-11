@@ -427,7 +427,7 @@ fn expand_tumble_analyzer(
 
 /// This is a placeholder for tumble_start and tumble_end function, so that datafusion can
 /// recognize them as scalar function
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TumbleExpand {
     signature: Signature,
     name: String,

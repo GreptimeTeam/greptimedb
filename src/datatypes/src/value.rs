@@ -1131,7 +1131,9 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
-            ScalarValue::Decimal256(_, _, _)
+            ScalarValue::Decimal32(_, _, _)
+            | ScalarValue::Decimal64(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)

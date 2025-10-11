@@ -67,7 +67,7 @@ impl ParserContext<'_> {
             .parser
             .parse_object_name(false)
             .context(error::SyntaxSnafu)?;
-        let database_name = Self::canonicalize_object_name(database_name);
+        let database_name = Self::canonicalize_object_name(database_name)?;
 
         match self.parser.peek_token().token {
             Token::Word(w) => {
@@ -116,7 +116,7 @@ impl ParserContext<'_> {
             .parser
             .parse_object_name(false)
             .context(error::SyntaxSnafu)?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = Self::canonicalize_object_name(raw_table_name)?;
 
         let alter_operation = match self.parser.peek_token().token {
             Token::Word(w) => {
@@ -142,7 +142,7 @@ impl ParserContext<'_> {
                             let new_table_name_obj_raw =
                                 self.parse_object_name().context(error::SyntaxSnafu)?;
                             let new_table_name_obj =
-                                Self::canonicalize_object_name(new_table_name_obj_raw);
+                                Self::canonicalize_object_name(new_table_name_obj_raw)?;
                             let new_table_name = match &new_table_name_obj.0[..] {
                                 [table] => table.to_string_unquoted(),
                                 _ => {

@@ -21,7 +21,7 @@ use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
-use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
+use datafusion_postgres::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
