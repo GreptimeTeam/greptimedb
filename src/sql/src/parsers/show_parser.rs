@@ -148,7 +148,7 @@ impl ParserContext<'_> {
                     expected: "a database name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let database_name = Self::canonicalize_object_name(raw_database_name);
+        let database_name = Self::canonicalize_object_name(raw_database_name)?;
         ensure!(
             !database_name.0.is_empty(),
             InvalidDatabaseNameSnafu {
@@ -168,7 +168,7 @@ impl ParserContext<'_> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = Self::canonicalize_object_name(raw_table_name)?;
         ensure!(
             !table_name.0.is_empty(),
             InvalidTableNameSnafu {
@@ -197,7 +197,7 @@ impl ParserContext<'_> {
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
-        let flow_name = Self::canonicalize_object_name(raw_flow_name);
+        let flow_name = Self::canonicalize_object_name(raw_flow_name)?;
         ensure!(
             !flow_name.0.is_empty(),
             InvalidFlowNameSnafu {
@@ -214,7 +214,7 @@ impl ParserContext<'_> {
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
-        let view_name = Self::canonicalize_object_name(raw_view_name);
+        let view_name = Self::canonicalize_object_name(raw_view_name)?;
         ensure!(
             !view_name.0.is_empty(),
             InvalidTableNameSnafu {
@@ -241,7 +241,7 @@ impl ParserContext<'_> {
         );
 
         // Safety: already checked above
-        Ok(Self::canonicalize_object_name(table_name).0[0].to_string_unquoted())
+        Ok(Self::canonicalize_object_name(table_name)?.0[0].to_string_unquoted())
     }
 
     fn parse_db_name(&mut self) -> Result<Option<String>> {
@@ -262,7 +262,7 @@ impl ParserContext<'_> {
 
         // Safety: already checked above
         Ok(Some(
-            Self::canonicalize_object_name(db_name).0[0].to_string_unquoted(),
+            Self::canonicalize_object_name(db_name)?.0[0].to_string_unquoted(),
         ))
     }
 

@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDFImpl};
@@ -30,6 +31,20 @@ impl Debug for ScalarUdf {
         f.debug_struct("ScalarUdf")
             .field("function", &self.function.name())
             .finish()
+    }
+}
+
+impl PartialEq for ScalarUdf {
+    fn eq(&self, other: &Self) -> bool {
+        self.function.signature() == other.function.signature()
+    }
+}
+
+impl Eq for ScalarUdf {}
+
+impl Hash for ScalarUdf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.function.signature().hash(state)
     }
 }
 
