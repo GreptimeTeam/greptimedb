@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error;
@@ -28,15 +27,6 @@ use crate::sst::file::FileMeta;
 use crate::wal::EntryId;
 
 /// Remaps file references from old region manifests to new region manifests.
-///
-/// This struct takes old regions (with their manifests) and new regions
-/// (with their partition rules), and generates new manifests by copying
-/// file references according to a direct region-to-region mapping.
-///
-/// # Guarantees
-///
-/// * All new regions will have manifests
-/// * No files will be lost (total references >= original file count)
 pub struct RemapManifest {
     /// Old region manifests indexed by region ID
     old_manifests: HashMap<RegionId, RegionManifest>,
@@ -46,46 +36,7 @@ pub struct RemapManifest {
     region_mapping: HashMap<RegionId, Vec<RegionId>>,
 }
 
-/// Result of manifest remapping, including new manifests and statistics.
-#[derive(Debug)]
-pub struct RemapResult {
-    /// New manifests for all new regions
-    pub new_manifests: HashMap<RegionId, RegionManifest>,
-    /// Statistics about the remapping
-    pub stats: RemapStats,
-}
-
-/// Statistical information about the manifest remapping.
-#[derive(Debug)]
-pub struct RemapStats {
-    /// Number of files per region in new manifests
-    pub files_per_region: HashMap<RegionId, usize>,
-    /// Total number of file references created across all new regions
-    pub total_file_refs: usize,
-    /// Regions that received no files (potentially empty after repartition)
-    pub empty_regions: Vec<RegionId>,
-    /// Total number of unique files processed
-    pub unique_files: usize,
-}
-
-/// Merged metadata from multiple source regions.
-struct MergedMetadata {
-    flushed_entry_id: EntryId,
-    flushed_sequence: SequenceNumber,
-    truncated_entry_id: Option<EntryId>,
-    compaction_time_window: Option<Duration>,
-}
-
 impl RemapManifest {
-    /// Creates a new RemapManifest.
-    ///
-    /// # Arguments
-    /// * `old_manifests` - Current manifests for old regions
-    /// * `new_partition_exprs` - Partition expressions for new regions
-    /// * `region_mapping` - For each old region ID, list of new region IDs to receive its files
-    ///
-    /// # Returns
-    /// A new RemapManifest instance ready to perform remapping
     pub fn new(
         old_manifests: HashMap<RegionId, RegionManifest>,
         new_partition_exprs: HashMap<RegionId, PartitionExpr>,
@@ -100,23 +51,19 @@ impl RemapManifest {
 
     /// Remaps manifests from old regions to new regions.
     ///
-    /// This is the main entry point for manifest remapping. It processes
-    /// the subtask, copying files from old regions to new regions based on
+    /// Main entry point. It copies files from old regions to new regions based on
     /// partition expression overlaps.
-    ///
-    /// FileMeta entries are copied without modification - the region_id field
-    /// indicates which region originally created the file and never changes.
     pub fn remap_manifests(&self) -> Result<RemapResult> {
-        // Step 1: Initialize new manifests
+        // initialize new manifests
         let mut new_manifests = self.initialize_new_manifests()?;
 
-        // Step 2: Process the subtask - remap files
-        self.process_subtask(&mut new_manifests)?;
+        // remap files
+        self.do_remap(&mut new_manifests)?;
 
-        // Step 3: Merge and set metadata for all new manifests
+        // merge and set metadata for all new manifests
         self.finalize_manifests(&mut new_manifests)?;
 
-        // Step 4: Validate and compute statistics
+        // validate and compute statistics
         let stats = self.compute_stats(&new_manifests);
         self.validate_result(&new_manifests, &stats)?;
 
@@ -130,13 +77,32 @@ impl RemapManifest {
     fn initialize_new_manifests(&self) -> Result<HashMap<RegionId, RegionManifest>> {
         let mut new_manifests = HashMap::new();
 
+        // Get any old manifest as template (they all share the same table schema)
+        let template_manifest = self
+            .old_manifests
+            .values()
+            .next()
+            .context(error::NoOldManifestsSnafu)?;
+        let template_metadata = (*template_manifest.metadata).clone();
+
         // Create empty manifest for each new region
         for region_id in self.new_partition_exprs.keys() {
             // Derive region metadata from any old manifest as template
-            let metadata = self.derive_region_metadata(*region_id)?;
+            let mut new_metadata = template_metadata.clone();
+
+            new_metadata.region_id = *region_id;
+            let new_partition_expr = self
+                .new_partition_exprs
+                .get(region_id)
+                .context(error::MissingPartitionExprSnafu {
+                    region_id: *region_id,
+                })?
+                .as_json_str()
+                .context(error::SerializePartitionExprSnafu)?;
+            new_metadata.partition_expr = Some(new_partition_expr);
 
             let manifest = RegionManifest {
-                metadata,
+                metadata: Arc::new(new_metadata),
                 files: HashMap::new(),
                 removed_files: RemovedFilesRecord::default(),
                 flushed_entry_id: 0,
@@ -152,37 +118,8 @@ impl RemapManifest {
         Ok(new_manifests)
     }
 
-    /// Derives region metadata for a new region from old manifests.
-    fn derive_region_metadata(&self, new_region_id: RegionId) -> Result<RegionMetadataRef> {
-        // Get any old manifest as template (they all share the same table schema)
-        let template_manifest = self
-            .old_manifests
-            .values()
-            .next()
-            .context(error::NoOldManifestsSnafu)?;
-
-        // Clone metadata and update region_id
-        let mut metadata = (*template_manifest.metadata).clone();
-        metadata.region_id = new_region_id;
-
-        // Update partition expression to match the new region's partition rule
-        let new_partition_expr = self.new_partition_exprs.get(&new_region_id).context(
-            error::MissingPartitionExprSnafu {
-                region_id: new_region_id,
-            },
-        )?;
-
-        metadata.partition_expr = Some(
-            new_partition_expr
-                .as_json_str()
-                .context(error::SerializePartitionExprSnafu)?,
-        );
-
-        Ok(Arc::new(metadata))
-    }
-
     /// Remaps files from old regions to new regions according to the region mapping.
-    fn process_subtask(&self, new_manifests: &mut HashMap<RegionId, RegionManifest>) -> Result<()> {
+    fn do_remap(&self, new_manifests: &mut HashMap<RegionId, RegionManifest>) -> Result<()> {
         // For each old region and its target new regions
         for (&from_region_id, target_region_ids) in &self.region_mapping {
             // Get old manifest
@@ -444,6 +381,36 @@ impl RemapManifest {
     }
 }
 
+/// Result of manifest remapping, including new manifests and statistics.
+#[derive(Debug)]
+pub struct RemapResult {
+    /// New manifests for all new regions
+    pub new_manifests: HashMap<RegionId, RegionManifest>,
+    /// Statistics about the remapping
+    pub stats: RemapStats,
+}
+
+/// Statistical information about the manifest remapping.
+#[derive(Debug)]
+pub struct RemapStats {
+    /// Number of files per region in new manifests
+    pub files_per_region: HashMap<RegionId, usize>,
+    /// Total number of file references created across all new regions
+    pub total_file_refs: usize,
+    /// Regions that received no files (potentially empty after repartition)
+    pub empty_regions: Vec<RegionId>,
+    /// Total number of unique files processed
+    pub unique_files: usize,
+}
+
+/// Merged metadata from multiple source regions.
+struct MergedMetadata {
+    flushed_entry_id: EntryId,
+    flushed_sequence: SequenceNumber,
+    truncated_entry_id: Option<EntryId>,
+    compaction_time_window: Option<Duration>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -457,7 +424,7 @@ mod tests {
     use datatypes::value::Value;
     use partition::expr::{PartitionExpr, col};
     use smallvec::SmallVec;
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::storage::RegionId;
 
     use super::*;
