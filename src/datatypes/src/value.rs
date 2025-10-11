@@ -916,7 +916,15 @@ impl ListValue {
         &self.datatype
     }
 
-    fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
         let vs = self
             .items
             .iter()
@@ -1000,6 +1008,14 @@ impl StructValue {
 
     pub fn struct_type(&self) -> &StructType {
         &self.fields
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     fn estimated_size(&self) -> usize {

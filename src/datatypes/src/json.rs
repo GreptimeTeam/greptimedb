@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use common_base::bytes::StringBytes;
 use ordered_float::OrderedFloat;
 use serde_json::{Map, Value as Json};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error};
@@ -162,11 +162,11 @@ pub fn encode_json_with_context<'a>(
     match json {
         Json::Object(json_object) => {
             ensure!(
-                matches!(data_type, Some(ConcreteDataType::Struct(_) | None)),
+                matches!(data_type, Some(ConcreteDataType::Struct(_)) | None),
                 error::InvalidJsonSnafu {
                     value: "JSON object can only be encoded to Struct type".to_string(),
                 }
-            )
+            );
 
             let data_type = data_type.and_then(|x| x.as_struct());
             let struct_value = encode_json_object_with_context(json_object, data_type, context)?;
@@ -211,9 +211,10 @@ fn encode_json_object_with_context<'a>(
     fields: Option<&StructType>,
     context: &JsonContext<'a>,
 ) -> Result<StructValue, Error> {
-    let mut items = Vec::new();
-    let mut struct_fields = Vec::new();
-    let mut processed_keys = std::collections::HashSet::new();
+    let total_json_keys = json_object.len();
+    let mut items = Vec::with_capacity(total_json_keys);
+    let mut struct_fields = Vec::with_capacity(total_json_keys);
+    let mut processed_keys = HashSet::with_capacity(total_json_keys);
 
     // First, process fields from the provided schema in their original order
     if let Some(fields) = fields {
@@ -266,7 +267,8 @@ fn encode_json_array_with_context<'a>(
     item_type: Option<&ConcreteDataType>,
     context: &JsonContext<'a>,
 ) -> Result<ListValue, Error> {
-    let mut items = Vec::new();
+    let json_array_len = json_array.len();
+    let mut items = Vec::with_capacity(json_array_len);
     let mut element_type = None;
 
     for (index, value) in json_array.into_iter().enumerate() {
@@ -410,7 +412,7 @@ fn decode_struct_with_context<'a>(
     struct_value: StructValue,
     context: &JsonContext<'a>,
 ) -> Result<Json, Error> {
-    let mut json_object = Map::new();
+    let mut json_object = Map::with_capacity(struct_value.len());
 
     let (items, fields) = struct_value.into_parts();
 
@@ -428,7 +430,7 @@ fn decode_list_with_context<'a>(
     list_value: ListValue,
     context: &JsonContext<'a>,
 ) -> Result<Json, Error> {
-    let mut json_array = Vec::new();
+    let mut json_array = Vec::with_capacity(list_value.len());
 
     let data_items = list_value.take_items();
 
@@ -452,8 +454,10 @@ fn decode_unstructured_value(value: Value) -> Result<Json, Error> {
                     && let Some(Value::String(s)) = struct_value.items().first()
                 {
                     let json_str = s.as_utf8();
-                    return serde_json::from_str(json_str).with_context(|_| error::DeserializeSnafu {
-                        json: json_str.to_string(),
+                    return serde_json::from_str(json_str).with_context(|_| {
+                        error::DeserializeSnafu {
+                            json: json_str.to_string(),
+                        }
                     });
                 }
             }
@@ -545,8 +549,8 @@ fn decode_struct_with_settings<'a>(
         return decode_unstructured_raw_struct(struct_value);
     }
 
-    let mut items = Vec::new();
-    let mut struct_fields = Vec::new();
+    let mut items = Vec::with_capacity(struct_value.len());
+    let mut struct_fields = Vec::with_capacity(struct_value.len());
 
     // Process each field in the struct value
     let (struct_data, fields) = struct_value.into_parts();
@@ -603,7 +607,7 @@ fn decode_list_with_settings<'a>(
     list_value: ListValue,
     context: &JsonContext<'a>,
 ) -> Result<ListValue, Error> {
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity(list_value.len());
 
     let (data_items, datatype) = list_value.into_parts();
 
@@ -685,22 +689,6 @@ where
         }
         .build()
     })
-}
-
-pub fn encode_json_partial_unstructured(
-    json: Json,
-    data_type: Option<&ConcreteDataType>,
-    keys: &HashSet<String>,
-) -> Result<Value, Error> {
-    let settings = JsonStructureSettings::PartialUnstructuredByKey {
-        fields: None,
-        unstructured_keys: keys.clone(),
-    };
-    let context = JsonContext {
-        key_path: String::new(),
-        settings: &settings,
-    };
-    encode_json_with_context(json, data_type, &context)
 }
 
 #[cfg(test)]
@@ -1119,22 +1107,6 @@ mod tests {
         let items = result.items();
         assert_eq!(items[0], Value::String("Bob".into()));
         assert_eq!(items[1], Value::Null);
-    }
-
-    #[test]
-    fn test_encode_json_partial_unstructured() {
-        let json = json!({
-            "name": "Dave",
-            "age": 40
-        });
-
-        let result = encode_json_partial_unstructured(json, None, &HashSet::new()).unwrap();
-
-        if let Value::Struct(s) = result {
-            assert_eq!(s.items().len(), 2);
-        } else {
-            panic!("Expected Struct value");
-        }
     }
 
     #[test]
