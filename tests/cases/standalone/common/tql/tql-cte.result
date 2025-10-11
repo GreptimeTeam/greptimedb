@@ -61,6 +61,13 @@ SELECT * FROM tql;
 | 1970-01-01T00:00:40 | 3.0       |
 +---------------------+-----------+
 
+-- Explain TQL CTE
+EXPLAIN WITH tql AS (
+    TQL EVAL (0, 40, '10s') metric
+) SELECT * FROM tql;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: tql
+
 -- Hybrid CTEs (TQL + SQL)
 WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),
@@ -278,6 +285,31 @@ LIMIT 5;
 | 1970-01-01T00:00:10 | host2     | host1 |
 | 1970-01-01T00:00:20 | host1     | host1 |
 +---------------------+-----------+-------+
+
+-- TQL CTE with JOIN and value aliasing
+-- SQLNESS SORT_RESULT 3 1
+WITH tql_summary AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s]) AS cpu
+)
+SELECT
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
++---------------------+--------------------+-------+
+| ts                  | avg_value          | host  |
++---------------------+--------------------+-------+
+| 1970-01-01T00:00:00 | 0.1                | host1 |
+| 1970-01-01T00:00:00 | 0.2                | host1 |
+| 1970-01-01T00:00:10 | 0.45               | host1 |
+| 1970-01-01T00:00:10 | 0.55               | host1 |
+| 1970-01-01T00:00:20 | 0.5666666666666668 | host1 |
++---------------------+--------------------+-------+
 
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (

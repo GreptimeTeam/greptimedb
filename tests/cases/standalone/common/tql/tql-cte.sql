@@ -32,6 +32,11 @@ WITH tql (the_timestamp, the_value) as (
 )
 SELECT * FROM tql;
 
+-- Explain TQL CTE
+EXPLAIN WITH tql AS (
+    TQL EVAL (0, 40, '10s') metric
+) SELECT * FROM tql;
+
 -- Hybrid CTEs (TQL + SQL)
 WITH
     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') metric),
@@ -134,6 +139,21 @@ SELECT * FROM time_shifted;
 -- SQLNESS SORT_RESULT 3 1
 WITH tql_summary(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
+)
+SELECT
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
+-- TQL CTE with JOIN and value aliasing
+-- SQLNESS SORT_RESULT 3 1
+WITH tql_summary AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s]) AS cpu
 )
 SELECT
     t.ts,
