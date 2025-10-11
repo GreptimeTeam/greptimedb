@@ -32,7 +32,7 @@ To run test with kafka, you need to pass the option `-w kafka`. If no other opti
 Otherwise, you can additionally pass the your existing kafka environment to sqlness with `-k` option. E.g.:
 
 ```shell
-cargo sqlness -w kafka -k localhost:9092
+cargo sqlness bare -w kafka -k localhost:9092
 ```
 
 In this case, sqlness will not start its own kafka cluster and the one you provided instead.
@@ -42,7 +42,7 @@ In this case, sqlness will not start its own kafka cluster and the one you provi
 Unlike other tests, this harness is in a binary target form. You can run it with:
 
 ```shell
-cargo sqlness
+cargo sqlness bare
 ```
 
 It automatically finishes the following procedures: compile `GreptimeDB`, start it, grab tests and feed it to

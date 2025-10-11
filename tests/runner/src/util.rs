@@ -533,3 +533,28 @@ pub fn get_random_port() -> u16 {
         .expect("Failed to get local address")
         .port()
 }
+
+/// Retry to execute the function until success or the maximum number of retries is reached.
+pub async fn retry_with_backoff<T, E, Fut, F>(
+    mut fut: F,
+    max_retry: usize,
+    init_backoff: Duration,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut backoff = init_backoff;
+    for attempt in 0..max_retry {
+        match fut().await {
+            Ok(res) => return Ok(res),
+            Err(err) if attempt + 1 == max_retry => return Err(err),
+            Err(_) => {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+        }
+    }
+
+    unreachable!("loop should have returned before here")
+}
