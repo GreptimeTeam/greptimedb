@@ -301,7 +301,6 @@ impl TryFrom<&Statement> for DfStatement {
     fn try_from(s: &Statement) -> Result<Self, Self::Error> {
         let s = match s {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            // Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
             Statement::Delete(delete) => delete.inner.clone(),
             _ => {
