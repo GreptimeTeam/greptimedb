@@ -149,7 +149,6 @@ pub struct GcScheduler {
 
 impl GcScheduler {
     /// Creates a new [`GcScheduler`].
-    #[allow(unused)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,
@@ -166,7 +165,6 @@ impl GcScheduler {
     }
 
     /// Creates a new [`GcScheduler`] with custom configuration.
-    #[allow(unused)]
     pub(crate) fn new_with_config(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,

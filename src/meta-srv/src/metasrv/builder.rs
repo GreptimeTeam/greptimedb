@@ -55,6 +55,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
+use crate::gc_scheduler::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -454,6 +455,17 @@ impl MetasrvBuilder {
             Some(wal_prune_ticker)
         } else {
             None
+        };
+
+        let gc_ticker = {
+            let (gc_scheduler, gc_ticker) = GcScheduler::new(
+                table_metadata_manager.clone(),
+                meta_peer_client.clone(),
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+            );
+            gc_scheduler.try_start()?;
+            gc_ticker
         };
 
         let customized_region_lease_renewer = plugins

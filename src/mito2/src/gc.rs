@@ -44,7 +44,7 @@ use crate::error::{
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::metrics::GC_FILE_CNT;
+use crate::metrics::GC_DEL_FILE_CNT;
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::delete_files;
 use crate::sst::location::{self, region_dir_from_table_dir};
@@ -380,7 +380,7 @@ impl LocalGcWorker {
         )
         .await?;
 
-        GC_FILE_CNT.add(file_ids.len() as i64);
+        GC_DEL_FILE_CNT.add(file_ids.len() as i64);
 
         Ok(())
     }
