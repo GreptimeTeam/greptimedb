@@ -291,7 +291,7 @@ impl DropTableData {
         }
     }
 
-    fn table_ref(&self) -> TableReference {
+    fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
     }
 

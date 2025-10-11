@@ -15,7 +15,6 @@
 #![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
-#![feature(let_chains)]
 #![feature(if_let_guard)]
 
 use datafusion_expr::LogicalPlan;

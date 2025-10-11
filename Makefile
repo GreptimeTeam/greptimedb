@@ -169,7 +169,7 @@ nextest: ## Install nextest tools.
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
-	cargo sqlness ${SQLNESS_OPTS}
+	cargo sqlness bare ${SQLNESS_OPTS}
 
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table

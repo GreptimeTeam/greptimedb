@@ -199,10 +199,7 @@ impl InformationSchemaRegionPeersBuilder {
                     if table_info.table_type == TableType::Temporary {
                         Ok(None)
                     } else {
-                        Ok(Some((
-                            table_info.ident.table_id,
-                            table_info.name.to_string(),
-                        )))
+                        Ok(Some((table_info.ident.table_id, table_info.name.clone())))
                     }
                 });
 

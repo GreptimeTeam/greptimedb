@@ -431,7 +431,7 @@ impl MetadataRegion {
             if !k.starts_with(prefix) {
                 break;
             }
-            result.insert(k.to_string(), v.to_string());
+            result.insert(k.clone(), v.clone());
         }
         Ok(result)
     }
@@ -530,7 +530,7 @@ impl MetadataRegion {
             .map(|key| {
                 row(vec![
                     ValueData::TimestampMillisecondValue(0),
-                    ValueData::StringValue(key.to_string()),
+                    ValueData::StringValue(key.clone()),
                 ])
             })
             .collect();

@@ -1261,7 +1261,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Ttl(Some(ttl)))
             }
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
-                Ok(Self::Twsc(key.to_string(), value.to_string()))
+                Ok(Self::Twsc(key.clone(), value.clone()))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }

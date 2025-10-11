@@ -125,7 +125,7 @@ impl TransformRule for ExpandIntervalTransformRule {
                             ..
                         }) => {
                             let interval_value =
-                                normalize_interval_name(value).unwrap_or_else(|| value.to_string());
+                                normalize_interval_name(value).unwrap_or_else(|| value.clone());
                             *expr = Expr::Cast {
                                 kind: kind.clone(),
                                 expr: single_quoted_string_expr(interval_value),

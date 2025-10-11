@@ -78,7 +78,6 @@ impl ParserContext<'_> {
                         .parse_comma_separated(parse_string_option_names)
                         .context(error::SyntaxSnafu)?
                         .into_iter()
-                        .map(|name| name.to_string())
                         .collect();
                     Ok(AlterDatabase::new(
                         database_name,
@@ -770,7 +769,7 @@ mod tests {
                 );
                 match alter.alter_operation {
                     AlterTableOperation::AddColumns { add_columns } => {
-                        let expected = vec![
+                        let expected = [
                             AddColumn {
                                 column_def: ColumnDef {
                                     name: Ident::new("a"),
@@ -1030,8 +1029,7 @@ mod tests {
         };
 
         assert_eq!(sql, alter.to_string());
-        let res = keys.iter().map(|o| o.to_string()).collect::<Vec<_>>();
-        assert_eq!(expected, &res);
+        assert_eq!(expected, keys);
     }
 
     #[test]

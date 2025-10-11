@@ -82,7 +82,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -202,7 +202,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -305,7 +305,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -407,7 +407,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );

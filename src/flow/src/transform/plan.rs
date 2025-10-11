@@ -158,7 +158,7 @@ impl TypedPlan {
             let table_reference = match nt.names.len() {
                 1 => [
                     query_ctx.current_catalog().to_string(),
-                    query_ctx.current_schema().to_string(),
+                    query_ctx.current_schema().clone(),
                     nt.names[0].clone(),
                 ],
                 2 => [

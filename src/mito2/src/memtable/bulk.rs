@@ -1157,7 +1157,7 @@ mod tests {
         let memtable =
             BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
 
-        let test_data = vec![
+        let test_data = [
             (
                 "key_a",
                 1u32,

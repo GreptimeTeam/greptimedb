@@ -119,7 +119,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
 
     let template = CreateRequest {
         region_id: 0,
-        engine: create_table_expr.engine.to_string(),
+        engine: create_table_expr.engine.clone(),
         column_defs,
         primary_key,
         path: String::new(),

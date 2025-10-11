@@ -247,7 +247,7 @@ impl From<AuthScheme> for api::v1::auth_header::AuthScheme {
             AuthScheme::Basic(username, password) => {
                 api::v1::auth_header::AuthScheme::Basic(Basic {
                     username,
-                    password: password.expose_secret().to_string(),
+                    password: password.expose_secret().clone(),
                 })
             }
         }

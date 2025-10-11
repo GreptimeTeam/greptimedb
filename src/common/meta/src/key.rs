@@ -2172,7 +2172,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2191,7 +2191,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2216,7 +2216,7 @@ mod tests {
                 table_id,
                 RegionInfo {
                     engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: HashMap::new(),
                     region_wal_options: HashMap::new(),
                 },
@@ -2247,7 +2247,7 @@ mod tests {
                     table_id,
                     RegionInfo {
                         engine: engine.to_string(),
-                        region_storage_path: region_storage_path.to_string(),
+                        region_storage_path: region_storage_path.clone(),
                         region_options: HashMap::new(),
                         region_wal_options: HashMap::new(),
                     },

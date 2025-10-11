@@ -174,7 +174,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
+            QueryStatement::Promql(_, _) => self.plan_exec(stmt, query_ctx).await,
         }
     }
 

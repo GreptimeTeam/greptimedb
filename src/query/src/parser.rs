@@ -46,7 +46,8 @@ pub const ANALYZE_VERBOSE_NODE_NAME: &str = "ANALYZE VERBOSE";
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
-    Promql(EvalStmt),
+    // The optional String is the alias name
+    Promql(EvalStmt, Option<String>),
 }
 
 impl QueryStatement {
@@ -56,19 +57,22 @@ impl QueryStatement {
                 operation: "sql post process",
             }
             .fail(),
-            QueryStatement::Promql(eval_stmt) => {
+            QueryStatement::Promql(eval_stmt, alias) => {
                 let node_name = match params.get("name") {
                     Some(name) => name.as_str(),
                     None => "",
                 };
                 let extension_node = Self::create_extension_node(node_name, &eval_stmt.expr);
-                Ok(QueryStatement::Promql(EvalStmt {
-                    expr: Extension(extension_node.unwrap()),
-                    start: eval_stmt.start,
-                    end: eval_stmt.end,
-                    interval: eval_stmt.interval,
-                    lookback_delta: eval_stmt.lookback_delta,
-                }))
+                Ok(QueryStatement::Promql(
+                    EvalStmt {
+                        expr: Extension(extension_node.unwrap()),
+                        start: eval_stmt.start,
+                        end: eval_stmt.end,
+                        interval: eval_stmt.interval,
+                        lookback_delta: eval_stmt.lookback_delta,
+                    },
+                    alias.clone(),
+                ))
             }
         }
     }
@@ -99,6 +103,7 @@ pub struct PromQuery {
     pub end: String,
     pub step: String,
     pub lookback: String,
+    pub alias: Option<String>,
 }
 
 impl Default for PromQuery {
@@ -109,6 +114,7 @@ impl Default for PromQuery {
             end: String::from("0"),
             step: String::from("5m"),
             lookback: String::from(DEFAULT_LOOKBACK_STRING),
+            alias: None,
         }
     }
 }
@@ -185,7 +191,7 @@ impl QueryLanguageParser {
             lookback_delta,
         };
 
-        Ok(QueryStatement::Promql(eval_stmt))
+        Ok(QueryStatement::Promql(eval_stmt, query.alias.clone()))
     }
 
     pub fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
@@ -341,6 +347,7 @@ mod test {
             end: "2023-02-13T17:14:00Z".to_string(),
             step: "1d".to_string(),
             lookback: "5m".to_string(),
+            alias: Some("my_query".to_string()),
         };
 
         #[cfg(not(windows))]
@@ -355,7 +362,7 @@ mod test {
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \
                 interval: 86400s, \
                 lookback_delta: 300s \
-            })",
+            }, Some(\"my_query\"))",
         );
 
         // Windows has different debug output for SystemTime.
@@ -371,7 +378,7 @@ mod test {
                 end: SystemTime { intervals: 133207820400000000 }, \
                 interval: 86400s, \
                 lookback_delta: 300s \
-            })",
+            }, Some(\"my_query\"))",
         );
 
         let result = QueryLanguageParser::parse_promql(&promql, &QueryContext::arc()).unwrap();

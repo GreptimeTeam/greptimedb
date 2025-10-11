@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
-
 mod df_substrait;
 pub mod error;
 pub mod extension_serializer;

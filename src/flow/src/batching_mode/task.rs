@@ -947,7 +947,7 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 
     let all_pk_cols: Vec<_> = all_pk_cols
         .into_iter()
-        .filter(|col| first_time_stamp != Some(col.to_string()))
+        .filter(|col| first_time_stamp.as_ref() != Some(col))
         .collect();
 
     Ok(Some(TableDef {

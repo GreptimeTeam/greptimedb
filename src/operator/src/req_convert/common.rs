@@ -354,7 +354,7 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
     let time_index_column = &table_schema
         .timestamp_column()
         .with_context(|| table::error::MissingTimeIndexColumnSnafu {
-            table_name: table_info.name.to_string(),
+            table_name: table_info.name.clone(),
         })
         .context(MissingTimeIndexColumnSnafu)?
         .name;

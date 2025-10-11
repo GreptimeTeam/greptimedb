@@ -29,22 +29,17 @@ use crate::error;
 use crate::error::Result;
 use crate::heartbeat::utils::get_datanode_workloads;
 
-pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
-const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
-
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
 
 pub const REGION_STATISTIC_KEY: &str = "__region_statistic";
 
 lazy_static! {
     pub(crate) static ref DATANODE_LEASE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{DATANODE_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+        Regex::new("^__meta_datanode_lease-([0-9]+)-([0-9]+)$").unwrap();
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DATANODE_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
-    static ref INACTIVE_REGION_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{INACTIVE_REGION_PREFIX}-([0-9]+)-([0-9]+)-([0-9]+)$"
-    ))
-    .unwrap();
+    static ref INACTIVE_REGION_KEY_PATTERN: Regex =
+        Regex::new("^__meta_inactive_region-([0-9]+)-([0-9]+)-([0-9]+)$").unwrap();
 }
 
 /// The key of the datanode stat in the storage.
@@ -297,7 +292,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes as u64,
-            engine: value.engine.to_string(),
+            engine: value.engine.clone(),
             role: RegionRole::from(value.role()),
             num_rows: region_stat.num_rows,
             memtable_size: region_stat.memtable_size,

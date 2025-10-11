@@ -98,10 +98,10 @@ pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
                 .unwrap_or(0),
             version: 1,
         },
-        name: expr.table_name.to_string(),
-        desc: Some(expr.desc.to_string()),
-        catalog_name: expr.catalog_name.to_string(),
-        schema_name: expr.schema_name.to_string(),
+        name: expr.table_name.clone(),
+        desc: Some(expr.desc.clone()),
+        catalog_name: expr.catalog_name.clone(),
+        schema_name: expr.schema_name.clone(),
         meta: RawTableMeta {
             schema: RawSchema {
                 column_schemas: expr
@@ -126,7 +126,7 @@ pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
                 })
                 .collect(),
             value_indices: vec![],
-            engine: expr.engine.to_string(),
+            engine: expr.engine.clone(),
             next_column_id: expr.column_defs.len() as u32,
             region_numbers: vec![],
             options: TableOptions::try_from_iter(&expr.table_options).unwrap(),
