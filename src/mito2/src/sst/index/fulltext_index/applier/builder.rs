@@ -211,7 +211,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         };
 
-        Some((column.column_id, FulltextQuery(query.to_string())))
+        Some((column.column_id, FulltextQuery(query.clone())))
     }
 
     fn expr_to_term(
@@ -256,7 +256,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             column.column_id,
             FulltextTerm {
                 col_lowered: lowered,
-                term: term.to_string(),
+                term: term.clone(),
             },
         ))
     }
@@ -320,14 +320,14 @@ mod tests {
 
     fn matches_func() -> Arc<ScalarUDF> {
         Arc::new(
-            ScalarFunctionFactory::from(Arc::new(MatchesFunction) as FunctionRef)
+            ScalarFunctionFactory::from(Arc::new(MatchesFunction::default()) as FunctionRef)
                 .provide(Default::default()),
         )
     }
 
     fn matches_term_func() -> Arc<ScalarUDF> {
         Arc::new(
-            ScalarFunctionFactory::from(Arc::new(MatchesTermFunction) as FunctionRef)
+            ScalarFunctionFactory::from(Arc::new(MatchesTermFunction::default()) as FunctionRef)
                 .provide(Default::default()),
         )
     }

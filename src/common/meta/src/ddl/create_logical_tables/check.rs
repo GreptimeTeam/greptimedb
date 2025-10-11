@@ -52,7 +52,7 @@ impl CreateLogicalTablesProcedure {
                 ensure!(
                     task.create_table.create_if_not_exists,
                     TableAlreadyExistsSnafu {
-                        table_name: task.create_table.table_name.to_string(),
+                        table_name: task.create_table.table_name.clone(),
                     }
                 );
                 continue;

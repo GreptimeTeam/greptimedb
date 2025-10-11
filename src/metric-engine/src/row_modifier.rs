@@ -82,11 +82,11 @@ impl RowModifier {
             let internal_columns = [
                 (
                     ReservedColumnId::table_id(),
-                    api::helper::pb_value_to_value_ref(&table_id, &None),
+                    api::helper::pb_value_to_value_ref(&table_id, None),
                 ),
                 (
                     ReservedColumnId::tsid(),
-                    api::helper::pb_value_to_value_ref(&tsid, &None),
+                    api::helper::pb_value_to_value_ref(&tsid, None),
                 ),
             ];
             self.codec
@@ -278,7 +278,7 @@ impl RowsIter {
     }
 
     /// Returns the iterator of rows.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = RowIter> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = RowIter<'_>> {
         self.rows.rows.iter_mut().map(|row| RowIter {
             row,
             index: &self.index,
@@ -315,7 +315,7 @@ impl RowIter<'_> {
     }
 
     /// Returns the primary keys.
-    pub fn primary_keys(&self) -> impl Iterator<Item = (ColumnId, ValueRef)> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = (ColumnId, ValueRef<'_>)> {
         self.index.indices[..self.index.num_primary_key_column]
             .iter()
             .map(|idx| {
@@ -323,7 +323,7 @@ impl RowIter<'_> {
                     idx.column_id,
                     api::helper::pb_value_to_value_ref(
                         &self.row.values[idx.index],
-                        &self.schema[idx.index].datatype_extension,
+                        self.schema[idx.index].datatype_extension.as_ref(),
                     ),
                 )
             })

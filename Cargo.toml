@@ -123,17 +123,18 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion = "49"
+datafusion-common = "49"
+datafusion-expr = "49"
+datafusion-functions = "49"
+datafusion-functions-aggregate-common = "49"
+datafusion-optimizer = "49"
 datafusion-orc = { git = "https://github.com/GreptimeTeam/datafusion-orc", rev = "a0a5f902158f153119316eaeec868cff3fc8a99d" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "3d1b7c7d5b82dd49bafc2803259365e633f654fa" }
+datafusion-physical-expr = "49"
+datafusion-physical-plan = "49"
+datafusion-sql = "49"
+datafusion-substrait = "49"
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
@@ -146,7 +147,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "3e821d0d405e6733690a4e4352812ba2ff780a3e" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "d75496d5d09dedcd0edcade57ccf0a522f4393ae" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -175,6 +176,9 @@ opentelemetry-proto = { version = "0.30", features = [
     "logs",
 ] }
 ordered-float = { version = "4.3", features = ["serde"] }
+otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
+    "server",
+] }
 parking_lot = "0.12"
 parquet = { version = "56.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
@@ -276,6 +280,7 @@ common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
 common-sql = { path = "src/common/sql" }
+common-stat = { path = "src/common/stat" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
@@ -297,9 +302,6 @@ mito-codec = { path = "src/mito-codec" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
-otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
-    "server",
-] }
 partition = { path = "src/partition" }
 pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
@@ -310,7 +312,6 @@ servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
 standalone = { path = "src/standalone" }
-stat = { path = "src/common/stat" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
@@ -318,6 +319,18 @@ table = { path = "src/table" }
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+
+[patch.crates-io]
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7d5214512740b4dfb742b6b3d91ed9affcc2c9d0" }
 
 [profile.release]
 debug = 1

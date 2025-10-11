@@ -19,7 +19,7 @@ use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-// An wapper for `Futures` that provides tracing instrument adapters.
+// An wrapper for `Futures` that provides tracing instrument adapters.
 pub trait FutureExt: std::future::Future + Sized {
     fn trace(self, span: tracing::span::Span) -> tracing::instrument::Instrumented<Self>;
 }

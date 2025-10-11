@@ -25,7 +25,7 @@ pub use common::{
     HashedPassword, Identity, Password, auth_mysql, static_user_provider_from_option,
     user_provider_from_option, userinfo_by_name,
 };
-pub use permission::{PermissionChecker, PermissionReq, PermissionResp};
+pub use permission::{DefaultPermissionChecker, PermissionChecker, PermissionReq, PermissionResp};
 pub use user_info::UserInfo;
 pub use user_provider::UserProvider;
 pub use user_provider::static_user_provider::StaticUserProvider;

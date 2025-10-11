@@ -41,7 +41,12 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
-use crate::function_registry::FunctionRegistry;
+use crate::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
+use crate::function_registry::{FUNCTION_REGISTRY, FunctionRegistry};
+
+pub mod fix_order;
+#[cfg(test)]
+mod tests;
 
 /// Returns the name of the state function for the given aggregate function name.
 /// The state function is used to compute the state of the aggregate function.
@@ -55,6 +60,39 @@ pub fn aggr_state_func_name(aggr_name: &str) -> String {
 /// The merge function's name is in the format `__<aggr_name>_merge
 pub fn aggr_merge_func_name(aggr_name: &str) -> String {
     format!("__{}_merge", aggr_name)
+}
+
+/// Check if the given aggregate expression is steppable.
+/// As in if it can be split into multiple steps:
+/// i.e. on datanode first call `state(input)` then
+/// on frontend call `calc(merge(state))` to get the final result.
+pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
+    aggr_exprs.iter().all(|expr| {
+        if let Some(aggr_func) = get_aggr_func(expr) {
+            if aggr_func.params.distinct {
+                // Distinct aggregate functions are not steppable(yet).
+                // TODO(discord9): support distinct aggregate functions.
+                return false;
+            }
+
+            // whether the corresponding state function exists in the registry
+            FUNCTION_REGISTRY.is_aggr_func_exist(&aggr_state_func_name(aggr_func.func.name()))
+        } else {
+            false
+        }
+    })
+}
+
+pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
+    let mut expr_ref = expr;
+    while let Expr::Alias(alias) = expr_ref {
+        expr_ref = &alias.expr;
+    }
+    if let Expr::AggregateFunction(aggr_func) = expr_ref {
+        Some(aggr_func)
+    } else {
+        None
+    }
 }
 
 /// A wrapper to make an aggregate function out of the state and merge functions of the original aggregate function.
@@ -72,18 +110,6 @@ pub struct StepAggrPlan {
     pub upper_merge: LogicalPlan,
     /// Lower state plan, which is the aggregate plan that computes the state of the aggregate function.
     pub lower_state: LogicalPlan,
-}
-
-pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
-    let mut expr_ref = expr;
-    while let Expr::Alias(alias) = expr_ref {
-        expr_ref = &alias.expr;
-    }
-    if let Expr::AggregateFunction(aggr_func) = expr_ref {
-        Some(aggr_func)
-    } else {
-        None
-    }
 }
 
 impl StateMergeHelper {
@@ -118,6 +144,7 @@ impl StateMergeHelper {
     }
 
     /// Split an aggregate plan into two aggregate plans, one for the state function and one for the merge function.
+    ///
     pub fn split_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<StepAggrPlan> {
         let aggr = {
             // certain aggr func need type coercion to work correctly, so we need to analyze the plan first.
@@ -136,6 +163,15 @@ impl StateMergeHelper {
         };
         let mut lower_aggr_exprs = vec![];
         let mut upper_aggr_exprs = vec![];
+
+        // group exprs for upper plan should refer to the output group expr as column from lower plan
+        // to avoid re-compute group exprs again.
+        let upper_group_exprs = aggr
+            .group_expr
+            .iter()
+            .map(|c| c.qualified_name())
+            .map(|(r, c)| Expr::Column(Column::new(r, c)))
+            .collect();
 
         for aggr_expr in aggr.aggr_expr.iter() {
             let Some(aggr_func) = get_aggr_func(aggr_expr) else {
@@ -164,6 +200,7 @@ impl StateMergeHelper {
 
             lower_aggr_exprs.push(expr);
 
+            // then create the merge function using the physical expression of the original aggregate function
             let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
                 aggr_expr,
                 aggr.input.schema(),
@@ -179,9 +216,15 @@ impl StateMergeHelper {
             let arg = Expr::Column(Column::new_unqualified(lower_state_output_col_name));
             let expr = AggregateFunction {
                 func: Arc::new(merge_func.into()),
+                // notice filter/order_by is not supported in the merge function, as it's not meaningful to have them in the merge phase.
+                // do notice this order by is only removed in the outer logical plan, the physical plan still have order by and hence
+                // can create correct accumulator with order by.
                 params: AggregateFunctionParams {
                     args: vec![arg],
-                    ..aggr_func.params.clone()
+                    distinct: aggr_func.params.distinct,
+                    filter: None,
+                    order_by: vec![],
+                    null_treatment: aggr_func.params.null_treatment,
                 },
             };
 
@@ -198,10 +241,18 @@ impl StateMergeHelper {
         // update aggregate's output schema
         let lower_plan = lower_plan.recompute_schema()?;
 
-        let mut upper = aggr.clone();
+        // should only affect two udaf `first_value/last_value`
+        // which only them have meaningful order by field
+        let fixed_lower_plan =
+            FixStateUdafOrderingAnalyzer.analyze(lower_plan, &Default::default())?;
+
+        let upper = Aggregate::try_new(
+            Arc::new(fixed_lower_plan.clone()),
+            upper_group_exprs,
+            upper_aggr_exprs.clone(),
+        )?;
         let aggr_plan = LogicalPlan::Aggregate(aggr);
-        upper.aggr_expr = upper_aggr_exprs;
-        upper.input = Arc::new(lower_plan.clone());
+
         // upper schema's output schema should be the same as the original aggregate plan's output schema
         let upper_check = upper;
         let upper_plan = LogicalPlan::Aggregate(upper_check).recompute_schema()?;
@@ -214,7 +265,7 @@ impl StateMergeHelper {
         }
 
         Ok(StepAggrPlan {
-            lower_state: lower_plan,
+            lower_state: fixed_lower_plan,
             upper_merge: upper_plan,
         })
     }
@@ -225,13 +276,22 @@ impl StateMergeHelper {
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
+    /// Default to empty, might get fixed by analyzer later
+    ordering: Vec<FieldRef>,
+    /// Default to false, might get fixed by analyzer later
+    distinct: bool,
 }
 
 impl StateWrapper {
     /// `state_index`: The index of the state in the output of the state function.
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
         let name = aggr_state_func_name(inner.name());
-        Ok(Self { inner, name })
+        Ok(Self {
+            inner,
+            name,
+            ordering: vec![],
+            distinct: false,
+        })
     }
 
     pub fn inner(&self) -> &AggregateUDF {
@@ -245,7 +305,19 @@ impl StateWrapper {
         &self,
         acc_args: &datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<FieldRef> {
-        self.inner.return_field(acc_args.schema.fields())
+        let input_fields = acc_args
+            .exprs
+            .iter()
+            .map(|e| e.return_field(acc_args.schema))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.return_field(&input_fields).inspect_err(|e| {
+            common_telemetry::error!(
+                "StateWrapper: {:#?}\nacc_args:{:?}\nerror:{:?}",
+                &self,
+                &acc_args,
+                e
+            );
+        })
     }
 }
 
@@ -269,6 +341,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
+
         Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
 
@@ -295,11 +368,22 @@ impl AggregateUDFImpl for StateWrapper {
             name: self.inner().name(),
             input_fields,
             return_field: self.inner.return_field(input_fields)?,
-            // TODO(discord9): how to get this?, probably ok?
-            ordering_fields: &[],
-            is_distinct: false,
+            // those args are also needed as they are vital to construct the state fields correctly.
+            ordering_fields: &self.ordering,
+            is_distinct: self.distinct,
         };
         let state_fields = self.inner.state_fields(state_fields_args)?;
+
+        let state_fields = state_fields
+            .into_iter()
+            .map(|f| {
+                let mut f = f.as_ref().clone();
+                // since state can be null when no input rows, so make all fields nullable
+                f.set_nullable(true);
+                Arc::new(f)
+            })
+            .collect::<Vec<_>>();
+
         let struct_field = DataType::Struct(state_fields.into());
         Ok(struct_field)
     }
@@ -324,7 +408,7 @@ impl AggregateUDFImpl for StateWrapper {
         self.inner.signature()
     }
 
-    /// Coerce types also do nothing, as optimzer should be able to already make struct types
+    /// Coerce types also do nothing, as optimizer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         self.inner.coerce_types(arg_types)
     }
@@ -364,6 +448,39 @@ impl Accumulator for StateAccum {
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
+        let array_type = array
+            .iter()
+            .map(|a| a.data_type().clone())
+            .collect::<Vec<_>>();
+        let expected_type: Vec<_> = self
+            .state_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        if array_type != expected_type {
+            debug!(
+                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
+                self.state_fields.len(),
+                array.len(),
+                self.state_fields,
+                array_type,
+            );
+            let guess_schema = array
+                .iter()
+                .enumerate()
+                .map(|(index, array)| {
+                    Field::new(
+                        format!("col_{index}[mismatch_state]").as_str(),
+                        array.data_type().clone(),
+                        true,
+                    )
+                })
+                .collect::<Fields>();
+            let arr = StructArray::try_new(guess_schema, array, None)?;
+
+            return Ok(ScalarValue::Struct(Arc::new(arr)));
+        }
+
         let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
@@ -402,7 +519,7 @@ pub struct MergeWrapper {
     merge_signature: Signature,
     /// The original physical expression of the aggregate function, can't store the original aggregate function directly, as PhysicalExpr didn't implement Any
     original_phy_expr: Arc<AggregateFunctionExpr>,
-    original_input_types: Vec<DataType>,
+    return_type: DataType,
 }
 impl MergeWrapper {
     pub fn new(
@@ -413,13 +530,14 @@ impl MergeWrapper {
         let name = aggr_merge_func_name(inner.name());
         // the input type is actually struct type, which is the state fields of the original aggregate function.
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
+        let return_type = inner.return_type(&original_input_types)?;
 
         Ok(Self {
             inner,
             name,
             merge_signature,
             original_phy_expr,
-            original_input_types,
+            return_type,
         })
     }
 
@@ -471,14 +589,13 @@ impl AggregateUDFImpl for MergeWrapper {
     /// so return fixed return type instead of using `arg_types` to determine the return type.
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         // The return type is the same as the original aggregate function's return type.
-        let ret_type = self.inner.return_type(&self.original_input_types)?;
-        Ok(ret_type)
+        Ok(self.return_type.clone())
     }
     fn signature(&self) -> &Signature {
         &self.merge_signature
     }
 
-    /// Coerce types also do nothing, as optimzer should be able to already make struct types
+    /// Coerce types also do nothing, as optimizer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         // just check if the arg_types are only one and is struct array
         if arg_types.len() != 1 || !matches!(arg_types.first(), Some(DataType::Struct(_))) {
@@ -542,10 +659,11 @@ impl Accumulator for MergeAccum {
             })?;
         let fields = struct_arr.fields();
         if fields != &self.state_fields {
-            return Err(datafusion_common::DataFusionError::Internal(format!(
-                "Expected state fields: {:?}, got: {:?}",
+            debug!(
+                "State fields mismatch, expected: {:?}, got: {:?}",
                 self.state_fields, fields
-            )));
+            );
+            // state fields mismatch might be acceptable by datafusion, continue
         }
 
         // now fields should be the same, so we can merge the batch
@@ -562,6 +680,3 @@ impl Accumulator for MergeAccum {
         self.inner.state()
     }
 }
-
-#[cfg(test)]
-mod tests;

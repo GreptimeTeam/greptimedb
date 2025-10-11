@@ -176,7 +176,7 @@ pub fn yaml_to_vrl_value(v: &yaml_rust::Yaml) -> Result<VrlValue> {
                 .context(ValueParseFloatSnafu { ty: "float64", v })?;
             NotNan::new(f).map(VrlValue::Float).context(FloatIsNanSnafu)
         }
-        yaml_rust::Yaml::String(v) => Ok(VrlValue::Bytes(Bytes::from(v.to_string()))),
+        yaml_rust::Yaml::String(v) => Ok(VrlValue::Bytes(Bytes::from(v.clone()))),
         yaml_rust::Yaml::Array(arr) => {
             let mut values = vec![];
             for v in arr {

@@ -123,10 +123,10 @@ macro_rules! impl_data_type_for_interval {
                         })
                 }
 
-                fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+                fn cast_value_ref(value: &ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
-                        ValueRef::[<Interval $unit>](t) => Ok(Some(t)),
+                        ValueRef::[<Interval $unit>](t) => Ok(Some(*t)),
                         other => error::CastTypeSnafu {
                             msg: format!("Failed to cast value {:?} to {}", other, stringify!([<Interval $unit>])),
                         }

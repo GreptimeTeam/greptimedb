@@ -794,6 +794,10 @@ impl Metasrv {
         &self.plugins
     }
 
+    pub fn started(&self) -> Arc<AtomicBool> {
+        self.started.clone()
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().grpc.server_addr.clone();

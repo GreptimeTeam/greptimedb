@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, trace};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
@@ -181,7 +181,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
 
             self.mem_cache
-                .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                .insert(read_key.clone(), ReadResult::Success(size as u32))
                 .await;
         }
 
@@ -289,6 +289,11 @@ impl<C: Access> ReadCache<C> {
 
         let (_, reader) = inner.read(path, args).await?;
         let result = self.try_write_cache::<I>(reader, read_key).await;
+
+        trace!(
+            "Read cache miss for key '{}' and fetch file '{}' from object store",
+            read_key, path,
+        );
 
         match result {
             Ok(read_bytes) => {

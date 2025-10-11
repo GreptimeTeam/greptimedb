@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::helper::pb_value_to_value_ref;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
@@ -31,7 +32,6 @@ use common_catalog::consts::default_engine;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
-use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use mime_guess::mime;
@@ -446,7 +446,7 @@ async fn dryrun_pipeline_inner(
     )
     .await?;
 
-    let colume_type_key = "colume_type";
+    let column_type_key = "column_type";
     let data_type_key = "data_type";
     let name_key = "name";
 
@@ -455,9 +455,9 @@ async fn dryrun_pipeline_inner(
         .filter_map(|row| {
             if let Some(rows) = row.rows {
                 let table_name = row.table_name;
-                let schema = rows.schema;
+                let result_schema = rows.schema;
 
-                let schema = schema
+                let schema = result_schema
                     .iter()
                     .map(|cs| {
                         let mut map = Map::new();
@@ -470,7 +470,7 @@ async fn dryrun_pipeline_inner(
                             JsonValue::String(cs.datatype().as_str_name().to_string()),
                         );
                         map.insert(
-                            colume_type_key.to_string(),
+                            column_type_key.to_string(),
                             JsonValue::String(cs.semantic_type().as_str_name().to_string()),
                         );
                         map.insert(
@@ -493,25 +493,25 @@ async fn dryrun_pipeline_inner(
                             .into_iter()
                             .enumerate()
                             .map(|(idx, v)| {
-                                v.value_data
-                                    .map(|d| {
-                                        let mut map = Map::new();
-                                        map.insert("value".to_string(), column_data_to_json(d));
-                                        map.insert(
-                                            "key".to_string(),
-                                            schema[idx][name_key].clone(),
-                                        );
-                                        map.insert(
-                                            "semantic_type".to_string(),
-                                            schema[idx][colume_type_key].clone(),
-                                        );
-                                        map.insert(
-                                            "data_type".to_string(),
-                                            schema[idx][data_type_key].clone(),
-                                        );
-                                        JsonValue::Object(map)
-                                    })
-                                    .unwrap_or(JsonValue::Null)
+                                let mut map = Map::new();
+                                let value_ref = pb_value_to_value_ref(
+                                    &v,
+                                    result_schema[idx].datatype_extension.as_ref(),
+                                );
+                                let greptime_value: datatypes::value::Value = value_ref.into();
+                                let serde_json_value =
+                                    serde_json::Value::try_from(greptime_value).unwrap();
+                                map.insert("value".to_string(), serde_json_value);
+                                map.insert("key".to_string(), schema[idx][name_key].clone());
+                                map.insert(
+                                    "semantic_type".to_string(),
+                                    schema[idx][column_type_key].clone(),
+                                );
+                                map.insert(
+                                    "data_type".to_string(),
+                                    schema[idx][data_type_key].clone(),
+                                );
+                                JsonValue::Object(map)
                             })
                             .collect()
                     })

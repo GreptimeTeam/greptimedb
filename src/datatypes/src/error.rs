@@ -220,6 +220,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert scalar value to Arrow array"))]
+    ConvertScalarToArrowArray {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse extended type in metadata: {}", value))]
     ParseExtendedType {
         value: String,
@@ -235,6 +243,19 @@ pub enum Error {
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
+    InconsistentStructFieldsAndItems {
+        field_len: usize,
+        item_len: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to process JSONB value"))]
+    InvalidJsonb {
+        error: jsonb::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -257,6 +278,7 @@ impl ErrorExt for Error {
             | InvalidTimestampPrecision { .. }
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
+            | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
@@ -275,7 +297,9 @@ impl ErrorExt for Error {
             | ToScalarValue { .. }
             | TryFromValue { .. }
             | ConvertArrowArrayToScalars { .. }
-            | ParseExtendedType { .. } => StatusCode::Internal,
+            | ConvertScalarToArrowArray { .. }
+            | ParseExtendedType { .. }
+            | InconsistentStructFieldsAndItems { .. } => StatusCode::Internal,
         }
     }
 

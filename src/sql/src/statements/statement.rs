@@ -31,7 +31,7 @@ use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
-use crate::statements::explain::Explain;
+use crate::statements::explain::ExplainStatement;
 use crate::statements::insert::Insert;
 use crate::statements::kill::Kill;
 use crate::statements::query::Query;
@@ -109,6 +109,8 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // SHOW CREATE FLOW
     ShowCreateFlow(ShowCreateFlow),
+    #[cfg(feature = "enterprise")]
+    ShowCreateTrigger(crate::statements::show::trigger::ShowCreateTrigger),
     /// SHOW FLOWS
     ShowFlows(ShowFlows),
     // SHOW TRIGGERS
@@ -125,7 +127,7 @@ pub enum Statement {
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
-    Explain(Box<Explain>),
+    Explain(Box<ExplainStatement>),
     // COPY
     Copy(Copy),
     // Telemetry Query Language
@@ -182,6 +184,8 @@ impl Statement {
             | Statement::FetchCursor(_)
             | Statement::Tql(_) => true,
 
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(_) => true,
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
 
@@ -250,6 +254,8 @@ impl Display for Statement {
             Statement::ShowRegion(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(s) => s.fmt(f),
@@ -300,7 +306,6 @@ impl TryFrom<&Statement> for DfStatement {
     fn try_from(s: &Statement) -> Result<Self, Self::Error> {
         let s = match s {
             Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            Statement::Explain(explain) => explain.inner.clone(),
             Statement::Insert(insert) => insert.inner.clone(),
             Statement::Delete(delete) => delete.inner.clone(),
             _ => {

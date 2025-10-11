@@ -69,8 +69,8 @@ mod tests {
         let input = DateVector::from_slice([1, 2, 3]);
 
         let mut builder = DateType.create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Date(Date::new(5)));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::Date(Date::new(5)));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(
             builder

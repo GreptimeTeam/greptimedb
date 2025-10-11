@@ -48,6 +48,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-session.workspace = true
 common-sql.workspace = true
+common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
@@ -56,6 +57,7 @@ dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-pg-catalog.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
@@ -63,7 +65,6 @@ futures-util.workspace = true
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true
-http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -89,7 +90,7 @@ opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
-pgwire = { version = "0.32.1", default-features = false, features = ["server-api-ring"] }
+pgwire = { version = "0.33", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }

@@ -100,9 +100,38 @@ pub struct StatementExecutor {
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
+    #[cfg(feature = "enterprise")]
+    trigger_querier: Option<TriggerQuerierRef>,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
+
+/// Trait for creating [`TriggerQuerier`] instance.
+#[cfg(feature = "enterprise")]
+pub trait TriggerQuerierFactory: Send + Sync {
+    fn create(&self, kv_backend: KvBackendRef) -> TriggerQuerierRef;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierFactoryRef = Arc<dyn TriggerQuerierFactory>;
+
+/// Trait for querying trigger info, such as `SHOW CREATE TRIGGER` etc.
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait TriggerQuerier: Send + Sync {
+    // Query the `SHOW CREATE TRIGGER` statement for the given trigger.
+    async fn show_create_trigger(
+        &self,
+        catalog: &str,
+        trigger: &str,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[cfg(feature = "enterprise")]
+pub type TriggerQuerierRef = Arc<dyn TriggerQuerier>;
 
 impl StatementExecutor {
     #[allow(clippy::too_many_arguments)]
@@ -127,7 +156,15 @@ impl StatementExecutor {
             cache_invalidator,
             inserter,
             process_manager,
+            #[cfg(feature = "enterprise")]
+            trigger_querier: None,
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
+        self.trigger_querier = Some(querier);
+        self
     }
 
     #[cfg(feature = "testing")]
@@ -138,7 +175,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
+            QueryStatement::Promql(_, _) => self.plan_exec(stmt, query_ctx).await,
         }
     }
 
@@ -380,6 +417,8 @@ impl StatementExecutor {
             }
             Statement::ShowCreateFlow(show) => self.show_create_flow(show, query_ctx).await,
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
+            #[cfg(feature = "enterprise")]
+            Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
             Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::Comment(stmt) => self.comment(stmt, query_ctx).await,
@@ -642,6 +681,41 @@ fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest
     })
 }
 
+// Verifies time related format is valid
+fn verify_time_related_format(with: &OptionMap) -> Result<()> {
+    let time_format = with.get(common_datasource::file_format::TIME_FORMAT);
+    let date_format = with.get(common_datasource::file_format::DATE_FORMAT);
+    let timestamp_format = with.get(common_datasource::file_format::TIMESTAMP_FORMAT);
+    let file_format = with.get(common_datasource::file_format::FORMAT_TYPE);
+
+    if !matches!(file_format, Some(f) if f.eq_ignore_ascii_case("csv")) {
+        ensure!(
+            time_format.is_none() && date_format.is_none() && timestamp_format.is_none(),
+            error::TimestampFormatNotSupportedSnafu {
+                format: "<unknown>".to_string(),
+                file_format: file_format.cloned().unwrap_or_default(),
+            }
+        );
+    }
+
+    for (key, format_opt) in [
+        (common_datasource::file_format::TIME_FORMAT, time_format),
+        (common_datasource::file_format::DATE_FORMAT, date_format),
+        (
+            common_datasource::file_format::TIMESTAMP_FORMAT,
+            timestamp_format,
+        ),
+    ] {
+        if let Some(format) = format_opt {
+            chrono::format::strftime::StrftimeItems::new(format)
+                .parse()
+                .map_err(|_| error::InvalidCopyParameterSnafu { key, value: format }.build())?;
+        }
+    }
+
+    Ok(())
+}
+
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {
     let direction = match stmt {
         CopyTable::To(_) => CopyDirection::Export,
@@ -665,6 +739,8 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
             .context(ExternalSnafu)?;
 
     let timestamp_range = timestamp_range_from_option_map(&with, &query_ctx)?;
+
+    verify_time_related_format(&with)?;
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
@@ -830,7 +906,7 @@ mod tests {
     use crate::statement::copy_database::{
         COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
     };
-    use crate::statement::timestamp_range_from_option_map;
+    use crate::statement::{timestamp_range_from_option_map, verify_time_related_format};
 
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
@@ -864,6 +940,64 @@ mod tests {
         assert_matches!(
             check_timestamp_range(("2022-04-11 08:00:00", "2022-04-11 07:00:00")).unwrap_err(),
             error::Error::InvalidTimestampRange { .. }
+        );
+    }
+
+    #[test]
+    fn test_verify_timestamp_format() {
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        assert!(verify_time_related_format(&map).is_ok());
+
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%Y-%m-%d %H:%M:%S".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::TimestampFormatNotSupported { .. }
+        );
+        let map = OptionMap::from(
+            [
+                (
+                    common_datasource::file_format::TIMESTAMP_FORMAT.to_string(),
+                    "%111112".to_string(),
+                ),
+                (
+                    common_datasource::file_format::FORMAT_TYPE.to_string(),
+                    "csv".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+
+        assert_matches!(
+            verify_time_related_format(&map).unwrap_err(),
+            error::Error::InvalidCopyParameter { .. }
         );
     }
 }

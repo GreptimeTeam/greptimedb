@@ -75,11 +75,11 @@ impl Plugins {
         self.read().is_empty()
     }
 
-    fn read(&self) -> RwLockReadGuard<SendSyncAnyMap> {
+    fn read(&self) -> RwLockReadGuard<'_, SendSyncAnyMap> {
         self.inner.read().unwrap()
     }
 
-    fn write(&self) -> RwLockWriteGuard<SendSyncAnyMap> {
+    fn write(&self) -> RwLockWriteGuard<'_, SendSyncAnyMap> {
         self.inner.write().unwrap()
     }
 }

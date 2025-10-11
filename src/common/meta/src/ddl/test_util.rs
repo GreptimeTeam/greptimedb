@@ -247,7 +247,7 @@ pub fn assert_column_name(table_info: &RawTableInfo, expected_column_names: &[&s
             .schema
             .column_schemas
             .iter()
-            .map(|c| c.name.to_string())
+            .map(|c| c.name.clone())
             .collect::<Vec<_>>(),
         expected_column_names
     );

@@ -345,8 +345,8 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?;
-        Ok(SeqScan::new(input, false))
+        let input = self.scan_input().await?.with_compaction(false);
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
@@ -437,6 +437,7 @@ impl ScanRegion {
                 Some(mapper.column_ids()),
                 predicate.clone(),
                 self.request.sequence,
+                false,
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange
@@ -692,6 +693,8 @@ pub struct ScanInput {
     pub(crate) distribution: Option<TimeSeriesDistribution>,
     /// Whether to use flat format.
     pub(crate) flat_format: bool,
+    /// Whether this scan is for compaction.
+    pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -721,6 +724,7 @@ impl ScanInput {
             series_row_selector: None,
             distribution: None,
             flat_format: false,
+            compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -872,6 +876,13 @@ impl ScanInput {
         self
     }
 
+    /// Sets whether this scan is for compaction.
+    #[must_use]
+    pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -922,6 +933,7 @@ impl ScanInput {
             .fulltext_index_applier(self.fulltext_index_applier.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
+            .compaction(self.compaction)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {
@@ -945,11 +957,13 @@ impl ScanInput {
             // mapper can convert it.
             let compat = if let Some(flat_format) = file_range_ctx.read_format().as_flat() {
                 let mapper = self.mapper.as_flat().unwrap();
-                Some(CompatBatch::Flat(FlatCompatBatch::try_new(
+                FlatCompatBatch::try_new(
                     mapper,
                     flat_format.metadata(),
                     flat_format.format_projection(),
-                )?))
+                    self.compaction,
+                )?
+                .map(CompatBatch::Flat)
             } else {
                 let compact_batch = PrimaryKeyCompatBatch::new(
                     &self.mapper,
@@ -1127,9 +1141,9 @@ pub struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput, compaction: bool) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::seq_scan_ranges(&input, compaction);
+        let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {

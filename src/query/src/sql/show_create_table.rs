@@ -64,7 +64,7 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
-        options.insert(k.to_string(), v.to_string());
+        options.insert(k.clone(), v.clone());
     }
     options
 }
@@ -101,7 +101,7 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
     }
 
     if let Some(c) = column_schema.metadata().get(COMMENT_KEY) {
-        options.push(column_option_def(ColumnOption::Comment(c.to_string())));
+        options.push(column_option_def(ColumnOption::Comment(c.clone())));
     }
 
     if let Some(opt) = column_schema

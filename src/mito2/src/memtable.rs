@@ -64,17 +64,12 @@ pub use time_partition::filter_record_batch;
 pub type MemtableId = u32;
 
 /// Config for memtables.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemtableConfig {
     PartitionTree(PartitionTreeConfig),
+    #[default]
     TimeSeries,
-}
-
-impl Default for MemtableConfig {
-    fn default() -> Self {
-        Self::TimeSeries
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -194,12 +189,15 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
+    ///
+    /// The `for_flush` flag is true if the flush job calls this method for flush.
     /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
+        for_flush: bool,
     ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.

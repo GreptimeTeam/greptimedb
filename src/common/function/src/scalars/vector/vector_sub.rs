@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
-use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::{DataFusionError, ScalarValue};
@@ -23,12 +21,12 @@ use datafusion_expr::{ScalarFunctionArgs, Signature};
 use nalgebra::DVectorView;
 
 use crate::function::Function;
-use crate::helper;
-use crate::scalars::vector::VectorCalculator;
 use crate::scalars::vector::impl_conv::veclit_to_binlit;
+use crate::scalars::vector::{VectorCalculator, define_args_of_two_vector_literals_udf};
 
 const NAME: &str = "vec_sub";
 
+define_args_of_two_vector_literals_udf!(
 /// Subtracts corresponding elements of two vectors, returns a vector.
 ///
 /// # Example
@@ -42,23 +40,19 @@ const NAME: &str = "vec_sub";
 /// | [0,-1]                                                        |
 /// +---------------------------------------------------------------+
 ///
-#[derive(Debug, Clone, Default)]
-pub struct VectorSubFunction;
+VectorSubFunction);
 
 impl Function for VectorSubFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![DataType::Utf8, DataType::Binary],
-            vec![DataType::Utf8, DataType::Binary],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -94,12 +88,6 @@ impl Function for VectorSubFunction {
     }
 }
 
-impl Display for VectorSubFunction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", NAME.to_ascii_uppercase())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -112,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_sub() {
-        let func = VectorSubFunction;
+        let func = VectorSubFunction::default();
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
@@ -155,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_sub_error() {
-        let func = VectorSubFunction;
+        let func = VectorSubFunction::default();
 
         let input0: ArrayRef = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),

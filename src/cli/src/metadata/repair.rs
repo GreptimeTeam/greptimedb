@@ -38,10 +38,10 @@ use snafu::{ResultExt, ensure};
 use store_api::storage::TableId;
 
 use crate::Tool;
+use crate::common::StoreConfig;
 use crate::error::{
     InvalidArgumentsSnafu, Result, SendRequestToDatanodeSnafu, TableMetadataSnafu, UnexpectedSnafu,
 };
-use crate::metadata::common::StoreConfig;
 use crate::metadata::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
 
 /// Repair metadata of logical tables.
@@ -138,13 +138,7 @@ impl RepairTool {
 
             let table_names = table_names
                 .iter()
-                .map(|table_name| {
-                    (
-                        catalog.to_string(),
-                        schema_name.to_string(),
-                        table_name.to_string(),
-                    )
-                })
+                .map(|table_name| (catalog.clone(), schema_name.clone(), table_name.clone()))
                 .collect::<Vec<_>>();
             return Ok(IteratorInput::new_table_names(table_names));
         } else if !self.table_ids.is_empty() {

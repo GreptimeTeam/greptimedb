@@ -14,57 +14,66 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::InvalidFuncArgsSnafu;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::Value;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, StringVectorBuilder, VectorRef};
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder, StringViewBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 /// Function that converts a hex string representation of an IPv6 address to a formatted string.
 ///
 /// For example:
 /// - "20010DB8000000000000000000000001" returns "2001:db8::1"
 /// - "00000000000000000000FFFFC0A80001" returns "::ffff:192.168.0.1"
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6NumToString;
+pub(crate) struct Ipv6NumToString {
+    signature: Signature,
+}
+
+impl Default for Ipv6NumToString {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6NumToString {
     fn name(&self) -> &str {
         "ipv6_num_to_string"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 argument, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
 
-        let hex_vec = &columns[0];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let hex_vec = arg0.as_string_view();
         let size = hex_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let hex_str = hex_vec.get(i);
+            let hex_str = hex_vec.is_valid(i).then(|| hex_vec.value(i));
             let ip_str = match hex_str {
-                Value::String(s) => {
-                    let hex_str = s.as_utf8().to_lowercase();
+                Some(s) => {
+                    let hex_str = s.to_lowercase();
 
                     // Validate and convert hex string to bytes
                     let bytes = if hex_str.len() == 32 {
@@ -80,10 +89,10 @@ impl Function for Ipv6NumToString {
                         }
                         bytes
                     } else {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: format!("Expected 32 hex characters, got {}", hex_str.len()),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution(format!(
+                            "expecting 32 hex characters, got {}",
+                            hex_str.len()
+                        )));
                     };
 
                     // Convert bytes to IPv6 address
@@ -106,10 +115,10 @@ impl Function for Ipv6NumToString {
                 _ => None,
             };
 
-            results.push(ip_str.as_deref());
+            builder.append_option(ip_str.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -120,41 +129,48 @@ impl Function for Ipv6NumToString {
 /// - If the input string contains a valid IPv4 address, returns its IPv6 equivalent
 /// - HEX can be uppercase or lowercase
 /// - Invalid IPv6 format throws an exception
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6StringToNum;
+pub(crate) struct Ipv6StringToNum {
+    signature: Signature,
+}
+
+impl Default for Ipv6StringToNum {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6StringToNum {
     fn name(&self) -> &str {
         "ipv6_string_to_num"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Binary)
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 argument, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
 
-        let ip_vec = &columns[0];
         let size = ip_vec.len();
-        let mut results = BinaryVectorBuilder::with_capacity(size);
+        let mut builder = BinaryViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let ip_str = ip_vec.get(i);
+            let ip_str = ip_vec.is_valid(i).then(|| ip_vec.value(i));
             let ip_binary = match ip_str {
-                Value::String(s) => {
-                    let addr_str = s.as_utf8();
-
+                Some(addr_str) => {
                     let addr = if let Ok(ipv6) = Ipv6Addr::from_str(addr_str) {
                         // Direct IPv6 address
                         ipv6
@@ -163,10 +179,10 @@ impl Function for Ipv6StringToNum {
                         ipv4.to_ipv6_mapped()
                     } else {
                         // Invalid format
-                        return InvalidFuncArgsSnafu {
-                            err_msg: format!("Invalid IPv6 address format: {}", addr_str),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution(format!(
+                            "Invalid IPv6 address format: {}",
+                            addr_str
+                        )));
                     };
 
                     // Convert IPv6 address to binary (16 bytes)
@@ -176,10 +192,10 @@ impl Function for Ipv6StringToNum {
                 _ => None,
             };
 
-            results.push(ip_binary.as_deref());
+            builder.append_option(ip_binary.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -188,15 +204,14 @@ mod tests {
     use std::fmt::Write;
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BinaryVector, StringVector, Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::StringViewArray;
 
     use super::*;
 
     #[test]
     fn test_ipv6_num_to_string() {
-        let func = Ipv6NumToString;
-        let ctx = FunctionContext::default();
+        let func = Ipv6NumToString::default();
 
         // Hex string for "2001:db8::1"
         let hex_str1 = "20010db8000000000000000000000001";
@@ -205,62 +220,93 @@ mod tests {
         let hex_str2 = "00000000000000000000ffffc0a80001";
 
         let values = vec![hex_str1, hex_str2];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(2).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "2001:db8::1");
-        assert_eq!(result.get_data(1).unwrap(), "::ffff:192.168.0.1");
+        assert_eq!(result.value(0), "2001:db8::1");
+        assert_eq!(result.value(1), "::ffff:192.168.0.1");
     }
 
     #[test]
     fn test_ipv6_num_to_string_uppercase() {
-        let func = Ipv6NumToString;
-        let ctx = FunctionContext::default();
+        let func = Ipv6NumToString::default();
 
         // Uppercase hex string for "2001:db8::1"
         let hex_str = "20010DB8000000000000000000000001";
 
         let values = vec![hex_str];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(1).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "2001:db8::1");
+        assert_eq!(result.value(0), "2001:db8::1");
     }
 
     #[test]
     fn test_ipv6_num_to_string_error() {
-        let func = Ipv6NumToString;
-        let ctx = FunctionContext::default();
+        let func = Ipv6NumToString::default();
 
         // Invalid hex string - wrong length
         let hex_str = "20010db8";
 
         let values = vec![hex_str];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
         // Should return an error
-        let result = func.eval(&ctx, &[input]);
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args);
         assert!(result.is_err());
 
         // Check that the error message contains expected text
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("Expected 32 hex characters"));
+        assert_eq!(
+            error_msg,
+            "Execution error: expecting 32 hex characters, got 8"
+        );
     }
 
     #[test]
     fn test_ipv6_string_to_num() {
-        let func = Ipv6StringToNum;
-        let ctx = FunctionContext::default();
+        let func = Ipv6StringToNum::default();
 
         let values = vec!["2001:db8::1", "::ffff:192.168.0.1", "192.168.0.1"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<BinaryVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(3).unwrap();
+        let result = result.as_binary_view();
 
         // Expected binary for "2001:db8::1"
         let expected_1 = [
@@ -272,33 +318,37 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xC0, 0xA8, 0, 0x01,
         ];
 
-        assert_eq!(result.get_data(0).unwrap(), &expected_1);
-        assert_eq!(result.get_data(1).unwrap(), &expected_2);
-        assert_eq!(result.get_data(2).unwrap(), &expected_2);
+        assert_eq!(result.value(0), &expected_1);
+        assert_eq!(result.value(1), &expected_2);
+        assert_eq!(result.value(2), &expected_2);
     }
 
     #[test]
     fn test_ipv6_conversions_roundtrip() {
-        let to_num = Ipv6StringToNum;
-        let to_string = Ipv6NumToString;
-        let ctx = FunctionContext::default();
+        let to_num = Ipv6StringToNum::default();
+        let to_string = Ipv6NumToString::default();
 
         // Test data
         let values = vec!["2001:db8::1", "::ffff:192.168.0.1"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
         // Convert IPv6 addresses to binary
-        let binary_result = to_num.eval(&ctx, std::slice::from_ref(&input)).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_num.invoke_with_args(args).unwrap();
 
         // Convert binary to hex string representation (for ipv6_num_to_string)
         let mut hex_strings = Vec::new();
-        let binary_vector = binary_result
-            .as_any()
-            .downcast_ref::<BinaryVector>()
-            .unwrap();
+        let result = result.to_array(2).unwrap();
+        let binary_vector = result.as_binary_view();
 
         for i in 0..binary_vector.len() {
-            let bytes = binary_vector.get_data(i).unwrap();
+            let bytes = binary_vector.value(i);
             let hex = bytes.iter().fold(String::new(), |mut acc, b| {
                 write!(&mut acc, "{:02x}", b).unwrap();
                 acc
@@ -307,44 +357,60 @@ mod tests {
         }
 
         let hex_str_refs: Vec<&str> = hex_strings.iter().map(|s| s.as_str()).collect();
-        let hex_input = Arc::new(StringVector::from_slice(&hex_str_refs)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&hex_str_refs)));
 
         // Now convert hex to formatted string
-        let string_result = to_string.eval(&ctx, &[hex_input]).unwrap();
-        let str_result = string_result
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_string.invoke_with_args(args).unwrap();
+        let result = result.to_array(2).unwrap();
+        let result = result.as_string_view();
 
         // Compare with original input
-        assert_eq!(str_result.get_data(0).unwrap(), values[0]);
-        assert_eq!(str_result.get_data(1).unwrap(), values[1]);
+        assert_eq!(result.value(0), values[0]);
+        assert_eq!(result.value(1), values[1]);
     }
 
     #[test]
     fn test_ipv6_conversions_hex_roundtrip() {
         // Create a new test to verify that the string output from ipv6_num_to_string
         // can be converted back using ipv6_string_to_num
-        let to_string = Ipv6NumToString;
-        let to_binary = Ipv6StringToNum;
-        let ctx = FunctionContext::default();
+        let to_string = Ipv6NumToString::default();
+        let to_binary = Ipv6StringToNum::default();
 
         // Hex representation of IPv6 addresses
         let hex_values = vec![
             "20010db8000000000000000000000001",
             "00000000000000000000ffffc0a80001",
         ];
-        let hex_input = Arc::new(StringVector::from_slice(&hex_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&hex_values)));
 
         // Convert hex to string representation
-        let string_result = to_string.eval(&ctx, &[hex_input]).unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_string.invoke_with_args(args).unwrap();
 
         // Then convert string representation back to binary
-        let binary_result = to_binary.eval(&ctx, &[string_result]).unwrap();
-        let bin_result = binary_result
-            .as_any()
-            .downcast_ref::<BinaryVector>()
-            .unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![result],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::BinaryView, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_binary.invoke_with_args(args).unwrap();
+        let result = result.to_array(2).unwrap();
+        let result = result.as_binary_view();
 
         // Expected binary values
         let expected_bin1 = [
@@ -354,7 +420,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xC0, 0xA8, 0, 0x01,
         ];
 
-        assert_eq!(bin_result.get_data(0).unwrap(), &expected_bin1);
-        assert_eq!(bin_result.get_data(1).unwrap(), &expected_bin2);
+        assert_eq!(result.value(0), &expected_bin1);
+        assert_eq!(result.value(1), &expected_bin2);
     }
 }

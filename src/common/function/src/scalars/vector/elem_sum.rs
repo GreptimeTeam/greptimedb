@@ -14,7 +14,6 @@
 
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::ScalarValue;
@@ -27,26 +26,37 @@ use crate::scalars::vector::{VectorCalculator, impl_conv};
 
 const NAME: &str = "vec_elem_sum";
 
-#[derive(Debug, Clone, Default)]
-pub struct ElemSumFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct ElemSumFunction {
+    signature: Signature,
+}
+
+impl Default for ElemSumFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Uniform(1, STRINGS.to_vec()),
+                    TypeSignature::Uniform(1, BINARYS.to_vec()),
+                    TypeSignature::Uniform(1, vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 impl Function for ElemSumFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float32)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::one_of(
-            vec![
-                TypeSignature::Uniform(1, STRINGS.to_vec()),
-                TypeSignature::Uniform(1, BINARYS.to_vec()),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -87,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_elem_sum() {
-        let func = ElemSumFunction;
+        let func = ElemSumFunction::default();
 
         let input = Arc::new(StringViewArray::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),

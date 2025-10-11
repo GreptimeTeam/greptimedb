@@ -127,12 +127,12 @@ impl TestingEnv {
             volatile_ctx: Default::default(),
             in_memory_key: Arc::new(MemoryKvBackend::default()),
             mailbox: self.mailbox_ctx.mailbox().clone(),
-            server_addr: self.server_addr.to_string(),
+            server_addr: self.server_addr.clone(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 self.mailbox_ctx.mailbox().clone(),
                 MetasrvInfo {
-                    server_addr: self.server_addr.to_string(),
+                    server_addr: self.server_addr.clone(),
                 },
             )),
         }

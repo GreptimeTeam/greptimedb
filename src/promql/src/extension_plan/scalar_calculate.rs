@@ -70,7 +70,7 @@ impl ScalarCalculate {
         interval: Millisecond,
         input: LogicalPlan,
         time_index: &str,
-        tag_colunms: &[String],
+        tag_columns: &[String],
         field_column: &str,
         table_name: Option<&str>,
     ) -> Result<Self> {
@@ -97,7 +97,7 @@ impl ScalarCalculate {
             end,
             interval,
             time_index: time_index.to_string(),
-            tag_columns: tag_colunms.to_vec(),
+            tag_columns: tag_columns.to_vec(),
             field_column: field_column.to_string(),
             input,
             output_schema: Arc::new(schema),

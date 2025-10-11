@@ -14,16 +14,16 @@
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion_expr::{Signature, TypeSignature, Volatility};
-use datatypes::arrow::datatypes::DataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{MutableVector, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
+use common_query::error::InvalidFuncArgsSnafu;
+use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt32Builder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::{DataType, UInt32Type};
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use derive_more::Display;
-use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 /// Function that converts a UInt32 number to an IPv4 address string.
 ///
@@ -36,12 +36,17 @@ use crate::function::{Function, FunctionContext};
 #[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
 pub struct Ipv4NumToString {
+    signature: Signature,
     aliases: [String; 1],
 }
 
 impl Default for Ipv4NumToString {
     fn default() -> Self {
         Self {
+            signature: Signature::new(
+                TypeSignature::Exact(vec![DataType::UInt32]),
+                Volatility::Immutable,
+            ),
             aliases: ["inet_ntoa".to_string()],
         }
     }
@@ -52,33 +57,28 @@ impl Function for Ipv4NumToString {
         "ipv4_num_to_string"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::new(
-            TypeSignature::Exact(vec![DataType::UInt32]),
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 argument, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
+        let uint_vec = arg0.as_primitive::<UInt32Type>();
 
-        let uint_vec = &columns[0];
         let size = uint_vec.len();
-        let mut results = StringVectorBuilder::with_capacity(size);
+        let mut builder = StringViewBuilder::with_capacity(size);
 
         for i in 0..size {
-            let ip_num = uint_vec.get(i);
+            let ip_num = uint_vec.is_valid(i).then(|| uint_vec.value(i));
             let ip_str = match ip_num {
-                datatypes::value::Value::UInt32(num) => {
+                Some(num) => {
                     // Convert UInt32 to IPv4 string (A.B.C.D format)
                     let a = (num >> 24) & 0xFF;
                     let b = (num >> 16) & 0xFF;
@@ -89,10 +89,10 @@ impl Function for Ipv4NumToString {
                 _ => None,
             };
 
-            results.push(ip_str.as_deref());
+            builder.append_option(ip_str.as_deref());
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 
     fn aliases(&self) -> &[String] {
@@ -106,40 +106,48 @@ impl Function for Ipv4NumToString {
 /// - "10.0.0.1" returns 167772161
 /// - "192.168.0.1" returns 3232235521
 /// - Invalid IPv4 format throws an exception
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4StringToNum;
+pub(crate) struct Ipv4StringToNum {
+    signature: Signature,
+}
+
+impl Default for Ipv4StringToNum {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv4StringToNum {
     fn name(&self) -> &str {
         "ipv4_string_to_num"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt32)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 1,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 1 argument, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0] = extract_args(self.name(), &args)?;
 
-        let ip_vec = &columns[0];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
         let size = ip_vec.len();
-        let mut results = UInt32VectorBuilder::with_capacity(size);
+        let mut builder = UInt32Builder::with_capacity(size);
 
         for i in 0..size {
-            let ip_str = ip_vec.get(i);
+            let ip_str = ip_vec.is_valid(i).then(|| ip_vec.value(i));
             let ip_num = match ip_str {
-                datatypes::value::Value::String(s) => {
-                    let ip_str = s.as_utf8();
+                Some(ip_str) => {
                     let ip_addr = Ipv4Addr::from_str(ip_str).map_err(|_| {
                         InvalidFuncArgsSnafu {
                             err_msg: format!("Invalid IPv4 address format: {}", ip_str),
@@ -151,10 +159,10 @@ impl Function for Ipv4StringToNum {
                 _ => None,
             };
 
-            results.push(ip_num);
+            builder.append_option(ip_num);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -162,66 +170,92 @@ impl Function for Ipv4StringToNum {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{StringVector, UInt32Vector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::{StringViewArray, UInt32Array};
 
     use super::*;
 
     #[test]
     fn test_ipv4_num_to_string() {
         let func = Ipv4NumToString::default();
-        let ctx = FunctionContext::default();
 
         // Test data
         let values = vec![167772161u32, 3232235521u32, 0u32, 4294967295u32];
-        let input = Arc::new(UInt32Vector::from_vec(values)) as VectorRef;
+        let input = ColumnarValue::Array(Arc::new(UInt32Array::from(values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<StringVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![input],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_string_view();
 
-        assert_eq!(result.get_data(0).unwrap(), "10.0.0.1");
-        assert_eq!(result.get_data(1).unwrap(), "192.168.0.1");
-        assert_eq!(result.get_data(2).unwrap(), "0.0.0.0");
-        assert_eq!(result.get_data(3).unwrap(), "255.255.255.255");
+        assert_eq!(result.value(0), "10.0.0.1");
+        assert_eq!(result.value(1), "192.168.0.1");
+        assert_eq!(result.value(2), "0.0.0.0");
+        assert_eq!(result.value(3), "255.255.255.255");
     }
 
     #[test]
     fn test_ipv4_string_to_num() {
-        let func = Ipv4StringToNum;
-        let ctx = FunctionContext::default();
+        let func = Ipv4StringToNum::default();
 
         // Test data
         let values = vec!["10.0.0.1", "192.168.0.1", "0.0.0.0", "255.255.255.255"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let input = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let result = func.eval(&ctx, &[input]).unwrap();
-        let result = result.as_any().downcast_ref::<UInt32Vector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![input],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::UInt32, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_primitive::<UInt32Type>();
 
-        assert_eq!(result.get_data(0).unwrap(), 167772161);
-        assert_eq!(result.get_data(1).unwrap(), 3232235521);
-        assert_eq!(result.get_data(2).unwrap(), 0);
-        assert_eq!(result.get_data(3).unwrap(), 4294967295);
+        assert_eq!(result.value(0), 167772161);
+        assert_eq!(result.value(1), 3232235521);
+        assert_eq!(result.value(2), 0);
+        assert_eq!(result.value(3), 4294967295);
     }
 
     #[test]
     fn test_ipv4_conversions_roundtrip() {
-        let to_num = Ipv4StringToNum;
+        let to_num = Ipv4StringToNum::default();
         let to_string = Ipv4NumToString::default();
-        let ctx = FunctionContext::default();
 
         // Test data for string to num to string
         let values = vec!["10.0.0.1", "192.168.0.1", "0.0.0.0", "255.255.255.255"];
-        let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
+        let input = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
 
-        let num_result = to_num.eval(&ctx, &[input]).unwrap();
-        let back_to_string = to_string.eval(&ctx, &[num_result]).unwrap();
-        let str_result = back_to_string
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![input],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::UInt32, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_num.invoke_with_args(args).unwrap();
+
+        let args = ScalarFunctionArgs {
+            args: vec![result],
+            arg_fields: vec![],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = to_string.invoke_with_args(args).unwrap();
+        let result = result.to_array(4).unwrap();
+        let result = result.as_string_view();
 
         for (i, expected) in values.iter().enumerate() {
-            assert_eq!(str_result.get_data(i).unwrap(), *expected);
+            assert_eq!(result.value(i), *expected);
         }
     }
 }

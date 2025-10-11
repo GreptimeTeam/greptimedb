@@ -34,7 +34,6 @@ const FORMAT: &str = "FORMAT";
 
 use sqlparser::parser::Parser;
 
-use crate::dialect::GreptimeDbDialect;
 use crate::parsers::error::{
     ConvertToLogicalExpressionSnafu, EvaluationSnafu, ParserSnafu, TQLError,
 };
@@ -106,38 +105,51 @@ impl ParserContext<'_> {
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(
-                    parser,
-                    &[Token::Comma],
-                    require_now_expr,
-                )?
-                .0;
-                let end = Self::parse_string_or_number_or_word(
-                    parser,
-                    &[Token::Comma],
-                    require_now_expr,
-                )?
-                .0;
+                let exprs = parser
+                    .parse_comma_separated(Parser::parse_expr)
+                    .context(ParserSnafu)?;
 
-                let (step, delimiter) = Self::parse_string_or_number_or_word(
-                    parser,
-                    &[Token::Comma, Token::RParen],
-                    false,
+                let param_count = exprs.len();
+
+                if param_count != 3 && param_count != 4 {
+                    return Err(ParserError::ParserError(
+                        format!("Expected 3 or 4 expressions in TQL parameters (start, end, step, [lookback]), but found {}", param_count)
+                    ))
+                    .context(ParserSnafu);
+                }
+
+                let mut exprs_iter = exprs.into_iter();
+                // Safety: safe to call next and unwrap, because we already check the param_count above.
+                let start = Self::parse_expr_to_literal_or_ts(
+                    exprs_iter.next().unwrap(),
+                    require_now_expr,
                 )?;
-                let lookback = if delimiter == Token::Comma {
-                    Self::parse_string_or_number_or_word(parser, &[Token::RParen], false)
-                        .ok()
-                        .map(|t| t.0)
-                } else {
-                    None
-                };
+                let end = Self::parse_expr_to_literal_or_ts(
+                    exprs_iter.next().unwrap(),
+                    require_now_expr,
+                )?;
+                let step = Self::parse_expr_to_literal_or_ts(exprs_iter.next().unwrap(), false)?;
+
+                let lookback = exprs_iter
+                    .next()
+                    .map(|expr| Self::parse_expr_to_literal_or_ts(expr, false))
+                    .transpose()?;
+
+                if !parser.consume_token(&Token::RParen) {
+                    return Err(ParserError::ParserError(format!(
+                        "Expected ')' after TQL parameters, but found: {}",
+                        parser.peek_token()
+                    )))
+                    .context(ParserSnafu);
+                }
 
                 (start, end, step, lookback)
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
         };
-        let query = Self::parse_tql_query(parser, self.sql).context(ParserSnafu)?;
-        Ok(TqlParameters::new(start, end, step, lookback, query))
+
+        let (query, alias) = Self::parse_tql_query(parser, self.sql).context(ParserSnafu)?;
+        Ok(TqlParameters::new(start, end, step, lookback, query, alias))
     }
 
     pub fn comma_or_rparen(token: &Token) -> bool {
@@ -179,72 +191,43 @@ impl ParserContext<'_> {
         }
     }
 
-    /// Try to parse and consume a string, number or word token.
-    /// Return `Ok` if it's parsed and one of the given delimiter tokens is consumed.
-    /// The string and matched delimiter will be returned as a tuple.
-    fn parse_string_or_number_or_word(
-        parser: &mut Parser,
-        delimiter_tokens: &[Token],
-        require_now_expr: bool,
-    ) -> std::result::Result<(String, Token), TQLError> {
-        let mut tokens = vec![];
-
-        while !delimiter_tokens.contains(&parser.peek_token().token) {
-            let token = parser.next_token().token;
-            if matches!(token, Token::EOF) {
-                break;
-            }
-            tokens.push(token);
-        }
-        let result = match tokens.len() {
-            0 => Err(ParserError::ParserError(
-                "Expected at least one token".to_string(),
-            ))
-            .context(ParserSnafu),
-            1 => {
-                let value = match tokens[0].clone() {
-                    Token::Number(n, _) if !require_now_expr => n,
-                    Token::DoubleQuotedString(s) | Token::SingleQuotedString(s)
-                        if !require_now_expr =>
-                    {
-                        s
-                    }
-                    Token::Word(_) => Self::parse_tokens_to_ts(tokens, require_now_expr)?,
-                    unexpected => {
-                        if !require_now_expr {
-                            return Err(ParserError::ParserError(format!(
-                                "Expected number, string or word, but have {unexpected:?}"
-                            )))
-                            .context(ParserSnafu);
-                        } else {
-                            return Err(ParserError::ParserError(format!(
-                                "Expected expression containing `now()`, but have {unexpected:?}"
-                            )))
-                            .context(ParserSnafu);
-                        }
-                    }
-                };
-                Ok(value)
-            }
-            _ => Self::parse_tokens_to_ts(tokens, require_now_expr),
-        };
-        for token in delimiter_tokens {
-            if parser.consume_token(token) {
-                return result.map(|v| (v, token.clone()));
-            }
-        }
-        Err(ParserError::ParserError(format!(
-            "Delimiters not match {delimiter_tokens:?}"
-        )))
-        .context(ParserSnafu)
-    }
-
-    /// Parse the tokens to seconds and convert to string.
-    fn parse_tokens_to_ts(
-        tokens: Vec<Token>,
+    /// Parse the expression to a literal string or a timestamp in seconds.
+    fn parse_expr_to_literal_or_ts(
+        parser_expr: sqlparser::ast::Expr,
         require_now_expr: bool,
     ) -> std::result::Result<String, TQLError> {
-        let parser_expr = Self::parse_to_expr(tokens)?;
+        match parser_expr {
+            sqlparser::ast::Expr::Value(v) => match v.value {
+                sqlparser::ast::Value::Number(s, _) if !require_now_expr => Ok(s),
+                sqlparser::ast::Value::DoubleQuotedString(s)
+                | sqlparser::ast::Value::SingleQuotedString(s)
+                    if !require_now_expr =>
+                {
+                    Ok(s)
+                }
+                unexpected => {
+                    if !require_now_expr {
+                        Err(ParserError::ParserError(format!(
+                            "Expected number, string or word, but have {unexpected:?}"
+                        )))
+                        .context(ParserSnafu)
+                    } else {
+                        Err(ParserError::ParserError(format!(
+                            "Expected expression containing `now()`, but have {unexpected:?}"
+                        )))
+                        .context(ParserSnafu)
+                    }
+                }
+            },
+            _ => Self::parse_expr_to_ts(parser_expr, require_now_expr),
+        }
+    }
+
+    /// Parse the expression to a timestamp in seconds.
+    fn parse_expr_to_ts(
+        parser_expr: sqlparser::ast::Expr,
+        require_now_expr: bool,
+    ) -> std::result::Result<String, TQLError> {
         let lit = utils::parser_expr_to_scalar_value_literal(parser_expr, require_now_expr)
             .map_err(Box::new)
             .context(ConvertToLogicalExpressionSnafu)?;
@@ -267,14 +250,11 @@ impl ParserContext<'_> {
         })
     }
 
-    fn parse_to_expr(tokens: Vec<Token>) -> std::result::Result<sqlparser::ast::Expr, TQLError> {
-        Parser::new(&GreptimeDbDialect {})
-            .with_tokens(tokens)
-            .parse_expr()
-            .context(ParserSnafu)
-    }
-
-    fn parse_tql_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {
+    /// Parse the TQL query and optional alias from the given [Parser] and SQL string.
+    pub fn parse_tql_query(
+        parser: &mut Parser,
+        sql: &str,
+    ) -> std::result::Result<(String, Option<String>), ParserError> {
         while matches!(parser.peek_token().token, Token::Comma) {
             let _skip_token = parser.next_token();
         }
@@ -286,14 +266,43 @@ impl ParserContext<'_> {
         let start_location = start_tql.span.start;
         // translate the start location to the index in the sql string
         let index = location_to_index(sql, &start_location);
+        assert!(index > 0);
 
-        let query = &sql[index - 1..];
-        while parser.next_token() != Token::EOF {
-            // consume all tokens
-            // TODO(dennis): supports multi TQL statements separated by ';'?
+        let mut token = start_tql;
+        loop {
+            // Find AS keyword, which indicates "<promql> AS <alias"
+            if matches!(&token.token, Token::Word(w) if w.keyword == Keyword::AS) {
+                let query_end_index = location_to_index(sql, &token.span.start);
+                let alias = parser.parse_identifier()?;
+                let promql = sql[index - 1..query_end_index]
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
+                if promql.is_empty() {
+                    return Err(ParserError::ParserError("Empty promql query".to_string()));
+                }
+
+                if parser.consume_token(&Token::EOF) || parser.consume_token(&Token::SemiColon) {
+                    return Ok((promql, Some(alias.value)));
+                } else {
+                    return Err(ParserError::ParserError(format!(
+                        "Unexpected token after alias: {}",
+                        parser.peek_token()
+                    )));
+                }
+            }
+            token = parser.next_token();
+            if token == Token::EOF {
+                break;
+            }
         }
-        // remove the last ';' or tailing space if exists
-        Ok(query.trim().trim_end_matches(';').to_string())
+
+        // AS clause not found
+        let promql = sql[index - 1..].trim().trim_end_matches(';').to_string();
+        if promql.is_empty() {
+            return Err(ParserError::ParserError("Empty promql query".to_string()));
+        }
+        Ok((promql, None))
     }
 }
 
@@ -418,6 +427,60 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_tql_eval_with_date_trunc() {
+        let sql = "TQL EVAL (date_trunc('day', now() - interval '1' day), date_trunc('day', now()), '1h') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let statement = parse_into_statement(sql);
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                // date_trunc('day', now() - interval '1' day) should resolve to start of yesterday
+                // date_trunc('day', now()) should resolve to start of today
+                // The exact values depend on when the test runs, but we can verify the structure
+                assert!(eval.start.parse::<i64>().is_ok());
+                assert!(eval.end.parse::<i64>().is_ok());
+                assert_eq!(eval.step, "1h");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Test with 4 parameters including lookback
+        let sql = "TQL EVAL (date_trunc('hour', now() - interval '6' hour), date_trunc('hour', now()), '30m', '5m') cpu_usage_total";
+        let statement = parse_into_statement(sql);
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert!(eval.start.parse::<i64>().is_ok());
+                assert!(eval.end.parse::<i64>().is_ok());
+                assert_eq!(eval.step, "30m");
+                assert_eq!(eval.lookback, Some("5m".to_string()));
+                assert_eq!(eval.query, "cpu_usage_total");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_tql_analyze_with_date_trunc() {
+        let sql = "TQL ANALYZE VERBOSE FORMAT JSON (date_trunc('week', now() - interval '2' week), date_trunc('week', now()), '4h', '1h') network_bytes_total";
+        let statement = parse_into_statement(sql);
+        match statement {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert!(analyze.start.parse::<i64>().is_ok());
+                assert!(analyze.end.parse::<i64>().is_ok());
+                assert_eq!(analyze.step, "4h");
+                assert_eq!(analyze.lookback, Some("1h".to_string()));
+                assert_eq!(analyze.query, "network_bytes_total");
+                assert!(analyze.is_verbose);
+                assert_eq!(analyze.format, Some(AnalyzeFormat::JSON));
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -989,6 +1052,188 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tql_with_alias() {
+        // Test TQL EVAL with alias
+        let sql = "TQL EVAL (0, 30, '10s') http_requests_total AS my_metric";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "30");
+                assert_eq!(eval.step, "10s");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(eval.query, "http_requests_total");
+                assert_eq!(eval.alias, Some("my_metric".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL EVAL with complex query and alias
+        let sql = "TQL EVAL (1676887657, 1676887659, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m AS web_requests";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "1676887657");
+                assert_eq!(eval.end, "1676887659");
+                assert_eq!(eval.step, "1m");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(
+                    eval.query,
+                    "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m"
+                );
+                assert_eq!(eval.alias, Some("web_requests".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL EVAL with lookback and alias
+        let sql = "TQL EVAL (0, 100, '30s', '5m') cpu_usage_total AS cpu_metrics";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "100");
+                assert_eq!(eval.step, "30s");
+                assert_eq!(eval.lookback, Some("5m".to_string()));
+                assert_eq!(eval.query, "cpu_usage_total");
+                assert_eq!(eval.alias, Some("cpu_metrics".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL EXPLAIN with alias
+        let sql = "TQL EXPLAIN (20, 100, '10s') memory_usage{app='web'} AS memory_data";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.start, "20");
+                assert_eq!(explain.end, "100");
+                assert_eq!(explain.step, "10s");
+                assert_eq!(explain.lookback, None);
+                assert_eq!(explain.query, "memory_usage{app='web'}");
+                assert_eq!(explain.alias, Some("memory_data".to_string()));
+                assert!(!explain.is_verbose);
+                assert_eq!(explain.format, None);
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL EXPLAIN VERBOSE with alias
+        let sql = "TQL EXPLAIN VERBOSE FORMAT JSON (0, 50, '5s') disk_io_rate AS disk_metrics";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Explain(explain)) => {
+                assert_eq!(explain.start, "0");
+                assert_eq!(explain.end, "50");
+                assert_eq!(explain.step, "5s");
+                assert_eq!(explain.lookback, None);
+                assert_eq!(explain.query, "disk_io_rate");
+                assert_eq!(explain.alias, Some("disk_metrics".to_string()));
+                assert!(explain.is_verbose);
+                assert_eq!(explain.format, Some(AnalyzeFormat::JSON));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL ANALYZE with alias
+        let sql = "TQL ANALYZE (100, 200, '1m') network_bytes_total AS network_stats";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "100");
+                assert_eq!(analyze.end, "200");
+                assert_eq!(analyze.step, "1m");
+                assert_eq!(analyze.lookback, None);
+                assert_eq!(analyze.query, "network_bytes_total");
+                assert_eq!(analyze.alias, Some("network_stats".to_string()));
+                assert!(!analyze.is_verbose);
+                assert_eq!(analyze.format, None);
+            }
+            _ => unreachable!(),
+        }
+
+        // Test TQL ANALYZE VERBOSE with alias and lookback
+        let sql = "TQL ANALYZE VERBOSE FORMAT TEXT (0, 1000, '2m', '30s') error_rate{service='api'} AS api_errors";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Analyze(analyze)) => {
+                assert_eq!(analyze.start, "0");
+                assert_eq!(analyze.end, "1000");
+                assert_eq!(analyze.step, "2m");
+                assert_eq!(analyze.lookback, Some("30s".to_string()));
+                assert_eq!(analyze.query, "error_rate{service='api'}");
+                assert_eq!(analyze.alias, Some("api_errors".to_string()));
+                assert!(analyze.is_verbose);
+                assert_eq!(analyze.format, Some(AnalyzeFormat::TEXT));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_tql_alias_edge_cases() {
+        // Test alias with underscore and numbers
+        let sql = "TQL EVAL (0, 10, '5s') test_metric AS metric_123";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.query, "test_metric");
+                assert_eq!(eval.alias, Some("metric_123".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test complex PromQL expression with AS
+        let sql = r#"TQL EVAL (0, 30, '10s') (sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100 AS cpu_utilization;"#;
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(
+                    eval.query,
+                    "(sum by(host) (irate(host_cpu_seconds_total{mode!='idle'}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100"
+                );
+                assert_eq!(eval.alias, Some("cpu_utilization".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test query with semicolon and alias
+        let sql = "TQL EVAL (0, 10, '5s') simple_metric AS my_alias";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.query, "simple_metric");
+                assert_eq!(eval.alias, Some("my_alias".to_string()));
+            }
+            _ => unreachable!(),
+        }
+
+        // Test without alias (ensure it still works)
+        let sql = "TQL EVAL (0, 10, '5s') test_metric_no_alias";
+        match parse_into_statement(sql) {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.query, "test_metric_no_alias");
+                assert_eq!(eval.alias, None);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_tql_alias_errors() {
+        let dialect = &GreptimeDbDialect {};
+        let parse_options = ParseOptions::default();
+
+        // Test AS without alias identifier
+        let sql = "TQL EVAL (0, 10, '5s') test_metric AS";
+        let result = ParserContext::create_with_dialect(sql, dialect, parse_options.clone());
+        assert!(result.is_err(), "Should fail when AS has no identifier");
+
+        // Test AS with invalid characters after alias
+        let sql = "TQL EVAL (0, 10, '5s') test_metric AS alias extra_token";
+        let result = ParserContext::create_with_dialect(sql, dialect, parse_options.clone());
+        assert!(
+            result.is_err(),
+            "Should fail with unexpected token after alias"
+        );
+
+        // Test AS with empty promql query
+        let sql = "TQL EVAL (0, 10, '5s') AS alias";
+        let result = ParserContext::create_with_dialect(sql, dialect, parse_options.clone());
+        assert!(result.is_err(), "Should fail with empty promql query");
+    }
+
+    #[test]
     fn test_parse_tql_error() {
         let dialect = &GreptimeDbDialect {};
         let parse_options = ParseOptions::default();
@@ -997,10 +1242,13 @@ mod tests {
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
+
         assert!(
             result
                 .output_msg()
-                .contains("Failed to extract a timestamp value")
+                .contains("Expected ')' after TQL parameters, but found: m"),
+            "{}",
+            result.output_msg()
         );
 
         // missing end
@@ -1010,7 +1258,9 @@ mod tests {
         assert!(
             result
                 .output_msg()
-                .contains("Failed to extract a timestamp value")
+                .contains("Expected 3 or 4 expressions in TQL parameters"),
+            "{}",
+            result.output_msg()
         );
 
         // empty TQL query
@@ -1023,6 +1273,12 @@ mod tests {
         let sql = "tql eval (0, 0, '1s) t;;';";
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
-        assert!(result.output_msg().contains("Delimiters not match"));
+        assert!(
+            result
+                .output_msg()
+                .contains("Expected ')' after TQL parameters, but found: ;"),
+            "{}",
+            result.output_msg()
+        );
     }
 }

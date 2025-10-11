@@ -88,7 +88,7 @@ macro_rules! sql_tests {
 
 pub async fn test_mysql_auth(store_type: StorageType) {
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+        "static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd",
     )
     .unwrap();
 
@@ -139,6 +139,46 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+
+    // 4. readonly user
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://readonly_user:readonly_pwd@{addr}/public"))
+        .await;
+    assert!(conn_re.is_ok());
+    let pool = conn_re.unwrap();
+    let _ = pool.execute("SELECT 1").await.unwrap();
+    let err = pool
+        .execute("CREATE TABLE test (ts timestamp time index)")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("(PermissionDenied): User is not authorized to perform this action"),
+        "{}",
+        err.to_string()
+    );
+
+    // 5. writeonly user
+    let conn_re = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "mysql://writeonly_user:writeonly_pwd@{addr}/public"
+        ))
+        .await;
+    assert!(conn_re.is_ok());
+    let pool = conn_re.unwrap();
+    let _ = pool
+        .execute("CREATE TABLE test (ts timestamp time index)")
+        .await
+        .unwrap();
+    let err = pool.execute("SHOW TABLES").await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("(PermissionDenied): User is not authorized to perform this action"),
+        "{}",
+        err.to_string()
+    );
 
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
@@ -423,10 +463,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
 }
 
 pub async fn test_postgres_auth(store_type: StorageType) {
-    let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-    )
-    .unwrap();
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
 
     let (mut guard, fe_pg_server) =
         setup_pg_server_with_user_provider(store_type, "sql_crud", Some(user_provider)).await;
@@ -1145,7 +1183,7 @@ pub async fn test_mysql_async_timestamp(store_type: StorageType) {
     .await
     .expect("create table failure");
 
-    let metrics = vec![
+    let metrics = [
         CpuMetric::new(
             "host0".into(),
             "test".into(),

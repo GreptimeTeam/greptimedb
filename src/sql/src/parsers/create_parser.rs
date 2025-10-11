@@ -208,9 +208,7 @@ impl<'a> ParserContext<'a> {
         for key in options.keys() {
             ensure!(
                 validate_database_option(key),
-                InvalidDatabaseOptionSnafu {
-                    key: key.to_string()
-                }
+                InvalidDatabaseOptionSnafu { key: key.clone() }
             );
         }
         if let Some(append_mode) = options.get("append_mode")

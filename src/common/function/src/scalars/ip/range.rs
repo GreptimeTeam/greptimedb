@@ -14,17 +14,18 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
-use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::prelude::Value;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVectorBuilder, MutableVector, VectorRef};
+use datafusion_common::DataFusionError;
+use datafusion_common::arrow::array::{Array, AsArray, BooleanBuilder};
+use datafusion_common::arrow::compute;
+use datafusion_common::arrow::datatypes::DataType;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use derive_more::Display;
 use snafu::ensure;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, extract_args};
 
 /// Function that checks if an IPv4 address is within a specified CIDR range.
 ///
@@ -35,59 +36,58 @@ use crate::function::{Function, FunctionContext};
 /// - ipv4_in_range('192.168.1.5', '192.168.1.0/24') -> true
 /// - ipv4_in_range('192.168.2.1', '192.168.1.0/24') -> false
 /// - ipv4_in_range('10.0.0.1', '10.0.0.0/8') -> true
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv4InRange;
+pub(crate) struct Ipv4InRange {
+    signature: Signature,
+}
+
+impl Default for Ipv4InRange {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv4InRange {
     fn name(&self) -> &str {
         "ipv4_in_range"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 2 arguments, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
-        let ip_vec = &columns[0];
-        let range_vec = &columns[1];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let ranges = arg1.as_string_view();
+
         let size = ip_vec.len();
 
-        ensure!(
-            range_vec.len() == size,
-            InvalidFuncArgsSnafu {
-                err_msg: "IP addresses and CIDR ranges must have the same number of rows"
-                    .to_string()
-            }
-        );
-
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
-            let ip = ip_vec.get(i);
-            let range = range_vec.get(i);
+            let ip = ip_vec.is_valid(i).then(|| ip_vec.value(i));
+            let range = ranges.is_valid(i).then(|| ranges.value(i));
 
             let in_range = match (ip, range) {
-                (Value::String(ip_str), Value::String(range_str)) => {
-                    let ip_str = ip_str.as_utf8().trim();
-                    let range_str = range_str.as_utf8().trim();
-
+                (Some(ip_str), Some(range_str)) => {
                     if ip_str.is_empty() || range_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "IP address and CIDR range cannot be empty".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution(
+                            "IP address or CIDR range cannot be empty".to_string(),
+                        ));
                     }
 
                     // Parse the IP address
@@ -107,10 +107,10 @@ impl Function for Ipv4InRange {
                 _ => None,
             };
 
-            results.push(in_range);
+            builder.append_option(in_range);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -124,59 +124,56 @@ impl Function for Ipv4InRange {
 /// - ipv6_in_range('2001:db8:1::', '2001:db8::/32') -> true
 /// - ipv6_in_range('2001:db9::1', '2001:db8::/32') -> false
 /// - ipv6_in_range('::1', '::1/128') -> true
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6InRange;
+pub(crate) struct Ipv6InRange {
+    signature: Signature,
+}
+
+impl Default for Ipv6InRange {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6InRange {
     fn name(&self) -> &str {
         "ipv6_in_range"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
-        ensure!(
-            columns.len() == 2,
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Expected 2 arguments, got {}", columns.len())
-            }
-        );
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1] = extract_args(self.name(), &args)?;
 
-        let ip_vec = &columns[0];
-        let range_vec = &columns[1];
+        let arg0 = compute::cast(&arg0, &DataType::Utf8View)?;
+        let ip_vec = arg0.as_string_view();
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let ranges = arg1.as_string_view();
         let size = ip_vec.len();
-
-        ensure!(
-            range_vec.len() == size,
-            InvalidFuncArgsSnafu {
-                err_msg: "IP addresses and CIDR ranges must have the same number of rows"
-                    .to_string()
-            }
-        );
-
-        let mut results = BooleanVectorBuilder::with_capacity(size);
+        let mut builder = BooleanBuilder::with_capacity(size);
 
         for i in 0..size {
-            let ip = ip_vec.get(i);
-            let range = range_vec.get(i);
+            let ip = ip_vec.is_valid(i).then(|| ip_vec.value(i));
+            let range = ranges.is_valid(i).then(|| ranges.value(i));
 
             let in_range = match (ip, range) {
-                (Value::String(ip_str), Value::String(range_str)) => {
-                    let ip_str = ip_str.as_utf8().trim();
-                    let range_str = range_str.as_utf8().trim();
-
+                (Some(ip_str), Some(range_str)) => {
                     if ip_str.is_empty() || range_str.is_empty() {
-                        return InvalidFuncArgsSnafu {
-                            err_msg: "IP address and CIDR range cannot be empty".to_string(),
-                        }
-                        .fail();
+                        return Err(DataFusionError::Execution(
+                            "IP address or CIDR range cannot be empty".to_string(),
+                        ));
                     }
 
                     // Parse the IP address
@@ -196,10 +193,10 @@ impl Function for Ipv6InRange {
                 _ => None,
             };
 
-            results.push(in_range);
+            builder.append_option(in_range);
         }
 
-        Ok(results.to_vector())
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
@@ -312,7 +309,7 @@ fn is_ipv6_in_range(ip: &Ipv6Addr, cidr_base: &Ipv6Addr, prefix_len: u8) -> Opti
     }
 
     // If there's a partial byte to check
-    if prefix_len % 8 != 0 && full_bytes < 16 {
+    if !prefix_len.is_multiple_of(8) && full_bytes < 16 {
         let bits_to_check = prefix_len % 8;
         let mask = 0xFF_u8 << (8 - bits_to_check);
 
@@ -329,15 +326,14 @@ fn is_ipv6_in_range(ip: &Ipv6Addr, cidr_base: &Ipv6Addr, prefix_len: u8) -> Opti
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BooleanVector, StringVector};
+    use arrow_schema::Field;
+    use datafusion_common::arrow::array::StringViewArray;
 
     use super::*;
 
     #[test]
     fn test_ipv4_in_range() {
-        let func = Ipv4InRange;
-        let ctx = FunctionContext::default();
+        let func = Ipv4InRange::default();
 
         // Test IPs
         let ip_values = vec![
@@ -357,24 +353,31 @@ mod tests {
             "172.16.0.0/16",
         ];
 
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&cidr_values)));
 
-        let result = func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
-        let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 5,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(5).unwrap();
+        let result = result.as_boolean();
 
         // Expected results
-        assert!(result.get_data(0).unwrap()); // 192.168.1.5 is in 192.168.1.0/24
-        assert!(!result.get_data(1).unwrap()); // 192.168.2.1 is not in 192.168.1.0/24
-        assert!(result.get_data(2).unwrap()); // 10.0.0.1 is in 10.0.0.0/8
-        assert!(result.get_data(3).unwrap()); // 10.1.0.1 is in 10.0.0.0/8
-        assert!(result.get_data(4).unwrap()); // 172.16.0.1 is in 172.16.0.0/16
+        assert!(result.value(0)); // 192.168.1.5 is in 192.168.1.0/24
+        assert!(!result.value(1)); // 192.168.2.1 is not in 192.168.1.0/24
+        assert!(result.value(2)); // 10.0.0.1 is in 10.0.0.0/8
+        assert!(result.value(3)); // 10.1.0.1 is in 10.0.0.0/8
+        assert!(result.value(4)); // 172.16.0.1 is in 172.16.0.0/16
     }
 
     #[test]
     fn test_ipv6_in_range() {
-        let func = Ipv6InRange;
-        let ctx = FunctionContext::default();
+        let func = Ipv6InRange::default();
 
         // Test IPs
         let ip_values = vec![
@@ -394,46 +397,70 @@ mod tests {
             "fe80::/16",
         ];
 
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&cidr_values)));
 
-        let result = func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
-        let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 5,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = func.invoke_with_args(args).unwrap();
+        let result = result.to_array(5).unwrap();
+        let result = result.as_boolean();
 
         // Expected results
-        assert!(result.get_data(0).unwrap()); // 2001:db8::1 is in 2001:db8::/32
-        assert!(result.get_data(1).unwrap()); // 2001:db8:1:: is in 2001:db8::/32
-        assert!(!result.get_data(2).unwrap()); // 2001:db9::1 is not in 2001:db8::/32
-        assert!(result.get_data(3).unwrap()); // ::1 is in ::1/128
-        assert!(result.get_data(4).unwrap()); // fe80::1 is in fe80::/16
+        assert!(result.value(0)); // 2001:db8::1 is in 2001:db8::/32
+        assert!(result.value(1)); // 2001:db8:1:: is in 2001:db8::/32
+        assert!(!result.value(2)); // 2001:db9::1 is not in 2001:db8::/32
+        assert!(result.value(3)); // ::1 is in ::1/128
+        assert!(result.value(4)); // fe80::1 is in fe80::/16
     }
 
     #[test]
     fn test_invalid_inputs() {
-        let ipv4_func = Ipv4InRange;
-        let ipv6_func = Ipv6InRange;
-        let ctx = FunctionContext::default();
+        let ipv4_func = Ipv4InRange::default();
+        let ipv6_func = Ipv6InRange::default();
 
         // Invalid IPv4 address
         let invalid_ip_values = vec!["not-an-ip", "192.168.1.300"];
         let cidr_values = vec!["192.168.1.0/24", "192.168.1.0/24"];
 
-        let invalid_ip_input = Arc::new(StringVector::from_slice(&invalid_ip_values)) as VectorRef;
-        let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(
+            &invalid_ip_values,
+        )));
+        let arg1 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&cidr_values)));
 
-        let result = ipv4_func.eval(&ctx, &[invalid_ip_input, cidr_input]);
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = ipv4_func.invoke_with_args(args);
         assert!(result.is_err());
 
         // Invalid CIDR notation
         let ip_values = vec!["192.168.1.1", "2001:db8::1"];
         let invalid_cidr_values = vec!["192.168.1.0", "2001:db8::/129"];
 
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let invalid_cidr_input =
-            Arc::new(StringVector::from_slice(&invalid_cidr_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(
+            &invalid_cidr_values,
+        )));
 
-        let ipv4_result = ipv4_func.eval(&ctx, &[ip_input.clone(), invalid_cidr_input.clone()]);
-        let ipv6_result = ipv6_func.eval(&ctx, &[ip_input, invalid_cidr_input]);
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 2,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let ipv4_result = ipv4_func.invoke_with_args(args.clone());
+        let ipv6_result = ipv6_func.invoke_with_args(args);
 
         assert!(ipv4_result.is_err());
         assert!(ipv6_result.is_err());
@@ -441,21 +468,28 @@ mod tests {
 
     #[test]
     fn test_edge_cases() {
-        let ipv4_func = Ipv4InRange;
-        let ctx = FunctionContext::default();
+        let ipv4_func = Ipv4InRange::default();
 
         // Edge cases like prefix length 0 (matches everything) and 32 (exact match)
         let ip_values = vec!["8.8.8.8", "192.168.1.1", "192.168.1.1"];
         let cidr_values = vec!["0.0.0.0/0", "192.168.1.1/32", "192.168.1.0/32"];
 
-        let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
-        let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
+        let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&ip_values)));
+        let arg1 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&cidr_values)));
 
-        let result = ipv4_func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
-        let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
+        let args = ScalarFunctionArgs {
+            args: vec![arg0, arg1],
+            arg_fields: vec![],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("x", DataType::Boolean, false)),
+            config_options: Arc::new(Default::default()),
+        };
+        let result = ipv4_func.invoke_with_args(args).unwrap();
+        let result = result.to_array(3).unwrap();
+        let result = result.as_boolean();
 
-        assert!(result.get_data(0).unwrap()); // 8.8.8.8 is in 0.0.0.0/0 (matches everything)
-        assert!(result.get_data(1).unwrap()); // 192.168.1.1 is in 192.168.1.1/32 (exact match)
-        assert!(!result.get_data(2).unwrap()); // 192.168.1.1 is not in 192.168.1.0/32 (no match)
+        assert!(result.value(0)); // 8.8.8.8 is in 0.0.0.0/0 (matches everything)
+        assert!(result.value(1)); // 192.168.1.1 is in 192.168.1.1/32 (exact match)
+        assert!(!result.value(2)); // 192.168.1.1 is not in 192.168.1.0/32 (no match)
     }
 }

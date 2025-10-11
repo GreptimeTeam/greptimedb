@@ -115,6 +115,8 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether to use flat format for reading.
     flat_format: bool,
+    /// Whether this reader is for compaction.
+    compaction: bool,
 }
 
 impl ParquetReaderBuilder {
@@ -138,6 +140,7 @@ impl ParquetReaderBuilder {
             fulltext_index_applier: None,
             expected_metadata: None,
             flat_format: false,
+            compaction: false,
         }
     }
 
@@ -208,6 +211,13 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Sets the compaction flag.
+    #[must_use]
+    pub fn compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -239,20 +249,28 @@ impl ParquetReaderBuilder {
         let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(
                 region_meta.clone(),
-                column_ids.iter().copied(),
+                Some(column_ids),
                 self.flat_format,
-            )
+                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+                &file_path,
+                self.compaction,
+            )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
+            let column_ids: Vec<_> = expected_meta
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect();
             ReadFormat::new(
                 region_meta.clone(),
-                expected_meta
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id),
+                Some(&column_ids),
                 self.flat_format,
-            )
+                Some(parquet_meta.file_metadata().schema_descr().num_columns()),
+                &file_path,
+                self.compaction,
+            )?
         };
         if need_override_sequence(&parquet_meta) {
             read_format
@@ -1379,17 +1397,10 @@ impl FlatRowGroupReader {
                 let record_batch = batch_result.context(ArrowReaderSnafu {
                     path: self.context.file_path(),
                 })?;
-
-                // Apply override sequence if needed
-                if let (Some(flat_format), Some(override_array)) = (
-                    self.context.read_format().as_flat(),
-                    &self.override_sequence,
-                ) {
-                    let converted =
-                        flat_format.convert_batch(record_batch, Some(override_array))?;
-                    return Ok(Some(converted));
-                }
-
+                // Safety: Only flat format use FlatRowGroupReader.
+                let flat_format = self.context.read_format().as_flat().unwrap();
+                let record_batch =
+                    flat_format.convert_batch(record_batch, self.override_sequence.as_ref())?;
                 Ok(Some(record_batch))
             }
             None => Ok(None),

@@ -180,7 +180,7 @@ impl Vector for BinaryVector {
         vectors::impl_get_for_vector!(self.array, index)
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
@@ -241,7 +241,7 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         match value.as_binary()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
@@ -427,8 +427,8 @@ mod tests {
         let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
 
         let mut builder = BinaryType.create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Binary("hello".as_bytes()));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::Binary("hello".as_bytes()));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(
             builder

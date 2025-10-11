@@ -312,7 +312,7 @@ impl Pipeline {
 
                 // Create pipeline context with the found timestamp
                 let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                    IdentityTimeIndex::Epoch(ts_name.to_string(), *time_unit, false),
+                    IdentityTimeIndex::Epoch(ts_name.clone(), *time_unit, false),
                 ));
                 let n_ctx =
                     PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
@@ -505,7 +505,7 @@ transform:
             .unwrap();
 
         assert_eq!(schema_info.schema.len(), result.0.values.len());
-        let test = vec![
+        let test = [
             (
                 ColumnDataType::String as i32,
                 Some(ValueData::StringValue("129.37.245.88".into())),

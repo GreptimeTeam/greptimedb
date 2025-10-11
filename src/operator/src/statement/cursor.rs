@@ -36,7 +36,7 @@ impl StatementExecutor {
 
         if query_ctx.get_cursor(&cursor_name).is_some() {
             error::CursorExistsSnafu {
-                name: cursor_name.to_string(),
+                name: cursor_name.clone(),
             }
             .fail()?;
         }

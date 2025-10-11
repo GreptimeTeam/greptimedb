@@ -14,7 +14,6 @@
 
 use std::{fs, path};
 
-use common_base::secrets::ExposeSecret;
 use common_telemetry::info;
 use opendal::layers::HttpClientLayer;
 use opendal::services::{Fs, Gcs, Oss, S3};
@@ -32,7 +31,7 @@ pub async fn new_raw_object_store(
 ) -> Result<ObjectStore> {
     let data_home = normalize_dir(data_home);
     match store {
-        ObjectStoreConfig::File(file_config) => new_fs_object_store(&data_home, file_config).await,
+        ObjectStoreConfig::File(file_config) => new_fs_object_store(&data_home, file_config),
         ObjectStoreConfig::S3(s3_config) => new_s3_object_store(s3_config).await,
         ObjectStoreConfig::Oss(oss_config) => new_oss_object_store(oss_config).await,
         ObjectStoreConfig::Azblob(azblob_config) => new_azblob_object_store(azblob_config).await,
@@ -41,10 +40,7 @@ pub async fn new_raw_object_store(
 }
 
 /// A helper function to create a file system object store.
-pub async fn new_fs_object_store(
-    data_home: &str,
-    _file_config: &FileConfig,
-) -> Result<ObjectStore> {
+pub fn new_fs_object_store(data_home: &str, _file_config: &FileConfig) -> Result<ObjectStore> {
     fs::create_dir_all(path::Path::new(&data_home))
         .context(error::CreateDirSnafu { dir: data_home })?;
     info!("The file storage home is: {}", data_home);
@@ -68,26 +64,14 @@ pub async fn new_fs_object_store(
 }
 
 pub async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<ObjectStore> {
-    let root = util::normalize_dir(&azblob_config.root);
-
+    let root = util::normalize_dir(&azblob_config.connection.root);
     info!(
         "The azure storage container is: {}, root is: {}",
-        azblob_config.container, &root
+        azblob_config.connection.container, &root
     );
 
     let client = build_http_client(&azblob_config.http_client)?;
-
-    let mut builder = Azblob::default()
-        .root(&root)
-        .container(&azblob_config.container)
-        .endpoint(&azblob_config.endpoint)
-        .account_name(azblob_config.account_name.expose_secret())
-        .account_key(azblob_config.account_key.expose_secret());
-
-    if let Some(token) = &azblob_config.sas_token {
-        builder = builder.sas_token(token);
-    };
-
+    let builder = Azblob::from(&azblob_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
         .layer(HttpClientLayer::new(client))
@@ -97,22 +81,14 @@ pub async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<Obj
 }
 
 pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore> {
-    let root = util::normalize_dir(&gcs_config.root);
+    let root = util::normalize_dir(&gcs_config.connection.root);
     info!(
         "The gcs storage bucket is: {}, root is: {}",
-        gcs_config.bucket, &root
+        gcs_config.connection.bucket, &root
     );
 
     let client = build_http_client(&gcs_config.http_client)?;
-
-    let builder = Gcs::default()
-        .root(&root)
-        .bucket(&gcs_config.bucket)
-        .scope(&gcs_config.scope)
-        .credential_path(gcs_config.credential_path.expose_secret())
-        .credential(gcs_config.credential.expose_secret())
-        .endpoint(&gcs_config.endpoint);
-
+    let builder = Gcs::from(&gcs_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
         .layer(HttpClientLayer::new(client))
@@ -122,21 +98,14 @@ pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore>
 }
 
 pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore> {
-    let root = util::normalize_dir(&oss_config.root);
+    let root = util::normalize_dir(&oss_config.connection.root);
     info!(
         "The oss storage bucket is: {}, root is: {}",
-        oss_config.bucket, &root
+        oss_config.connection.bucket, &root
     );
 
     let client = build_http_client(&oss_config.http_client)?;
-
-    let builder = Oss::default()
-        .root(&root)
-        .bucket(&oss_config.bucket)
-        .endpoint(&oss_config.endpoint)
-        .access_key_id(oss_config.access_key_id.expose_secret())
-        .access_key_secret(oss_config.access_key_secret.expose_secret());
-
+    let builder = Oss::from(&oss_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
         .layer(HttpClientLayer::new(client))
@@ -146,31 +115,14 @@ pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore>
 }
 
 pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
-    let root = util::normalize_dir(&s3_config.root);
-
+    let root = util::normalize_dir(&s3_config.connection.root);
     info!(
         "The s3 storage bucket is: {}, root is: {}",
-        s3_config.bucket, &root
+        s3_config.connection.bucket, &root
     );
 
     let client = build_http_client(&s3_config.http_client)?;
-
-    let mut builder = S3::default()
-        .root(&root)
-        .bucket(&s3_config.bucket)
-        .access_key_id(s3_config.access_key_id.expose_secret())
-        .secret_access_key(s3_config.secret_access_key.expose_secret());
-
-    if s3_config.endpoint.is_some() {
-        builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-    }
-    if s3_config.region.is_some() {
-        builder = builder.region(s3_config.region.as_ref().unwrap());
-    }
-    if s3_config.enable_virtual_host_style {
-        builder = builder.enable_virtual_host_style();
-    }
-
+    let builder = S3::from(&s3_config.connection);
     let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
         .layer(HttpClientLayer::new(client))

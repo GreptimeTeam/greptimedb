@@ -14,7 +14,6 @@
 
 #![feature(assert_matches)]
 #![feature(if_let_guard)]
-#![feature(let_chains)]
 
 mod bulk_insert;
 pub mod delete;

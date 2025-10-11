@@ -262,7 +262,7 @@ impl ShardBuilderReader {
         }
     }
 
-    pub fn current_data_batch(&self) -> DataBatch {
+    pub fn current_data_batch(&self) -> DataBatch<'_> {
         self.data_reader.current_data_batch()
     }
 

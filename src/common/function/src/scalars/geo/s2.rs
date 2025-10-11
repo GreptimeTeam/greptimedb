@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, LazyLock};
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::InvalidFuncArgsSnafu;
 use datafusion_common::ScalarValue;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder, UInt64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
@@ -39,20 +39,14 @@ static LEVEL_TYPES: &[DataType] = datafusion_expr::type_coercion::aggregates::IN
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///
 /// [s2]: http://s2geometry.io
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2LatLngToCell;
+pub(crate) struct S2LatLngToCell {
+    signature: Signature,
+}
 
-impl Function for S2LatLngToCell {
-    fn name(&self) -> &str {
-        "s2_latlng_to_cell"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for S2LatLngToCell {
+    fn default() -> Self {
         let mut signatures = Vec::with_capacity(COORDINATE_TYPES.len());
         for coord_type in COORDINATE_TYPES.as_slice() {
             signatures.push(TypeSignature::Exact(vec![
@@ -62,7 +56,23 @@ impl Function for S2LatLngToCell {
                 coord_type.clone(),
             ]));
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for S2LatLngToCell {
+    fn name(&self) -> &str {
+        "s2_latlng_to_cell"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -107,21 +117,31 @@ impl Function for S2LatLngToCell {
 }
 
 /// Return the level of current s2 cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellLevel;
+pub(crate) struct S2CellLevel {
+    signature: Signature,
+}
+
+impl Default for S2CellLevel {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for S2CellLevel {
     fn name(&self) -> &str {
         "s2_cell_level"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -145,21 +165,31 @@ impl Function for S2CellLevel {
 }
 
 /// Return the string presentation of the cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellToToken;
+pub(crate) struct S2CellToToken {
+    signature: Signature,
+}
+
+impl Default for S2CellToToken {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for S2CellToToken {
     fn name(&self) -> &str {
         "s2_cell_to_token"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -183,21 +213,31 @@ impl Function for S2CellToToken {
 }
 
 /// Return parent at given level of current s2 cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct S2CellParent;
+pub(crate) struct S2CellParent {
+    signature: Signature,
+}
+
+impl Default for S2CellParent {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_level(),
+        }
+    }
+}
 
 impl Function for S2CellParent {
     fn name(&self) -> &str {
         "s2_cell_parent"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_level()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

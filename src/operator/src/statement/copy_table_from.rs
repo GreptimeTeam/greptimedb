@@ -116,7 +116,7 @@ impl StatementExecutor {
             Source::Dir
         };
 
-        let lister = Lister::new(object_store.clone(), source.clone(), dir.to_string(), regex);
+        let lister = Lister::new(object_store.clone(), source.clone(), dir.clone(), regex);
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
         debug!("Copy from dir: {dir:?}, {source:?}, entries: {entries:?}");
@@ -386,7 +386,7 @@ impl StatementExecutor {
             }
             let path = entry.path();
             let file_metadata = self
-                .collect_metadata(&object_store, format, path.to_string())
+                .collect_metadata(&object_store, format.clone(), path.to_string())
                 .await?;
 
             let file_schema = file_metadata.schema();
@@ -430,7 +430,7 @@ impl StatementExecutor {
             let fields = projected_table_schema
                 .fields()
                 .iter()
-                .map(|f| f.name().to_string())
+                .map(|f| f.name().clone())
                 .collect::<Vec<_>>();
 
             // TODO(hl): make this configurable through options.
@@ -453,9 +453,9 @@ impl StatementExecutor {
 
                 pending.push(self.inserter.handle_table_insert(
                     InsertRequest {
-                        catalog_name: req.catalog_name.to_string(),
-                        schema_name: req.schema_name.to_string(),
-                        table_name: req.table_name.to_string(),
+                        catalog_name: req.catalog_name.clone(),
+                        schema_name: req.schema_name.clone(),
+                        table_name: req.table_name.clone(),
                         columns_values,
                     },
                     query_ctx.clone(),

@@ -192,7 +192,7 @@ impl DatafusionQueryEngine {
             .timestamp_column()
             .map(|x| &x.name)
             .with_context(|| MissingTimestampColumnSnafu {
-                table_name: table_name.to_string(),
+                table_name: table_name.clone(),
             })?;
 
         let table_info = table.table_info();
@@ -578,6 +578,12 @@ impl QueryEngine for DatafusionQueryEngine {
                 query_ctx: query_ctx.clone(),
                 state: self.engine_state().function_state(),
             });
+
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
 
         QueryEngineContext::new(state, query_ctx)
     }

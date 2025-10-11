@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock};
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::error::{self, Result};
+use common_query::error;
 use datafusion::arrow::array::{
     Array, AsArray, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringViewArray,
     StringViewBuilder, UInt8Builder, UInt64Builder,
@@ -51,20 +51,14 @@ static POSITION_TYPES: &[DataType] = INTEGERS;
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///
 /// [h3]: https://h3geo.org/
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3LatLngToCell;
+pub(crate) struct H3LatLngToCell {
+    signature: Signature,
+}
 
-impl Function for H3LatLngToCell {
-    fn name(&self) -> &str {
-        "h3_latlng_to_cell"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for H3LatLngToCell {
+    fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in COORDINATE_TYPES.as_slice() {
             for resolution_type in RESOLUTION_TYPES {
@@ -78,7 +72,23 @@ impl Function for H3LatLngToCell {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for H3LatLngToCell {
+    fn name(&self) -> &str {
+        "h3_latlng_to_cell"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -132,20 +142,14 @@ impl Function for H3LatLngToCell {
 /// geospatial coordinate.
 ///
 /// [h3]: https://h3geo.org/
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3LatLngToCellString;
+pub(crate) struct H3LatLngToCellString {
+    signature: Signature,
+}
 
-impl Function for H3LatLngToCellString {
-    fn name(&self) -> &str {
-        "h3_latlng_to_cell_string"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8View)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for H3LatLngToCellString {
+    fn default() -> Self {
         let mut signatures = Vec::new();
         for coord_type in COORDINATE_TYPES.as_slice() {
             for resolution_type in RESOLUTION_TYPES {
@@ -159,7 +163,23 @@ impl Function for H3LatLngToCellString {
                 ]));
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for H3LatLngToCellString {
+    fn name(&self) -> &str {
+        "h3_latlng_to_cell_string"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -210,21 +230,31 @@ impl Function for H3LatLngToCellString {
 }
 
 /// Function that converts cell id to its string form
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellToString;
+pub(crate) struct H3CellToString {
+    signature: Signature,
+}
+
+impl Default for H3CellToString {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for H3CellToString {
     fn name(&self) -> &str {
         "h3_cell_to_string"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -248,21 +278,31 @@ impl Function for H3CellToString {
 }
 
 /// Function that converts cell string id to uint64 number
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3StringToCell;
+pub(crate) struct H3StringToCell {
+    signature: Signature,
+}
+
+impl Default for H3StringToCell {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Stable),
+        }
+    }
+}
 
 impl Function for H3StringToCell {
     fn name(&self) -> &str {
         "h3_string_to_cell"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Stable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -294,16 +334,26 @@ impl Function for H3StringToCell {
 }
 
 /// Function that returns centroid latitude and longitude of given cell id
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellCenterLatLng;
+pub(crate) struct H3CellCenterLatLng {
+    signature: Signature,
+}
+
+impl Default for H3CellCenterLatLng {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for H3CellCenterLatLng {
     fn name(&self) -> &str {
         "h3_cell_center_latlng"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "x",
             DataType::Float64,
@@ -311,8 +361,8 @@ impl Function for H3CellCenterLatLng {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -342,21 +392,31 @@ impl Function for H3CellCenterLatLng {
 }
 
 /// Function that returns resolution of given cell id
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellResolution;
+pub(crate) struct H3CellResolution {
+    signature: Signature,
+}
+
+impl Default for H3CellResolution {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for H3CellResolution {
     fn name(&self) -> &str {
         "h3_cell_resolution"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt8)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -379,21 +439,31 @@ impl Function for H3CellResolution {
 }
 
 /// Function that returns base cell of given cell id
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellBase;
+pub(crate) struct H3CellBase {
+    signature: Signature,
+}
+
+impl Default for H3CellBase {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for H3CellBase {
     fn name(&self) -> &str {
         "h3_cell_base"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt8)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -417,21 +487,31 @@ impl Function for H3CellBase {
 }
 
 /// Function that check if given cell id is a pentagon
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellIsPentagon;
+pub(crate) struct H3CellIsPentagon {
+    signature: Signature,
+}
+
+impl Default for H3CellIsPentagon {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell(),
+        }
+    }
+}
 
 impl Function for H3CellIsPentagon {
     fn name(&self) -> &str {
         "h3_cell_is_pentagon"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -455,21 +535,31 @@ impl Function for H3CellIsPentagon {
 }
 
 /// Function that returns center child cell of given cell id
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellCenterChild;
+pub(crate) struct H3CellCenterChild {
+    signature: Signature,
+}
+
+impl Default for H3CellCenterChild {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_resolution(),
+        }
+    }
+}
 
 impl Function for H3CellCenterChild {
     fn name(&self) -> &str {
         "h3_cell_center_child"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_resolution()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -483,21 +573,31 @@ impl Function for H3CellCenterChild {
 }
 
 /// Function that returns parent cell of given cell id and resolution
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellParent;
+pub(crate) struct H3CellParent {
+    signature: Signature,
+}
+
+impl Default for H3CellParent {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_resolution(),
+        }
+    }
+}
 
 impl Function for H3CellParent {
     fn name(&self) -> &str {
         "h3_cell_parent"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_resolution()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -511,16 +611,26 @@ impl Function for H3CellParent {
 }
 
 /// Function that returns children cell list
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellToChildren;
+pub(crate) struct H3CellToChildren {
+    signature: Signature,
+}
+
+impl Default for H3CellToChildren {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_resolution(),
+        }
+    }
+}
 
 impl Function for H3CellToChildren {
     fn name(&self) -> &str {
         "h3_cell_to_children"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "item",
             DataType::UInt64,
@@ -528,8 +638,8 @@ impl Function for H3CellToChildren {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_resolution()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -566,21 +676,31 @@ impl Function for H3CellToChildren {
 }
 
 /// Function that returns children cell count
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellToChildrenSize;
+pub(crate) struct H3CellToChildrenSize {
+    signature: Signature,
+}
+
+impl Default for H3CellToChildrenSize {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_resolution(),
+        }
+    }
+}
 
 impl Function for H3CellToChildrenSize {
     fn name(&self) -> &str {
         "h3_cell_to_children_size"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_resolution()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -594,21 +714,31 @@ impl Function for H3CellToChildrenSize {
 }
 
 /// Function that returns the cell position if its parent at given resolution
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellToChildPos;
+pub(crate) struct H3CellToChildPos {
+    signature: Signature,
+}
+
+impl Default for H3CellToChildPos {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_resolution(),
+        }
+    }
+}
 
 impl Function for H3CellToChildPos {
     fn name(&self) -> &str {
         "h3_cell_to_child_pos"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_resolution()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -651,20 +781,14 @@ where
 }
 
 /// Function that returns the cell at given position of the parent at given resolution
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3ChildPosToCell;
+pub(crate) struct H3ChildPosToCell {
+    signature: Signature,
+}
 
-impl Function for H3ChildPosToCell {
-    fn name(&self) -> &str {
-        "h3_child_pos_to_cell"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for H3ChildPosToCell {
+    fn default() -> Self {
         let mut signatures =
             Vec::with_capacity(POSITION_TYPES.len() * CELL_TYPES.len() * RESOLUTION_TYPES.len());
         for position_type in POSITION_TYPES {
@@ -678,7 +802,23 @@ impl Function for H3ChildPosToCell {
                 }
             }
         }
-        Signature::one_of(signatures, Volatility::Stable)
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
+
+impl Function for H3ChildPosToCell {
+    fn name(&self) -> &str {
+        "h3_child_pos_to_cell"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::UInt64)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -711,16 +851,26 @@ impl Function for H3ChildPosToCell {
 }
 
 /// Function that returns cells with k distances of given cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3GridDisk;
+pub(crate) struct H3GridDisk {
+    signature: Signature,
+}
+
+impl Default for H3GridDisk {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_distance(),
+        }
+    }
+}
 
 impl Function for H3GridDisk {
     fn name(&self) -> &str {
         "h3_grid_disk"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "item",
             DataType::UInt64,
@@ -728,8 +878,8 @@ impl Function for H3GridDisk {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_distance()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -760,16 +910,26 @@ impl Function for H3GridDisk {
 }
 
 /// Function that returns all cells within k distances of given cell
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3GridDiskDistances;
+pub(crate) struct H3GridDiskDistances {
+    signature: Signature,
+}
+
+impl Default for H3GridDiskDistances {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_cell_and_distance(),
+        }
+    }
+}
 
 impl Function for H3GridDiskDistances {
     fn name(&self) -> &str {
         "h3_grid_disk_distances"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "item",
             DataType::UInt64,
@@ -777,8 +937,8 @@ impl Function for H3GridDiskDistances {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_cell_and_distance()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -809,20 +969,30 @@ impl Function for H3GridDiskDistances {
 }
 
 /// Function that returns distance between two cells
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3GridDistance;
+pub(crate) struct H3GridDistance {
+    signature: Signature,
+}
+
+impl Default for H3GridDistance {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_double_cells(),
+        }
+    }
+}
 
 impl Function for H3GridDistance {
     fn name(&self) -> &str {
         "h3_grid_distance"
     }
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Int32)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_double_cells()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -863,16 +1033,26 @@ impl Function for H3GridDistance {
 }
 
 /// Function that returns path cells between two cells
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3GridPathCells;
+pub(crate) struct H3GridPathCells {
+    signature: Signature,
+}
+
+impl Default for H3GridPathCells {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_double_cells(),
+        }
+    }
+}
 
 impl Function for H3GridPathCells {
     fn name(&self) -> &str {
         "h3_grid_path_cells"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "item",
             DataType::UInt64,
@@ -880,8 +1060,8 @@ impl Function for H3GridPathCells {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_double_cells()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -919,20 +1099,14 @@ impl Function for H3GridPathCells {
 }
 
 /// Tests if cells contains given cells
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellContains;
+pub(crate) struct H3CellContains {
+    signature: Signature,
+}
 
-impl Function for H3CellContains {
-    fn name(&self) -> &str {
-        "h3_cells_contains"
-    }
-
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn signature(&self) -> Signature {
+impl Default for H3CellContains {
+    fn default() -> Self {
         let multi_cell_types = vec![
             DataType::new_list(DataType::Int64, true),
             DataType::new_list(DataType::UInt64, true),
@@ -949,8 +1123,23 @@ impl Function for H3CellContains {
                 ]));
             }
         }
+        Self {
+            signature: Signature::one_of(signatures, Volatility::Stable),
+        }
+    }
+}
 
-        Signature::one_of(signatures, Volatility::Stable)
+impl Function for H3CellContains {
+    fn name(&self) -> &str {
+        "h3_cells_contains"
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -991,20 +1180,30 @@ impl Function for H3CellContains {
 }
 
 /// Get WGS84 great circle distance of two cell centroid
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellDistanceSphereKm;
+pub(crate) struct H3CellDistanceSphereKm {
+    signature: Signature,
+}
+
+impl Default for H3CellDistanceSphereKm {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_double_cells(),
+        }
+    }
+}
 
 impl Function for H3CellDistanceSphereKm {
     fn name(&self) -> &str {
         "h3_distance_sphere_km"
     }
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_double_cells()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -1039,9 +1238,19 @@ impl Function for H3CellDistanceSphereKm {
 }
 
 /// Get Euclidean distance of two cell centroid
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct H3CellDistanceEuclideanDegree;
+pub(crate) struct H3CellDistanceEuclideanDegree {
+    signature: Signature,
+}
+
+impl Default for H3CellDistanceEuclideanDegree {
+    fn default() -> Self {
+        Self {
+            signature: signature_of_double_cells(),
+        }
+    }
+}
 
 impl H3CellDistanceEuclideanDegree {
     fn distance(centroid_this: LatLng, centroid_that: LatLng) -> f64 {
@@ -1055,12 +1264,12 @@ impl Function for H3CellDistanceEuclideanDegree {
     fn name(&self) -> &str {
         "h3_distance_degree"
     }
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        signature_of_double_cells()
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(

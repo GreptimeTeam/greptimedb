@@ -869,13 +869,6 @@ mod tests {
             pub flushed_sequence: Option<SequenceNumber>,
         }
 
-        /// Last data truncated in the region.
-        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-        pub struct RegionTruncateV1 {
-            pub region_id: RegionId,
-            pub kind: TruncateKind,
-        }
-
         let json = serde_json::to_string(&RegionEditV1 {
             files_to_add: vec![],
             files_to_remove: vec![],

@@ -12,40 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-use std::sync::Arc;
-
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
-use datafusion_expr::{Signature, Volatility};
-use datatypes::vectors::{StringVector, VectorRef};
+use datafusion_common::ScalarValue;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use session::context::Channel;
 
-use crate::function::{Function, FunctionContext};
+use crate::function::{Function, find_function_context};
+use crate::system::define_nullary_udf;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct VersionFunction;
-
-impl fmt::Display for VersionFunction {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VERSION")
-    }
-}
+define_nullary_udf!(VersionFunction);
 
 impl Function for VersionFunction {
     fn name(&self) -> &str {
         "version"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Utf8)
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
         let version = match func_ctx.query_ctx.channel() {
             Channel::Mysql => {
                 format!(
@@ -60,7 +54,6 @@ impl Function for VersionFunction {
             }
             _ => common_version::version().to_string(),
         };
-        let result = StringVector::from(vec![version]);
-        Ok(Arc::new(result))
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(version))))
     }
 }

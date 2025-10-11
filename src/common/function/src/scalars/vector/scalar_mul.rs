@@ -14,7 +14,6 @@
 
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::ScalarValue;
@@ -50,23 +49,38 @@ const NAME: &str = "vec_scalar_mul";
 /// | [1,2,3] |
 /// +---------+
 /// ```
-#[derive(Debug, Clone, Default)]
-pub struct ScalarMulFunction;
+#[derive(Debug, Clone)]
+pub(crate) struct ScalarMulFunction {
+    signature: Signature,
+}
+
+impl Default for ScalarMulFunction {
+    fn default() -> Self {
+        Self {
+            signature: helper::one_of_sigs2(
+                vec![DataType::Float64],
+                vec![
+                    DataType::Utf8,
+                    DataType::Utf8View,
+                    DataType::Binary,
+                    DataType::BinaryView,
+                ],
+            ),
+        }
+    }
+}
 
 impl Function for ScalarMulFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        helper::one_of_sigs2(
-            vec![DataType::Float64],
-            vec![DataType::Utf8, DataType::Binary],
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -110,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_scalar_mul() {
-        let func = ScalarMulFunction;
+        let func = ScalarMulFunction::default();
 
         let input0 = Arc::new(Float64Array::from(vec![
             Some(2.0),

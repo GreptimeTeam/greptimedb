@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
@@ -137,6 +138,8 @@ impl QueryEngineState {
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
+
+        analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));

@@ -161,8 +161,8 @@ impl UpdateMetadata {
             .update_table_route(
                 region_id.table_id(),
                 RegionInfo {
-                    engine: engine.to_string(),
-                    region_storage_path: region_storage_path.to_string(),
+                    engine: engine.clone(),
+                    region_storage_path: region_storage_path.clone(),
                     region_options: region_options.clone(),
                     region_wal_options: region_wal_options.clone(),
                 },

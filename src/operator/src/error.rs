@@ -864,11 +864,38 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "{} not supported when transforming to {} format type",
+        format,
+        file_format
+    ))]
+    TimestampFormatNotSupported {
+        file_format: String,
+        format: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Too large duration"))]
     TooLargeDuration {
         #[snafu(source)]
         error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Not trigger querier is specified"))]
+    MissingTriggerQuerier {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Trigger querier error"))]
+    TriggerQuerier {
+        source: BoxedError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -917,10 +944,6 @@ impl ErrorExt for Error {
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
-            #[cfg(feature = "enterprise")]
-            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
-            #[cfg(feature = "enterprise")]
-            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }
@@ -1002,7 +1025,16 @@ impl ErrorExt for Error {
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::PathNotFound { .. } => StatusCode::InvalidArguments,
+            Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
             Error::SqlCommon { source, .. } => source.status_code(),
+            #[cfg(feature = "enterprise")]
+            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::TooLargeDuration { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::MissingTriggerQuerier { .. } => StatusCode::Internal,
+            #[cfg(feature = "enterprise")]
+            Error::TriggerQuerier { source, .. } => source.status_code(),
         }
     }
 

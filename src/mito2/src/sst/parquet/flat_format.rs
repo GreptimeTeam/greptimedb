@@ -43,6 +43,7 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -51,14 +52,16 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, ReadFormat, StatValues,
+    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
+    StatValues,
 };
-use crate::sst::{FlatSchemaOptions, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema};
+use crate::sst::{
+    FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
+    to_flat_sst_arrow_schema,
+};
 
 /// Helper for writing the SST format.
-#[allow(dead_code)]
 pub(crate) struct FlatWriteFormat {
-    metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
@@ -66,18 +69,15 @@ pub(crate) struct FlatWriteFormat {
 
 impl FlatWriteFormat {
     /// Creates a new helper.
-    #[allow(dead_code)]
     pub(crate) fn new(metadata: RegionMetadataRef, options: &FlatSchemaOptions) -> FlatWriteFormat {
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, options);
         FlatWriteFormat {
-            metadata,
             arrow_schema,
             override_sequence: None,
         }
     }
 
     /// Set override sequence.
-    #[allow(dead_code)]
     pub(crate) fn with_override_sequence(
         mut self,
         override_sequence: Option<SequenceNumber>,
@@ -87,13 +87,11 @@ impl FlatWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
-    #[allow(dead_code)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
-    #[allow(dead_code)]
     pub(crate) fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
@@ -134,64 +132,60 @@ pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
 ///
 /// It only supports flat format that stores primary keys additionally.
 pub struct FlatReadFormat {
-    /// The metadata stored in the SST.
-    metadata: RegionMetadataRef,
-    /// SST file schema.
-    arrow_schema: SchemaRef,
-    /// Projection computed for the format.
-    format_projection: FormatProjection,
-    /// Column id to index in SST.
-    column_id_to_sst_index: HashMap<ColumnId, usize>,
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
-    /// Optional format converter for handling flat format conversion.
-    convert_format: Option<FlatConvertFormat>,
+    /// Parquet format adapter.
+    parquet_adapter: ParquetAdapter,
 }
 
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
+    ///
+    /// If `skip_auto_convert` is true, skips auto conversion of format when the encoding is sparse encoding.
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-        convert_to_flat: bool,
-    ) -> FlatReadFormat {
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
-
-        // Creates a map to lookup index.
-        let id_to_index = sst_column_id_indices(&metadata);
-
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            arrow_schema.fields.len(),
-            column_ids,
-        );
-
-        let convert_format = if convert_to_flat {
-            let codec = build_primary_key_codec(&metadata);
-            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
-        } else {
-            None
+        num_columns: Option<usize>,
+        file_path: &str,
+        skip_auto_convert: bool,
+    ) -> Result<FlatReadFormat> {
+        let is_legacy = match num_columns {
+            Some(num) => Self::is_legacy_format(&metadata, num, file_path)?,
+            None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         };
 
-        FlatReadFormat {
-            metadata,
-            arrow_schema,
-            format_projection,
-            column_id_to_sst_index: id_to_index,
+        let parquet_adapter = if is_legacy {
+            // Safety: is_legacy_format() ensures primary_key is not empty.
+            if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                // Only skip auto convert when the primary key encoding is sparse.
+                ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
+                    metadata,
+                    column_ids,
+                    skip_auto_convert,
+                ))
+            } else {
+                ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
+                    metadata, column_ids, false,
+                ))
+            }
+        } else {
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
+        };
+
+        Ok(FlatReadFormat {
             override_sequence: None,
-            convert_format,
-        }
+            parquet_adapter,
+        })
     }
 
     /// Sets the sequence number to override.
-    #[allow(dead_code)]
     pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
         self.override_sequence = sequence;
     }
 
     /// Index of a column in the projected batch by its column id.
     pub fn projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
-        self.format_projection
+        self.format_projection()
             .column_id_to_projected_index
             .get(&column_id)
             .copied()
@@ -203,7 +197,10 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        self.get_stat_values(row_groups, column_id, true)
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => p.min_values(row_groups, column_id),
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.min_values(row_groups, column_id),
+        }
     }
 
     /// Returns max values of specific column in row groups.
@@ -212,7 +209,10 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        self.get_stat_values(row_groups, column_id, false)
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => p.max_values(row_groups, column_id),
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.max_values(row_groups, column_id),
+        }
     }
 
     /// Returns null counts of specific column in row groups.
@@ -221,13 +221,10 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
-            // No such column in the SST.
-            return StatValues::NoColumn;
-        };
-
-        let stats = ReadFormat::column_null_counts(row_groups, *index);
-        StatValues::from_stats_opt(stats)
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => p.null_counts(row_groups, column_id),
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.null_counts(row_groups, column_id),
+        }
     }
 
     /// Gets the arrow schema of the SST file.
@@ -235,22 +232,34 @@ impl FlatReadFormat {
     /// This schema is computed from the region metadata but should be the same
     /// as the arrow schema decoded from the file metadata.
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
-        &self.arrow_schema
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => &p.arrow_schema,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.arrow_schema(),
+        }
     }
 
     /// Gets the metadata of the SST.
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
-        &self.metadata
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => &p.metadata,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.metadata(),
+        }
     }
 
-    /// Gets sorted projection indices to read.
+    /// Gets sorted projection indices to read from the SST file.
     pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.format_projection.projection_indices
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => &p.format_projection.projection_indices,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.projection_indices(),
+        }
     }
 
-    /// Gets the projection.
+    /// Gets the projection in the flat format.
     pub(crate) fn format_projection(&self) -> &FormatProjection {
-        &self.format_projection
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(p) => &p.format_projection,
+            ParquetAdapter::PrimaryKeyToFlat(p) => &p.format_projection,
+        }
     }
 
     /// Creates a sequence array to override.
@@ -263,17 +272,15 @@ impl FlatReadFormat {
     ///
     /// Returns a new RecordBatch with flat format conversion applied first (if enabled),
     /// then the sequence column replaced by the override sequence array.
-    #[allow(dead_code)]
     pub(crate) fn convert_batch(
         &self,
         record_batch: RecordBatch,
         override_sequence_array: Option<&ArrayRef>,
     ) -> Result<RecordBatch> {
-        // First, apply flat format conversion if enabled
-        let batch = if let Some(ref convert_format) = self.convert_format {
-            convert_format.convert(record_batch)?
-        } else {
-            record_batch
+        // First, apply flat format conversion.
+        let batch = match &self.parquet_adapter {
+            ParquetAdapter::Flat(_) => record_batch,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.convert_batch(record_batch)?,
         };
 
         // Then apply sequence override if provided
@@ -298,15 +305,18 @@ impl FlatReadFormat {
 
     /// Checks whether the batch from the parquet file needs to be converted to match the flat format.
     ///
-    /// * `file_path` is the path to the parquet file, for error message.
-    /// * `num_columns` is the number of columns in the parquet file.
     /// * `metadata` is the region metadata (always assumes flat format).
-    #[allow(dead_code)]
-    pub(crate) fn need_convert_to_flat(
-        file_path: &str,
-        num_columns: usize,
+    /// * `num_columns` is the number of columns in the parquet file.
+    /// * `file_path` is the path to the parquet file, for error message.
+    pub(crate) fn is_legacy_format(
         metadata: &RegionMetadata,
+        num_columns: usize,
+        file_path: &str,
     ) -> Result<bool> {
+        if metadata.primary_key.is_empty() {
+            return Ok(false);
+        }
+
         // For flat format, compute expected column number:
         // all columns + internal columns (pk, sequence, op_type)
         let expected_columns = metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM;
@@ -343,6 +353,137 @@ impl FlatReadFormat {
 
             Ok(true)
         }
+    }
+}
+
+/// Wraps the parquet helper for different formats.
+enum ParquetAdapter {
+    Flat(ParquetFlat),
+    PrimaryKeyToFlat(ParquetPrimaryKeyToFlat),
+}
+
+/// Helper to reads the parquet from primary key format into the flat format.
+struct ParquetPrimaryKeyToFlat {
+    /// The primary key format to read the parquet.
+    format: PrimaryKeyReadFormat,
+    /// Format converter for handling flat format conversion.
+    convert_format: Option<FlatConvertFormat>,
+    /// Projection computed for the flat format.
+    format_projection: FormatProjection,
+}
+
+impl ParquetPrimaryKeyToFlat {
+    /// Creates a helper with existing `metadata` and `column_ids` to read.
+    fn new(
+        metadata: RegionMetadataRef,
+        column_ids: impl Iterator<Item = ColumnId>,
+        skip_auto_convert: bool,
+    ) -> ParquetPrimaryKeyToFlat {
+        assert!(if skip_auto_convert {
+            metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        } else {
+            true
+        });
+
+        let column_ids: Vec<_> = column_ids.collect();
+
+        // Creates a map to lookup index based on the new format.
+        let id_to_index = sst_column_id_indices(&metadata);
+        let sst_column_num =
+            flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
+        // Computes the format projection for the new format.
+        let format_projection = FormatProjection::compute_format_projection(
+            &id_to_index,
+            sst_column_num,
+            column_ids.iter().copied(),
+        );
+        let codec = build_primary_key_codec(&metadata);
+        let convert_format = if skip_auto_convert {
+            None
+        } else {
+            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
+        };
+
+        let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
+
+        Self {
+            format,
+            convert_format,
+            format_projection,
+        }
+    }
+
+    fn convert_batch(&self, record_batch: RecordBatch) -> Result<RecordBatch> {
+        if let Some(convert_format) = &self.convert_format {
+            convert_format.convert(record_batch)
+        } else {
+            Ok(record_batch)
+        }
+    }
+}
+
+/// Helper to reads the parquet in flat format directly.
+struct ParquetFlat {
+    /// The metadata stored in the SST.
+    metadata: RegionMetadataRef,
+    /// SST file schema.
+    arrow_schema: SchemaRef,
+    /// Projection computed for the flat format.
+    format_projection: FormatProjection,
+    /// Column id to index in SST.
+    column_id_to_sst_index: HashMap<ColumnId, usize>,
+}
+
+impl ParquetFlat {
+    /// Creates a helper with existing `metadata` and `column_ids` to read.
+    fn new(metadata: RegionMetadataRef, column_ids: impl Iterator<Item = ColumnId>) -> ParquetFlat {
+        // Creates a map to lookup index.
+        let id_to_index = sst_column_id_indices(&metadata);
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let sst_column_num =
+            flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
+        let format_projection =
+            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, column_ids);
+
+        Self {
+            metadata,
+            arrow_schema,
+            format_projection,
+            column_id_to_sst_index: id_to_index,
+        }
+    }
+
+    /// Returns min values of specific column in row groups.
+    fn min_values(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column_id: ColumnId,
+    ) -> StatValues {
+        self.get_stat_values(row_groups, column_id, true)
+    }
+
+    /// Returns max values of specific column in row groups.
+    fn max_values(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column_id: ColumnId,
+    ) -> StatValues {
+        self.get_stat_values(row_groups, column_id, false)
+    }
+
+    /// Returns null counts of specific column in row groups.
+    fn null_counts(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column_id: ColumnId,
+    ) -> StatValues {
+        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
+
+        let stats = ReadFormat::column_null_counts(row_groups, *index);
+        StatValues::from_stats_opt(stats)
     }
 
     fn get_stat_values(
@@ -528,14 +669,14 @@ impl FlatConvertFormat {
                     match decoded {
                         CompositeValues::Dense(dense) => {
                             if pk_index < dense.len() {
-                                builder.push_value_ref(dense[pk_index].1.as_value_ref());
+                                builder.push_value_ref(&dense[pk_index].1.as_value_ref());
                             } else {
                                 builder.push_null();
                             }
                         }
                         CompositeValues::Sparse(sparse) => {
                             let value = sparse.get_or_null(column_id);
-                            builder.push_value_ref(value.as_value_ref());
+                            builder.push_value_ref(&value.as_value_ref());
                         }
                     };
                 }
@@ -567,7 +708,10 @@ impl FlatReadFormat {
         Self::new(
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
             false,
         )
+        .unwrap()
     }
 }

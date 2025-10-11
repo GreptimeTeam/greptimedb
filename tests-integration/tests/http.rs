@@ -150,7 +150,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+        "static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd",
     )
     .unwrap();
 
@@ -187,6 +187,65 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. readonly user cannot write
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic cmVhZG9ubHlfdXNlcjpyZWFkb25seV9wd2Q=",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 5. writeonly user cannot read
+    let res = client
+        .get("/v1/sql?db=public&sql=show tables;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = client
+        .get("/v1/sql?db=public&sql=create table auth_test(ts timestamp time index);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=insert into auth_test values(1);")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?db=public&sql=select * from auth_test;")
+        .header(
+            "Authorization",
+            "basic d3JpdGVvbmx5X3VzZXI6d3JpdGVvbmx5X3B3ZA==",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     guard.remove_all().await;
 }
 
@@ -1449,6 +1508,7 @@ enable_experimental_flat_format = false
 aux_path = ""
 staging_size = "2GiB"
 staging_ttl = "7days"
+build_mode = "sync"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -1532,9 +1592,11 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "result_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_index_builds =",
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",
+        "enable_read_cache =",
     ];
 
     input
@@ -2274,8 +2336,8 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***",[1,2,3],{"a":1,"b":2},"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
-    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***",[1,2,3],{"a":1,"b":2},"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
+    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","[1,2,3]",1,2,"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
+    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","[1,2,3]",1,2,"200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
     let res = client.get("/v1/sql?sql=select * from logs").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let resp: serde_json::Value = res.json().await;
@@ -2298,7 +2360,7 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
         serde_json::from_str::<Vec<Value>>(line2_expected).unwrap()
     );
 
-    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","Json","","YES","","FIELD"],["json_object","Json","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","String","","YES","","FIELD"],["json_object.a","Int64","","YES","","FIELD"],["json_object.b","Int64","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
 
     guard.remove_all().await;
@@ -3296,7 +3358,7 @@ pub async fn test_identity_pipeline_with_flatten(store_type: StorageType) {
 
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","String","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
     validate_data(
         "test_identity_pipeline_with_flatten_desc_logs",
         &client,
@@ -3305,7 +3367,7 @@ pub async fn test_identity_pipeline_with_flatten(store_type: StorageType) {
     )
     .await;
 
-    let expected = "[[[\"a\",\"b\",\"c\"]]]";
+    let expected = "[[\"[\\\"a\\\",\\\"b\\\",\\\"c\\\"]\"]]";
     validate_data(
         "test_identity_pipeline_with_flatten_select_json",
         &client,
@@ -3460,37 +3522,37 @@ transform:
 
     let dryrun_schema = json!([
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id1"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "INT32",
             "fulltext": false,
             "name": "id2"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "type"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "log"
         },
         {
-            "colume_type": "FIELD",
+            "column_type": "FIELD",
             "data_type": "STRING",
             "fulltext": false,
             "name": "logger"
         },
         {
-            "colume_type": "TIMESTAMP",
+            "column_type": "TIMESTAMP",
             "data_type": "TIMESTAMP_NANOSECOND",
             "fulltext": false,
             "name": "time"
@@ -3532,7 +3594,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:37.217+0000"
+                "value": 1716668197217000000i64
             }
         ],
         [
@@ -3570,7 +3632,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:38.217+0000"
+                "value": 1716668198217000000i64
             }
         ]
     ]);
@@ -6396,7 +6458,7 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     validate_data(
         "test_influxdb_write",
         &client,
-        "select * from test_alter order by ts;",
+        "select * from test_alter order by greptime_timestamp;",
         expected,
     )
     .await;

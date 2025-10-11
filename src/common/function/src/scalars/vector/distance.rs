@@ -19,7 +19,6 @@ mod l2sq;
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
@@ -32,23 +31,43 @@ macro_rules! define_distance_function {
     ($StructName:ident, $display_name:expr, $similarity_method:path) => {
         /// A function calculates the distance between two vectors.
 
-        #[derive(Debug, Clone, Default)]
-        pub struct $StructName;
+        #[derive(Debug, Clone)]
+        pub(crate) struct $StructName {
+            signature: Signature,
+        }
+
+        impl Default for $StructName {
+            fn default() -> Self {
+                Self {
+                    signature: helper::one_of_sigs2(
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                    ),
+                }
+            }
+        }
 
         impl Function for $StructName {
             fn name(&self) -> &str {
                 $display_name
             }
 
-            fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+            fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
                 Ok(DataType::Float32)
             }
 
-            fn signature(&self) -> Signature {
-                helper::one_of_sigs2(
-                    vec![DataType::Utf8, DataType::Binary],
-                    vec![DataType::Utf8, DataType::Binary],
-                )
+            fn signature(&self) -> &Signature {
+                &self.signature
             }
 
             fn invoke_with_args(
@@ -124,9 +143,9 @@ mod tests {
     #[test]
     fn test_distance_string_string() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
@@ -164,9 +183,9 @@ mod tests {
     #[test]
     fn test_distance_binary_binary() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
@@ -205,9 +224,9 @@ mod tests {
     #[test]
     fn test_distance_string_binary() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {
@@ -246,9 +265,9 @@ mod tests {
     #[test]
     fn test_invalid_vector_length() {
         let funcs = [
-            Box::new(CosDistanceFunction {}) as Box<dyn Function>,
-            Box::new(L2SqDistanceFunction {}) as Box<dyn Function>,
-            Box::new(DotProductFunction {}) as Box<dyn Function>,
+            Box::new(CosDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(L2SqDistanceFunction::default()) as Box<dyn Function>,
+            Box::new(DotProductFunction::default()) as Box<dyn Function>,
         ];
 
         for func in funcs {

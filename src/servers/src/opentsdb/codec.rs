@@ -154,9 +154,9 @@ impl DataPoint {
 
         for (tagk, tagv) in self.tags.iter() {
             columns.push(Column {
-                column_name: tagk.to_string(),
+                column_name: tagk.clone(),
                 values: Some(column::Values {
-                    string_values: vec![tagv.to_string()],
+                    string_values: vec![tagv.clone()],
                     ..Default::default()
                 }),
                 semantic_type: SemanticType::Tag as i32,

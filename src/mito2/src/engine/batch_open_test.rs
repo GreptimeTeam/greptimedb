@@ -109,7 +109,7 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -175,7 +175,7 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );
@@ -188,7 +188,7 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
                 RegionId::new(1, id),
                 RegionOpenRequest {
                     engine: String::new(),
-                    table_dir: table_dir.to_string(),
+                    table_dir: table_dir.clone(),
                     options: options.clone(),
                     skip_wal_replay: false,
                     path_type: PathType::Bare,

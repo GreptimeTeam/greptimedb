@@ -176,7 +176,7 @@ impl FrontendBuilder {
         )
         .query_engine();
 
-        let statement_executor = Arc::new(StatementExecutor::new(
+        let statement_executor = StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
             self.procedure_executor,
@@ -185,7 +185,17 @@ impl FrontendBuilder {
             inserter.clone(),
             table_route_cache,
             Some(process_manager.clone()),
-        ));
+        );
+
+        #[cfg(feature = "enterprise")]
+        let statement_executor =
+            if let Some(factory) = plugins.get::<operator::statement::TriggerQuerierFactoryRef>() {
+                statement_executor.with_trigger_querier(factory.create(kv_backend.clone()))
+            } else {
+                statement_executor
+            };
+
+        let statement_executor = Arc::new(statement_executor);
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
             inserter.clone(),

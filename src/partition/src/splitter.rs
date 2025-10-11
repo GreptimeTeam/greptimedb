@@ -119,7 +119,7 @@ impl<'a> SplitReadRowHelper<'a> {
                     idx.as_ref().map_or(Value::Null, |idx| {
                         helper::pb_value_to_value_ref(
                             &row.values[*idx],
-                            &self.schema[*idx].datatype_extension,
+                            self.schema[*idx].datatype_extension.as_ref(),
                         )
                         .into()
                     })

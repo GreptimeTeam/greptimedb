@@ -137,7 +137,10 @@ impl BloomFilterCreator {
             self.global_memory_usage
                 .fetch_add(mem_diff, Ordering::Relaxed);
 
-            if self.accumulated_row_count % self.rows_per_segment == 0 {
+            if self
+                .accumulated_row_count
+                .is_multiple_of(self.rows_per_segment)
+            {
                 self.finalize_segment().await?;
                 self.finalized_row_count = self.accumulated_row_count;
             }
@@ -163,7 +166,10 @@ impl BloomFilterCreator {
         self.global_memory_usage
             .fetch_add(mem_diff, Ordering::Relaxed);
 
-        if self.accumulated_row_count % self.rows_per_segment == 0 {
+        if self
+            .accumulated_row_count
+            .is_multiple_of(self.rows_per_segment)
+        {
             self.finalize_segment().await?;
             self.finalized_row_count = self.accumulated_row_count;
         }

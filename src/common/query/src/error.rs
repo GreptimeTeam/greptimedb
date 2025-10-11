@@ -44,13 +44,6 @@ pub enum Error {
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to cast arrow array into vector"))]
-    FromArrowArray {
-        #[snafu(implicit)]
-        location: Location,
-        source: DataTypeError,
-    },
-
     #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
         #[snafu(implicit)]
@@ -225,7 +218,6 @@ impl ErrorExt for Error {
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source, .. }
-            | Error::FromArrowArray { source, .. }
             | Error::InvalidVectorString { source, .. } => source.status_code(),
 
             Error::MissingTableMutationHandler { .. }

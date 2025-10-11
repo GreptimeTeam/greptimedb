@@ -16,9 +16,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use common_function::aggrs::aggr_wrapper::fix_order::{
+    FixStateUdafOrderingAnalyzer, UnFixStateUdafOrderingAnalyzer,
+};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::optimizer::AnalyzerRule;
 use datafusion::prelude::SessionConfig;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
@@ -47,6 +51,9 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         let df_plan = from_substrait_plan(&state, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;
+        let df_plan = FixStateUdafOrderingAnalyzer {}
+            .analyze(df_plan, state.config_options())
+            .context(DecodeDfPlanSnafu)?;
         Ok(df_plan)
     }
 
@@ -55,8 +62,11 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         plan: &Self::Plan,
         serializer: impl SerializerRegistry + 'static,
     ) -> Result<Bytes, Self::Error> {
+        let plan = UnFixStateUdafOrderingAnalyzer {}
+            .analyze(plan.clone(), &Default::default())
+            .context(EncodeDfPlanSnafu)?;
         let mut buf = BytesMut::new();
-        let substrait_plan = self.to_sub_plan(plan, serializer)?;
+        let substrait_plan = self.to_sub_plan(&plan, serializer)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())

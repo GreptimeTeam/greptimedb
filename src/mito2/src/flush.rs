@@ -28,7 +28,7 @@ use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::access_layer::{
     AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
@@ -250,6 +250,8 @@ pub(crate) struct RegionFlushTask {
 
     /// Index options for the region.
     pub(crate) index_options: IndexOptions,
+    /// Semaphore to control flush concurrency.
+    pub(crate) flush_semaphore: Arc<Semaphore>,
 }
 
 impl RegionFlushTask {
@@ -364,13 +366,22 @@ impl RegionFlushTask {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
+        let mut file_ids = Vec::with_capacity(file_metas.len());
+        let mut total_rows = 0;
+        let mut total_bytes = 0;
+        for meta in &file_metas {
+            file_ids.push(meta.file_id);
+            total_rows += meta.num_rows;
+            total_bytes += meta.file_size;
+        }
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}, metrics: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
             series_count,
+            total_rows,
+            total_bytes,
             timer.stop_and_record(),
             flush_metrics,
         );
@@ -447,7 +458,8 @@ impl RegionFlushTask {
             let compact_cost = compact_start.elapsed();
             flush_metrics.compact_memtable += compact_cost;
 
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None)?;
+            // Sets `for_flush` flag to true.
+            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None, true)?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();
@@ -558,8 +570,10 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
-        let batch_schema =
-            to_flat_sst_arrow_schema(&version.metadata, &FlatSchemaOptions::default());
+        let batch_schema = to_flat_sst_arrow_schema(
+            &version.metadata,
+            &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
+        );
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,
@@ -574,7 +588,9 @@ impl RegionFlushTask {
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
+            let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let _permit = semaphore.acquire().await.unwrap();
                 access_layer
                     .write_sst(write_request, &write_opts, WriteType::Flush)
                     .await
@@ -585,7 +601,9 @@ impl RegionFlushTask {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
+            let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
@@ -640,6 +658,7 @@ impl RegionFlushTask {
             storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),
             index_options: self.index_options.clone(),
+            index_config: self.engine_config.index.clone(),
             inverted_index_config: self.engine_config.inverted_index.clone(),
             fulltext_index_config: self.engine_config.fulltext_index.clone(),
             bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
@@ -1239,6 +1258,7 @@ mod tests {
                 .mock_manifest_context(version_control.current().version.metadata.clone())
                 .await,
             index_options: IndexOptions::default(),
+            flush_semaphore: Arc::new(Semaphore::new(2)),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -1280,6 +1300,7 @@ mod tests {
                 cache_manager: Arc::new(CacheManager::default()),
                 manifest_ctx: manifest_ctx.clone(),
                 index_options: IndexOptions::default(),
+                flush_semaphore: Arc::new(Semaphore::new(2)),
             })
             .collect();
         // Schedule first task.

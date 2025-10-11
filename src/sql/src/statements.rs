@@ -128,7 +128,7 @@ pub fn column_to_schema(
     }) {
         let _ = column_schema
             .mut_metadata()
-            .insert(COMMENT_KEY.to_string(), c.to_string());
+            .insert(COMMENT_KEY.to_string(), c.clone());
     }
 
     if let Some(options) = column.extensions.build_fulltext_options()? {

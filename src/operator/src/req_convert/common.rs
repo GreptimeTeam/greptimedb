@@ -112,7 +112,7 @@ fn validate_rows(rows: &Option<Rows>) -> Result<()> {
 
     for (col_idx, schema) in rows.schema.iter().enumerate() {
         let column_type =
-            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension)
+            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension.clone())
                 .context(ColumnDataTypeSnafu)?
                 .into();
 
@@ -172,7 +172,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
             column_name: column.column_name.clone(),
             datatype: column.datatype,
             semantic_type: column.semantic_type,
-            datatype_extension: column.datatype_extension,
+            datatype_extension: column.datatype_extension.clone(),
             options: column.options.clone(),
         };
         schema.push(column_schema);
@@ -292,6 +292,8 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
         ),
         (Decimal128, Decimal128Value, decimal128_values),
         (Vector, BinaryValue, binary_values),
+        (List, ListValue, list_values),
+        (Struct, StructValue, struct_values),
     );
 
     Ok(())
@@ -352,7 +354,7 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
     let time_index_column = &table_schema
         .timestamp_column()
         .with_context(|| table::error::MissingTimeIndexColumnSnafu {
-            table_name: table_info.name.to_string(),
+            table_name: table_info.name.clone(),
         })
         .context(MissingTimeIndexColumnSnafu)?
         .name;

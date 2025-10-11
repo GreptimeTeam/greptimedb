@@ -71,7 +71,7 @@ impl FunctionRegistry {
         for alias in func.aliases() {
             let func: ScalarFunctionFactory = func.clone().into();
             let alias = ScalarFunctionFactory {
-                name: alias.to_string(),
+                name: alias.clone(),
                 ..func
             };
             self.register(alias);
@@ -190,7 +190,7 @@ mod tests {
 
         assert!(registry.get_function("test_and").is_none());
         assert!(registry.scalar_functions().is_empty());
-        registry.register_scalar(TestAndFunction);
+        registry.register_scalar(TestAndFunction::default());
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
     }

@@ -19,37 +19,48 @@ mod rate;
 use std::fmt;
 
 pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
-use datafusion_expr::{Signature, Volatility};
-pub use rate::RateFunction;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion_common::internal_err;
+use datafusion_expr::{ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::Function;
 use crate::function_registry::FunctionRegistry;
 use crate::scalars::math::modulo::ModuloFunction;
+use crate::scalars::math::rate::RateFunction;
 
 pub(crate) struct MathFunction;
 
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(ModuloFunction);
-        registry.register_scalar(RateFunction);
-        registry.register_scalar(RangeFunction);
-        registry.register_scalar(ClampFunction);
-        registry.register_scalar(ClampMinFunction);
-        registry.register_scalar(ClampMaxFunction);
+        registry.register_scalar(ModuloFunction::default());
+        registry.register_scalar(RateFunction::default());
+        registry.register_scalar(RangeFunction::default());
+        registry.register_scalar(ClampFunction::default());
+        registry.register_scalar(ClampMinFunction::default());
+        registry.register_scalar(ClampMaxFunction::default());
     }
 }
 
 /// `RangeFunction` will never be used as a normal function,
 /// just for datafusion to generate logical plan for RangeSelect
-#[derive(Clone, Debug, Default)]
-struct RangeFunction;
+#[derive(Clone, Debug)]
+struct RangeFunction {
+    signature: Signature,
+}
 
 impl fmt::Display for RangeFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "RANGE_FN")
+    }
+}
+
+impl Default for RangeFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
     }
 }
 
@@ -59,19 +70,22 @@ impl Function for RangeFunction {
     }
 
     // The first argument to range_fn is the expression to be evaluated
-    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType> {
         input_types
             .first()
             .cloned()
             .ok_or(DataFusionError::Internal(
                 "No expr found in range_fn".into(),
             ))
-            .map_err(Into::into)
     }
 
     /// `range_fn` will never been used. As long as a legal signature is returned, the specific content of the signature does not matter.
     /// In fact, the arguments loaded by `range_fn` are very complicated, and it is difficult to use `Signature` to describe
-    fn signature(&self) -> Signature {
-        Signature::variadic_any(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {
+        internal_err!("not expected to invoke 'range_fn' directly")
     }
 }

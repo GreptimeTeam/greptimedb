@@ -376,7 +376,7 @@ impl Instance {
                 .entry(db_string)
                 .or_default();
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), false);
+                cache.insert((*name).clone(), false);
             });
             return Ok(false);
         }
@@ -412,13 +412,13 @@ impl Instance {
             ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
             let flag = has_legacy;
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), flag);
+                cache.insert((*name).clone(), flag);
             });
             Ok(flag)
         } else {
             // no table info, use new mode
             names.iter().for_each(|name| {
-                cache.insert(name.to_string(), false);
+                cache.insert((*name).clone(), false);
             });
             Ok(false)
         }
@@ -449,7 +449,7 @@ fn fast_legacy_check(
         // set cache for all names
         names.iter().for_each(|name| {
             if !cache.contains_key(*name) {
-                cache.insert(name.to_string(), flag);
+                cache.insert((*name).clone(), flag);
             }
         });
         Ok(Some(flag))
@@ -737,8 +737,8 @@ impl PrometheusHandler for Instance {
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
-        let query_statement = if let QueryStatement::Promql(eval_stmt) = stmt {
-            CatalogQueryStatement::Promql(eval_stmt)
+        let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
+            CatalogQueryStatement::Promql(eval_stmt, alias)
         } else {
             // It should not happen since the query is already parsed successfully.
             return UnexpectedResultSnafu {
@@ -877,6 +877,10 @@ pub fn check_permission(
         }
         Statement::ShowCreateFlow(stmt) => {
             validate_flow(&stmt.flow_name, query_ctx)?;
+        }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowCreateTrigger(stmt) => {
+            validate_param(&stmt.trigger_name, query_ctx)?;
         }
         Statement::ShowCreateView(stmt) => {
             validate_param(&stmt.view_name, query_ctx)?;

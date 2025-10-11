@@ -71,7 +71,7 @@ fn ensure_dir(dir: &str) -> error::Result<()> {
 impl RaftEngineBackend {
     pub fn try_open_with_cfg(dir: String, config: &KvBackendConfig) -> error::Result<Self> {
         let cfg = Config {
-            dir: dir.to_string(),
+            dir: dir.clone(),
             purge_threshold: ReadableSize(config.purge_threshold.0),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             batch_compression_threshold: ReadableSize::kb(8),

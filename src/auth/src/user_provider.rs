@@ -29,7 +29,7 @@ use crate::error::{
     IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
     UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
-use crate::user_info::DefaultUserInfo;
+use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
 
 #[async_trait::async_trait]
@@ -64,11 +64,19 @@ pub trait UserProvider: Send + Sync {
     }
 }
 
-fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Vec<u8>>>> {
+/// Type alias for user info map
+/// Key is username, value is (password, permission_mode)
+pub type UserInfoMap = HashMap<String, (Vec<u8>, PermissionMode)>;
+
+fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
     // check valid path
     let path = Path::new(filepath);
     if !path.exists() {
-        return Ok(None);
+        return InvalidConfigSnafu {
+            value: filepath.to_string(),
+            msg: "UserProvider file must exist",
+        }
+        .fail();
     }
 
     ensure!(
@@ -83,13 +91,19 @@ fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Ve
         .lines()
         .map_while(std::result::Result::ok)
         .filter_map(|line| {
-            if let Some((k, v)) = line.split_once('=') {
-                Some((k.to_string(), v.as_bytes().to_vec()))
-            } else {
-                None
+            // The line format is:
+            // - `username=password` - Basic user with default permissions
+            // - `username:permission_mode=password` - User with specific permission mode
+            // - Lines starting with '#' are treated as comments and ignored
+            // - Empty lines are ignored
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
             }
+
+            parse_credential_line(line)
         })
-        .collect::<HashMap<String, Vec<u8>>>();
+        .collect::<HashMap<String, _>>();
 
     ensure!(
         !credential.is_empty(),
@@ -99,11 +113,31 @@ fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Ve
         }
     );
 
-    Ok(Some(credential))
+    Ok(credential)
+}
+
+/// Parse a line of credential in the format of `username=password` or `username:permission_mode=password`
+pub(crate) fn parse_credential_line(line: &str) -> Option<(String, (Vec<u8>, PermissionMode))> {
+    let parts = line.split('=').collect::<Vec<&str>>();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let (username_part, password) = (parts[0], parts[1]);
+    let (username, permission_mode) = if let Some((user, perm)) = username_part.split_once(':') {
+        (user, PermissionMode::from_str(perm))
+    } else {
+        (username_part, PermissionMode::default())
+    };
+
+    Some((
+        username.to_string(),
+        (password.as_bytes().to_vec(), permission_mode),
+    ))
 }
 
 fn authenticate_with_credential(
-    users: &HashMap<String, Vec<u8>>,
+    users: &UserInfoMap,
     input_id: Identity<'_>,
     input_pwd: Password<'_>,
 ) -> Result<UserInfoRef> {
@@ -115,7 +149,7 @@ fn authenticate_with_credential(
                     msg: "blank username"
                 }
             );
-            let save_pwd = users.get(username).context(UserNotFoundSnafu {
+            let (save_pwd, permission_mode) = users.get(username).context(UserNotFoundSnafu {
                 username: username.to_string(),
             })?;
 
@@ -128,7 +162,10 @@ fn authenticate_with_credential(
                         }
                     );
                     if save_pwd == pwd.expose_secret().as_bytes() {
-                        Ok(DefaultUserInfo::with_name(username))
+                        Ok(DefaultUserInfo::with_name_and_permission(
+                            username,
+                            *permission_mode,
+                        ))
                     } else {
                         UserPasswordMismatchSnafu {
                             username: username.to_string(),
@@ -137,8 +174,9 @@ fn authenticate_with_credential(
                     }
                 }
                 Password::MysqlNativePassword(auth_data, salt) => {
-                    auth_mysql(auth_data, salt, username, save_pwd)
-                        .map(|_| DefaultUserInfo::with_name(username))
+                    auth_mysql(auth_data, salt, username, save_pwd).map(|_| {
+                        DefaultUserInfo::with_name_and_permission(username, *permission_mode)
+                    })
                 }
                 Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
                     password_type: "pg_md5",
@@ -146,5 +184,110 @@ fn authenticate_with_credential(
                 .fail(),
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_credential_line() {
+        // Basic username=password format
+        let result = parse_credential_line("admin=password123");
+        assert_eq!(
+            result,
+            Some((
+                "admin".to_string(),
+                ("password123".as_bytes().to_vec(), PermissionMode::default())
+            ))
+        );
+
+        // Username with permission mode
+        let result = parse_credential_line("user:ReadOnly=secret");
+        assert_eq!(
+            result,
+            Some((
+                "user".to_string(),
+                ("secret".as_bytes().to_vec(), PermissionMode::ReadOnly)
+            ))
+        );
+        let result = parse_credential_line("user:ro=secret");
+        assert_eq!(
+            result,
+            Some((
+                "user".to_string(),
+                ("secret".as_bytes().to_vec(), PermissionMode::ReadOnly)
+            ))
+        );
+        // Username with WriteOnly permission mode
+        let result = parse_credential_line("writer:WriteOnly=mypass");
+        assert_eq!(
+            result,
+            Some((
+                "writer".to_string(),
+                ("mypass".as_bytes().to_vec(), PermissionMode::WriteOnly)
+            ))
+        );
+
+        // Username with 'wo' as WriteOnly permission shorthand
+        let result = parse_credential_line("writer:wo=mypass");
+        assert_eq!(
+            result,
+            Some((
+                "writer".to_string(),
+                ("mypass".as_bytes().to_vec(), PermissionMode::WriteOnly)
+            ))
+        );
+
+        // Username with complex password containing special characters
+        let result = parse_credential_line("admin:rw=p@ssw0rd!123");
+        assert_eq!(
+            result,
+            Some((
+                "admin".to_string(),
+                (
+                    "p@ssw0rd!123".as_bytes().to_vec(),
+                    PermissionMode::ReadWrite
+                )
+            ))
+        );
+
+        // Username with spaces should be preserved
+        let result = parse_credential_line("user name:WriteOnly=password");
+        assert_eq!(
+            result,
+            Some((
+                "user name".to_string(),
+                ("password".as_bytes().to_vec(), PermissionMode::WriteOnly)
+            ))
+        );
+
+        // Invalid format - no equals sign
+        let result = parse_credential_line("invalid_line");
+        assert_eq!(result, None);
+
+        // Invalid format - multiple equals signs
+        let result = parse_credential_line("user=pass=word");
+        assert_eq!(result, None);
+
+        // Empty password
+        let result = parse_credential_line("user=");
+        assert_eq!(
+            result,
+            Some((
+                "user".to_string(),
+                ("".as_bytes().to_vec(), PermissionMode::default())
+            ))
+        );
+
+        // Empty username
+        let result = parse_credential_line("=password");
+        assert_eq!(
+            result,
+            Some((
+                "".to_string(),
+                ("password".as_bytes().to_vec(), PermissionMode::default())
+            ))
+        );
     }
 }

@@ -235,6 +235,7 @@ impl Memtable for SimpleBulkMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
+        _for_flush: bool,
     ) -> error::Result<MemtableRanges> {
         let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
@@ -612,7 +613,7 @@ mod tests {
         memtable.write_one(kv).unwrap();
 
         let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
+            .ranges(None, PredicateGroup::default(), None, false)
             .unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
@@ -646,7 +647,7 @@ mod tests {
         memtable.freeze().unwrap();
 
         let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
+            .ranges(None, PredicateGroup::default(), None, false)
             .unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
@@ -689,7 +690,7 @@ mod tests {
         memtable.freeze().unwrap();
 
         let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None)
+            .ranges(None, PredicateGroup::default(), None, false)
             .unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
@@ -848,7 +849,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from_iter_values(
-                    ["a".repeat(string_len as usize).to_string()].into_iter(),
+                    ["a".repeat(string_len as usize).clone()].into_iter(),
                 )) as ArrayRef,
                 Arc::new(TimestampMillisecondArray::from_iter_values(
                     [ts].into_iter(),
@@ -903,7 +904,7 @@ mod tests {
             })
             .unwrap();
         let MemtableRanges { ranges, .. } = memtable
-            .ranges(None, PredicateGroup::default(), None)
+            .ranges(None, PredicateGroup::default(), None, false)
             .unwrap();
         let mut source = if ranges.len() == 1 {
             let only_range = ranges.into_values().next().unwrap();
