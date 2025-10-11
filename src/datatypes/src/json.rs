@@ -31,6 +31,19 @@ use crate::error::{self, Error};
 use crate::types::{ListType, StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
+/// The configuration of JSON encoding
+///
+/// The enum describes how we handle JSON encoding to `StructValue` internally.
+/// It defines three configurations:
+/// - Structured: Encodes JSON objects as StructValue with an optional predefined StructType.
+/// - UnstructuredRaw: Encodes JSON data as string and store it in a struct with a field named "_raw".
+/// - PartialUnstructuredByKey: Encodes JSON objects as StructValue with an optional predefined StructType
+/// and a set of unstructured keys, these keys are provided as flattened names, for example: `a.b.c`.
+///
+/// We provide a few methods to convert JSON data to StructValue based on the settings. And we also
+/// convert them to fully structured StructValue for user-facing APIs: the UI protocol and the UDF interface.
+///
+/// **Important**: This settings only controls the internal form of JSON encoding.
 #[derive(Debug, Clone)]
 pub enum JsonStructureSettings {
     // TODO(sunng87): provide a limit
@@ -54,6 +67,7 @@ pub struct JsonContext<'a> {
 impl JsonStructureSettings {
     pub const RAW_FIELD: &'static str = "_raw";
 
+    /// Decode an encoded StructValue back into a serde_json::Value.
     pub fn decode(&self, value: Value) -> Result<Json, Error> {
         let context = JsonContext {
             key_path: String::new(),
@@ -73,6 +87,7 @@ impl JsonStructureSettings {
         decode_struct_with_settings(struct_value, &context)
     }
 
+    /// Encode a serde_json::Value into a StructValue using current settings.
     pub fn encode(&self, json: Json) -> Result<Value, Error> {
         let context = JsonContext {
             key_path: String::new(),
