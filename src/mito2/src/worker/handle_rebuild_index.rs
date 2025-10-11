@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::Result;
 use crate::region::MitoRegionRef;
 use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
 };
@@ -121,10 +121,20 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
 
         let build_tasks = if request.file_metas.is_empty() {
-            // NOTE: Currently, rebuilding the index will reconstruct the index for all
-            // files in the region, which is a simplified approach and is not yet available for
-            // production use; further optimization is required.
-            all_files.values().cloned().collect::<Vec<_>>()
+            if request.build_type == IndexBuildType::Manual {
+                // Find all files whose index is inconsistent with the region metadata.
+                all_files
+                    .values()
+                    .filter(|file| {
+                        !file
+                            .meta_ref()
+                            .is_index_consistent_with_region(&version.metadata.column_metadatas)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                all_files.values().cloned().collect::<Vec<_>>()
+            }
         } else {
             request
                 .file_metas
@@ -160,6 +170,9 @@ impl<S> RegionWorkerLoop<S> {
             let _ = self
                 .index_build_scheduler
                 .schedule_build(&region.version_control, task);
+            self.listener
+                .on_index_build_begin(RegionFileId::new(region_id, file_handle.meta_ref().file_id))
+                .await;
         }
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
@@ -191,11 +204,17 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
+        
         region.version_control.apply_edit(
             Some(request.edit.clone()),
             &[],
             region.file_purger.clone(),
         );
+        for file_meta in &request.edit.files_to_add {
+            self.listener
+                .on_index_build_success(RegionFileId::new(region_id, file_meta.file_id))
+                .await;
+        }
     }
 
     pub(crate) async fn handle_index_build_failed(

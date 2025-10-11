@@ -497,12 +497,12 @@ pub struct IndexBuildTask {
 impl IndexBuildTask {
     /// Notify the caller the job is success.
     pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
-        self.result_sender.0.send(Ok(outcome)).await;
+        let _ = self.result_sender.0.send(Ok(outcome)).await;
     }
 
     /// Send index build error to waiter.
     pub async fn on_failure(&mut self, err: Arc<Error>) {
-        self.result_sender
+        let _ = self.result_sender
             .0
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
                 region_id: self.file_meta.region_id,
@@ -565,7 +565,7 @@ impl IndexBuildTask {
         let version = &version_data.version;
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
 
-        // Check SST file existence before building index.
+        // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(version).await {
             // Calls abort to clean up index files.
             indexer.abort().await;

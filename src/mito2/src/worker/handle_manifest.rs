@@ -120,7 +120,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         change_result.sender.send(change_result.result.map(|_| 0));
 
         // In async mode, rebuild index after index metadata changed.
-        if self.config.index.build_mode == IndexBuildMode::Async {
+        if self.config.index.build_mode == IndexBuildMode::Async && change_result.need_index {
             self.handle_rebuild_index(
                 BuildIndexRequest {
                     region_id: region.region_id,

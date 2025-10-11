@@ -351,9 +351,7 @@ fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, Re
     let region_id = index.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::BuildIndex(RegionBuildIndexRequest {
-            index_id: 0,
-        }),
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
     )])
 }
 
@@ -1356,9 +1354,7 @@ impl Default for RegionCompactRequest {
     }
 }
 #[derive(Debug, Clone, Default)]
-pub struct RegionBuildIndexRequest {
-    pub index_id: u32, // to check: unused
-}
+pub struct RegionBuildIndexRequest {}
 
 /// Truncate region request.
 #[derive(Debug)]
