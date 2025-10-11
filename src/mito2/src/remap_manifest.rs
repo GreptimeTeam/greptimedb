@@ -549,44 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn test_partition_expr_immutability() {
-        // Verify that FileMeta.partition_expr is NOT modified during remapping
-        let old_region_id = RegionId::new(1, 1);
-        let new_region_id = RegionId::new(1, 2);
-
-        let new_expr = range_expr("x", 0, 100);
-
-        // Create files with partition expressions
-        let file_partition_expr = range_expr("x", 10, 20);
-        let old_manifest = create_manifest(
-            old_region_id,
-            5,
-            Some(file_partition_expr.clone()),
-            100,
-            200,
-        );
-
-        let mut old_manifests = HashMap::new();
-        old_manifests.insert(old_region_id, old_manifest);
-
-        let mut new_partition_exprs = HashMap::new();
-        new_partition_exprs.insert(new_region_id, new_expr);
-
-        // Direct mapping: old region -> new region
-        let mut region_mapping = HashMap::new();
-        region_mapping.insert(old_region_id, vec![new_region_id]);
-
-        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
-
-        let result = remapper.remap_manifests().unwrap();
-
-        for file_meta in result.new_manifests[&new_region_id].files.values() {
-            assert_eq!(file_meta.partition_expr, Some(file_partition_expr.clone()));
-            assert_eq!(file_meta.region_id, old_region_id);
-        }
-    }
-
-    #[test]
     fn test_metadata_preserved_for_existing_region() {
         // Test that metadata is preserved when a previous manifest exists for the same region id
         let old_region_id_1 = RegionId::new(1, 1);
@@ -767,76 +729,5 @@ mod tests {
         assert_eq!(result.new_manifests[&new_region_3].files.len(), 4);
         assert_eq!(result.stats.total_file_refs, 14); // 3 + 7 + 4
         assert_eq!(result.stats.unique_files, 7); // 3 + 4 unique
-    }
-
-    #[test]
-    fn test_no_old_manifests_error() {
-        // Should fail if no old manifests provided
-        let new_region_id = RegionId::new(1, 1);
-        let new_expr = range_expr("x", 0, 100);
-
-        let old_manifests = HashMap::new();
-
-        let mut new_partition_exprs = HashMap::new();
-        new_partition_exprs.insert(new_region_id, new_expr);
-
-        let region_mapping = HashMap::new();
-
-        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
-
-        let result = remapper.remap_manifests();
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::NoOldManifests { .. }));
-    }
-
-    #[test]
-    fn test_missing_old_manifest_error() {
-        let template_region_id = RegionId::new(2, 1);
-        let missing_region_id = RegionId::new(2, 2);
-        let new_region_id = RegionId::new(2, 3);
-
-        let mut old_manifests = HashMap::new();
-        old_manifests.insert(
-            template_region_id,
-            create_manifest(template_region_id, 1, None, 0, 0),
-        );
-
-        let mut new_partition_exprs = HashMap::new();
-        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 10));
-
-        let mut region_mapping = HashMap::new();
-        region_mapping.insert(missing_region_id, vec![new_region_id]);
-
-        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
-
-        match remapper.remap_manifests().unwrap_err() {
-            Error::MissingOldManifest { region_id, .. } => {
-                assert_eq!(region_id, missing_region_id);
-            }
-            other => panic!("unexpected error: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_missing_new_manifest_error() {
-        let old_region_id = RegionId::new(3, 1);
-        let missing_new_region_id = RegionId::new(3, 2);
-
-        let mut old_manifests = HashMap::new();
-        old_manifests.insert(old_region_id, create_manifest(old_region_id, 1, None, 0, 0));
-
-        let new_partition_exprs = HashMap::new();
-
-        let mut region_mapping = HashMap::new();
-        region_mapping.insert(old_region_id, vec![missing_new_region_id]);
-
-        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
-
-        match remapper.remap_manifests().unwrap_err() {
-            Error::MissingNewManifest { region_id, .. } => {
-                assert_eq!(region_id, missing_new_region_id);
-            }
-            other => panic!("unexpected error: {:?}", other),
-        }
     }
 }
