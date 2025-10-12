@@ -34,6 +34,7 @@ ADMIN FLUSH_TABLE('test');
 | 0                         |
 +---------------------------+
 
+-- SQLNESS SLEEP 1s
 -- No fulltext index yet
 SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS;
 
@@ -64,3 +65,4 @@ SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS;
 +------------+
 | 318        |
 +------------+
+

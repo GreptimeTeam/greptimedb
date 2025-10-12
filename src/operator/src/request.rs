@@ -232,6 +232,7 @@ impl Requester {
         let region_id = match req {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
+            RegionRequestBody::BuildIndex(req) => req.region_id,
             _ => {
                 error!("Unsupported region request: {:?}", req);
                 return UnsupportedRegionRequestSnafu {}.fail();
