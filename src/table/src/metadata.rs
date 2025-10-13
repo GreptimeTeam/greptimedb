@@ -143,6 +143,8 @@ pub struct TableMeta {
     pub options: TableOptions,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
+    #[builder(default = "self.default_updated_on()")]
+    pub updated_on: DateTime<Utc>,
     #[builder(default = "Vec::new()")]
     pub partition_key_indices: Vec<usize>,
     #[builder(default = "Vec::new()")]
@@ -162,6 +164,7 @@ impl TableMetaBuilder {
             next_column_id: None,
             options: None,
             created_on: None,
+            updated_on: None,
             partition_key_indices: None,
             column_ids: None,
         }
@@ -181,6 +184,10 @@ impl TableMetaBuilder {
         }
     }
 
+    fn default_updated_on(&self) -> DateTime<Utc> {
+        self.created_on.unwrap_or_default()
+    }
+
     pub fn new_external_table() -> Self {
         Self {
             schema: None,
@@ -191,6 +198,7 @@ impl TableMetaBuilder {
             next_column_id: Some(0),
             options: None,
             created_on: None,
+            updated_on: None,
             partition_key_indices: None,
             column_ids: None,
         }
@@ -1162,6 +1170,7 @@ pub struct RawTableMeta {
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    pub updated_on: DateTime<Utc>,
     /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
@@ -1182,6 +1191,7 @@ impl From<TableMeta> for RawTableMeta {
             region_numbers: meta.region_numbers,
             options: meta.options,
             created_on: meta.created_on,
+            updated_on: meta.updated_on,
             partition_key_indices: meta.partition_key_indices,
             column_ids: meta.column_ids,
         }
@@ -1201,6 +1211,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             next_column_id: raw.next_column_id,
             options: raw.options,
             created_on: raw.created_on,
+            updated_on: raw.updated_on,
             partition_key_indices: raw.partition_key_indices,
             column_ids: raw.column_ids,
         })

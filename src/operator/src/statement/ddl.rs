@@ -1720,6 +1720,7 @@ pub fn create_table_info(
         region_numbers: vec![],
         options: table_options,
         created_on: Utc::now(),
+        updated_on: Utc::now(),
         partition_key_indices,
         column_ids: vec![],
     };
