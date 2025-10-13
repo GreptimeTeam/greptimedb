@@ -87,6 +87,7 @@ impl RemapManifest {
             .next()
             .context(error::NoOldManifestsSnafu)?;
         let template_metadata = (*template_manifest.metadata).clone();
+        let sst_format = template_manifest.sst_format;
 
         // Create empty manifest for each new region
         for region_id in self.new_partition_exprs.keys() {
@@ -114,6 +115,7 @@ impl RemapManifest {
                 manifest_version: 0,
                 truncated_entry_id: None,
                 compaction_time_window: None,
+                sst_format,
             };
 
             new_manifests.insert(*region_id, manifest);
@@ -372,6 +374,7 @@ mod tests {
 
     use super::*;
     use crate::manifest::action::RegionManifest;
+    use crate::sst::FormatType;
     use crate::sst::file::{FileMeta, FileTimeRange};
     use crate::wal::EntryId;
 
@@ -452,6 +455,7 @@ mod tests {
             truncated_entry_id: None,
             compaction_time_window: None,
             committed_sequence: None,
+            sst_format: FormatType::PrimaryKey,
         }
     }
 
