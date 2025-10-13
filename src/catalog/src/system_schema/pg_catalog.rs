@@ -26,9 +26,9 @@ use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
-use datafusion_postgres::pg_catalog::catalog_info::CatalogInfo;
-use datafusion_postgres::pg_catalog::context::EmptyContextProvider;
-use datafusion_postgres::pg_catalog::{
+use datafusion_pg_catalog::pg_catalog::catalog_info::CatalogInfo;
+use datafusion_pg_catalog::pg_catalog::context::EmptyContextProvider;
+use datafusion_pg_catalog::pg_catalog::{
     PG_CATALOG_TABLES, PgCatalogSchemaProvider, PgCatalogStaticTables, PgCatalogTable,
 };
 use snafu::ResultExt;
