@@ -19,6 +19,15 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
 
+/// Represents a SQL COMMENT statement for adding or removing comments on database objects.
+///
+/// # Examples
+///
+/// ```sql
+/// COMMENT ON TABLE my_table IS 'This is a table comment';
+/// COMMENT ON COLUMN my_table.my_column IS 'This is a column comment';
+/// COMMENT ON FLOW my_flow IS NULL;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct Comment {
     pub object: CommentObject,
