@@ -37,7 +37,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-functions-aggregate-common.workspace = true
 datafusion-physical-expr.workspace = true
-datafusion-postgres.workspace = true
+datafusion-pg-catalog.workspace = true
 datatypes.workspace = true
 derive_more = { version = "1", default-features = false, features = ["display"] }
 geo = { version = "0.29", optional = true }
