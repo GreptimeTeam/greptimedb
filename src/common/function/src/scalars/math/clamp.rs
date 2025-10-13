@@ -15,7 +15,6 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, PrimitiveArray};
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::{ColumnarValue, Volatility};
@@ -25,8 +24,19 @@ use datafusion_expr::{ScalarFunctionArgs, Signature};
 
 use crate::function::Function;
 
-#[derive(Clone, Debug, Default)]
-pub struct ClampFunction;
+#[derive(Clone, Debug)]
+pub struct ClampFunction {
+    signature: Signature,
+}
+
+impl Default for ClampFunction {
+    fn default() -> Self {
+        Self {
+            // input, min, max
+            signature: Signature::uniform(3, NUMERICS.to_vec(), Volatility::Immutable),
+        }
+    }
+}
 
 const CLAMP_NAME: &str = "clamp";
 
@@ -35,14 +45,16 @@ impl Function for ClampFunction {
         CLAMP_NAME
     }
 
-    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+    fn return_type(
+        &self,
+        input_types: &[ArrowDataType],
+    ) -> datafusion_common::Result<ArrowDataType> {
         // Type check is done by `signature`
         Ok(input_types[0].clone())
     }
 
-    fn signature(&self) -> Signature {
-        // input, min, max
-        Signature::uniform(3, NUMERICS.to_vec(), Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -211,8 +223,19 @@ fn clamp_impl(
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct ClampMinFunction;
+#[derive(Clone, Debug)]
+pub struct ClampMinFunction {
+    signature: Signature,
+}
+
+impl Default for ClampMinFunction {
+    fn default() -> Self {
+        Self {
+            // input, min
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+        }
+    }
+}
 
 const CLAMP_MIN_NAME: &str = "clamp_min";
 
@@ -221,13 +244,15 @@ impl Function for ClampMinFunction {
         CLAMP_MIN_NAME
     }
 
-    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+    fn return_type(
+        &self,
+        input_types: &[ArrowDataType],
+    ) -> datafusion_common::Result<ArrowDataType> {
         Ok(input_types[0].clone())
     }
 
-    fn signature(&self) -> Signature {
-        // input, min
-        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -252,8 +277,19 @@ impl Display for ClampMinFunction {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct ClampMaxFunction;
+#[derive(Clone, Debug)]
+pub struct ClampMaxFunction {
+    signature: Signature,
+}
+
+impl Default for ClampMaxFunction {
+    fn default() -> Self {
+        Self {
+            // input, max
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+        }
+    }
+}
 
 const CLAMP_MAX_NAME: &str = "clamp_max";
 
@@ -262,13 +298,15 @@ impl Function for ClampMaxFunction {
         CLAMP_MAX_NAME
     }
 
-    fn return_type(&self, input_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+    fn return_type(
+        &self,
+        input_types: &[ArrowDataType],
+    ) -> datafusion_common::Result<ArrowDataType> {
         Ok(input_types[0].clone())
     }
 
-    fn signature(&self) -> Signature {
-        // input, max
-        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -361,7 +399,7 @@ mod test {
             ),
         ];
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         for (in_data, min, max, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -404,7 +442,7 @@ mod test {
             ),
         ];
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         for (in_data, min, max, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -447,7 +485,7 @@ mod test {
             ),
         ];
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         for (in_data, min, max, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -467,7 +505,7 @@ mod test {
         let min = 10.0;
         let max = -1.0;
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),
@@ -484,7 +522,7 @@ mod test {
         let min = -1i64;
         let max = 10u64;
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),
@@ -501,7 +539,7 @@ mod test {
         let min = -10.0;
         let max = 1.0;
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),
@@ -517,7 +555,7 @@ mod test {
         let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
         let min = -10.0;
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),
@@ -531,7 +569,7 @@ mod test {
     fn clamp_on_string() {
         let input = vec![Some("foo"), Some("foo"), Some("foo"), Some("foo")];
 
-        let func = ClampFunction;
+        let func = ClampFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(StringArray::from(input))),
@@ -557,7 +595,7 @@ mod test {
             ),
         ];
 
-        let func = ClampMinFunction;
+        let func = ClampMinFunction::default();
         for (in_data, min, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -585,7 +623,7 @@ mod test {
             ),
         ];
 
-        let func = ClampMaxFunction;
+        let func = ClampMaxFunction::default();
         for (in_data, max, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -606,7 +644,7 @@ mod test {
             vec![Some(-1.0), Some(-1.0), Some(-1.0), Some(0.0), Some(1.0)],
         )];
 
-        let func = ClampMinFunction;
+        let func = ClampMinFunction::default();
         for (in_data, min, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -627,7 +665,7 @@ mod test {
             vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(0.0)],
         )];
 
-        let func = ClampMaxFunction;
+        let func = ClampMaxFunction::default();
         for (in_data, max, expected) in inputs {
             let number_rows = in_data.len();
             let args = vec![
@@ -645,7 +683,7 @@ mod test {
         let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
         let min = -1i64;
 
-        let func = ClampMinFunction;
+        let func = ClampMinFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),
@@ -660,7 +698,7 @@ mod test {
         let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
         let max = 1i64;
 
-        let func = ClampMaxFunction;
+        let func = ClampMaxFunction::default();
         let number_rows = input.len();
         let args = vec![
             ColumnarValue::Array(Arc::new(Float64Array::from(input))),

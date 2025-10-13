@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use common_query::error::{self, Result};
+use common_query::error;
 use datafusion::arrow::compute::kernels::numeric;
 use datafusion_common::arrow::compute::kernels::cast;
 use datafusion_common::arrow::datatypes::DataType;
@@ -25,8 +25,18 @@ use snafu::ResultExt;
 use crate::function::{Function, extract_args};
 
 /// generates rates from a sequence of adjacent data points.
-#[derive(Clone, Debug, Default)]
-pub struct RateFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct RateFunction {
+    signature: Signature,
+}
+
+impl Default for RateFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+        }
+    }
+}
 
 impl fmt::Display for RateFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -39,12 +49,12 @@ impl Function for RateFunction {
         "rate"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -83,7 +93,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_rate_function() {
-        let rate = RateFunction;
+        let rate = RateFunction::default();
         assert_eq!("rate", rate.name());
         assert_eq!(DataType::Float64, rate.return_type(&[]).unwrap());
         assert!(matches!(rate.signature(),

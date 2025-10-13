@@ -220,7 +220,7 @@ pub fn sql_value_to_value(
                 _ => return InvalidUnaryOpSnafu { unary_op, value }.fail(),
             },
 
-            Value::String(_) | Value::Binary(_) | Value::List(_) => {
+            Value::String(_) | Value::Binary(_) | Value::List(_) | Value::Struct(_) => {
                 return InvalidUnaryOpSnafu { unary_op, value }.fail();
             }
         }

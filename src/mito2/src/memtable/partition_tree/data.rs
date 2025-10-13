@@ -219,7 +219,7 @@ impl DataBuffer {
 
     /// Writes a row to data buffer.
     pub fn write_row(&mut self, pk_index: PkIndex, kv: &KeyValue) {
-        self.ts_builder.push_value_ref(kv.timestamp());
+        self.ts_builder.push_value_ref(&kv.timestamp());
         self.pk_index_builder.push(Some(pk_index));
         self.sequence_builder.push(Some(kv.sequence()));
         self.op_type_builder.push(Some(kv.op_type() as u8));
@@ -229,7 +229,7 @@ impl DataBuffer {
         for (idx, field) in kv.fields().enumerate() {
             self.field_builders[idx]
                 .get_or_create_builder(self.ts_builder.len())
-                .push_value_ref(field);
+                .push_value_ref(&field);
         }
     }
 
@@ -550,7 +550,7 @@ impl DataBufferReader {
     /// Returns current data batch.
     /// # Panics
     /// If Current reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: &self.batch,
@@ -881,7 +881,7 @@ impl DataPartReader {
     /// Returns current data batch of reader.
     /// # Panics
     /// If reader is exhausted.
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let range = self.current_range.unwrap();
         DataBatch {
             rb: self.current_batch.as_ref().unwrap(),
@@ -1041,7 +1041,7 @@ impl Drop for DataPartsReader {
 }
 
 impl DataPartsReader {
-    pub(crate) fn current_data_batch(&self) -> DataBatch {
+    pub(crate) fn current_data_batch(&self) -> DataBatch<'_> {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
     }

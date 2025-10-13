@@ -68,7 +68,7 @@ impl KeySet {
 
     pub fn keys(&self) -> Vec<String> {
         let mut keys = Vec::with_capacity(self.segments + 1);
-        keys.push(self.key.to_string());
+        keys.push(self.key.clone());
         for i in 1..=self.segments {
             keys.push(Self::with_segment_suffix(&self.key, i))
         }

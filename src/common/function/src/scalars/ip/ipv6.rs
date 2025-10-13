@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_query::error::{InvalidFuncArgsSnafu, Result};
+use common_query::error::InvalidFuncArgsSnafu;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder, StringViewBuilder};
@@ -31,21 +31,31 @@ use crate::function::{Function, extract_args};
 /// For example:
 /// - "20010DB8000000000000000000000001" returns "2001:db8::1"
 /// - "00000000000000000000FFFFC0A80001" returns "::ffff:192.168.0.1"
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6NumToString;
+pub(crate) struct Ipv6NumToString {
+    signature: Signature,
+}
+
+impl Default for Ipv6NumToString {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6NumToString {
     fn name(&self) -> &str {
         "ipv6_num_to_string"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -119,21 +129,31 @@ impl Function for Ipv6NumToString {
 /// - If the input string contains a valid IPv4 address, returns its IPv6 equivalent
 /// - HEX can be uppercase or lowercase
 /// - Invalid IPv6 format throws an exception
-#[derive(Clone, Debug, Default, Display)]
+#[derive(Clone, Debug, Display)]
 #[display("{}", self.name())]
-pub struct Ipv6StringToNum;
+pub(crate) struct Ipv6StringToNum {
+    signature: Signature,
+}
+
+impl Default for Ipv6StringToNum {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for Ipv6StringToNum {
     fn name(&self) -> &str {
         "ipv6_string_to_num"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -191,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_num_to_string() {
-        let func = Ipv6NumToString;
+        let func = Ipv6NumToString::default();
 
         // Hex string for "2001:db8::1"
         let hex_str1 = "20010db8000000000000000000000001";
@@ -219,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_num_to_string_uppercase() {
-        let func = Ipv6NumToString;
+        let func = Ipv6NumToString::default();
 
         // Uppercase hex string for "2001:db8::1"
         let hex_str = "20010DB8000000000000000000000001";
@@ -243,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_num_to_string_error() {
-        let func = Ipv6NumToString;
+        let func = Ipv6NumToString::default();
 
         // Invalid hex string - wrong length
         let hex_str = "20010db8";
@@ -272,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_string_to_num() {
-        let func = Ipv6StringToNum;
+        let func = Ipv6StringToNum::default();
 
         let values = vec!["2001:db8::1", "::ffff:192.168.0.1", "192.168.0.1"];
         let arg0 = ColumnarValue::Array(Arc::new(StringViewArray::from_iter_values(&values)));
@@ -305,8 +325,8 @@ mod tests {
 
     #[test]
     fn test_ipv6_conversions_roundtrip() {
-        let to_num = Ipv6StringToNum;
-        let to_string = Ipv6NumToString;
+        let to_num = Ipv6StringToNum::default();
+        let to_string = Ipv6NumToString::default();
 
         // Test data
         let values = vec!["2001:db8::1", "::ffff:192.168.0.1"];
@@ -360,8 +380,8 @@ mod tests {
     fn test_ipv6_conversions_hex_roundtrip() {
         // Create a new test to verify that the string output from ipv6_num_to_string
         // can be converted back using ipv6_string_to_num
-        let to_string = Ipv6NumToString;
-        let to_binary = Ipv6StringToNum;
+        let to_string = Ipv6NumToString::default();
+        let to_binary = Ipv6StringToNum::default();
 
         // Hex representation of IPv6 addresses
         let hex_values = vec![

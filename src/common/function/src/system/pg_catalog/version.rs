@@ -14,15 +14,24 @@
 
 use std::fmt;
 
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 
 use crate::function::Function;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PGVersionFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct PGVersionFunction {
+    signature: Signature,
+}
+
+impl Default for PGVersionFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::exact(vec![], Volatility::Immutable),
+        }
+    }
+}
 
 impl fmt::Display for PGVersionFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -35,12 +44,12 @@ impl Function for PGVersionFunction {
         "pg_catalog.version"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(vec![], Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(&self, _: ScalarFunctionArgs) -> datafusion_common::Result<ColumnarValue> {

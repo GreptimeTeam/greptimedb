@@ -15,7 +15,6 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
 use datafusion_common::arrow::datatypes::DataType;
@@ -24,8 +23,19 @@ use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use crate::function::{Function, extract_args};
 
 /// Converts the `JSONB` into `String`. It's useful for displaying JSONB content.
-#[derive(Clone, Debug, Default)]
-pub struct JsonToStringFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct JsonToStringFunction {
+    signature: Signature,
+}
+
+impl Default for JsonToStringFunction {
+    fn default() -> Self {
+        Self {
+            // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
+            signature: Signature::exact(vec![DataType::Binary], Volatility::Immutable),
+        }
+    }
+}
 
 const NAME: &str = "json_to_string";
 
@@ -34,13 +44,12 @@ impl Function for JsonToStringFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        // TODO(LFC): Use a more clear type here instead of "Binary" for Json input, once we have a "Json" type.
-        Signature::exact(vec![DataType::Binary], Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -79,26 +88,18 @@ mod tests {
 
     use arrow_schema::Field;
     use datafusion_common::arrow::array::BinaryArray;
-    use datafusion_expr::TypeSignature;
 
     use super::*;
 
     #[test]
     fn test_json_to_string_function() {
-        let json_to_string = JsonToStringFunction;
+        let json_to_string = JsonToStringFunction::default();
 
         assert_eq!("json_to_string", json_to_string.name());
         assert_eq!(
             DataType::Utf8View,
             json_to_string.return_type(&[DataType::Binary]).unwrap()
         );
-
-        assert!(matches!(json_to_string.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![DataType::Binary]
-        ));
 
         let json_strings = [
             r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,

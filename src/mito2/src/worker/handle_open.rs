@@ -43,8 +43,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let object_store = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
             self.object_store_manager
                 .find(storage_name)
-                .context(ObjectStoreNotFoundSnafu {
-                    object_store: storage_name.to_string(),
+                .with_context(|| ObjectStoreNotFoundSnafu {
+                    object_store: storage_name.clone(),
                 })?
         } else {
             self.object_store_manager.default_object_store()

@@ -184,7 +184,7 @@ fn collect_column_defaults(column_schemas: &[ColumnSchema]) -> HashMap<String, E
                 column_schema.default_constraint()?,
                 &column_schema.data_type,
             )
-            .map(|expr| (column_schema.name.to_string(), expr))
+            .map(|expr| (column_schema.name.clone(), expr))
         })
         .collect()
 }
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_collect_columns_defaults() {
-        let column_schemas = vec![
+        let column_schemas = [
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true)
                 .with_default_constraint(Some(ColumnDefaultConstraint::Value("test".into())))

@@ -15,7 +15,6 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder};
 use datafusion_common::arrow::compute;
@@ -25,8 +24,18 @@ use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use crate::function::{Function, extract_args};
 
 /// Parses the `String` into `JSONB`.
-#[derive(Clone, Debug, Default)]
-pub struct ParseJsonFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct ParseJsonFunction {
+    signature: Signature,
+}
+
+impl Default for ParseJsonFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 const NAME: &str = "parse_json";
 
@@ -35,12 +44,12 @@ impl Function for ParseJsonFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -87,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_get_by_path_function() {
-        let parse_json = ParseJsonFunction;
+        let parse_json = ParseJsonFunction::default();
 
         assert_eq!("parse_json", parse_json.name());
         assert_eq!(

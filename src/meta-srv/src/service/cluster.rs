@@ -17,7 +17,6 @@ use api::v1::meta::{
     MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
     RangeResponse as PbRangeResponse, cluster_server,
 };
-use common_telemetry::warn;
 use snafu::ResultExt;
 use tonic::Request;
 

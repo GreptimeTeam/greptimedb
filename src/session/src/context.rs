@@ -258,7 +258,7 @@ impl QueryContext {
             });
         QueryContextBuilder::default()
             .current_catalog(catalog)
-            .current_schema(schema.to_string())
+            .current_schema(schema.clone())
             .build()
     }
 

@@ -107,6 +107,7 @@ pub async fn sql_to_df_plan(
                     lookback: eval
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    alias: eval.alias.clone(),
                 };
 
                 QueryLanguageParser::parse_promql(&promql, &query_ctx)

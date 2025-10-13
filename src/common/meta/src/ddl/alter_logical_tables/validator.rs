@@ -85,7 +85,7 @@ impl<'a> AlterLogicalTableValidator<'a> {
         Ok(())
     }
 
-    fn table_names(&self) -> Vec<TableReference> {
+    fn table_names(&self) -> Vec<TableReference<'_>> {
         self.alters
             .iter()
             .map(|alter| {

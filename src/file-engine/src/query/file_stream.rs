@@ -52,7 +52,7 @@ fn build_record_batch_stream(
     let files = scan_plan_config
         .files
         .iter()
-        .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+        .map(|filename| PartitionedFile::new(filename.clone(), 0))
         .collect::<Vec<_>>();
 
     let config = FileScanConfigBuilder::new(
@@ -122,7 +122,7 @@ fn new_parquet_stream_with_exec_plan(config: &ScanPlanConfig) -> Result<Sendable
     let file_group = FileGroup::new(
         files
             .iter()
-            .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+            .map(|filename| PartitionedFile::new(filename.clone(), 0))
             .collect::<Vec<_>>(),
     );
 

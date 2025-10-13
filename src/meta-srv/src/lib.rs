@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(result_flattening)]
 #![feature(assert_matches)]
 #![feature(hash_set_entry)]
-#![feature(let_chains)]
-#![feature(duration_constructors_lite)]
 #![feature(duration_constructors)]
 #![feature(string_from_utf8_lossy_owned)]
 

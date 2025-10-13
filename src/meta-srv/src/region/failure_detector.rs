@@ -74,7 +74,7 @@ impl RegionFailureDetector {
     }
 
     /// Returns a [FailureDetectorEntry] iterator.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = FailureDetectorEntry> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = FailureDetectorEntry<'_>> + '_ {
         self.detectors
             .iter()
             .map(move |e| FailureDetectorEntry { e })

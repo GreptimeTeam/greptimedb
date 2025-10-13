@@ -383,7 +383,7 @@ pub struct CreateViewTask {
 
 impl CreateViewTask {
     /// Returns the [`TableReference`] of view.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.create_view.catalog_name,
             schema: &self.create_view.schema_name,
@@ -496,7 +496,7 @@ pub struct DropViewTask {
 
 impl DropViewTask {
     /// Returns the [`TableReference`] of view.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -553,7 +553,7 @@ pub struct DropTableTask {
 }
 
 impl DropTableTask {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -563,9 +563,9 @@ impl DropTableTask {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.catalog.to_string(),
-            schema_name: self.schema.to_string(),
-            table_name: self.table.to_string(),
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
         }
     }
 }
@@ -659,13 +659,13 @@ impl CreateTableTask {
         let table = &self.create_table;
 
         TableName {
-            catalog_name: table.catalog_name.to_string(),
-            schema_name: table.schema_name.to_string(),
-            table_name: table.table_name.to_string(),
+            catalog_name: table.catalog_name.clone(),
+            schema_name: table.schema_name.clone(),
+            table_name: table.table_name.clone(),
         }
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         let table = &self.create_table;
 
         TableReference {
@@ -750,7 +750,7 @@ impl AlterTableTask {
         Ok(())
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.alter_table.catalog_name,
             schema: &self.alter_table.schema_name,
@@ -762,9 +762,9 @@ impl AlterTableTask {
         let table = &self.alter_table;
 
         TableName {
-            catalog_name: table.catalog_name.to_string(),
-            schema_name: table.schema_name.to_string(),
-            table_name: table.table_name.to_string(),
+            catalog_name: table.catalog_name.clone(),
+            schema_name: table.schema_name.clone(),
+            table_name: table.table_name.clone(),
         }
     }
 }
@@ -834,7 +834,7 @@ pub struct TruncateTableTask {
 }
 
 impl TruncateTableTask {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog,
             schema: &self.schema,
@@ -844,9 +844,9 @@ impl TruncateTableTask {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.catalog.to_string(),
-            schema_name: self.schema.to_string(),
-            table_name: self.table.to_string(),
+            catalog_name: self.catalog.clone(),
+            schema_name: self.schema.clone(),
+            table_name: self.table.clone(),
         }
     }
 }
@@ -1344,7 +1344,7 @@ impl From<QueryContextRef> for QueryContext {
     fn from(query_context: QueryContextRef) -> Self {
         QueryContext {
             current_catalog: query_context.current_catalog().to_string(),
-            current_schema: query_context.current_schema().to_string(),
+            current_schema: query_context.current_schema().clone(),
             timezone: query_context.timezone().to_string(),
             extensions: query_context.extensions(),
             channel: query_context.channel() as u8,
@@ -1401,7 +1401,7 @@ impl From<QueryContextRef> for FlowQueryContext {
     fn from(ctx: QueryContextRef) -> Self {
         Self {
             catalog: ctx.current_catalog().to_string(),
-            schema: ctx.current_schema().to_string(),
+            schema: ctx.current_schema().clone(),
             timezone: ctx.timezone().to_string(),
         }
     }

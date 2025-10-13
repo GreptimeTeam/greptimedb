@@ -56,7 +56,7 @@ impl KeyValues {
     }
 
     /// Returns a key value iterator.
-    pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
+    pub fn iter(&self) -> impl Iterator<Item = KeyValue<'_>> {
         let rows = self.mutation.rows.as_ref().unwrap();
         let schema = &rows.schema;
         rows.rows.iter().enumerate().map(|(idx, row)| {
@@ -130,7 +130,7 @@ impl<'a> KeyValuesRef<'a> {
     }
 
     /// Returns a key value iterator.
-    pub fn iter(&self) -> impl Iterator<Item = KeyValue> {
+    pub fn iter(&self) -> impl Iterator<Item = KeyValue<'_>> {
         let rows = self.mutation.rows.as_ref().unwrap();
         let schema = &rows.schema;
         rows.rows.iter().enumerate().map(|(idx, row)| {
@@ -199,38 +199,38 @@ impl KeyValue<'_> {
     }
 
     /// Get primary key columns.
-    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
+    pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef<'_>> {
         self.helper.indices[..self.helper.num_primary_key_column]
             .iter()
             .map(|idx| match idx {
                 Some(i) => api::helper::pb_value_to_value_ref(
                     &self.row.values[*i],
-                    &self.schema[*i].datatype_extension,
+                    self.schema[*i].datatype_extension.as_ref(),
                 ),
                 None => ValueRef::Null,
             })
     }
 
     /// Get field columns.
-    pub fn fields(&self) -> impl Iterator<Item = ValueRef> {
+    pub fn fields(&self) -> impl Iterator<Item = ValueRef<'_>> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
             .map(|idx| match idx {
                 Some(i) => api::helper::pb_value_to_value_ref(
                     &self.row.values[*i],
-                    &self.schema[*i].datatype_extension,
+                    self.schema[*i].datatype_extension.as_ref(),
                 ),
                 None => ValueRef::Null,
             })
     }
 
     /// Get timestamp.
-    pub fn timestamp(&self) -> ValueRef {
+    pub fn timestamp(&self) -> ValueRef<'_> {
         // Timestamp is primitive, we clone it.
         let index = self.helper.indices[self.helper.num_primary_key_column].unwrap();
         api::helper::pb_value_to_value_ref(
             &self.row.values[index],
-            &self.schema[index].datatype_extension,
+            self.schema[index].datatype_extension.as_ref(),
         )
     }
 

@@ -86,7 +86,7 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                 // and we only need to do a merge sort, otherwise fallback to quick sort
                 let can_merge_sort = partition_cnt >= region_cnt;
                 if can_merge_sort {
-                    // TODO(discord9): use `SortPreversingMergeExec here`
+                    // TODO(discord9): use `SortPreservingMergeExec here`
                 }
                 // for now merge sort only exist in logical plan, and have the same effect as `Sort`
                 // doesn't change the execution plan, this will change in the future
@@ -214,11 +214,8 @@ impl DistExtensionPlanner {
         let all_regions = table_info.region_ids();
 
         // Extract partition columns
-        let partition_columns: Vec<String> = table_info
-            .meta
-            .partition_column_names()
-            .map(|s| s.to_string())
-            .collect();
+        let partition_columns: Vec<String> =
+            table_info.meta.partition_column_names().cloned().collect();
         if partition_columns.is_empty() {
             return Ok(all_regions);
         }

@@ -925,7 +925,7 @@ async fn test_udaf_correct_eval_result() {
                 let percent = ScalarValue::Float64(Some(0.5)).to_array().unwrap();
                 let percent = ColumnarValue::Array(percent);
                 let state = ColumnarValue::Array(arr);
-                let udd_calc = UddSketchCalcFunction;
+                let udd_calc = UddSketchCalcFunction::default();
                 let res = udd_calc
                     .invoke_with_args(ScalarFunctionArgs {
                         args: vec![percent, state],
@@ -965,7 +965,7 @@ async fn test_udaf_correct_eval_result() {
             expected_fn: Some(|arr| {
                 let number_rows = arr.len();
                 let state = ColumnarValue::Array(arr);
-                let hll_calc = HllCalcFunction;
+                let hll_calc = HllCalcFunction::default();
                 let res = hll_calc
                     .invoke_with_args(ScalarFunctionArgs {
                         args: vec![state],

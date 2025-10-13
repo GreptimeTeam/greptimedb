@@ -150,7 +150,7 @@ impl<
         if let Some(ref mut writer) = self.writer {
             Ok(writer)
         } else {
-            let writer = (self.writer_factory)(self.path.to_string()).await?;
+            let writer = (self.writer_factory)(self.path.clone()).await?;
             Ok(self.writer.insert(writer))
         }
     }

@@ -15,7 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::{InvalidVectorStringSnafu, Result};
+use common_query::error::InvalidVectorStringSnafu;
 use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
@@ -27,20 +27,30 @@ use crate::function::{Function, extract_args};
 
 const NAME: &str = "parse_vec";
 
-#[derive(Debug, Clone, Default)]
-pub struct ParseVectorFunction;
+#[derive(Debug, Clone)]
+pub struct ParseVectorFunction {
+    signature: Signature,
+}
+
+impl Default for ParseVectorFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(1, Volatility::Immutable),
+        }
+    }
+}
 
 impl Function for ParseVectorFunction {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::BinaryView)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(1, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -87,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_parse_vector() {
-        let func = ParseVectorFunction;
+        let func = ParseVectorFunction::default();
 
         let arg0 = Arc::new(StringViewArray::from_iter([
             Some("[1.0,2.0,3.0]".to_string()),
@@ -132,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_parse_vector_error() {
-        let func = ParseVectorFunction;
+        let func = ParseVectorFunction::default();
 
         let inputs = [
             StringViewArray::from_iter([

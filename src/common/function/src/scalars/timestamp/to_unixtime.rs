@@ -15,7 +15,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use common_time::{Date, Timestamp};
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{
@@ -29,8 +28,31 @@ use crate::function::{Function, FunctionContext, extract_args, find_function_con
 use crate::helper::with_match_timestamp_types;
 
 /// A function to convert the column into the unix timestamp in seconds.
-#[derive(Clone, Debug, Default)]
-pub struct ToUnixtimeFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct ToUnixtimeFunction {
+    signature: Signature,
+}
+
+impl Default for ToUnixtimeFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::uniform(
+                1,
+                vec![
+                    DataType::Utf8,
+                    DataType::Int32,
+                    DataType::Int64,
+                    DataType::Date32,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
 
 const NAME: &str = "to_unixtime";
 
@@ -72,25 +94,12 @@ impl Function for ToUnixtimeFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Int64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::uniform(
-            1,
-            vec![
-                DataType::Utf8,
-                DataType::Int32,
-                DataType::Int64,
-                DataType::Date32,
-                DataType::Timestamp(TimeUnit::Second, None),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-            ],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -147,7 +156,6 @@ mod tests {
     };
     use datafusion_common::arrow::datatypes::Int64Type;
     use datafusion_common::config::ConfigOptions;
-    use datafusion_expr::TypeSignature;
 
     use super::{ToUnixtimeFunction, *};
 
@@ -164,7 +172,7 @@ mod tests {
             return_field: Arc::new(Field::new("", DataType::Int64, true)),
             config_options,
         };
-        let result = ToUnixtimeFunction
+        let result = ToUnixtimeFunction::default()
             .invoke_with_args(args)
             .and_then(|x| x.to_array(number_rows))
             .unwrap();
@@ -178,25 +186,9 @@ mod tests {
 
     #[test]
     fn test_string_to_unixtime() {
-        let f = ToUnixtimeFunction;
+        let f = ToUnixtimeFunction::default();
         assert_eq!("to_unixtime", f.name());
         assert_eq!(DataType::Int64, f.return_type(&[]).unwrap());
-
-        assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(1, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![
-                             DataType::Utf8,
-                             DataType::Int32,
-                             DataType::Int64,
-                             DataType::Date32,
-                             DataType::Timestamp(TimeUnit::Second, None),
-                             DataType::Timestamp(TimeUnit::Millisecond, None),
-                             DataType::Timestamp(TimeUnit::Microsecond, None),
-                             DataType::Timestamp(TimeUnit::Nanosecond, None),
-                         ]
-        ));
 
         let times = vec![
             Some("2023-03-01T06:35:02Z"),

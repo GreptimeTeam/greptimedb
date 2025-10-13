@@ -12,29 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{self};
-
-use common_query::error::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use derive_more::Display;
 
 use crate::function::{Function, find_function_context};
+use crate::system::define_nullary_udf;
 
-/// A function to return current schema name.
-#[derive(Clone, Debug, Default)]
-pub struct DatabaseFunction;
-
-pub struct ReadPreferenceFunction;
-
-#[derive(Display)]
-#[display("{}", self.name())]
-pub struct PgBackendPidFunction;
-
-#[derive(Display)]
-#[display("{}", self.name())]
-pub struct ConnectionIdFunction;
+define_nullary_udf!(DatabaseFunction);
+define_nullary_udf!(ReadPreferenceFunction);
+define_nullary_udf!(PgBackendPidFunction);
+define_nullary_udf!(ConnectionIdFunction);
 
 const DATABASE_FUNCTION_NAME: &str = "database";
 const READ_PREFERENCE_FUNCTION_NAME: &str = "read_preference";
@@ -46,12 +34,12 @@ impl Function for DatabaseFunction {
         DATABASE_FUNCTION_NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -70,12 +58,12 @@ impl Function for ReadPreferenceFunction {
         READ_PREFERENCE_FUNCTION_NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -96,12 +84,12 @@ impl Function for PgBackendPidFunction {
         PG_BACKEND_PID
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt64)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -120,12 +108,12 @@ impl Function for ConnectionIdFunction {
         CONNECTION_ID
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::UInt32)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -136,18 +124,6 @@ impl Function for ConnectionIdFunction {
         let pid = func_ctx.query_ctx.process_id();
 
         Ok(ColumnarValue::Scalar(ScalarValue::UInt32(Some(pid))))
-    }
-}
-
-impl fmt::Display for DatabaseFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DATABASE")
-    }
-}
-
-impl fmt::Display for ReadPreferenceFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "READ_PREFERENCE")
     }
 }
 
@@ -163,10 +139,9 @@ mod tests {
     use crate::function::FunctionContext;
     #[test]
     fn test_build_function() {
-        let build = DatabaseFunction;
+        let build = DatabaseFunction::default();
         assert_eq!("database", build.name());
         assert_eq!(DataType::Utf8View, build.return_type(&[]).unwrap());
-        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default()
             .current_schema("test_db".to_string())

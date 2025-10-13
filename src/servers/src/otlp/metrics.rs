@@ -298,8 +298,7 @@ pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> Strin
 
     // Metric name cannot start with a digit, so prefix it with "_" in this case
     if let Some((_, first)) = name.char_indices().next()
-        && first >= '0'
-        && first <= '9'
+        && first.is_ascii_digit()
     {
         format!("_{}", name)
     } else {
@@ -343,8 +342,7 @@ pub fn normalize_label_name(name: &str) -> String {
 
     let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
     if let Some((_, first)) = n.char_indices().next()
-        && first >= '0'
-        && first <= '9'
+        && first.is_ascii_digit()
     {
         return format!("key_{}", n);
     }

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::{ConcreteDataType, DataType, LogicalTypeId};
 use crate::value::Value;
+use crate::vectors::StructVectorBuilder;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StructType {
@@ -31,7 +32,7 @@ impl TryFrom<&Fields> for StructType {
             .iter()
             .map(|field| {
                 Ok(StructField::new(
-                    field.name().to_string(),
+                    field.name().clone(),
                     ConcreteDataType::try_from(field.data_type())?,
                     field.is_nullable(),
                 ))
@@ -68,16 +69,15 @@ impl DataType for StructType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        let fields = self
-            .fields
-            .iter()
-            .map(|f| Field::new(f.name.clone(), f.data_type.as_arrow_type(), f.nullable))
-            .collect();
+        let fields = self.as_arrow_fields();
         ArrowDataType::Struct(fields)
     }
 
-    fn create_mutable_vector(&self, _capacity: usize) -> Box<dyn crate::prelude::MutableVector> {
-        unimplemented!("What is the mutable vector for StructVector?");
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn crate::prelude::MutableVector> {
+        Box::new(StructVectorBuilder::with_type_and_capacity(
+            self.clone(),
+            capacity,
+        ))
     }
 
     fn try_cast(&self, _from: Value) -> Option<Value> {
@@ -93,6 +93,13 @@ impl StructType {
 
     pub fn fields(&self) -> &[StructField] {
         &self.fields
+    }
+
+    pub fn as_arrow_fields(&self) -> Fields {
+        self.fields
+            .iter()
+            .map(|f| Field::new(f.name.clone(), f.data_type.as_arrow_type(), f.nullable))
+            .collect()
     }
 }
 

@@ -32,23 +32,23 @@ pub(crate) struct JsonFunction;
 
 impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(JsonToStringFunction);
-        registry.register_scalar(ParseJsonFunction);
+        registry.register_scalar(JsonToStringFunction::default());
+        registry.register_scalar(ParseJsonFunction::default());
 
-        registry.register_scalar(JsonGetInt);
-        registry.register_scalar(JsonGetFloat);
-        registry.register_scalar(JsonGetString);
-        registry.register_scalar(JsonGetBool);
+        registry.register_scalar(JsonGetInt::default());
+        registry.register_scalar(JsonGetFloat::default());
+        registry.register_scalar(JsonGetString::default());
+        registry.register_scalar(JsonGetBool::default());
 
-        registry.register_scalar(JsonIsNull);
-        registry.register_scalar(JsonIsInt);
-        registry.register_scalar(JsonIsFloat);
-        registry.register_scalar(JsonIsString);
-        registry.register_scalar(JsonIsBool);
-        registry.register_scalar(JsonIsArray);
-        registry.register_scalar(JsonIsObject);
+        registry.register_scalar(JsonIsNull::default());
+        registry.register_scalar(JsonIsInt::default());
+        registry.register_scalar(JsonIsFloat::default());
+        registry.register_scalar(JsonIsString::default());
+        registry.register_scalar(JsonIsBool::default());
+        registry.register_scalar(JsonIsArray::default());
+        registry.register_scalar(JsonIsObject::default());
 
-        registry.register_scalar(json_path_exists::JsonPathExistsFunction);
-        registry.register_scalar(json_path_match::JsonPathMatchFunction);
+        registry.register_scalar(json_path_exists::JsonPathExistsFunction::default());
+        registry.register_scalar(json_path_match::JsonPathMatchFunction::default());
     }
 }

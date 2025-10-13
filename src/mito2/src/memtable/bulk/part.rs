@@ -45,6 +45,7 @@ use mito_codec::row_converter::{
     DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, build_primary_key_codec,
 };
 use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
@@ -261,7 +262,7 @@ impl PrimaryKeyColumnBuilder {
                 }
             }
             PrimaryKeyColumnBuilder::Vector(builder) => {
-                builder.push_value_ref(value);
+                builder.push_value_ref(&value);
             }
         }
         Ok(())
@@ -635,6 +636,7 @@ impl BulkPartEncoder {
                 .set_key_value_metadata(Some(vec![key_value_meta]))
                 .set_write_batch_size(row_group_size)
                 .set_max_row_group_size(row_group_size)
+                .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None)
                 .build(),
@@ -783,11 +785,11 @@ fn mutations_to_record_batch(
                 .encode_to_vec(row.primary_keys(), &mut pk_buffer)
                 .context(EncodeSnafu)?;
             pk_builder.append_value(pk_buffer.as_bytes());
-            ts_vector.push_value_ref(row.timestamp());
+            ts_vector.push_value_ref(&row.timestamp());
             sequence_builder.append_value(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);
             for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
-                builder.push_value_ref(field);
+                builder.push_value_ref(&field);
             }
         }
     }

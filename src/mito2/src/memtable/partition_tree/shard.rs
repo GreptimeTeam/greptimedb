@@ -134,7 +134,7 @@ pub trait DataBatchSource {
     /// Returns the data part.
     /// # Panics
     /// If source is not valid.
-    fn current_data_batch(&self) -> DataBatch;
+    fn current_data_batch(&self) -> DataBatch<'_>;
 }
 
 pub type BoxedDataBatchSource = Box<dyn DataBatchSource + Send>;
@@ -223,7 +223,7 @@ impl ShardReader {
         }
     }
 
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         self.parts_reader.current_data_batch()
     }
 
@@ -305,7 +305,7 @@ impl DataBatchSource for ShardMerger {
         self.merger.current_node().current_key()
     }
 
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         let batch = self.merger.current_node().current_data_batch();
         batch.slice(0, self.merger.current_rows())
     }
@@ -345,7 +345,7 @@ impl ShardSource {
         }
     }
 
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         match self {
             ShardSource::Builder(r) => r.current_data_batch(),
             ShardSource::Shard(r) => r.current_data_batch(),
@@ -371,7 +371,7 @@ impl ShardNode {
         self.source.current_key()
     }
 
-    fn current_data_batch(&self) -> DataBatch {
+    fn current_data_batch(&self) -> DataBatch<'_> {
         self.source.current_data_batch()
     }
 }

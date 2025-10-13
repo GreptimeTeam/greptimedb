@@ -18,7 +18,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
@@ -37,12 +36,27 @@ const NAME: &str = "uddsketch_calc";
 /// 2. The serialized UDDSketch state, as produced by the aggregator (binary).
 ///
 /// For each row, it deserializes the sketch and returns the computed quantile value.
-#[derive(Debug, Default)]
-pub struct UddSketchCalcFunction;
+#[derive(Debug)]
+pub(crate) struct UddSketchCalcFunction {
+    signature: Signature,
+}
 
 impl UddSketchCalcFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(UddSketchCalcFunction);
+        registry.register_scalar(UddSketchCalcFunction::default());
+    }
+}
+
+impl Default for UddSketchCalcFunction {
+    fn default() -> Self {
+        Self {
+            // First argument: percentile (float64)
+            // Second argument: UDDSketch state (binary)
+            signature: Signature::exact(
+                vec![DataType::Float64, DataType::Binary],
+                Volatility::Immutable,
+            ),
+        }
     }
 }
 
@@ -57,17 +71,12 @@ impl Function for UddSketchCalcFunction {
         NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Float64)
     }
 
-    fn signature(&self) -> Signature {
-        // First argument: percentile (float64)
-        // Second argument: UDDSketch state (binary)
-        Signature::exact(
-            vec![DataType::Float64, DataType::Binary],
-            Volatility::Immutable,
-        )
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -142,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_uddsketch_calc_function() {
-        let function = UddSketchCalcFunction;
+        let function = UddSketchCalcFunction::default();
         assert_eq!("uddsketch_calc", function.name());
         assert_eq!(
             DataType::Float64,
@@ -200,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_uddsketch_calc_function_errors() {
-        let function = UddSketchCalcFunction;
+        let function = UddSketchCalcFunction::default();
 
         // Test with invalid number of arguments
         let result = function.invoke_with_args(ScalarFunctionArgs {

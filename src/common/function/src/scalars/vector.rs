@@ -41,29 +41,29 @@ pub(crate) struct VectorFunction;
 impl VectorFunction {
     pub fn register(registry: &FunctionRegistry) {
         // conversion
-        registry.register_scalar(convert::ParseVectorFunction);
-        registry.register_scalar(convert::VectorToStringFunction);
+        registry.register_scalar(convert::ParseVectorFunction::default());
+        registry.register_scalar(convert::VectorToStringFunction::default());
 
         // distance
-        registry.register_scalar(distance::CosDistanceFunction);
-        registry.register_scalar(distance::DotProductFunction);
-        registry.register_scalar(distance::L2SqDistanceFunction);
+        registry.register_scalar(distance::CosDistanceFunction::default());
+        registry.register_scalar(distance::DotProductFunction::default());
+        registry.register_scalar(distance::L2SqDistanceFunction::default());
 
         // scalar calculation
-        registry.register_scalar(scalar_add::ScalarAddFunction);
-        registry.register_scalar(scalar_mul::ScalarMulFunction);
+        registry.register_scalar(scalar_add::ScalarAddFunction::default());
+        registry.register_scalar(scalar_mul::ScalarMulFunction::default());
 
         // vector calculation
-        registry.register_scalar(vector_add::VectorAddFunction);
-        registry.register_scalar(vector_sub::VectorSubFunction);
-        registry.register_scalar(vector_mul::VectorMulFunction);
-        registry.register_scalar(vector_div::VectorDivFunction);
-        registry.register_scalar(vector_norm::VectorNormFunction);
-        registry.register_scalar(vector_dim::VectorDimFunction);
-        registry.register_scalar(vector_kth_elem::VectorKthElemFunction);
-        registry.register_scalar(vector_subvector::VectorSubvectorFunction);
-        registry.register_scalar(elem_sum::ElemSumFunction);
-        registry.register_scalar(elem_product::ElemProductFunction);
+        registry.register_scalar(vector_add::VectorAddFunction::default());
+        registry.register_scalar(vector_sub::VectorSubFunction::default());
+        registry.register_scalar(vector_mul::VectorMulFunction::default());
+        registry.register_scalar(vector_div::VectorDivFunction::default());
+        registry.register_scalar(vector_norm::VectorNormFunction::default());
+        registry.register_scalar(vector_dim::VectorDimFunction::default());
+        registry.register_scalar(vector_kth_elem::VectorKthElemFunction::default());
+        registry.register_scalar(vector_subvector::VectorSubvectorFunction::default());
+        registry.register_scalar(elem_sum::ElemSumFunction::default());
+        registry.register_scalar(elem_product::ElemProductFunction::default());
     }
 }
 
@@ -218,3 +218,44 @@ where
         Ok(ColumnarValue::Array(results))
     }
 }
+
+macro_rules! define_args_of_two_vector_literals_udf {
+    ($(#[$attr:meta])* $name: ident) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone)]
+        pub(crate) struct $name {
+            signature: datafusion_expr::Signature,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                use arrow::datatypes::DataType;
+
+                Self {
+                    signature: crate::helper::one_of_sigs2(
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                        vec![
+                            DataType::Utf8,
+                            DataType::Utf8View,
+                            DataType::Binary,
+                            DataType::BinaryView,
+                        ],
+                    ),
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.name().to_ascii_uppercase())
+            }
+        }
+    };
+}
+
+pub(crate) use define_args_of_two_vector_literals_udf;

@@ -16,7 +16,6 @@ mod version;
 
 use std::sync::Arc;
 
-use common_query::error::Result;
 use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
 use datafusion::catalog::TableFunction;
 use datafusion::common::ScalarValue;
@@ -24,27 +23,19 @@ use datafusion::common::utils::SingleRowListArrayBuilder;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datafusion_pg_catalog::pg_catalog::{self, PgCatalogStaticTables};
 use datatypes::arrow::datatypes::{DataType, Field};
-use derive_more::Display;
 use version::PGVersionFunction;
 
 use crate::function::{Function, find_function_context};
 use crate::function_registry::FunctionRegistry;
+use crate::system::define_nullary_udf;
 
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
 const CURRENT_SCHEMAS_FUNCTION_NAME: &str = "current_schemas";
 const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 
-#[derive(Clone, Debug, Default, Display)]
-#[display("{}", self.name())]
-pub struct CurrentSchemaFunction;
-
-#[derive(Clone, Debug, Default, Display)]
-#[display("{}", self.name())]
-pub struct CurrentSchemasFunction;
-
-#[derive(Clone, Debug, Default, Display)]
-#[display("{}", self.name())]
-pub struct SessionUserFunction;
+define_nullary_udf!(CurrentSchemaFunction);
+define_nullary_udf!(CurrentSchemasFunction);
+define_nullary_udf!(SessionUserFunction);
 
 // Though "current_schema" can be aliased to "database", to not cause any breaking changes,
 // we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
@@ -53,12 +44,12 @@ impl Function for CurrentSchemaFunction {
         CURRENT_SCHEMA_FUNCTION_NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -77,12 +68,12 @@ impl Function for SessionUserFunction {
         SESSION_USER_FUNCTION_NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Utf8View)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::nullary(Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -103,7 +94,7 @@ impl Function for CurrentSchemasFunction {
         CURRENT_SCHEMAS_FUNCTION_NAME
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
             "x",
             DataType::Utf8View,
@@ -111,8 +102,8 @@ impl Function for CurrentSchemasFunction {
         ))))
     }
 
-    fn signature(&self) -> Signature {
-        Signature::exact(vec![DataType::Boolean], Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -146,10 +137,10 @@ impl PGCatalogFunction {
         let static_tables =
             Arc::new(PgCatalogStaticTables::try_new().expect("load postgres static tables"));
 
-        registry.register_scalar(PGVersionFunction);
-        registry.register_scalar(CurrentSchemaFunction);
-        registry.register_scalar(CurrentSchemasFunction);
-        registry.register_scalar(SessionUserFunction);
+        registry.register_scalar(PGVersionFunction::default());
+        registry.register_scalar(CurrentSchemaFunction::default());
+        registry.register_scalar(CurrentSchemasFunction::default());
+        registry.register_scalar(SessionUserFunction::default());
         registry.register(pg_catalog::format_type::create_format_type_udf());
         registry.register(pg_catalog::create_pg_get_partkeydef_udf());
         registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(

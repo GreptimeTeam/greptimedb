@@ -132,7 +132,7 @@ impl AlterTableExecutor {
             );
 
             table_metadata_manager
-                .rename_table(current_table_info_value, new_table_name.to_string())
+                .rename_table(current_table_info_value, new_table_name.clone())
                 .await?;
         } else {
             debug!(
@@ -293,7 +293,7 @@ fn build_new_table_info(
             new_info.meta.next_column_id += columns.len() as u32;
         }
         AlterKind::RenameTable { new_table_name } => {
-            new_info.name = new_table_name.to_string();
+            new_info.name = new_table_name.clone();
         }
         AlterKind::DropColumns { .. }
         | AlterKind::ModifyColumnTypes { .. }

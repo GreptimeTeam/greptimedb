@@ -15,7 +15,6 @@
 use std::fmt;
 use std::fmt::Display;
 
-use common_query::error::Result;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::compute::kernels::numeric;
 use datafusion_common::arrow::datatypes::DataType;
@@ -27,8 +26,18 @@ use crate::function::{Function, extract_args};
 const NAME: &str = "mod";
 
 /// The function to find remainders
-#[derive(Clone, Debug, Default)]
-pub struct ModuloFunction;
+#[derive(Clone, Debug)]
+pub(crate) struct ModuloFunction {
+    signature: Signature,
+}
+
+impl Default for ModuloFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+        }
+    }
+}
 
 impl Display for ModuloFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -41,7 +50,7 @@ impl Function for ModuloFunction {
         NAME
     }
 
-    fn return_type(&self, input_types: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, input_types: &[DataType]) -> datafusion_common::Result<DataType> {
         if input_types.iter().all(DataType::is_signed_integer) {
             Ok(DataType::Int64)
         } else if input_types.iter().all(DataType::is_unsigned_integer) {
@@ -51,8 +60,8 @@ impl Function for ModuloFunction {
         }
     }
 
-    fn signature(&self) -> Signature {
-        Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     fn invoke_with_args(
@@ -89,7 +98,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_mod_function_signed() {
-        let function = ModuloFunction;
+        let function = ModuloFunction::default();
         assert_eq!("mod", function.name());
         assert_eq!(
             DataType::Int64,
@@ -125,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_mod_function_unsigned() {
-        let function = ModuloFunction;
+        let function = ModuloFunction::default();
         assert_eq!("mod", function.name());
         assert_eq!(
             DataType::UInt64,
@@ -161,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_mod_function_float() {
-        let function = ModuloFunction;
+        let function = ModuloFunction::default();
         assert_eq!("mod", function.name());
         assert_eq!(
             DataType::Float64,
@@ -197,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_mod_function_errors() {
-        let function = ModuloFunction;
+        let function = ModuloFunction::default();
         assert_eq!("mod", function.name());
         let nums = vec![27];
         let divs = vec![0];

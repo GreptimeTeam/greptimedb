@@ -392,15 +392,15 @@ impl MemoryCatalogManager {
         if !manager.schema_exist_sync(catalog, schema).unwrap() {
             manager
                 .register_schema_sync(RegisterSchemaRequest {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
+                    catalog: catalog.clone(),
+                    schema: schema.clone(),
                 })
                 .unwrap();
         }
 
         let request = RegisterTableRequest {
-            catalog: catalog.to_string(),
-            schema: schema.to_string(),
+            catalog: catalog.clone(),
+            schema: schema.clone(),
             table_name: table.table_info().name.clone(),
             table_id: table.table_info().ident.table_id,
             table,

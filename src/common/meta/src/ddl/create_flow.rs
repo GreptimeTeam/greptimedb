@@ -379,9 +379,10 @@ pub enum CreateFlowState {
 }
 
 /// The type of flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FlowType {
     /// The flow is a batching task.
+    #[default]
     Batching,
     /// The flow is a streaming task.
     Streaming,
@@ -391,12 +392,6 @@ impl FlowType {
     pub const BATCHING: &str = "batching";
     pub const STREAMING: &str = "streaming";
     pub const FLOW_TYPE_KEY: &str = "flow_type";
-}
-
-impl Default for FlowType {
-    fn default() -> Self {
-        Self::Batching
-    }
 }
 
 impl fmt::Display for FlowType {

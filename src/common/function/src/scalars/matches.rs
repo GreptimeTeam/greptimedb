@@ -35,12 +35,22 @@ use crate::function_registry::FunctionRegistry;
 /// `matches` for full text search.
 ///
 /// Usage: matches(`<col>`, `<pattern>`) -> boolean
-#[derive(Clone, Debug, Default)]
-pub struct MatchesFunction;
+#[derive(Clone, Debug)]
+pub struct MatchesFunction {
+    signature: Signature,
+}
 
 impl MatchesFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(MatchesFunction);
+        registry.register_scalar(MatchesFunction::default());
+    }
+}
+
+impl Default for MatchesFunction {
+    fn default() -> Self {
+        Self {
+            signature: Signature::string(2, Volatility::Immutable),
+        }
     }
 }
 
@@ -55,12 +65,12 @@ impl Function for MatchesFunction {
         "matches"
     }
 
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::Boolean)
     }
 
-    fn signature(&self) -> Signature {
-        Signature::string(2, Volatility::Immutable)
+    fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     // TODO: read case-sensitive config
@@ -1382,7 +1392,7 @@ mod test {
             ),
         ];
 
-        let f = MatchesFunction;
+        let f = MatchesFunction::default();
         for (pattern, expected) in cases {
             let args = ScalarFunctionArgs {
                 args: vec![

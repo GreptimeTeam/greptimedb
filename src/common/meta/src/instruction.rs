@@ -302,33 +302,23 @@ pub struct DropFlow {
 }
 
 /// Strategy for executing flush operations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FlushStrategy {
     /// Synchronous operation that waits for completion and expects a reply
+    #[default]
     Sync,
     /// Asynchronous hint operation (fire-and-forget, no reply expected)
     Async,
 }
 
 /// Error handling strategy for batch flush operations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FlushErrorStrategy {
     /// Abort on first error (fail-fast)
+    #[default]
     FailFast,
     /// Attempt to flush all regions and collect all errors
     TryAll,
-}
-
-impl Default for FlushStrategy {
-    fn default() -> Self {
-        Self::Sync
-    }
-}
-
-impl Default for FlushErrorStrategy {
-    fn default() -> Self {
-        Self::FailFast
-    }
 }
 
 /// Unified flush instruction supporting both single and batch operations
