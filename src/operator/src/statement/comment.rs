@@ -27,6 +27,16 @@ use crate::error::{ExecuteDdlSnafu, ExternalSnafu, InvalidSqlSnafu, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
+    /// Adds a comment to a database object (table, column, or flow).
+    ///
+    /// # Arguments
+    ///
+    /// * `stmt`: A `Comment` struct containing the object to comment on and the comment text.
+    /// * `query_ctx`: A `QueryContextRef` providing contextual information for the query.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `Output` of the operation, or an error if the operation fails.
     pub async fn comment(&self, stmt: Comment, query_ctx: QueryContextRef) -> Result<Output> {
         let comment_on_task = self.create_comment_on_task_from_stmt(stmt, &query_ctx)?;
 
