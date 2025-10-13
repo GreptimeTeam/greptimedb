@@ -321,9 +321,10 @@ impl RemapManifest {
         // 3. Log warning about empty regions (not an error)
         if !stats.empty_regions.is_empty() {
             common_telemetry::warn!(
-                "Repartition resulted in {} empty regions: {:?}",
+                "Repartition resulted in {} empty regions: {:?}, new partition exprs: {:?}",
                 stats.empty_regions.len(),
-                stats.empty_regions
+                stats.empty_regions,
+                self.new_partition_exprs.keys().collect::<Vec<_>>()
             );
         }
 
