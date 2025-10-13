@@ -71,6 +71,34 @@ impl CommentOnProcedure {
             }
         }
 
+        // Fast path: if comment is unchanged, skip update
+        if self.data.is_unchanged {
+            let object_desc = match self.data.object_type {
+                CommentObjectType::Table => format!(
+                    "table {}",
+                    format_full_table_name(
+                        &self.data.catalog_name,
+                        &self.data.schema_name,
+                        &self.data.object_name,
+                    )
+                ),
+                CommentObjectType::Column => format!(
+                    "column {}.{}",
+                    format_full_table_name(
+                        &self.data.catalog_name,
+                        &self.data.schema_name,
+                        &self.data.object_name,
+                    ),
+                    self.data.column_name.as_ref().unwrap()
+                ),
+                CommentObjectType::Flow => {
+                    format!("flow {}.{}", self.data.catalog_name, self.data.object_name)
+                }
+            };
+            info!("Comment unchanged for {}, skipping update", object_desc);
+            return Ok(Status::done());
+        }
+
         self.data.state = CommentOnState::UpdateMetadata;
         Ok(Status::executing(true))
     }
@@ -139,6 +167,36 @@ impl CommentOnProcedure {
         }
 
         self.data.table_id = Some(table_id);
+
+        // Check if comment is unchanged for early exit optimization
+        match self.data.object_type {
+            CommentObjectType::Table => {
+                let current_comment = &table_info.table_info.desc;
+                if &self.data.comment == current_comment {
+                    self.data.is_unchanged = true;
+                }
+            }
+            CommentObjectType::Column => {
+                let column_name = self.data.column_name.as_ref().unwrap();
+                let column_schema = table_info
+                    .table_info
+                    .meta
+                    .schema
+                    .column_schemas
+                    .iter()
+                    .find(|col| &col.name == column_name)
+                    .unwrap(); // Safe: validated above
+
+                let current_comment = column_schema.metadata().get(COLUMN_COMMENT_KEY);
+                if self.data.comment.as_deref() == current_comment.map(String::as_str) {
+                    self.data.is_unchanged = true;
+                }
+            }
+            CommentObjectType::Flow => {
+                // this branch is handled in `prepare_flow`
+            }
+        }
+
         self.data.table_info = Some(table_info);
 
         Ok(())
@@ -167,6 +225,14 @@ impl CommentOnProcedure {
             })?;
 
         self.data.flow_id = Some(flow_id);
+
+        // Check if comment is unchanged for early exit optimization
+        let current_comment = &flow_info.get_inner_ref().comment;
+        let new_comment = self.data.comment.as_deref().unwrap_or("");
+        if new_comment == current_comment.as_str() {
+            self.data.is_unchanged = true;
+        }
+
         self.data.flow_info = Some(flow_info);
 
         Ok(())
@@ -396,6 +462,9 @@ pub struct CommentOnData {
     /// Cached flow info (for Flow)
     #[serde(skip)]
     flow_info: Option<DeserializedValueWithBytes<FlowInfoValue>>,
+    /// Whether the comment is unchanged (optimization for early exit)
+    #[serde(skip)]
+    is_unchanged: bool,
 }
 
 impl CommentOnData {
@@ -412,6 +481,7 @@ impl CommentOnData {
             table_info: None,
             flow_id: None,
             flow_info: None,
+            is_unchanged: false,
         }
     }
 }
