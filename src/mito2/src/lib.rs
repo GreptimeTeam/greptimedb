@@ -41,6 +41,7 @@ mod metrics;
 pub mod read;
 pub mod region;
 mod region_write_ctx;
+pub mod remap_manifest;
 pub mod request;
 pub mod schedule;
 pub mod sst;
