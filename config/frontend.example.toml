@@ -256,6 +256,14 @@ parallelism = 0
 ## Default to false, meaning when push down optimize failed, return error msg
 allow_query_fallback = false
 
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+## Example: "4GB", "8GB"
+## @toml2docs:none-default
+#+ memory_pool_size = "4GB"
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.
