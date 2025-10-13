@@ -30,7 +30,7 @@ use table::table_name::TableName;
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::utils::map_to_procedure_error;
-use crate::error::{FlowNotFoundSnafu, Result, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::error::{ColumnNotFoundSnafu, FlowNotFoundSnafu, Result, TableNotFoundSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::flow::flow_info::{FlowInfoKey, FlowInfoValue};
 use crate::key::table_info::{TableInfoKey, TableInfoValue};
@@ -131,7 +131,7 @@ impl CommentOnProcedure {
             .table_info_manager()
             .get(table_id)
             .await?
-            .context(TableNotFoundSnafu {
+            .with_context(|| TableNotFoundSnafu {
                 table_name: format_full_table_name(
                     &self.data.catalog_name,
                     &self.data.schema_name,
@@ -152,16 +152,9 @@ impl CommentOnProcedure {
 
             ensure!(
                 column_exists,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column `{}` not found in table {}",
-                        column_name,
-                        format_full_table_name(
-                            &self.data.catalog_name,
-                            &self.data.schema_name,
-                            &self.data.object_name,
-                        ),
-                    ),
+                ColumnNotFoundSnafu {
+                    column_name,
+                    column_id: 0u32, // column_id is not known here
                 }
             );
         }
@@ -209,7 +202,7 @@ impl CommentOnProcedure {
             .flow_name_manager()
             .get(&self.data.catalog_name, &self.data.object_name)
             .await?
-            .context(FlowNotFoundSnafu {
+            .with_context(|| FlowNotFoundSnafu {
                 flow_name: &self.data.object_name,
             })?;
 
@@ -220,7 +213,7 @@ impl CommentOnProcedure {
             .flow_info_manager()
             .get_raw(flow_id)
             .await?
-            .context(FlowNotFoundSnafu {
+            .with_context(|| FlowNotFoundSnafu {
                 flow_name: &self.data.object_name,
             })?;
 
