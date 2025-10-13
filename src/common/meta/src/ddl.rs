@@ -44,6 +44,7 @@ pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
 pub mod table_meta;
+pub mod repartition;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]

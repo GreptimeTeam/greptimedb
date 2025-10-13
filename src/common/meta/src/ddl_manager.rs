@@ -31,6 +31,7 @@ use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
+use crate::ddl::repartition::{RepartitionProcedure, RepartitionTask};
 use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
@@ -181,7 +182,8 @@ impl DdlManager {
             TruncateTableProcedure,
             CreateDatabaseProcedure,
             DropDatabaseProcedure,
-            DropViewProcedure
+            DropViewProcedure,
+            RepartitionProcedure
         );
 
         for (type_name, loader_factory) in loaders {
@@ -205,6 +207,19 @@ impl DdlManager {
 
         let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
 
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    /// Submits and executes a repartition task.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_repartition_task(
+        &self,
+        repartition_task: RepartitionTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = RepartitionProcedure::new(repartition_task, context)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
