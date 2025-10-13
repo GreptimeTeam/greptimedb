@@ -474,20 +474,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrow-pg"
-version = "0.6.1"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=7c1db5efdbf25924246f49b061acbbdf2d4af649#7c1db5efdbf25924246f49b061acbbdf2d4af649"
-dependencies = [
- "bytes",
- "chrono",
- "datafusion",
- "futures",
- "pgwire 0.32.1",
- "postgres-types",
- "rust_decimal",
-]
-
-[[package]]
 name = "arrow-row"
 version = "56.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1459,7 +1445,7 @@ dependencies = [
  "common-workload",
  "dashmap",
  "datafusion",
- "datafusion-postgres",
+ "datafusion-pg-catalog",
  "datatypes",
  "futures",
  "futures-util",
@@ -2188,8 +2174,8 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions-aggregate-common",
+ "datafusion-pg-catalog",
  "datafusion-physical-expr",
- "datafusion-postgres",
  "datatypes",
  "derive_more",
  "futures",
@@ -3786,9 +3772,15 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "datafusion-physical-ex
 source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=78041eabebf014b8661f50d5ce8b3ae2f70105f7#78041eabebf014b8661f50d5ce8b3ae2f70105f7"
 
+=======
+name = "datafusion-physical-expr"
+version = "50.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=fd4b2abcf3c3e43e94951bda452c9fd35243aab0#fd4b2abcf3c3e43e94951bda452c9fd35243aab0"
+>>>>>>> 24c86be1d2 (fix: update datafusion_pg_catalog import)
 dependencies = [
  "ahash 0.8.12",
  "arrow",
@@ -3886,35 +3878,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "datafusion-postgres"
-version = "0.10.2"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=7c1db5efdbf25924246f49b061acbbdf2d4af649#7c1db5efdbf25924246f49b061acbbdf2d4af649"
-dependencies = [
- "arrow-pg",
- "async-trait",
- "bytes",
- "chrono",
- "datafusion",
- "futures",
- "getset",
- "log",
- "pgwire 0.32.1",
- "postgres-types",
- "rust_decimal",
- "rustls-pemfile",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "datafusion-pruning"
 version = "50.1.0"
-<<<<<<< HEAD
 source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=78041eabebf014b8661f50d5ce8b3ae2f70105f7#78041eabebf014b8661f50d5ce8b3ae2f70105f7"
-=======
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=fd4b2abcf3c3e43e94951bda452c9fd35243aab0#fd4b2abcf3c3e43e94951bda452c9fd35243aab0"
->>>>>>> ecda88a419 (chore: update datafusion to 50)
+
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -5397,18 +5364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getset"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf0fc11e47561d47397154977bc219f4cf809b2974facc3ccb3b89e2436f912"
-dependencies = [
- "proc-macro-error2",
- "proc-macro2",
- "quote",
- "syn 2.0.106",
-]
-
-[[package]]
 name = "gimli"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6263,10 +6218,14 @@ checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
 dependencies = [
  "equivalent",
 <<<<<<< HEAD
+<<<<<<< HEAD
  "hashbrown 0.16.0",
 =======
  "hashbrown 0.15.4",
 >>>>>>> ecda88a419 (chore: update datafusion to 50)
+=======
+ "hashbrown 0.16.0",
+>>>>>>> 24c86be1d2 (fix: update datafusion_pg_catalog import)
 ]
 
 [[package]]
@@ -9281,34 +9240,6 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddf403a6ee31cf7f2217b2bd8447cb13dbb6c268d7e81501bc78a4d3daafd294"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "derive-new",
- "futures",
- "hex",
- "lazy-regex",
- "md5 0.8.0",
- "postgres-types",
- "rand 0.9.1",
- "ring",
- "rust_decimal",
- "rustls-pki-types",
- "stringprep",
- "thiserror 2.0.17",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "x509-certificate 0.24.0",
-]
-
-[[package]]
-name = "pgwire"
 version = "0.33.0"
 source = "git+https://github.com/sunng87/pgwire.git?rev=658e37936da5039dfb8495af9cac7c511dbfaf90#658e37936da5039dfb8495af9cac7c511dbfaf90"
 dependencies = [
@@ -11674,7 +11605,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
- "datafusion-postgres",
+ "datafusion-pg-catalog",
  "datatypes",
  "derive_builder 0.20.2",
  "futures",
@@ -11706,7 +11637,7 @@ dependencies = [
  "otel-arrow-rust",
  "parking_lot 0.12.4",
  "permutation",
- "pgwire 0.33.0",
+ "pgwire",
  "pin-project",
  "pipeline",
  "postgres-types",
@@ -15053,25 +14984,6 @@ name = "x509-certificate"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66534846dec7a11d7c50a74b7cdb208b9a581cad890b7866430d438455847c85"
-dependencies = [
- "bcder",
- "bytes",
- "chrono",
- "der",
- "hex",
- "pem",
- "ring",
- "signature",
- "spki",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "x509-certificate"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e57b9f8bcae7c1f36479821ae826d75050c60ce55146fd86d3553ed2573e2762"
 dependencies = [
  "bcder",
  "bytes",
