@@ -235,6 +235,17 @@ impl RecordBatch {
             .unwrap_or("failed to pretty display a record batch".to_string())
     }
 
+    /// Estimate the memory size of this record batch in bytes.
+    /// This uses the slice memory size which represents the actual memory used.
+    pub fn estimated_size(&self) -> usize {
+        self.df_record_batch
+            .columns()
+            .iter()
+            // If cannot get slice memory size, assume 0
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum()
+    }
+
     /// Return a slice record batch starts from offset, with len rows
     pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
         ensure!(

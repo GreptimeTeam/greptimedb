@@ -128,6 +128,8 @@ pub struct MitoConfig {
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
+    /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
+    pub scan_memory_limit: ReadableSize,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -182,6 +184,7 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
+            scan_memory_limit: ReadableSize(0),
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),

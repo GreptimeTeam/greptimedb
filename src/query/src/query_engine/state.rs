@@ -31,7 +31,8 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
-use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
@@ -100,7 +101,17 @@ impl QueryEngineState {
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> Self {
-        let runtime_env = Arc::new(RuntimeEnv::default());
+        let memory_pool_size = options.memory_pool_size.as_bytes() as usize;
+        let runtime_env = if memory_pool_size > 0 {
+            Arc::new(
+                RuntimeEnvBuilder::new()
+                    .with_memory_pool(Arc::new(GreedyMemoryPool::new(memory_pool_size)))
+                    .build()
+                    .expect("Failed to build RuntimeEnv"),
+            )
+        } else {
+            Arc::new(RuntimeEnv::default())
+        };
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);

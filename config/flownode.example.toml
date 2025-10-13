@@ -158,6 +158,14 @@ default_ratio = 1.0
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1
 
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+## Example: "1GB", "2GB"
+## @toml2docs:none-default
+#+ memory_pool_size = "1GB"
+
 ## The memory options.
 [memory]
 ## Whether to enable heap profiling activation during startup.

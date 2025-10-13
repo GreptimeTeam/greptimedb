@@ -23,6 +23,7 @@ pub mod util;
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
@@ -403,6 +404,119 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.stream).poll_next(ctx)
+    }
+}
+
+/// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
+#[derive(Debug, Clone)]
+pub struct QueryMemoryTracker {
+    current: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+impl QueryMemoryTracker {
+    /// Create a new memory tracker with the given limit (in bytes).
+    /// If limit is 0, no limit is enforced.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            current: Arc::new(AtomicUsize::new(0)),
+            limit,
+        }
+    }
+
+    /// Track memory usage. Returns error if limit is exceeded.
+    pub fn track(&self, size: usize) -> Result<()> {
+        if self.limit == 0 {
+            return Ok(());
+        }
+
+        let new_total = self.current.fetch_add(size, Ordering::Relaxed) + size;
+        if new_total > self.limit {
+            self.release(size);
+            return error::ExceedMemoryLimitSnafu {
+                used: new_total,
+                limit: self.limit,
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
+    /// Release tracked memory.
+    pub fn release(&self, size: usize) {
+        if self.limit == 0 {
+            return;
+        }
+
+        self.current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(size))
+            })
+            .ok();
+    }
+
+    /// Get current memory usage.
+    pub fn current(&self) -> usize {
+        self.current.load(Ordering::Relaxed)
+    }
+}
+
+/// A wrapper stream that tracks memory usage of RecordBatches.
+pub struct MemoryTrackedStream {
+    inner: SendableRecordBatchStream,
+    tracker: QueryMemoryTracker,
+    total_tracked: usize,
+}
+
+impl MemoryTrackedStream {
+    pub fn new(inner: SendableRecordBatchStream, tracker: QueryMemoryTracker) -> Self {
+        Self {
+            inner,
+            tracker,
+            total_tracked: 0,
+        }
+    }
+}
+
+impl Stream for MemoryTrackedStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let size = batch.estimated_size();
+
+                if let Err(e) = self.tracker.track(size) {
+                    return Poll::Ready(Some(Err(e)));
+                }
+
+                self.total_tracked += size;
+                Poll::Ready(Some(Ok(batch)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for MemoryTrackedStream {
+    fn drop(&mut self) {
+        self.tracker.release(self.total_tracked);
+    }
+}
+
+impl RecordBatchStream for MemoryTrackedStream {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.inner.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.inner.metrics()
     }
 }
 
