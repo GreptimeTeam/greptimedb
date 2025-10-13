@@ -81,7 +81,7 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{MemoryTrackedStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
@@ -199,10 +199,13 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize);
+
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
+            scan_memory_tracker,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -253,6 +256,10 @@ impl MitoEngine {
         &self.inner.config
     }
 
+    pub fn scan_memory_tracker(&self) -> QueryMemoryTracker {
+        self.inner.scan_memory_tracker.clone()
+    }
+
     pub fn cache_manager(&self) -> CacheManagerRef {
         self.inner.workers.cache_manager()
     }
@@ -293,11 +300,17 @@ impl MitoEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scanner(region_id, request)
+        let stream = self
+            .scanner(region_id, request)
             .await
             .map_err(BoxedError::new)?
             .scan()
-            .await
+            .await?;
+
+        Ok(Box::pin(MemoryTrackedStream::new(
+            stream,
+            self.inner.scan_memory_tracker.clone(),
+        )))
     }
 
     /// Scan [`Batch`]es by [`ScanRequest`].
@@ -575,6 +588,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// Memory tracker for table scans.
+    scan_memory_tracker: QueryMemoryTracker,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -1071,6 +1086,7 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
+        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize);
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1087,6 +1103,7 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                scan_memory_tracker,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

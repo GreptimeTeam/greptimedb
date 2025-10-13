@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
+use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
@@ -242,6 +243,7 @@ fn test_load_flownode_example_config() {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
+                memory_pool_size: ReadableSize(0),
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
