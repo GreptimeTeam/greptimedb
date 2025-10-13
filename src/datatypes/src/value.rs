@@ -81,8 +81,12 @@ pub enum Value {
     IntervalDayTime(IntervalDayTime),
     IntervalMonthDayNano(IntervalMonthDayNano),
 
+    // Collection types:
     List(ListValue),
     Struct(StructValue),
+
+    // Json Logical types:
+    Json(Box<Value>),
 }
 
 impl Display for Value {
@@ -144,6 +148,9 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{{ {items} }}")
             }
+            Value::Json(json_data) => {
+                write!(f, "Json({})", json_data)
+            }
         }
     }
 }
@@ -190,6 +197,7 @@ macro_rules! define_data_type_func {
                 $struct::Struct(struct_value) => {
                     ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
+                $struct::Json(_) => ConcreteDataType::json_native_datatype(),
             }
         }
     };
@@ -253,6 +261,7 @@ impl Value {
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
             Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
+            Value::Json(v) => ValueRef::Json(Box::new(v.as_value_ref())),
         }
     }
 
@@ -369,6 +378,14 @@ impl Value {
         }
     }
 
+    /// Extract the inner JSON value from a JSON type.
+    pub fn into_json_inner(self) -> Option<Value> {
+        match self {
+            Value::Json(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {
@@ -411,6 +428,7 @@ impl Value {
             },
             Value::Decimal128(_) => LogicalTypeId::Decimal128,
             Value::Struct(_) => LogicalTypeId::Struct,
+            Value::Json(_) => LogicalTypeId::Json,
         }
     }
 
@@ -420,11 +438,11 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            // Json type leverage Value(Binary) for storage.
             output_type_id == value_type_id
                 || self.is_null()
                 || (output_type_id == LogicalTypeId::Json
-                    && value_type_id == LogicalTypeId::Binary),
+                    && (value_type_id == LogicalTypeId::Binary
+                        || value_type_id == LogicalTypeId::Json)),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -467,6 +485,7 @@ impl Value {
                 let struct_type = output_type.as_struct().unwrap();
                 struct_value.try_to_scalar_value(struct_type)?
             }
+            Value::Json(v) => v.try_to_scalar_value(output_type)?,
         };
 
         Ok(scalar_value)
@@ -518,6 +537,14 @@ impl Value {
             Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
             Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
             Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+
+            Value::Json(v) => {
+                if let Some(neg) = v.try_negative() {
+                    Some(Value::Json(Box::new(neg)))
+                } else {
+                    None
+                }
+            }
 
             Value::Binary(_)
             | Value::String(_)
@@ -877,6 +904,7 @@ impl TryFrom<Value> for serde_json::Value {
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
             }
+            Value::Json(v) => serde_json::Value::try_from(*v)?,
         };
 
         Ok(json_value)
@@ -1205,6 +1233,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
             ValueRef::Struct(v) => v.to_value(),
+            ValueRef::Json(v) => Value::Json(Box::new(Value::from(*v))),
         }
     }
 }
@@ -1247,6 +1276,8 @@ pub enum ValueRef<'a> {
     // Compound types:
     List(ListValueRef<'a>),
     Struct(StructValueRef<'a>),
+
+    Json(Box<ValueRef<'a>>),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1648,6 +1679,7 @@ impl ValueRef<'_> {
                 StructValueRef::Ref(val) => val.estimated_size(),
                 StructValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
             },
+            ValueRef::Json(v) => v.data_size(),
         }
     }
 }

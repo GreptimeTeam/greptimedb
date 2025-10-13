@@ -34,6 +34,7 @@ pub const JSON_TYPE_NAME: &str = "Json";
 pub enum JsonFormat {
     #[default]
     Jsonb,
+    ArrowNative,
 }
 
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
@@ -90,6 +91,7 @@ pub fn json_type_value_to_string(val: &[u8], format: &JsonFormat) -> Result<Stri
             }
             Err(e) => InvalidJsonbSnafu { error: e }.fail(),
         },
+        JsonFormat::ArrowNative => todo!(),
     }
 }
 
@@ -101,6 +103,7 @@ pub fn json_type_value_to_serde_json(val: &[u8], format: &JsonFormat) -> Result<
             serde_json::Value::from_str(json_string.as_str())
                 .context(DeserializeSnafu { json: json_string })
         }
+        JsonFormat::ArrowNative => todo!(),
     }
 }
 
@@ -110,5 +113,6 @@ pub fn parse_string_to_json_type_value(s: &str, format: &JsonFormat) -> Result<V
         JsonFormat::Jsonb => jsonb::parse_value(s.as_bytes())
             .map_err(|_| InvalidJsonSnafu { value: s }.build())
             .map(|json| json.to_vec()),
+        JsonFormat::ArrowNative => todo!(),
     }
 }

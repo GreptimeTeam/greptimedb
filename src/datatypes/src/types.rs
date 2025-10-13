@@ -44,7 +44,7 @@ pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
 pub use json_type::{
-    JSON_TYPE_NAME, JsonType, json_type_value_to_serde_json, json_type_value_to_string,
+    JSON_TYPE_NAME, JsonFormat, JsonType, json_type_value_to_serde_json, json_type_value_to_string,
     parse_string_to_json_type_value,
 };
 pub use list_type::ListType;
