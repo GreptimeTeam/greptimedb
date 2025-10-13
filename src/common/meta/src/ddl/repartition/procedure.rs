@@ -40,9 +40,11 @@ use strum::AsRefStr;
 use table::table_reference::TableReference;
 use uuid::Uuid;
 
-use crate::ddl::repartition::{PartitionRuleDiff, PlanGroup, PlanGroupId, RepartitionPlan, ResourceDemand};
-use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
+use crate::ddl::repartition::{
+    PartitionRuleDiff, PlanGroup, PlanGroupId, RepartitionPlan, ResourceDemand,
+};
+use crate::ddl::utils::map_to_procedure_error;
 use crate::error::Result;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 
@@ -138,7 +140,7 @@ impl RepartitionProcedure {
     async fn on_collect_subprocedures(&mut self, _ctx: &ProcedureContext) -> Result<Status> {
         self.data
             .succeeded_groups
-            .extend(self.data.pending_groups.drain(..));
+            .append(&mut self.data.pending_groups);
 
         self.data.state = RepartitionState::Finalize;
         Ok(Status::executing(true))
@@ -162,8 +164,10 @@ impl RepartitionProcedure {
             plan.groups.push(PlanGroup::new(group_id));
         }
 
-        let mut demand = ResourceDemand::default();
-        demand.new_regions = plan.groups.len() as u32;
+        let demand = ResourceDemand {
+            new_regions: plan.groups.len() as u32,
+            ..Default::default()
+        };
         plan.resource_demand = demand;
 
         Ok((plan, diff, demand))
@@ -207,9 +211,7 @@ impl Procedure for RepartitionProcedure {
             RepartitionState::Prepare => self.on_prepare().await,
             RepartitionState::AllocateResources => self.on_allocate_resources().await,
             RepartitionState::DispatchSubprocedures => self.on_dispatch_subprocedures().await,
-            RepartitionState::CollectSubprocedures => {
-                self.on_collect_subprocedures(ctx).await
-            }
+            RepartitionState::CollectSubprocedures => self.on_collect_subprocedures(ctx).await,
             RepartitionState::Finalize => self.on_finalize().await,
             RepartitionState::Finished => Ok(Status::done()),
         };
@@ -298,7 +300,7 @@ pub struct RepartitionTask {
 }
 
 impl RepartitionTask {
-    fn table_ref(&self) -> TableReference {
+    fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog_name,
             schema: &self.schema_name,

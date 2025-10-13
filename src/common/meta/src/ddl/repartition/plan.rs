@@ -101,15 +101,9 @@ impl PartitionRuleDiff {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PartitionChange {
     /// Split one region into multiple target regions.
-    Split {
-        from: RegionId,
-        to: Vec<RegionId>,
-    },
+    Split { from: RegionId, to: Vec<RegionId> },
     /// Merge multiple regions into one target region.
-    Merge {
-        from: Vec<RegionId>,
-        to: RegionId,
-    },
+    Merge { from: Vec<RegionId>, to: RegionId },
     /// No-op placeholder for future operations (e.g. rule rewrite).
     Unsupported,
 }

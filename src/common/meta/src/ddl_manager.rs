@@ -31,11 +31,11 @@ use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
-use crate::ddl::repartition::{RepartitionProcedure, RepartitionTask};
 use crate::ddl::drop_database::DropDatabaseProcedure;
 use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
+use crate::ddl::repartition::{RepartitionProcedure, RepartitionTask};
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
