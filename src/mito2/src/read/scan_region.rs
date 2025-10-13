@@ -1350,16 +1350,13 @@ pub struct PredicateGroup {
 impl PredicateGroup {
     /// Creates a new `PredicateGroup` from exprs according to the metadata.
     pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Result<Self> {
-        let base_exprs: Vec<Expr> = exprs.to_vec();
-        let mut combined_exprs = base_exprs.clone();
+        let mut combined_exprs = exprs.to_vec();
         let mut region_partition_expr = None;
 
         if let Some(expr_json) = metadata.partition_expr.as_ref()
             && !expr_json.is_empty()
-            && let Some(expr) =
-                PartitionExpr::from_json_str(expr_json).context(InvalidPartitionExprSnafu {
-                    expr: expr_json.clone(),
-                })?
+            && let Some(expr) = PartitionExpr::from_json_str(expr_json)
+                .context(InvalidPartitionExprSnafu { expr: expr_json })?
         {
             let logical_expr = expr
                 .try_as_logical_expr()
@@ -1392,10 +1389,10 @@ impl PredicateGroup {
         } else {
             Some(Predicate::new(combined_exprs))
         };
-        let predicate_without_region = if base_exprs.is_empty() {
+        let predicate_without_region = if exprs.is_empty() {
             None
         } else {
-            Some(Predicate::new(base_exprs))
+            Some(Predicate::new(exprs.to_vec()))
         };
 
         Ok(Self {

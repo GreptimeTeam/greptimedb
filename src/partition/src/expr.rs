@@ -257,7 +257,10 @@ impl PartitionExpr {
             _ => {}
         }
 
-        if matches!(self.op, RestrictedOp::Lt | RestrictedOp::LtEq) {
+        if matches!(
+            self.op,
+            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
+        ) {
             if matches!(self.lhs.as_ref(), Operand::Column(_)) {
                 let column_expr = self.lhs.try_as_logical_expr()?;
                 let other_expr = self.rhs.try_as_logical_expr()?;
@@ -273,6 +276,8 @@ impl PartitionExpr {
                 let base = match self.op {
                     RestrictedOp::Lt => other_expr.lt(column_expr.clone()),
                     RestrictedOp::LtEq => other_expr.lt_eq(column_expr.clone()),
+                    RestrictedOp::Gt => other_expr.gt(column_expr.clone()),
+                    RestrictedOp::GtEq => other_expr.gt_eq(column_expr.clone()),
                     _ => unreachable!(),
                 };
                 return Ok(datafusion_expr::or(base, column_expr.is_null()));
