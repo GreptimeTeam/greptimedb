@@ -205,7 +205,7 @@ impl ParserContext<'_> {
         }
 
         Ok(AlterTableOperation::Repartition {
-            transitions: vec![RepartitionOperation::new(from_exprs, into_exprs)],
+            operation: RepartitionOperation::new(from_exprs, into_exprs),
         })
     }
 
@@ -892,19 +892,16 @@ ALTER TABLE t REPARTITION (
                 AlterTableOperation::Repartition { .. }
             );
 
-            if let AlterTableOperation::Repartition { transitions } = alter_table.alter_operation()
-            {
-                assert_eq!(transitions.len(), 1);
-                let transition = &transitions[0];
-                assert_eq!(transition.from_exprs.len(), 1);
-                assert_eq!(transition.from_exprs[0].to_string(), "device_id < 100");
-                assert_eq!(transition.into_exprs.len(), 2);
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(operation.from_exprs.len(), 1);
+                assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
+                assert_eq!(operation.into_exprs.len(), 2);
                 assert_eq!(
-                    transition.into_exprs[0].to_string(),
+                    operation.into_exprs[0].to_string(),
                     "device_id < 100 AND area < 'South'"
                 );
                 assert_eq!(
-                    transition.into_exprs[1].to_string(),
+                    operation.into_exprs[1].to_string(),
                     "device_id < 100 AND area >= 'South'"
                 );
             }

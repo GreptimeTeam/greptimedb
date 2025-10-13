@@ -104,7 +104,7 @@ pub enum AlterTableOperation {
     },
     /// `REPARTITION (...) INTO (...)`
     Repartition {
-        transitions: Vec<RepartitionOperation>,
+        operation: RepartitionOperation,
     },
 }
 
@@ -232,12 +232,8 @@ impl Display for AlterTableOperation {
                 let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
             }
-            AlterTableOperation::Repartition { transitions } => {
-                let body = transitions
-                    .iter()
-                    .map(|transition| transition.to_string())
-                    .join(", ");
-                write!(f, "REPARTITION {body}")
+            AlterTableOperation::Repartition { operation } => {
+                write!(f, "REPARTITION {operation}")
             }
             AlterTableOperation::SetIndex { options } => match options {
                 SetIndexOperation::Fulltext {

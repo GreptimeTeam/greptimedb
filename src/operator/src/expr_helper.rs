@@ -683,17 +683,12 @@ pub fn column_schemas_to_defs(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepartitionTransitionRequest {
-    pub from_exprs: Vec<String>,
-    pub into_exprs: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepartitionRequest {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
-    pub transitions: Vec<RepartitionTransitionRequest>,
+    pub from_exprs: Vec<Expr>,
+    pub into_exprs: Vec<Expr>,
 }
 
 pub(crate) fn to_repartition_request(
@@ -705,36 +700,19 @@ pub(crate) fn to_repartition_request(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let AlterTableOperation::Repartition { transitions } = alter_table.alter_operation else {
+    let AlterTableOperation::Repartition { operation } = alter_table.alter_operation else {
         return InvalidSqlSnafu {
             err_msg: "expected REPARTITION operation",
         }
         .fail();
     };
 
-    let transitions = transitions
-        .into_iter()
-        .map(|transition| {
-            Ok(RepartitionTransitionRequest {
-                from_exprs: transition
-                    .from_exprs
-                    .into_iter()
-                    .map(|expr| expr.to_string())
-                    .collect(),
-                into_exprs: transition
-                    .into_exprs
-                    .into_iter()
-                    .map(|expr| expr.to_string())
-                    .collect(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
     Ok(RepartitionRequest {
         catalog_name,
         schema_name,
         table_name,
-        transitions,
+        from_exprs: operation.from_exprs,
+        into_exprs: operation.into_exprs,
     })
 }
 
@@ -1476,14 +1454,23 @@ ALTER TABLE metrics REPARTITION (
         assert_eq!("greptime", request.catalog_name);
         assert_eq!("public", request.schema_name);
         assert_eq!("metrics", request.table_name);
-        assert_eq!(1, request.transitions.len());
-        let transition = &request.transitions[0];
-        assert_eq!(transition.from_exprs, vec!["device_id < 100"]);
         assert_eq!(
-            transition.into_exprs,
+            request
+                .from_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec!["device_id < 100".to_string()]
+        );
+        assert_eq!(
+            request
+                .into_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
             vec![
-                "device_id < 100 AND area < 'South'",
-                "device_id < 100 AND area >= 'South'"
+                "device_id < 100 AND area < 'South'".to_string(),
+                "device_id < 100 AND area >= 'South'".to_string()
             ]
         );
     }
