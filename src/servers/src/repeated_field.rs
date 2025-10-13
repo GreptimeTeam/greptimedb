@@ -32,7 +32,7 @@ use std::{fmt, slice, vec};
 
 use bytes::Bytes;
 
-const NULL_BYTES: &'static [u8] = &[];
+const NULL_BYTES: &[u8] = &[];
 
 /// anything that can be cleared
 pub trait Clear {
