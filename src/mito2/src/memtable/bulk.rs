@@ -1191,7 +1191,7 @@ mod tests {
         assert_eq!(1000, min_ts.value());
         assert_eq!(3000, max_ts.value());
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1232,7 +1232,7 @@ mod tests {
         memtable.write_bulk(bulk_part).unwrap();
 
         let projection = vec![4u32];
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
             .ranges(Some(&projection), predicate_group, None, false)
             .unwrap();
@@ -1349,7 +1349,7 @@ mod tests {
             memtable.write_bulk(part).unwrap();
         }
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1380,7 +1380,7 @@ mod tests {
 
         memtable.write_bulk(part).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let sequence_filter = Some(400u64); // Filters out rows with sequence > 400
         let ranges = memtable
             .ranges(None, predicate_group, sequence_filter, false)
@@ -1414,7 +1414,7 @@ mod tests {
 
         memtable.compact(false).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         // Should have ranges for both bulk parts and encoded parts

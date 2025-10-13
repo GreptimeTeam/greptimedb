@@ -720,7 +720,7 @@ fn time_range_to_predicate(
         }
     };
 
-    let predicate = PredicateGroup::new(metadata, &exprs);
+    let predicate = PredicateGroup::new(metadata, &exprs)?;
     Ok(predicate)
 }
 
