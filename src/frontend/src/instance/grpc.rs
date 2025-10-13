@@ -230,6 +230,11 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::DropView(_) => {
                         todo!("implemented in the following PR")
                     }
+                    DdlExpr::CommentOn(expr) => {
+                        self.statement_executor
+                            .comment_by_expr(expr, ctx.clone())
+                            .await?
+                    }
                 }
             }
         };

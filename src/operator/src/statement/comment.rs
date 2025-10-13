@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::CommentOnExpr;
 use common_error::ext::BoxedError;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{CommentObjectType, CommentOnTask, DdlTask, SubmitDdlTaskRequest};
@@ -27,7 +28,7 @@ use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
     pub async fn comment(&self, stmt: Comment, query_ctx: QueryContextRef) -> Result<Output> {
-        let comment_on_task = self.create_comment_on_task(stmt, &query_ctx)?;
+        let comment_on_task = self.create_comment_on_task_from_stmt(stmt, &query_ctx)?;
 
         let request = SubmitDdlTaskRequest {
             task: DdlTask::new_comment_on(comment_on_task),
@@ -41,7 +42,61 @@ impl StatementExecutor {
             .map(|_| Output::new_with_affected_rows(0))
     }
 
-    fn create_comment_on_task(
+    pub async fn comment_by_expr(
+        &self,
+        expr: CommentOnExpr,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let comment_on_task = self.create_comment_on_task_from_expr(expr)?;
+
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_comment_on(comment_on_task),
+            query_context: query_ctx,
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(ExecuteDdlSnafu)
+            .map(|_| Output::new_with_affected_rows(0))
+    }
+
+    fn create_comment_on_task_from_expr(&self, expr: CommentOnExpr) -> Result<CommentOnTask> {
+        let object_type = match expr.object_type {
+            0 => CommentObjectType::Table,
+            1 => CommentObjectType::Column,
+            2 => CommentObjectType::Flow,
+            _ => {
+                return InvalidSqlSnafu {
+                    err_msg: format!(
+                        "Invalid CommentObjectType value: {}. Valid values are: 0 (Table), 1 (Column), 2 (Flow)",
+                        expr.object_type
+                    ),
+                }
+                .fail();
+            }
+        };
+
+        Ok(CommentOnTask {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            object_type,
+            object_name: expr.object_name,
+            column_name: if expr.column_name.is_empty() {
+                None
+            } else {
+                Some(expr.column_name)
+            },
+            object_id: None,
+            comment: if expr.comment.is_empty() {
+                None
+            } else {
+                Some(expr.comment)
+            },
+        })
+    }
+
+    fn create_comment_on_task_from_stmt(
         &self,
         stmt: Comment,
         query_ctx: &QueryContextRef,
