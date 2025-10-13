@@ -34,10 +34,12 @@ impl ParserContext<'_> {
         let target_token = self.parser.next_token();
         let comment = match target_token.token {
             Token::Word(word) if word.keyword == Keyword::TABLE => {
-                let raw_table = self.parse_object_name().with_context(|_| error::UnexpectedSnafu {
-                    expected: "a table name",
-                    actual: self.peek_token_as_string(),
-                })?;
+                let raw_table =
+                    self.parse_object_name()
+                        .with_context(|_| error::UnexpectedSnafu {
+                            expected: "a table name",
+                            actual: self.peek_token_as_string(),
+                        })?;
                 let table = Self::canonicalize_object_name(raw_table);
                 CommentObject::Table(table)
             }
@@ -47,10 +49,12 @@ impl ParserContext<'_> {
             Token::Word(word)
                 if word.keyword == Keyword::NoKeyword && word.value.eq_ignore_ascii_case(FLOW) =>
             {
-                let raw_flow = self.parse_object_name().with_context(|_| error::UnexpectedSnafu {
-                    expected: "a flow name",
-                    actual: self.peek_token_as_string(),
-                })?;
+                let raw_flow =
+                    self.parse_object_name()
+                        .with_context(|_| error::UnexpectedSnafu {
+                            expected: "a flow name",
+                            actual: self.peek_token_as_string(),
+                        })?;
                 let flow = Self::canonicalize_object_name(raw_flow);
                 CommentObject::Flow(flow)
             }
@@ -78,10 +82,12 @@ impl ParserContext<'_> {
     }
 
     fn parse_column_comment_target(&mut self) -> Result<CommentObject> {
-        let raw = self.parse_object_name().with_context(|_| error::UnexpectedSnafu {
-            expected: "a column reference",
-            actual: self.peek_token_as_string(),
-        })?;
+        let raw = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                expected: "a column reference",
+                actual: self.peek_token_as_string(),
+            })?;
         let canonical = Self::canonicalize_object_name(raw);
 
         let mut parts = canonical.0;

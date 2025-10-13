@@ -1318,13 +1318,21 @@ impl From<CommentObjectType> for PbCommentObjectType {
     }
 }
 
-impl From<i32> for CommentObjectType {
-    fn from(value: i32) -> Self {
+impl TryFrom<i32> for CommentObjectType {
+    type Error = error::Error;
+
+    fn try_from(value: i32) -> Result<Self> {
         match value {
-            0 => CommentObjectType::Table,
-            1 => CommentObjectType::Column,
-            2 => CommentObjectType::Flow,
-            _ => CommentObjectType::Table, // Default to Table for unknown values
+            0 => Ok(CommentObjectType::Table),
+            1 => Ok(CommentObjectType::Column),
+            2 => Ok(CommentObjectType::Flow),
+            _ => error::InvalidProtoMsgSnafu {
+                err_msg: format!(
+                    "Invalid CommentObjectType value: {}. Valid values are: 0 (Table), 1 (Column), 2 (Flow)",
+                    value
+                ),
+            }
+            .fail(),
         }
     }
 }
@@ -1341,7 +1349,7 @@ impl TryFrom<PbCommentOnTask> for CommentOnTask {
         Ok(CommentOnTask {
             catalog_name: comment_on.catalog_name,
             schema_name: comment_on.schema_name,
-            object_type: comment_on.object_type.into(),
+            object_type: comment_on.object_type.try_into()?,
             object_name: comment_on.object_name,
             column_name: if comment_on.column_name.is_empty() {
                 None
