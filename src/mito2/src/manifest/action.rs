@@ -964,6 +964,7 @@ mod tests {
         let region_change = RegionChange {
             metadata: region_change.metadata.clone(),
             sst_format: FormatType::Flat,
+            need_index: false,
         };
 
         let serialized = serde_json::to_string(&region_change).unwrap();
