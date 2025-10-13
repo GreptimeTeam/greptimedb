@@ -777,6 +777,7 @@ mod tests {
     use super::*;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
+    use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
@@ -1111,6 +1112,7 @@ mod tests {
                 },
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap();

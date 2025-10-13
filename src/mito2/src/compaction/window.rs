@@ -250,6 +250,7 @@ mod tests {
                 index_options: Default::default(),
                 memtable: None,
                 merge_mode: None,
+                sst_format: None,
             },
             compaction_time_window: None,
         }
