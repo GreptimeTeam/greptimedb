@@ -295,6 +295,8 @@ impl TableMeta {
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
 
+        let _ = builder.updated_on(Utc::now());
+
         Ok(builder)
     }
 
@@ -360,6 +362,8 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
 
+        let _ = meta_builder.updated_on(Utc::now());
+
         Ok(meta_builder)
     }
 
@@ -419,6 +423,8 @@ impl TableMeta {
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
+
+        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
@@ -661,6 +667,8 @@ impl TableMeta {
             .primary_key_indices(primary_key_indices)
             .partition_key_indices(partition_key_indices);
 
+        let _ = meta_builder.updated_on(Utc::now());
+
         Ok(meta_builder)
     }
 
@@ -756,6 +764,8 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(primary_key_indices)
             .partition_key_indices(partition_key_indices);
+
+        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
@@ -901,6 +911,8 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
 
+        let _ = meta_builder.updated_on(Utc::now());
+
         Ok(meta_builder)
     }
 
@@ -1006,6 +1018,8 @@ impl TableMeta {
 
         let _ = meta_builder.schema(Arc::new(new_schema));
 
+        let _ = meta_builder.updated_on(Utc::now());
+
         Ok(meta_builder)
     }
 
@@ -1048,6 +1062,8 @@ impl TableMeta {
         })?;
 
         let _ = meta_builder.schema(Arc::new(new_schema));
+
+        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
