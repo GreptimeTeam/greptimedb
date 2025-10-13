@@ -527,8 +527,6 @@ impl StartCommand {
         )
         .await
         .context(error::StartFrontendSnafu)?;
-        // set kv_backend to plugins in standalone
-        plugins.insert::<KvBackendRef>(kv_backend.clone());
 
         // Builds cache registry
         let layered_cache_builder = LayeredCacheRegistryBuilder::default();
