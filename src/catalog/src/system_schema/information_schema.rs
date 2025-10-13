@@ -362,7 +362,7 @@ impl InformationSchemaProvider {
         }
         #[cfg(feature = "enterprise")]
         for name in self.extra_table_factories.keys() {
-            tables.insert(name.to_string(), self.build_table(name).expect(name));
+            tables.insert(name.clone(), self.build_table(name).expect(name));
         }
         // Add memory tables
         for name in MEMORY_TABLES.iter() {

@@ -28,7 +28,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::{IntervalType, TimestampType, json_type_value_to_string};
-use datatypes::value::ListValue;
+use datatypes::value::{ListValue, StructValue};
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -60,6 +60,14 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
+}
+
+fn encode_struct(
+    _query_ctx: &QueryContextRef,
+    _struct_value: &StructValue,
+    _builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
+    todo!("how to encode struct for postgres");
 }
 
 fn encode_array(
@@ -428,6 +436,7 @@ pub(super) fn encode_value(
             })),
         },
         Value::List(values) => encode_array(query_ctx, values, builder),
+        Value::Struct(values) => encode_struct(query_ctx, values, builder),
     }
 }
 
@@ -467,10 +476,12 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL_ARRAY),
+            // TODO(sunng87) we may treat list/array as json directly so we can
+            // support deeply nested data structures
+            &ConcreteDataType::Struct(_) => Ok(Type::RECORD_ARRAY),
             &ConcreteDataType::Dictionary(_)
             | &ConcreteDataType::Vector(_)
-            | &ConcreteDataType::List(_)
-            | &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
+            | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
                 reason: "not implemented",
             }
@@ -482,11 +493,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         }
         .fail(),
         &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL),
-        &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
-            data_type: origin,
-            reason: "not implemented",
-        }
-        .fail(),
+        &ConcreteDataType::Struct(_) => Ok(Type::RECORD),
     }
 }
 

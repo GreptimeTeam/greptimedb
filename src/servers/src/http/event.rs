@@ -496,7 +496,7 @@ async fn dryrun_pipeline_inner(
                                 let mut map = Map::new();
                                 let value_ref = pb_value_to_value_ref(
                                     &v,
-                                    &result_schema[idx].datatype_extension,
+                                    result_schema[idx].datatype_extension.as_ref(),
                                 );
                                 let greptime_value: datatypes::value::Value = value_ref.into();
                                 let serde_json_value =

@@ -973,7 +973,7 @@ fn to_keyvalue(key: String, value: JsonValue) -> Option<KeyValue> {
         JsonValue::String(value) => Some(KeyValue {
             key,
             value_type: ValueType::String,
-            value: Value::String(value.to_string()),
+            value: Value::String(value.clone()),
         }),
         JsonValue::Number(value) => Some(KeyValue {
             key,

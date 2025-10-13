@@ -207,7 +207,7 @@ impl Vector for Decimal128Vector {
         }
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if let Some(decimal) = self.get_decimal128_value_from_array(index) {
             ValueRef::Decimal128(decimal)
         } else {
@@ -314,7 +314,7 @@ impl MutableVector for Decimal128VectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         let decimal_val = value.as_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
         Ok(())

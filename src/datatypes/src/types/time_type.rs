@@ -149,14 +149,14 @@ macro_rules! impl_data_type_for_time {
                         })
                 }
 
-                fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+                fn cast_value_ref(value: &ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
                         ValueRef::Int64(v) =>{
-                            Ok(Some([<Time $unit>]::from(v)))
+                            Ok(Some([<Time $unit>]::from(*v)))
                         }
                         ValueRef::Time(t) => match t.unit() {
-                            TimeUnit::$unit => Ok(Some([<Time $unit>](t))),
+                            TimeUnit::$unit => Ok(Some([<Time $unit>](*t))),
                             other => error::CastTypeSnafu {
                                 msg: format!(
                                     "Failed to cast Time value with different unit {:?} to {}",

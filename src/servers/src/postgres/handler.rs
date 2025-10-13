@@ -110,7 +110,7 @@ where
                 ErrorInfo::new(
                     PgErrorSeverity::Warning.to_string(),
                     PgErrorCode::Ec01000.code(),
-                    warning.to_string(),
+                    warning.clone(),
                 )
                 .into(),
             ))

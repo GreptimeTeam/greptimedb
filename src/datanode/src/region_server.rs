@@ -706,7 +706,7 @@ impl RegionServerParallelism {
         })
     }
 
-    pub async fn acquire(&self) -> Result<SemaphorePermit> {
+    pub async fn acquire(&self) -> Result<SemaphorePermit<'_>> {
         timeout(self.timeout, self.semaphore.acquire())
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
@@ -919,8 +919,7 @@ impl RegionServerInner {
             if let Some(requests) = engine_grouped_requests.get_mut(&request.engine) {
                 requests.push((region_id, request));
             } else {
-                engine_grouped_requests
-                    .insert(request.engine.to_string(), vec![(region_id, request)]);
+                engine_grouped_requests.insert(request.engine.clone(), vec![(region_id, request)]);
             }
         }
 

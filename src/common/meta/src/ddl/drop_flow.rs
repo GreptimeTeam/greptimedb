@@ -167,8 +167,8 @@ impl DropFlowProcedure {
                 &[
                     CacheIdent::FlowId(flow_id),
                     CacheIdent::FlowName(FlowName {
-                        catalog_name: flow_info_value.catalog_name.to_string(),
-                        flow_name: flow_info_value.flow_name.to_string(),
+                        catalog_name: flow_info_value.catalog_name.clone(),
+                        flow_name: flow_info_value.flow_name.clone(),
                     }),
                     CacheIdent::DropFlow(DropFlow {
                         flow_id,

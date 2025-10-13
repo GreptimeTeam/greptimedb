@@ -611,7 +611,7 @@ fn reduce_batch_subgraph(
                             i
                         )
                     })?
-                    .try_push_value_ref(v.as_value_ref())
+                    .try_push_value_ref(&v.as_value_ref())
                     .context(DataTypeSnafu {
                         msg: "Failed to push value",
                     })?;

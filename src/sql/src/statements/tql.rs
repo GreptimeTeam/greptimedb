@@ -42,15 +42,20 @@ fn format_tql(
     step: &str,
     lookback: Option<&str>,
     query: &str,
+    alias: &Option<String>,
 ) -> std::fmt::Result {
     write!(f, "({start}, {end}, '{step}'")?;
     if let Some(lookback) = lookback {
         write!(f, ", {lookback}")?;
     }
-    write!(f, ") {query}")
+    if let Some(alias) = alias {
+        write!(f, ") {query} AS {alias}")
+    } else {
+        write!(f, ") {query}")
+    }
 }
 
-/// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
+/// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql> [AS alias]
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlEval {
     pub start: String,
@@ -58,6 +63,7 @@ pub struct TqlEval {
     pub step: String,
     pub lookback: Option<String>,
     pub query: String,
+    pub alias: Option<String>,
 }
 
 impl Display for TqlEval {
@@ -70,11 +76,12 @@ impl Display for TqlEval {
             &self.step,
             self.lookback.as_deref(),
             &self.query,
+            &self.alias,
         )
     }
 }
 
-/// TQL EXPLAIN [VERBOSE] [FORMAT format] [<start>, <end>, <step>, [lookback]] <promql>
+/// TQL EXPLAIN [VERBOSE] [FORMAT format] [<start>, <end>, <step>, [lookback]] <promql> [AS alias]
 /// doesn't execute the query but tells how the query would be executed (similar to SQL EXPLAIN).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlExplain {
@@ -83,6 +90,7 @@ pub struct TqlExplain {
     pub step: String,
     pub lookback: Option<String>,
     pub query: String,
+    pub alias: Option<String>,
     pub is_verbose: bool,
     pub format: Option<AnalyzeFormat>,
 }
@@ -103,11 +111,12 @@ impl Display for TqlExplain {
             &self.step,
             self.lookback.as_deref(),
             &self.query,
+            &self.alias,
         )
     }
 }
 
-/// TQL ANALYZE [VERBOSE] [FORMAT format] (<start>, <end>, <step>, [lookback]) <promql>
+/// TQL ANALYZE [VERBOSE] [FORMAT format] (<start>, <end>, <step>, [lookback]) <promql> [AS alias]
 /// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlAnalyze {
@@ -116,6 +125,7 @@ pub struct TqlAnalyze {
     pub step: String,
     pub lookback: Option<String>,
     pub query: String,
+    pub alias: Option<String>,
     pub is_verbose: bool,
     pub format: Option<AnalyzeFormat>,
 }
@@ -136,6 +146,7 @@ impl Display for TqlAnalyze {
             &self.step,
             self.lookback.as_deref(),
             &self.query,
+            &self.alias,
         )
     }
 }
@@ -151,6 +162,7 @@ pub struct TqlParameters {
     step: String,
     lookback: Option<String>,
     query: String,
+    alias: Option<String>,
     pub is_verbose: bool,
     pub format: Option<AnalyzeFormat>,
 }
@@ -162,6 +174,7 @@ impl TqlParameters {
         step: String,
         lookback: Option<String>,
         query: String,
+        alias: Option<String>,
     ) -> Self {
         TqlParameters {
             start,
@@ -169,6 +182,7 @@ impl TqlParameters {
             step,
             lookback,
             query,
+            alias,
             is_verbose: false,
             format: None,
         }
@@ -183,6 +197,7 @@ impl From<TqlParameters> for TqlEval {
             step: params.step,
             lookback: params.lookback,
             query: params.query,
+            alias: params.alias,
         }
     }
 }
@@ -194,6 +209,7 @@ impl From<TqlParameters> for TqlExplain {
             end: params.end,
             step: params.step,
             query: params.query,
+            alias: params.alias,
             lookback: params.lookback,
             is_verbose: params.is_verbose,
             format: params.format,
@@ -208,6 +224,7 @@ impl From<TqlParameters> for TqlAnalyze {
             end: params.end,
             step: params.step,
             query: params.query,
+            alias: params.alias,
             lookback: params.lookback,
             is_verbose: params.is_verbose,
             format: params.format,

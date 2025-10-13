@@ -73,7 +73,7 @@ impl OptionMap {
         map.extend(
             self.secrets
                 .into_iter()
-                .map(|(k, v)| (k, v.expose_secret().to_string())),
+                .map(|(k, v)| (k, v.expose_secret().clone())),
         );
         map
     }

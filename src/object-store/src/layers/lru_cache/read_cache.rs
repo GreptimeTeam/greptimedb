@@ -181,7 +181,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
 
             self.mem_cache
-                .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                .insert(read_key.clone(), ReadResult::Success(size as u32))
                 .await;
         }
 

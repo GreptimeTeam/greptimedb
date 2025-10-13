@@ -169,7 +169,7 @@ impl ActiveBucket {
             }
         } else {
             datanode_stats.insert(
-                stat.topic.to_string(),
+                stat.topic.clone(),
                 PartialTopicStat {
                     latest_entry_id: stat.latest_entry_id,
                     record_size: stat.record_size,
@@ -205,7 +205,7 @@ impl ActiveBucket {
             let record_num = stats.iter().map(|stat| stat.record_num).sum::<u64>();
 
             output.insert(
-                topic.to_string(),
+                topic.clone(),
                 HistoryTopicStat {
                     latest_entry_id,
                     record_size,

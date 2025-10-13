@@ -298,7 +298,7 @@ impl MetricEngineInner {
             .collect::<HashMap<_, _>>();
         let logical_regions = requests
             .iter()
-            .map(|(region_id, _)| (*region_id))
+            .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
         let logical_region_columns = requests.iter().map(|(region_id, request)| {
             (
@@ -398,9 +398,9 @@ impl MetricEngineInner {
                     }
                 ),
                 SemanticType::Field => {
-                    if field_col.is_some() {
+                    if let Some(field_col) = field_col {
                         MultipleFieldColumnSnafu {
-                            previous: field_col.unwrap().column_schema.name.clone(),
+                            previous: field_col.column_schema.name.clone(),
                             current: col.column_schema.name.clone(),
                         }
                         .fail()?;
@@ -609,7 +609,7 @@ pub(crate) fn region_options_for_metadata_region(
     metadata_region_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
 
     if let Some(wal_options) = original.get(WAL_OPTIONS_KEY) {
-        metadata_region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.to_string());
+        metadata_region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
     }
 
     metadata_region_options

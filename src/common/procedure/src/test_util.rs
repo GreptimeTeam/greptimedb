@@ -41,7 +41,7 @@ impl PoisonStore for InMemoryPoisonStore {
         let mut map = self.map.write().unwrap();
         match map.entry(key) {
             Entry::Vacant(v) => {
-                v.insert(token.to_string());
+                v.insert(token.clone());
             }
             Entry::Occupied(o) => {
                 let value = o.get();

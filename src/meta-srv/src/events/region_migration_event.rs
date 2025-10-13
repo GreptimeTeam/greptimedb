@@ -142,9 +142,9 @@ impl Event for RegionMigrationEvent {
                 ValueData::U32Value(self.region_number).into(),
                 ValueData::StringValue(self.trigger_reason.to_string()).into(),
                 ValueData::U64Value(self.src_node_id).into(),
-                ValueData::StringValue(self.src_peer_addr.to_string()).into(),
+                ValueData::StringValue(self.src_peer_addr.clone()).into(),
                 ValueData::U64Value(self.dst_node_id).into(),
-                ValueData::StringValue(self.dst_peer_addr.to_string()).into(),
+                ValueData::StringValue(self.dst_peer_addr.clone()).into(),
             ],
         })
     }

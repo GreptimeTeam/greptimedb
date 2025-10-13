@@ -160,7 +160,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
 
         builder.columns(columns);
         builder.primary_keys(primary_keys);
-        builder.engine(self.engine.to_string());
+        builder.engine(self.engine.clone());
         builder.if_not_exists(self.if_not_exists);
         if self.name.is_empty() {
             builder.table_name(self.name_generator.generate(rng));
@@ -170,7 +170,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreateTableExprGenerato
         if !self.with_clause.is_empty() {
             let mut options = HashMap::new();
             for (key, value) in &self.with_clause {
-                options.insert(key.to_string(), Value::from(value.to_string()));
+                options.insert(key.clone(), Value::from(value.clone()));
             }
             builder.options(options);
         }
@@ -239,7 +239,7 @@ impl<R: Rng + 'static> Generator<CreateTableExpr, R> for CreatePhysicalTableExpr
         let mut options = HashMap::with_capacity(self.with_clause.len() + 1);
         options.insert("physical_metric_table".to_string(), Value::from(""));
         for (key, value) in &self.with_clause {
-            options.insert(key.to_string(), Value::from(value.to_string()));
+            options.insert(key.clone(), Value::from(value.clone()));
         }
 
         Ok(CreateTableExpr {
@@ -357,7 +357,7 @@ impl<R: Rng + 'static> Generator<CreateDatabaseExpr, R> for CreateDatabaseExprGe
         if self.database_name.is_empty() {
             builder.database_name(self.name_generator.generate(rng));
         } else {
-            builder.database_name(self.database_name.to_string());
+            builder.database_name(self.database_name.clone());
         }
         builder.build().context(error::BuildCreateDatabaseExprSnafu)
     }
@@ -451,7 +451,7 @@ mod tests {
         let physical_ts_name = physical_table_expr.columns[physical_ts.unwrap()]
             .name
             .value
-            .to_string();
+            .clone();
 
         let physical_table_ctx = Arc::new(TableContext::from(&physical_table_expr));
 
@@ -472,7 +472,7 @@ mod tests {
         let logical_ts_name = logical_table_expr.columns[logical_ts.unwrap()]
             .name
             .value
-            .to_string();
+            .clone();
 
         assert_eq!(logical_table_expr.engine, "metric");
         assert_eq!(logical_table_expr.columns.len(), 7);

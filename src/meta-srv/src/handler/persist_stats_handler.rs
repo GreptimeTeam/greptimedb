@@ -90,7 +90,7 @@ fn compute_persist_region_stat(
     datanode_id: DatanodeId,
     timestamp_millis: i64,
     persisted_region_stat: Option<PersistedRegionStat>,
-) -> PersistRegionStat {
+) -> PersistRegionStat<'_> {
     let write_bytes_delta = persisted_region_stat
         .and_then(|persisted_region_stat| {
             region_stat

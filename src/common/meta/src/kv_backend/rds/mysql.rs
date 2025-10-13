@@ -555,8 +555,8 @@ impl MySqlStore {
         sqlx::query(&sql_template_set.create_table_statement)
             .execute(&pool)
             .await
-            .context(MySqlExecutionSnafu {
-                sql: sql_template_set.create_table_statement.to_string(),
+            .with_context(|_| MySqlExecutionSnafu {
+                sql: sql_template_set.create_table_statement.clone(),
             })?;
         Ok(Arc::new(MySqlStore {
             max_txn_ops,

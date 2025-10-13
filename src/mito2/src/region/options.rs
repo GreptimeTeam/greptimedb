@@ -402,9 +402,9 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
         .map(|(key, value)| {
             // Only convert the key to lowercase.
             if value.eq_ignore_ascii_case("null") {
-                (key.to_string(), Value::Null)
+                (key.clone(), Value::Null)
             } else {
-                (key.to_string(), Value::from(value.to_string()))
+                (key.clone(), Value::from(value.clone()))
             }
         })
         .collect();

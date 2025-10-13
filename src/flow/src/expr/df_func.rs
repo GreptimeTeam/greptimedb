@@ -136,7 +136,7 @@ impl DfScalarFunction {
         {
             let typ = typ.scalar_type();
             let mut array = typ.create_mutable_vector(1);
-            array.push_value_ref(values[idx].as_value_ref());
+            array.push_value_ref(&values[idx].as_value_ref());
             cols.push(array.to_vector().to_arrow_array());
         }
         let schema = self.df_schema.inner().clone();

@@ -813,7 +813,7 @@ impl CreateRequestBuilder {
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
             let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             });
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
@@ -821,7 +821,7 @@ impl CreateRequestBuilder {
             );
         }
         RegionCreateRequest {
-            engine: self.engine.to_string(),
+            engine: self.engine.clone(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options,

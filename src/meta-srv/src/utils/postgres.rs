@@ -54,7 +54,7 @@ pub async fn create_postgres_pool(
     let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
         err_msg: "empty store addrs",
     })?;
-    cfg.url = Some(postgres_url.to_string());
+    cfg.url = Some(postgres_url.clone());
 
     let pool = if let Some(tls_config) = tls_config {
         let pg_tls_config = convert_tls_option(&tls_config);

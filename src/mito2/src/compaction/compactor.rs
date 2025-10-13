@@ -130,8 +130,8 @@ pub async fn open_compaction_region(
         if let Some(name) = name {
             object_store_manager
                 .find(name)
-                .context(ObjectStoreNotFoundSnafu {
-                    object_store: name.to_string(),
+                .with_context(|| ObjectStoreNotFoundSnafu {
+                    object_store: name.clone(),
                 })?
         } else {
             object_store_manager.default_object_store()

@@ -25,7 +25,6 @@ use api::v1::meta::{
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
 use common_meta::rpc::procedure;
-use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
 use tonic::Request;

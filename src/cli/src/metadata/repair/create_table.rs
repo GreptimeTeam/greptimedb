@@ -44,9 +44,9 @@ pub fn generate_create_table_expr(table_info: &RawTableInfo) -> Result<CreateTab
     let table_options = HashMap::from(&table_info.meta.options);
 
     Ok(CreateTableExpr {
-        catalog_name: table_info.catalog_name.to_string(),
-        schema_name: table_info.schema_name.to_string(),
-        table_name: table_info.name.to_string(),
+        catalog_name: table_info.catalog_name.clone(),
+        schema_name: table_info.schema_name.clone(),
+        table_name: table_info.name.clone(),
         desc: String::default(),
         column_defs,
         time_index,
@@ -54,7 +54,7 @@ pub fn generate_create_table_expr(table_info: &RawTableInfo) -> Result<CreateTab
         create_if_not_exists: true,
         table_options,
         table_id: None,
-        engine: table_info.meta.engine.to_string(),
+        engine: table_info.meta.engine.clone(),
     })
 }
 

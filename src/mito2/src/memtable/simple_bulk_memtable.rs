@@ -849,7 +849,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from_iter_values(
-                    ["a".repeat(string_len as usize).to_string()].into_iter(),
+                    ["a".repeat(string_len as usize).clone()].into_iter(),
                 )) as ArrayRef,
                 Arc::new(TimestampMillisecondArray::from_iter_values(
                     [ts].into_iter(),
