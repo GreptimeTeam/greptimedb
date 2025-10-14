@@ -66,3 +66,7 @@ SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS;
 | 318        |
 +------------+
 
+DROP TABLE test;
+
+Affected Rows: 0
+
