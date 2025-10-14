@@ -1380,7 +1380,7 @@ mod tests {
 
         memtable.write_bulk(part).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let sequence_filter = Some(SequenceRange::LtEq { max: 400 }); // Filters out rows with sequence > 400
         let ranges = memtable
             .ranges(None, predicate_group, sequence_filter, false)
