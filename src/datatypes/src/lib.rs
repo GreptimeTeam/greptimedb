@@ -19,6 +19,7 @@ pub mod data_type;
 pub mod duration;
 pub mod error;
 pub mod interval;
+pub mod json;
 pub mod macros;
 pub mod prelude;
 pub mod scalars;

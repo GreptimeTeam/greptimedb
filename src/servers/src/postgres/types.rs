@@ -25,6 +25,7 @@ use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
 use datatypes::types::{IntervalType, TimestampType, json_type_value_to_string};
@@ -62,17 +63,31 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
+/// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
+///
+/// Note that greptimedb has different types of StructValue for storing json data,
+/// based on policy defined in `JsonStructureSettings`. But here the `StructValue`
+/// should be fully structured.
+///
+/// there are alternatives like records, arrays, etc. but there are also limitations:
+/// records: there is no support for include keys
+/// arrays: element in array must be the same type
 fn encode_struct(
     _query_ctx: &QueryContextRef,
-    _struct_value: &StructValue,
-    _builder: &mut DataRowEncoder,
+    struct_value: StructValue,
+    builder: &mut DataRowEncoder,
 ) -> PgWireResult<()> {
-    todo!("how to encode struct for postgres");
+    let encoding_setting = JsonStructureSettings::Structured(None);
+    let json_value = encoding_setting
+        .decode(Value::Struct(struct_value))
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+    builder.encode_field(&json_value)
 }
 
 fn encode_array(
     query_ctx: &QueryContextRef,
-    value_list: &ListValue,
+    value_list: ListValue,
     builder: &mut DataRowEncoder,
 ) -> PgWireResult<()> {
     match value_list.datatype() {
@@ -362,27 +377,27 @@ fn encode_array(
 
 pub(super) fn encode_value(
     query_ctx: &QueryContextRef,
-    value: &Value,
+    value: Value,
     builder: &mut DataRowEncoder,
     datatype: &ConcreteDataType,
 ) -> PgWireResult<()> {
     match value {
         Value::Null => builder.encode_field(&None::<&i8>),
-        Value::Boolean(v) => builder.encode_field(v),
-        Value::UInt8(v) => builder.encode_field(&(*v as i8)),
-        Value::UInt16(v) => builder.encode_field(&(*v as i16)),
-        Value::UInt32(v) => builder.encode_field(v),
-        Value::UInt64(v) => builder.encode_field(&(*v as i64)),
-        Value::Int8(v) => builder.encode_field(v),
-        Value::Int16(v) => builder.encode_field(v),
-        Value::Int32(v) => builder.encode_field(v),
-        Value::Int64(v) => builder.encode_field(v),
+        Value::Boolean(v) => builder.encode_field(&v),
+        Value::UInt8(v) => builder.encode_field(&(v as i8)),
+        Value::UInt16(v) => builder.encode_field(&(v as i16)),
+        Value::UInt32(v) => builder.encode_field(&v),
+        Value::UInt64(v) => builder.encode_field(&(v as i64)),
+        Value::Int8(v) => builder.encode_field(&v),
+        Value::Int16(v) => builder.encode_field(&v),
+        Value::Int32(v) => builder.encode_field(&v),
+        Value::Int64(v) => builder.encode_field(&v),
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
             ConcreteDataType::Json(j) => {
-                let s = json_type_value_to_string(v, &j.format).map_err(convert_err)?;
+                let s = json_type_value_to_string(v.as_ref(), &j.format).map_err(convert_err)?;
                 builder.encode_field(&s)
             }
             _ => {
@@ -425,11 +440,11 @@ pub(super) fn encode_value(
                 }))
             }
         }
-        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(*v)),
-        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
-        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(v)),
+        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(v)),
+        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::Duration(d) => match PgInterval::try_from(*d) {
+        Value::Duration(d) => match PgInterval::try_from(d) {
             Ok(i) => builder.encode_field(&i),
             Err(e) => Err(convert_err(Error::Internal {
                 err_msg: e.to_string(),
@@ -1353,7 +1368,7 @@ mod test {
             .build()
             .into();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
-        for (value, datatype) in values.iter().zip(datatypes) {
+        for (value, datatype) in values.into_iter().zip(datatypes) {
             encode_value(&query_context, value, &mut builder, &datatype).unwrap();
         }
     }
