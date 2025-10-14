@@ -18,7 +18,7 @@ use common_telemetry::warn;
 use greptime_proto::v1::index::{BloomFilterMeta, InvertedIndexMeta, InvertedIndexMetas};
 use index::bitmap::BitmapType;
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
-use index::fulltext_index::{Analyzer, Config as FulltextConfig};
+use index::fulltext_index::Config as FulltextConfig;
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use index::target::IndexTarget;
 use puffin::blob_metadata::BlobMetadata;
@@ -93,70 +93,70 @@ pub(crate) async fn collect_index_entries_from_puffin(
     };
 
     for blob in &file_metadata.blobs {
-        if let Some(target_key) = target_key_from_blob(&blob.blob_type, BLOOM_BLOB_TYPE) {
-            let bloom_meta =
-                try_read_bloom_meta(&reader, blob.blob_type.as_str(), &context, "bloom filter")
-                    .await;
+        match BlobIndexTypeTargetKey::from_blob_type(&blob.blob_type) {
+            Some(BlobIndexTypeTargetKey::BloomFilter(target_key)) => {
+                let bloom_meta =
+                    try_read_bloom_meta(&reader, blob.blob_type.as_str(), &context, "bloom filter")
+                        .await;
 
-            let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
-            let (target_type, target_json) = decode_target_info(target_key);
-            let meta_json = build_meta_json(bloom_value, None, None);
-            let entry = build_index_entry(
-                &context,
-                INDEX_TYPE_BLOOM,
-                target_type,
-                target_key.to_string(),
-                target_json,
-                blob.length as u64,
-                meta_json,
-            );
-            entries.push(entry);
-            continue;
-        }
+                let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
+                let (target_type, target_json) = decode_target_info(target_key);
+                let meta_json = build_meta_json(bloom_value, None, None);
+                let entry = build_index_entry(
+                    &context,
+                    INDEX_TYPE_BLOOM,
+                    target_type,
+                    target_key.to_string(),
+                    target_json,
+                    blob.length as u64,
+                    meta_json,
+                );
+                entries.push(entry);
+            }
+            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key)) => {
+                let bloom_meta = try_read_bloom_meta(
+                    &reader,
+                    blob.blob_type.as_str(),
+                    &context,
+                    "fulltext bloom",
+                )
+                .await;
 
-        if let Some(target_key) = target_key_from_blob(&blob.blob_type, FULLTEXT_BLOOM_BLOB_TYPE) {
-            let bloom_meta: Option<BloomFilterMeta> =
-                try_read_bloom_meta(&reader, blob.blob_type.as_str(), &context, "fulltext bloom")
-                    .await;
-
-            let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
-            let fulltext_value = Some(fulltext_meta_value(blob));
-            let (target_type, target_json) = decode_target_info(target_key);
-            let meta_json = build_meta_json(bloom_value, fulltext_value, None);
-            let entry = build_index_entry(
-                &context,
-                INDEX_TYPE_FULLTEXT_BLOOM,
-                target_type,
-                target_key.to_string(),
-                target_json,
-                blob.length as u64,
-                meta_json,
-            );
-            entries.push(entry);
-            continue;
-        }
-
-        if let Some(target_key) = target_key_from_blob(&blob.blob_type, FULLTEXT_TANTIVY_BLOB_TYPE)
-        {
-            let fulltext_value = Some(fulltext_meta_value(blob));
-            let (target_type, target_json) = decode_target_info(target_key);
-            let meta_json = build_meta_json(None, fulltext_value, None);
-            let entry = build_index_entry(
-                &context,
-                INDEX_TYPE_FULLTEXT_TANTIVY,
-                target_type,
-                target_key.to_string(),
-                target_json,
-                blob.length as u64,
-                meta_json,
-            );
-            entries.push(entry);
-            continue;
-        }
-
-        if blob.blob_type == INVERTED_BLOB_TYPE {
-            let mut inverted_entries = collect_inverted_entries(&reader, &context).await;
-            entries.append(&mut inverted_entries);
+                let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
+                let fulltext_value = Some(fulltext_meta_value(blob));
+                let (target_type, target_json) = decode_target_info(target_key);
+                let meta_json = build_meta_json(bloom_value, fulltext_value, None);
+                let entry = build_index_entry(
+                    &context,
+                    INDEX_TYPE_FULLTEXT_BLOOM,
+                    target_type,
+                    target_key.to_string(),
+                    target_json,
+                    blob.length as u64,
+                    meta_json,
+                );
+                entries.push(entry);
+            }
+            Some(BlobIndexTypeTargetKey::FulltextTantivy(target_key)) => {
+                let fulltext_value = Some(fulltext_meta_value(blob));
+                let (target_type, target_json) = decode_target_info(target_key);
+                let meta_json = build_meta_json(None, fulltext_value, None);
+                let entry = build_index_entry(
+                    &context,
+                    INDEX_TYPE_FULLTEXT_TANTIVY,
+                    target_type,
+                    target_key.to_string(),
+                    target_json,
+                    blob.length as u64,
+                    meta_json,
+                );
+                entries.push(entry);
+            }
+            Some(BlobIndexTypeTargetKey::Inverted) => {
+                let mut inverted_entries = collect_inverted_entries(&reader, &context).await;
+                entries.append(&mut inverted_entries);
+            }
+            None => {}
         }
     }
 
@@ -294,13 +294,6 @@ fn decode_target_info(target_key: &str) -> (String, String) {
     }
 }
 
-fn analyzer_to_str(analyzer: Analyzer) -> &'static str {
-    match analyzer {
-        Analyzer::English => "English",
-        Analyzer::Chinese => "Chinese",
-    }
-}
-
 fn bloom_meta_value(meta: &BloomFilterMeta) -> Value {
     json!({
         "rows_per_segment": meta.rows_per_segment,
@@ -313,7 +306,7 @@ fn bloom_meta_value(meta: &BloomFilterMeta) -> Value {
 fn fulltext_meta_value(blob: &BlobMetadata) -> Value {
     let config = FulltextConfig::from_blob_metadata(blob).unwrap_or_default();
     json!({
-        "analyzer": analyzer_to_str(config.analyzer),
+        "analyzer": config.analyzer.to_str(),
         "case_sensitive": config.case_sensitive,
     })
 }
@@ -357,11 +350,38 @@ fn build_meta_json(
     }
 }
 
-fn target_key_from_blob<'a>(blob_type: &'a str, prefix: &str) -> Option<&'a str> {
-    // Blob types encode their target as "<prefix>-<target>".
-    blob_type
-        .strip_prefix(prefix)
-        .and_then(|suffix| suffix.strip_prefix('-'))
+enum BlobIndexTypeTargetKey<'a> {
+    BloomFilter(&'a str),
+    FulltextBloom(&'a str),
+    FulltextTantivy(&'a str),
+    Inverted,
+}
+
+impl<'a> BlobIndexTypeTargetKey<'a> {
+    fn from_blob_type(blob_type: &'a str) -> Option<Self> {
+        if let Some(target_key) = Self::target_key_from_blob(blob_type, BLOOM_BLOB_TYPE) {
+            Some(BlobIndexTypeTargetKey::BloomFilter(target_key))
+        } else if let Some(target_key) =
+            Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_BLOB_TYPE)
+        {
+            Some(BlobIndexTypeTargetKey::FulltextBloom(target_key))
+        } else if let Some(target_key) =
+            Self::target_key_from_blob(blob_type, FULLTEXT_TANTIVY_BLOB_TYPE)
+        {
+            Some(BlobIndexTypeTargetKey::FulltextTantivy(target_key))
+        } else if blob_type == INVERTED_BLOB_TYPE {
+            Some(BlobIndexTypeTargetKey::Inverted)
+        } else {
+            None
+        }
+    }
+
+    fn target_key_from_blob(blob_type: &'a str, prefix: &str) -> Option<&'a str> {
+        // Blob types encode their target as "<prefix>-<target>".
+        blob_type
+            .strip_prefix(prefix)
+            .and_then(|suffix| suffix.strip_prefix('-'))
+    }
 }
 
 fn build_index_entry(

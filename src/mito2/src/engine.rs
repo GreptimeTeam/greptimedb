@@ -451,15 +451,15 @@ impl MitoEngine {
         let mut results = Vec::new();
 
         for region in self.inner.workers.all_regions() {
-            let mut manifest_entries = region.manifest_sst_entries().await;
+            let manifest_entries = region.manifest_sst_entries().await;
             let access_layer = region.access_layer.clone();
             let table_dir = access_layer.table_dir().to_string();
             let path_type = access_layer.path_type();
             let object_store = access_layer.object_store().clone();
             let puffin_factory = access_layer.puffin_manager_factory().clone();
-            let path_factory = RegionFilePathFactory::new(table_dir.clone(), path_type);
+            let path_factory = RegionFilePathFactory::new(table_dir, path_type);
 
-            for entry in manifest_entries.drain(..) {
+            for entry in manifest_entries {
                 if entry.index_file_path.is_none() {
                     continue;
                 }

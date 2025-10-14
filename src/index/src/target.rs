@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fmt::{self, Display};
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -27,22 +28,21 @@ pub enum IndexTarget {
     ColumnId(ColumnId),
 }
 
-impl IndexTarget {
-    /// Derive a stable target key string for the provided index target.
-    pub fn encode(&self) -> String {
+impl Display for IndexTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IndexTarget::ColumnId(id) => id.to_string(),
+            IndexTarget::ColumnId(id) => write!(f, "{}", id),
         }
     }
+}
 
+impl IndexTarget {
     /// Parse a target key string back into an index target description.
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
         validate_column_key(key)?;
         let id = key
             .parse::<ColumnId>()
-            .map_err(|_| TargetKeyError::InvalidColumnId {
-                value: key.to_string(),
-            })?;
+            .map_err(|_| InvalidColumnIdSnafu { value: key }.build())?;
         Ok(IndexTarget::ColumnId(id))
     }
 }
@@ -75,9 +75,7 @@ fn validate_column_key(key: &str) -> Result<(), TargetKeyError> {
     ensure!(!key.is_empty(), EmptySnafu);
     ensure!(
         key.chars().all(|ch| ch.is_ascii_digit()),
-        InvalidCharactersSnafu {
-            key: key.to_string()
-        }
+        InvalidCharactersSnafu { key }
     );
     Ok(())
 }
@@ -89,7 +87,7 @@ mod tests {
     #[test]
     fn encode_decode_column() {
         let target = IndexTarget::ColumnId(42);
-        let key = target.encode();
+        let key = format!("{}", target);
         assert_eq!(key, "42");
         let decoded = IndexTarget::decode(&key).unwrap();
         assert_eq!(decoded, target);

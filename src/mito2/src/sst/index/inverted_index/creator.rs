@@ -116,7 +116,7 @@ impl InvertedIndexer {
         let indexed_column_ids = indexed_column_ids
             .into_iter()
             .map(|col_id| {
-                let target_key = IndexTarget::ColumnId(col_id).encode();
+                let target_key = format!("{}", IndexTarget::ColumnId(col_id));
                 (col_id, target_key)
             })
             .collect();

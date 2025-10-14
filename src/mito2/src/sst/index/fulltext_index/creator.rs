@@ -388,7 +388,7 @@ impl AltFulltextCreator {
             Self::Tantivy(creator) => {
                 let blob_key = format!(
                     "{INDEX_BLOB_TYPE_TANTIVY}-{}",
-                    IndexTarget::ColumnId(*column_id).encode()
+                    IndexTarget::ColumnId(*column_id)
                 );
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
@@ -398,7 +398,7 @@ impl AltFulltextCreator {
             Self::Bloom(creator) => {
                 let blob_key = format!(
                     "{INDEX_BLOB_TYPE_BLOOM}-{}",
-                    IndexTarget::ColumnId(*column_id).encode()
+                    IndexTarget::ColumnId(*column_id)
                 );
                 creator
                     .finish(puffin_writer, &blob_key, put_options)
