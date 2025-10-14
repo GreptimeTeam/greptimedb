@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
+use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow::row::{RowConverter, SortField};
@@ -382,28 +382,7 @@ impl Batch {
         };
 
         let seqs = self.sequences.as_arrow();
-        let predicate = match seq_range {
-            SequenceRange::Gt { min } => {
-                let min = UInt64Array::new_scalar(min);
-                datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
-                    .context(ComputeArrowSnafu)?
-            }
-            SequenceRange::LtEq { max } => {
-                let max = UInt64Array::new_scalar(max);
-                datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)
-                    .context(ComputeArrowSnafu)?
-            }
-            SequenceRange::GtLtEq { min, max } => {
-                let min = UInt64Array::new_scalar(min);
-                let max = UInt64Array::new_scalar(max);
-                let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)
-                    .context(ComputeArrowSnafu)?;
-                let pred_max = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)
-                    .context(ComputeArrowSnafu)?;
-                datafusion_common::arrow::compute::kernels::boolean::and(&pred_min, &pred_max)
-                    .context(ComputeArrowSnafu)?
-            }
-        };
+        let predicate = seq_range.filter(seqs).context(ComputeArrowSnafu)?;
 
         let predicate = BooleanVector::from(predicate);
         self.filter(&predicate)?;

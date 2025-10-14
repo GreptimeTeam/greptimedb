@@ -231,7 +231,7 @@ fn apply_combined_filters(
         let sequence_column =
             record_batch.column(sequence_column_index(record_batch.num_columns()));
         let sequence_filter = sequence
-            .filter(sequence_column.clone())
+            .filter(&sequence_column)
             .context(ComputeArrowSnafu)?;
         // Combine with existing filter using AND operation
         combined_filter = match combined_filter {

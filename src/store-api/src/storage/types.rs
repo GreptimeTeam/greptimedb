@@ -14,7 +14,7 @@
 
 //! Common types.
 
-use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use datatypes::arrow::array::{BooleanArray, Datum, UInt64Array};
 
 /// Represents a sequence number of data in storage. The offset of logstore can be used
 /// as a sequence number.
@@ -51,24 +51,24 @@ impl SequenceRange {
 
     pub fn filter(
         &self,
-        seqs: ArrayRef,
+        seqs: &dyn Datum,
     ) -> Result<BooleanArray, datatypes::arrow::error::ArrowError> {
         match self {
             SequenceRange::Gt { min } => {
                 let min = UInt64Array::new_scalar(*min);
-                let pred = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;
+                let pred = datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)?;
                 Ok(pred)
             }
             SequenceRange::LtEq { max } => {
                 let max = UInt64Array::new_scalar(*max);
-                let pred = datafusion_common::arrow::compute::kernels::cmp::lt_eq(&seqs, &max)?;
+                let pred = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)?;
                 Ok(pred)
             }
             SequenceRange::GtLtEq { min, max } => {
                 let min = UInt64Array::new_scalar(*min);
                 let max = UInt64Array::new_scalar(*max);
-                let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(&seqs, &min)?;
-                let pred_max = datafusion_common::arrow::compute::kernels::cmp::lt_eq(&seqs, &max)?;
+                let pred_min = datafusion_common::arrow::compute::kernels::cmp::gt(seqs, &min)?;
+                let pred_max = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &max)?;
                 datafusion_common::arrow::compute::kernels::boolean::and(&pred_min, &pred_max)
             }
         }
