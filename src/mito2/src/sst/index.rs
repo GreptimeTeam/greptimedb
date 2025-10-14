@@ -21,7 +21,6 @@ pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -52,9 +51,7 @@ use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId,
-};
+use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -91,35 +88,6 @@ impl IndexOutput {
             indexes.push(IndexType::BloomFilterIndex);
         }
         indexes
-    }
-
-    pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
-        let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
-
-        if self.inverted_index.is_available() {
-            for &col in &self.inverted_index.columns {
-                map.entry(col).or_default().push(IndexType::InvertedIndex);
-            }
-        }
-        if self.fulltext_index.is_available() {
-            for &col in &self.fulltext_index.columns {
-                map.entry(col).or_default().push(IndexType::FulltextIndex);
-            }
-        }
-        if self.bloom_filter.is_available() {
-            for &col in &self.bloom_filter.columns {
-                map.entry(col)
-                    .or_default()
-                    .push(IndexType::BloomFilterIndex);
-            }
-        }
-
-        map.into_iter()
-            .map(|(column_id, created_indexes)| ColumnIndexMetadata {
-                column_id,
-                created_indexes,
-            })
-            .collect::<Vec<_>>()
     }
 }
 
@@ -687,7 +655,6 @@ impl IndexBuildTask {
 
     async fn update_manifest(&mut self, output: IndexOutput) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
-        self.file_meta.indexes = output.build_indexes();
         self.file_meta.index_file_size = output.file_size;
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],

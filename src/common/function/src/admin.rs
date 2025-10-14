@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod build_index_table;
 mod flush_compact_region;
 mod flush_compact_table;
 mod migrate_region;
@@ -27,7 +26,6 @@ use reconcile_catalog::ReconcileCatalogFunction;
 use reconcile_database::ReconcileDatabaseFunction;
 use reconcile_table::ReconcileTableFunction;
 
-use crate::admin::build_index_table::BuildIndexFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -42,7 +40,6 @@ impl AdminFunction {
         registry.register(CompactRegionFunction::factory());
         registry.register(FlushTableFunction::factory());
         registry.register(CompactTableFunction::factory());
-        registry.register(BuildIndexFunction::factory());
         registry.register(FlushFlowFunction::factory());
         registry.register(ReconcileCatalogFunction::factory());
         registry.register(ReconcileDatabaseFunction::factory());
