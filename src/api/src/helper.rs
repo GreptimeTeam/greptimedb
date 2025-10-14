@@ -1254,6 +1254,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Struct, 2);
         let values = values.struct_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Json, 2);
+        assert_eq!(2, values.json_values.capacity());
+        assert_eq!(2, values.string_values.capacity());
     }
 
     #[test]
@@ -1377,6 +1381,54 @@ mod tests {
             ])
             .into()
         );
+        assert_eq!(
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            )),
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            )
+            .into()
+        )
     }
 
     #[test]
@@ -1502,7 +1554,71 @@ mod tests {
                     ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
                 )
             ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
-        )
+        );
+
+        let struct_type = StructType::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
+            StructField::new(
+                "address".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            ),
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            ))
+            .try_into()
+            .expect("failed to convert json type")
+        );
     }
 
     #[test]
