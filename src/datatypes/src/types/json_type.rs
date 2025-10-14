@@ -83,37 +83,26 @@ impl DataType for JsonType {
 }
 
 /// Converts a json type value to string
-pub fn json_type_value_to_string(val: &[u8], format: &JsonFormat) -> Result<String> {
-    match format {
-        JsonFormat::Jsonb => match jsonb::from_slice(val) {
-            Ok(jsonb_value) => {
-                let serialized = jsonb_value.to_string();
-                Ok(serialized)
-            }
-            Err(e) => InvalidJsonbSnafu { error: e }.fail(),
-        },
-        JsonFormat::Native(_) => todo!(),
+pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
+    match jsonb::from_slice(val) {
+        Ok(jsonb_value) => {
+            let serialized = jsonb_value.to_string();
+            Ok(serialized)
+        }
+        Err(e) => InvalidJsonbSnafu { error: e }.fail(),
     }
 }
 
 /// Converts a json type value to serde_json::Value
-pub fn json_type_value_to_serde_json(val: &[u8], format: &JsonFormat) -> Result<serde_json::Value> {
-    match format {
-        JsonFormat::Jsonb => {
-            let json_string = json_type_value_to_string(val, format)?;
-            serde_json::Value::from_str(json_string.as_str())
-                .context(DeserializeSnafu { json: json_string })
-        }
-        JsonFormat::Native(_) => todo!(),
-    }
+pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
+    let json_string = jsonb_to_string(val)?;
+    serde_json::Value::from_str(json_string.as_str())
+        .context(DeserializeSnafu { json: json_string })
 }
 
 /// Parses a string to a json type value
-pub fn parse_string_to_json_type_value(s: &str, format: &JsonFormat) -> Result<Vec<u8>> {
-    match format {
-        JsonFormat::Jsonb => jsonb::parse_value(s.as_bytes())
-            .map_err(|_| InvalidJsonSnafu { value: s }.build())
-            .map(|json| json.to_vec()),
-        JsonFormat::Native(_) => todo!(),
-    }
+pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
+    jsonb::parse_value(s.as_bytes())
+        .map_err(|_| InvalidJsonSnafu { value: s }.build())
+        .map(|json| json.to_vec())
 }

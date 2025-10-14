@@ -33,7 +33,7 @@ use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::types::{JsonFormat, json_type_value_to_string};
+use datatypes::types::{JsonFormat, jsonb_to_string};
 use datatypes::vectors::{BinaryVector, StringVectorBuilder};
 use error::Result;
 use futures::task::{Context, Poll};
@@ -106,11 +106,9 @@ pub fn map_json_type_to_string(
                         continue;
                     };
                     let string_value =
-                        json_type_value_to_string(value, &j.format).with_context(|_| {
-                            error::CastVectorSnafu {
-                                from_type: schema.data_type.clone(),
-                                to_type: ConcreteDataType::string_datatype(),
-                            }
+                        jsonb_to_string(value).with_context(|_| error::CastVectorSnafu {
+                            from_type: schema.data_type.clone(),
+                            to_type: ConcreteDataType::string_datatype(),
                         })?;
                     string_vector_builder.push(Some(string_value.as_str()));
                 }

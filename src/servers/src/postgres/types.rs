@@ -28,7 +28,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{IntervalType, JsonFormat, TimestampType, json_type_value_to_string};
+use datatypes::types::{IntervalType, JsonFormat, TimestampType, jsonb_to_string};
 use datatypes::value::{ListValue, StructValue};
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
@@ -357,8 +357,7 @@ fn encode_array(
                     .map(|v| match v {
                         Value::Null => Ok(None),
                         Value::Binary(v) => {
-                            let s = json_type_value_to_string(&v, &JsonFormat::Jsonb)
-                                .map_err(convert_err)?;
+                            let s = jsonb_to_string(&v).map_err(convert_err)?;
                             Ok(Some(s))
                         }
 
@@ -416,8 +415,8 @@ pub(super) fn encode_value(
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
-            ConcreteDataType::Json(j) => {
-                let s = json_type_value_to_string(v.as_ref(), &j.format).map_err(convert_err)?;
+            ConcreteDataType::Json(_j) => {
+                let s = jsonb_to_string(v.as_ref()).map_err(convert_err)?;
                 builder.encode_field(&s)
             }
             _ => {
