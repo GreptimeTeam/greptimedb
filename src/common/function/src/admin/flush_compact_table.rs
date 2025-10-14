@@ -126,7 +126,7 @@ fn parse_compact_request(
     query_ctx: &QueryContextRef,
 ) -> Result<CompactTableRequest> {
     ensure!(
-        !params.is_empty() && params.len() <= 4,
+        !params.is_empty() && params.len() <= 3,
         InvalidFuncArgsSnafu {
             err_msg: format!(
                 "The length of the args is not correct, expect 1-4, have: {}",
