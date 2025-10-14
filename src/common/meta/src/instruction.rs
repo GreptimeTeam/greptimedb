@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
 use table::table_name::TableName;
@@ -394,6 +394,85 @@ impl From<RegionId> for FlushRegions {
     }
 }
 
+/// Instruction to get file references for specified regions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetFileRefs {
+    /// List of region IDs to get file references for.
+    pub region_ids: Vec<RegionId>,
+}
+
+impl Display for GetFileRefs {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GetFileRefs(region_ids={:?})", self.region_ids)
+    }
+}
+
+/// Instruction to trigger garbage collection for a region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GcRegions {
+    /// The region ID to perform GC on.
+    pub regions: Vec<RegionId>,
+    /// The file references manifest containing temporary file references.
+    pub file_refs_manifest: FileRefsManifest,
+}
+
+impl Display for GcRegions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcRegion(regions={:?}, file_refs_count={})",
+            self.regions,
+            self.file_refs_manifest.file_refs.len()
+        )
+    }
+}
+
+/// Reply for GetFileRefs instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetFileRefsReply {
+    /// The file references manifest.
+    pub file_refs_manifest: FileRefsManifest,
+    /// Whether the operation was successful.
+    pub success: bool,
+    /// Error message if any.
+    pub error: Option<String>,
+}
+
+impl Display for GetFileRefsReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GetFileRefsReply(success={}, file_refs_count={}, error={:?})",
+            self.success,
+            self.file_refs_manifest.file_refs.len(),
+            self.error
+        )
+    }
+}
+
+/// Reply for GC instruction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GcRegionsReply {
+    pub result: Result<GcReport, String>,
+}
+
+impl Display for GcRegionsReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcReply(result={})",
+            match &self.result {
+                Ok(report) => format!(
+                    "GcReport(deleted_files_count={}, need_retry_regions_count={})",
+                    report.deleted_files.len(),
+                    report.need_retry_regions.len()
+                ),
+                Err(err) => format!("Err({})", err),
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
@@ -412,6 +491,10 @@ pub enum Instruction {
     InvalidateCaches(Vec<CacheIdent>),
     /// Flushes regions.
     FlushRegions(FlushRegions),
+    /// Gets file references for regions.
+    GetFileRefs(GetFileRefs),
+    /// Triggers garbage collection for a region.
+    GcRegions(GcRegions),
 }
 
 /// The reply of [UpgradeRegion].
@@ -443,6 +526,8 @@ pub enum InstructionReply {
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
     FlushRegions(FlushRegionReply),
+    GetFileRefs(GetFileRefsReply),
+    GcRegions(GcRegionsReply),
 }
 
 impl Display for InstructionReply {
@@ -455,6 +540,8 @@ impl Display for InstructionReply {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
+            Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
+            Self::GcRegions(reply) => write!(f, "InstructionReply::GcRegion({})", reply),
         }
     }
 }

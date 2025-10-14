@@ -165,6 +165,10 @@ impl MitoRegion {
         );
     }
 
+    pub fn access_layer(&self) -> AccessLayerRef {
+        self.access_layer.clone()
+    }
+
     /// Returns current metadata of the region.
     pub(crate) fn metadata(&self) -> RegionMetadataRef {
         let version_data = self.version_control.current();

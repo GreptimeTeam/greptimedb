@@ -437,7 +437,7 @@ lazy_static! {
             "mito stalled write request in each worker",
             &[WORKER_LABEL]
         ).unwrap();
-    /// Number of ref files per table
+    /// Number of ref files
     pub static ref GC_REF_FILE_CNT: IntGauge = register_int_gauge!(
             "greptime_gc_ref_file_count",
             "gc ref file count",
@@ -458,7 +458,7 @@ lazy_static! {
         .unwrap();
 
     /// Counter for the number of files deleted by the GC worker.
-    pub static ref GC_FILE_CNT: IntGauge =
+    pub static ref GC_DEL_FILE_CNT: IntGauge =
         register_int_gauge!(
             "greptime_mito_gc_file_count",
             "mito gc deleted file count",

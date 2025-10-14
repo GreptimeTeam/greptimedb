@@ -1113,6 +1113,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("GC job permit exhausted"))]
+    TooManyGcJobs {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1283,7 +1289,7 @@ impl ErrorExt for Error {
 
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
 
-            TooManyFilesToRead { .. } => StatusCode::RateLimited,
+            TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
         }
     }
 

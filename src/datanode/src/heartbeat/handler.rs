@@ -22,11 +22,13 @@ use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use snafu::OptionExt;
-use store_api::storage::RegionId;
+use store_api::storage::{GcReport, RegionId};
 
 mod close_region;
 mod downgrade_region;
+mod file_ref;
 mod flush_region;
+mod gc_worker;
 mod open_region;
 mod upgrade_region;
 
@@ -40,6 +42,7 @@ pub struct RegionHeartbeatResponseHandler {
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
 /// Handler of the instruction.
@@ -52,6 +55,7 @@ pub struct HandlerContext {
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
 impl HandlerContext {
@@ -66,6 +70,7 @@ impl HandlerContext {
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            gc_tasks: TaskTracker::new(),
         }
     }
 }
@@ -78,6 +83,7 @@ impl RegionHeartbeatResponseHandler {
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            gc_tasks: TaskTracker::new(),
         }
     }
 
@@ -102,6 +108,12 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_regions_instruction(flush_regions)
             })),
+            Instruction::GetFileRefs(get_file_refs) => Ok(Box::new(move |handler_context| {
+                Box::pin(handler_context.handle_get_file_refs_instruction(get_file_refs))
+            })),
+            Instruction::GcRegions(gc_regions) => Ok(Box::new(move |handler_context| {
+                Box::pin(handler_context.handle_gc_regions_instruction(gc_regions))
+            })),
         }
     }
 }
@@ -116,6 +128,8 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
+                | Some((_, Instruction::GetFileRefs { .. }))
+                | Some((_, Instruction::GcRegions { .. }))
         )
     }
 
@@ -130,6 +144,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
+        let gc_tasks = self.gc_tasks.clone();
         let handler = Self::build_handler(instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler(HandlerContext {
@@ -137,6 +152,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 catchup_tasks,
                 downgrade_tasks,
                 flush_tasks,
+                gc_tasks,
             })
             .await;
 
