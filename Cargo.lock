@@ -9184,8 +9184,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f58d371668e6151da16be31308989058156c01257277ea8af0f97524e87cfa31"
+source = "git+https://github.com/sunng87/pgwire.git?rev=658e37936da5039dfb8495af9cac7c511dbfaf90#658e37936da5039dfb8495af9cac7c511dbfaf90"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9201,6 +9200,8 @@ dependencies = [
  "ring",
  "rust_decimal",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "stringprep",
  "thiserror 2.0.17",
  "tokio",

@@ -95,6 +95,10 @@ impl StructType {
         &self.fields
     }
 
+    pub fn take_fields(self) -> Vec<StructField> {
+        self.fields
+    }
+
     pub fn as_arrow_fields(&self) -> Fields {
         self.fields
             .iter()
@@ -121,6 +125,10 @@ impl StructField {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn take_name(self) -> String {
+        self.name
     }
 
     pub fn data_type(&self) -> &ConcreteDataType {

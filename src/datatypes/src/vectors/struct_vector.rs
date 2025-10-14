@@ -438,6 +438,8 @@ impl ScalarVectorBuilder for StructVectorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::StructField;
+    use crate::value::ListValue;
     use crate::value::tests::*;
 
     #[test]
@@ -478,9 +480,45 @@ mod tests {
             assert_eq!(items.next(), Some(&Value::String("tom".into())));
             assert_eq!(items.next(), Some(&Value::UInt8(25)));
             assert_eq!(items.next(), Some(&Value::String("94038".into())));
+            assert_eq!(items.next(), Some(&Value::List(build_list_value())));
             assert_eq!(items.next(), None);
         } else {
             panic!("Expected a struct value");
         }
+    }
+
+    #[test]
+    fn test_deep_nested_struct_list() {
+        // level 1: struct
+        let struct_type = ConcreteDataType::struct_datatype(build_struct_type());
+        let struct_value = build_struct_value();
+        // level 2: list
+        let list_type = ConcreteDataType::list_datatype(struct_type.clone());
+        let list_value = ListValue::new(
+            vec![
+                Value::Struct(struct_value.clone()),
+                Value::Struct(struct_value.clone()),
+            ],
+            struct_type.clone(),
+        );
+        // level 3: struct
+        let root_type = StructType::new(vec![StructField::new(
+            "items".to_string(),
+            list_type,
+            false,
+        )]);
+        let root_value = StructValue::new(vec![Value::List(list_value)], root_type.clone());
+
+        let mut builder = StructVectorBuilder::with_type_and_capacity(root_type.clone(), 20);
+        builder.push(Some(StructValueRef::Ref(&root_value)));
+
+        let vector = builder.finish();
+        assert_eq!(vector.len(), 1);
+        assert_eq!(vector.null_count(), 0);
+        assert_eq!(
+            vector.data_type(),
+            ConcreteDataType::struct_datatype(root_type)
+        );
+        assert_eq!(vector.get(0), Value::Struct(root_value));
     }
 }
