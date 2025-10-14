@@ -26,7 +26,7 @@ use datatypes::schema::{
     SkippingIndexOptions,
 };
 use derive_builder::Builder;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
@@ -251,7 +251,7 @@ impl TableMeta {
         table_name: &str,
         alter_kind: &AlterKind,
     ) -> Result<TableMetaBuilder> {
-        match alter_kind {
+        let mut builder = match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
             AlterKind::ModifyColumnTypes { columns } => {
@@ -265,7 +265,9 @@ impl TableMeta {
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
             AlterKind::SetDefaults { defaults } => self.set_defaults(table_name, defaults),
-        }
+        }?;
+        let _ = builder.updated_on(Utc::now());
+        Ok(builder)
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
@@ -294,8 +296,6 @@ impl TableMeta {
         }
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
-
-        let _ = builder.updated_on(Utc::now());
 
         Ok(builder)
     }
@@ -362,8 +362,6 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
 
-        let _ = meta_builder.updated_on(Utc::now());
-
         Ok(meta_builder)
     }
 
@@ -423,8 +421,6 @@ impl TableMeta {
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
-
-        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
@@ -667,8 +663,6 @@ impl TableMeta {
             .primary_key_indices(primary_key_indices)
             .partition_key_indices(partition_key_indices);
 
-        let _ = meta_builder.updated_on(Utc::now());
-
         Ok(meta_builder)
     }
 
@@ -764,8 +758,6 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(primary_key_indices)
             .partition_key_indices(partition_key_indices);
-
-        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
@@ -911,8 +903,6 @@ impl TableMeta {
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
 
-        let _ = meta_builder.updated_on(Utc::now());
-
         Ok(meta_builder)
     }
 
@@ -1018,8 +1008,6 @@ impl TableMeta {
 
         let _ = meta_builder.schema(Arc::new(new_schema));
 
-        let _ = meta_builder.updated_on(Utc::now());
-
         Ok(meta_builder)
     }
 
@@ -1062,8 +1050,6 @@ impl TableMeta {
         })?;
 
         let _ = meta_builder.schema(Arc::new(new_schema));
-
-        let _ = meta_builder.updated_on(Utc::now());
 
         Ok(meta_builder)
     }
@@ -1169,7 +1155,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Default)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -1194,6 +1180,47 @@ pub struct RawTableMeta {
     /// Note: This field may be empty for older versions that did not include this field.
     #[serde(default)]
     pub column_ids: Vec<ColumnId>,
+}
+
+impl<'de> Deserialize<'de> for RawTableMeta {
+    fn deserialize<D>(
+        deserializer: D,
+    ) -> std::result::Result<RawTableMeta, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            schema: RawSchema,
+            primary_key_indices: Vec<usize>,
+            value_indices: Vec<usize>,
+            engine: String,
+            next_column_id: u32,
+            region_numbers: Vec<u32>,
+            options: TableOptions,
+            created_on: DateTime<Utc>,
+            updated_on: Option<DateTime<Utc>>,
+            #[serde(default)]
+            partition_key_indices: Vec<usize>,
+            #[serde(default)]
+            column_ids: Vec<ColumnId>,
+        }
+
+        let h = Helper::deserialize(deserializer)?;
+        Ok(RawTableMeta {
+            schema: h.schema,
+            primary_key_indices: h.primary_key_indices,
+            value_indices: h.value_indices,
+            engine: h.engine,
+            next_column_id: h.next_column_id,
+            region_numbers: h.region_numbers,
+            options: h.options,
+            created_on: h.created_on,
+            updated_on: h.updated_on.unwrap_or(h.created_on),
+            partition_key_indices: h.partition_key_indices,
+            column_ids: h.column_ids,
+        })
+    }
 }
 
 impl From<TableMeta> for RawTableMeta {
