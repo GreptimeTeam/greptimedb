@@ -164,6 +164,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Too many concurrent large requests, limit: {}, request size: {} bytes",
+        limit,
+        request_size
+    ))]
+    TooManyConcurrentRequests {
+        limit: usize,
+        request_size: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery {
         reason: String,
@@ -728,6 +740,8 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
 
             InvalidUtf8Value { .. } | InvalidHeaderValue { .. } => StatusCode::InvalidArguments,
+
+            TooManyConcurrentRequests { .. } => StatusCode::RuntimeResourcesExhausted,
 
             ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),

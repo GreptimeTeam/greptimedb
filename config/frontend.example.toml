@@ -31,6 +31,9 @@ timeout = "0s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
+## Maximum total memory for all concurrent HTTP request bodies.
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+#+ max_total_body_memory = "1GB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
 enable_cors = true
@@ -54,6 +57,9 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Maximum total memory for all concurrent gRPC request messages.
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+#+ max_total_message_memory = "1GB"
 ## Compression mode for frontend side Arrow IPC service. Available options:
 ## - `none`: disable all compression
 ## - `transport`: only enable gRPC transport compression (zstd)

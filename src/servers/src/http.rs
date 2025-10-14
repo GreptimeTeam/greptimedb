@@ -82,6 +82,7 @@ use crate::query_handler::{
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
+use crate::request_limiter::RequestMemoryLimiter;
 use crate::server::Server;
 
 pub mod authorize;
@@ -97,6 +98,7 @@ pub mod jaeger;
 pub mod logs;
 pub mod loki;
 pub mod mem_prof;
+mod memory_limit;
 pub mod opentsdb;
 pub mod otlp;
 pub mod pprof;
@@ -129,6 +131,7 @@ pub struct HttpServer {
     router: StdMutex<Router>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
+    memory_limiter: RequestMemoryLimiter,
 
     // plugins
     plugins: Plugins,
@@ -150,6 +153,9 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
+
+    /// Maximum total memory for all concurrent HTTP request bodies. 0 disables the limit.
+    pub max_total_body_memory: ReadableSize,
 
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
@@ -195,6 +201,7 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
+            max_total_body_memory: ReadableSize(0),
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
@@ -746,6 +753,8 @@ impl HttpServerBuilder {
     }
 
     pub fn build(self) -> HttpServer {
+        let memory_limiter =
+            RequestMemoryLimiter::new(self.options.max_total_body_memory.as_bytes() as usize);
         HttpServer {
             options: self.options,
             user_provider: self.user_provider,
@@ -753,6 +762,7 @@ impl HttpServerBuilder {
             plugins: self.plugins,
             router: StdMutex::new(self.router),
             bind_addr: None,
+            memory_limiter,
         }
     }
 }
@@ -877,6 +887,11 @@ impl HttpServer {
                     .option_layer(cors_layer)
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
+                    // memory limit layer - must be before body is consumed
+                    .layer(middleware::from_fn_with_state(
+                        self.memory_limiter.clone(),
+                        memory_limit::memory_limit_middleware,
+                    ))
                     // auth layer
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
