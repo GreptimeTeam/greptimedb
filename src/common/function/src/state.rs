@@ -44,7 +44,8 @@ impl FunctionState {
         use session::context::QueryContextRef;
         use store_api::storage::RegionId;
         use table::requests::{
-            BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest
+            BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest,
+            InsertRequest,
         };
 
         use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
@@ -127,7 +128,7 @@ impl FunctionState {
             ) -> Result<AffectedRows> {
                 Ok(ROWS)
             }
-            
+
             async fn flush_region(
                 &self,
                 _region_id: RegionId,

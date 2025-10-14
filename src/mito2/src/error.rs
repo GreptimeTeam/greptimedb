@@ -606,7 +606,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    
+
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
         source: datatypes::error::Error,
@@ -1218,7 +1218,7 @@ impl ErrorExt for Error {
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
             DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
-            FlushRegion { source, .. }  | BuildIndexAsync { source, .. } => source.status_code(),
+            FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,

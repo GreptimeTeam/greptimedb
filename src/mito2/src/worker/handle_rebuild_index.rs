@@ -20,7 +20,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, error, warn};
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::region::MitoRegionRef;
@@ -177,12 +177,10 @@ impl<S> RegionWorkerLoop<S> {
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
             for _ in 0..num_tasks {
-                if let Some(res) = rx.recv().await {
-                    if let Err(e) = res {
-                        warn!(e; "Index build task failed for region: {}", region_id);
-                        sender.send(Err(e));
-                        return;
-                    }
+                if let Some(Err(e)) = rx.recv().await {
+                    warn!(e; "Index build task failed for region: {}", region_id);
+                    sender.send(Err(e));
+                    return;
                 }
             }
             sender.send(Ok(0));
@@ -204,7 +202,7 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
-        
+
         region.version_control.apply_edit(
             Some(request.edit.clone()),
             &[],

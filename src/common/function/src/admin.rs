@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod build_index_table;
 mod flush_compact_region;
 mod flush_compact_table;
-mod build_index_table;
 mod migrate_region;
 mod reconcile_catalog;
 mod reconcile_database;

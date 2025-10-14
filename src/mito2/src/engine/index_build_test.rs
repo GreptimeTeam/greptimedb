@@ -15,28 +15,23 @@
 //! Index build tests for mito engine.
 //!
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 
 use api::v1::Rows;
-use common_time::duration;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCompactRequest, RegionRequest,
-    SetIndexOption, UnsetIndexOption,
+    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionRequest, SetIndexOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
-use crate::access_layer;
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
-use crate::engine::compaction_test::{compact, delete_and_flush, put_and_flush};
-use crate::engine::listener::{FlushListener, IndexBuildListener};
+use crate::engine::compaction_test::{compact, put_and_flush};
+use crate::engine::listener::IndexBuildListener;
 use crate::read::scan_region::Scanner;
 use crate::sst::location;
 use crate::test_util::{
-    CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, build_rows_for_key,
-    flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 
 // Wait interval for ensuring task finished.
@@ -66,7 +61,7 @@ async fn num_of_index_files(engine: &MitoEngine, scanner: &Scanner, region_id: R
     let access_layer = region.access_layer.clone();
     // When there is no file, return 0 directly.
     // Because we can't know region file ids here.
-    if scanner.file_ids().len() == 0 {
+    if scanner.file_ids().is_empty() {
         return 0;
     }
     let mut index_files_count: usize = 0;

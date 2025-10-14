@@ -189,7 +189,6 @@ impl RegionManifestManager {
             options.manifest_dir, manifest
         );
 
-
         let mut actions = vec![RegionMetaAction::Change(RegionChange {
             metadata,
             sst_format,

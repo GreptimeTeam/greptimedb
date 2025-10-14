@@ -52,7 +52,9 @@ use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, RegionFileId,
+};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -502,7 +504,8 @@ impl IndexBuildTask {
 
     /// Send index build error to waiter.
     pub async fn on_failure(&mut self, err: Arc<Error>) {
-        let _ = self.result_sender
+        let _ = self
+            .result_sender
             .0
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
                 region_id: self.file_meta.region_id,
@@ -747,7 +750,7 @@ mod tests {
     use object_store::services::Memory;
     use puffin_manager::PuffinManagerFactory;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::access_layer::{FilePathProvider, SstWriteRequest, WriteType};
@@ -1183,13 +1186,10 @@ mod tests {
         scheduler.schedule_build(&version_control, task).unwrap();
         match result_rx.recv().await.unwrap() {
             Ok(outcome) => {
-                match outcome {
-                    IndexBuildOutcome::Finished => {
-                        panic!("Expect aborted result due to missing SST file")
-                    }
-                    _ => (),
+                if outcome == IndexBuildOutcome::Finished {
+                    panic!("Expect aborted result due to missing SST file")
                 }
-            },
+            }
             _ => panic!("Expect aborted result due to missing SST file"),
         }
     }
@@ -1462,7 +1462,7 @@ mod tests {
 
         // Create mock task.
         let (tx, mut _rx) = mpsc::channel(4);
-       let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
+        let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,

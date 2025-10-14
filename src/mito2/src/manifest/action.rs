@@ -54,7 +54,7 @@ pub struct RegionChange {
     #[serde(default)]
     pub sst_format: FormatType,
     /// A flag indicates whether the index has been changed.
-    /// 
+    ///
     /// For backward compatibility, this field is default to `false` when
     /// deserializing from old manifest.
     /// Used for index build, to determine whether we need to build index files after schema change.

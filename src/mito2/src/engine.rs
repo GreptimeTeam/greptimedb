@@ -40,6 +40,8 @@ mod edit_region_test;
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod index_build_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -66,8 +68,6 @@ mod staging_test;
 mod sync_test;
 #[cfg(test)]
 mod truncate_test;
-#[cfg(test)]
-mod index_build_test;
 
 use std::any::Any;
 use std::collections::HashMap;

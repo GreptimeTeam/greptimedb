@@ -148,7 +148,7 @@ pub struct FileMeta {
     /// Available indexes of the file.
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Created indexes of the file for each column.
-    /// 
+    ///
     /// This is essentially a more granular, column-level version of `available_indexes`,
     /// primarily used for manual index building in the asynchronous index construction mode.
     ///
@@ -497,7 +497,11 @@ pub async fn delete_files(
 mod tests {
     use std::str::FromStr;
 
-    use datatypes::{prelude::ConcreteDataType, schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions}, value::Value};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{
+        ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions,
+    };
+    use datatypes::value::Value;
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
@@ -724,11 +728,13 @@ mod tests {
         }
 
         // Case 1: Perfect match. File has exactly the required indexes.
-        let mut file_meta = FileMeta::default();
-        file_meta.indexes = vec![ColumnIndexMetadata {
-            column_id: 1,
-            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
-        }];
+        let mut file_meta = FileMeta {
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 1,
+                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            }],
+            ..Default::default()
+        };
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
         assert!(file_meta.is_index_consistent_with_region(&region_meta));
 

@@ -90,18 +90,18 @@ impl<S> RegionWorkerLoop<S> {
         request.on_success();
 
         // In async mode, create indexes after compact if new files are created.
-        if self.config.index.build_mode == IndexBuildMode::Async {
-            if !index_build_file_metas.is_empty() {
-                self.handle_rebuild_index(
-                    BuildIndexRequest {
-                        region_id,
-                        build_type: IndexBuildType::Compact,
-                        file_metas: index_build_file_metas,
-                    },
-                    OptionOutputTx::new(None),
-                )
-                .await;
-            }
+        if self.config.index.build_mode == IndexBuildMode::Async
+            && !index_build_file_metas.is_empty()
+        {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id,
+                    build_type: IndexBuildType::Compact,
+                    file_metas: index_build_file_metas,
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
         }
 
         // Schedule next compaction if necessary.
