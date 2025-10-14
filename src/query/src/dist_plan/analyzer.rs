@@ -546,7 +546,7 @@ impl PlanRewriter {
                                     let index =
                                         if let Some(c) = plan.schema().index_of_column_by_name(None, &c){
                                             c
-                                        }else{
+                                        } else {
                                             // the `projection` field of `TableScan` doesn't contain the partition columns,
                                             // this is similar to not having a alias, hence return empty alias set
                                             return Ok((c.clone(), BTreeSet::new()))
