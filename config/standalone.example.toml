@@ -38,6 +38,7 @@ timeout = "0s"
 body_limit = "64MB"
 ## Maximum total memory for all concurrent HTTP request bodies.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
 #+ max_total_body_memory = "1GB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions

@@ -33,6 +33,7 @@ timeout = "0s"
 body_limit = "64MB"
 ## Maximum total memory for all concurrent HTTP request bodies.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
 #+ max_total_body_memory = "1GB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
@@ -59,6 +60,7 @@ server_addr = "127.0.0.1:4001"
 runtime_size = 8
 ## Maximum total memory for all concurrent gRPC request messages.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
 #+ max_total_message_memory = "1GB"
 ## Compression mode for frontend side Arrow IPC service. Available options:
 ## - `none`: disable all compression
