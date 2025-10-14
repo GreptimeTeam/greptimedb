@@ -457,15 +457,19 @@ impl MetasrvBuilder {
             None
         };
 
-        let gc_ticker = {
-            let (gc_scheduler, gc_ticker) = GcScheduler::new(
+        let gc_ticker = if options.gc.enabled {
+            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
                 table_metadata_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                options.gc.clone(),
             );
             gc_scheduler.try_start()?;
-            gc_ticker
+
+            Some(Arc::new(gc_ticker))
+        } else {
+            None
         };
 
         let customized_region_lease_renewer = plugins
@@ -569,6 +573,7 @@ impl MetasrvBuilder {
             reconciliation_manager,
             topic_stats_registry,
             resource_spec: Default::default(),
+            gc_ticker,
         })
     }
 }

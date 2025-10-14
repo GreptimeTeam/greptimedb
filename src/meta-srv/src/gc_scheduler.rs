@@ -27,6 +27,7 @@ use common_telemetry::{debug, error, info, warn};
 use futures::stream::{FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt as _, ResultExt};
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
@@ -44,8 +45,9 @@ use crate::service::mailbox::{Channel, MailboxRef};
 const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
 /// Configuration for GC operations.
-#[derive(Debug, Clone)]
-pub struct GcSchedulerConfig {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GcSchedulerOptions {
     /// Whether GC is enabled. Default to true. If set to false, no GC will be performed, and potentially some
     /// files from datanodes will never be deleted.
     ///
@@ -69,7 +71,7 @@ pub struct GcSchedulerConfig {
     pub regions_per_table_threshold: usize,
 }
 
-impl Default for GcSchedulerConfig {
+impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -142,13 +144,14 @@ pub struct GcScheduler {
     /// The receiver of events.
     receiver: Receiver<Event>,
     /// GC configuration.
-    config: GcSchedulerConfig,
+    config: GcSchedulerOptions,
     /// Tracks the last GC time for regions.
     region_gc_tracker: Arc<tokio::sync::Mutex<RegionGcTracker>>,
 }
 
 impl GcScheduler {
     /// Creates a new [`GcScheduler`].
+    #[allow(unused)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         meta_peer_client: MetaPeerClientRef,
@@ -160,7 +163,7 @@ impl GcScheduler {
             meta_peer_client,
             mailbox,
             server_addr,
-            GcSchedulerConfig::default(),
+            GcSchedulerOptions::default(),
         )
     }
 
@@ -170,7 +173,7 @@ impl GcScheduler {
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
-        config: GcSchedulerConfig,
+        config: GcSchedulerOptions,
     ) -> (Self, GcTicker) {
         let (tx, rx) = Self::channel();
         let gc_ticker = GcTicker::new(TICKER_INTERVAL, tx);
@@ -213,6 +216,7 @@ impl GcScheduler {
         if let Err(e) = self.trigger_gc().await {
             error!(e; "Failed to trigger gc");
         }
+        info!("Finished gc trigger");
     }
 
     async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>> {
@@ -489,7 +493,7 @@ impl GcScheduler {
                 .process_region_gc_with_retry(candidate, &file_refs_manifest, &region_to_peer)
                 .await
             {
-                Ok(()) => {
+                Ok(_report) => {
                     successful_regions += 1;
                     // Update GC tracker
                     let mut gc_tracker = self.region_gc_tracker.lock().await;
@@ -596,7 +600,7 @@ impl GcScheduler {
         file_refs_manifest: &FileRefsManifest,
         // TODO(discord9): maybe also refresh region_to_peer mapping if needed?
         region_to_peer: &HashMap<RegionId, Peer>,
-    ) -> Result<()> {
+    ) -> Result<GcReport> {
         let region_id = candidate.region_id;
 
         // Get GC stats for all datanodes to choose the best peer based on load
@@ -615,6 +619,8 @@ impl GcScheduler {
 
         let mut retries = 0;
         let mut current_manifest = file_refs_manifest.clone();
+        // Final report for recording all deleted files
+        let mut final_report = GcReport::default();
 
         loop {
             match self
@@ -624,7 +630,11 @@ impl GcScheduler {
                 Ok(report) => {
                     if report.need_retry_regions.is_empty() {
                         info!("Successfully completed GC for region {}", region_id);
-                        return Ok(());
+                        final_report.merge(report);
+                        // note that need_retry_regions should be empty here
+                        // since no more outdated regions
+                        final_report.need_retry_regions.clear();
+                        return Ok(final_report);
                     } else {
                         // retry outdated regions if needed?
                         current_manifest = self
@@ -633,6 +643,11 @@ impl GcScheduler {
                                 region_to_peer,
                             )
                             .await?;
+                        info!(
+                            "Retrying GC for regions {:?} due to outdated file references",
+                            &report.need_retry_regions
+                        );
+                        final_report.merge(report);
                     }
                 }
 
