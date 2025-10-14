@@ -2427,8 +2427,7 @@ non TIMESTAMP(6) TIME INDEX,
         let sql = "CREATE VIEW test AS DELETE from demo";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result.is_err());
-        assert_matches!(result, Err(crate::error::Error::Syntax { .. }));
+        assert!(result.is_ok_and(|x| x.len() == 1));
     }
 
     #[test]

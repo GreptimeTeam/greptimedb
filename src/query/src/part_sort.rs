@@ -37,6 +37,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::expressions::{DynamicFilterPhysicalExpr, lit};
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use parking_lot::RwLock;
@@ -60,7 +61,6 @@ pub struct PartSortExec {
     metrics: ExecutionPlanMetricsSet,
     partition_ranges: Vec<Vec<PartitionRange>>,
     properties: PlanProperties,
-    filter: Arc<RwLock<TopKDynamicFilters>>,
 }
 
 impl PartSortExec {
@@ -69,7 +69,6 @@ impl PartSortExec {
         limit: Option<usize>,
         partition_ranges: Vec<Vec<PartitionRange>>,
         input: Arc<dyn ExecutionPlan>,
-        filter: Arc<RwLock<TopKDynamicFilters>>,
     ) -> Self {
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = input.properties();
@@ -87,7 +86,6 @@ impl PartSortExec {
             metrics,
             partition_ranges,
             properties,
-            filter,
         }
     }
 
@@ -115,7 +113,6 @@ impl PartSortExec {
             input_stream,
             self.partition_ranges[partition].clone(),
             partition,
-            self.filter.clone(),
         )?) as _;
 
         Ok(df_stream)
@@ -172,7 +169,6 @@ impl ExecutionPlan for PartSortExec {
             self.limit,
             self.partition_ranges.clone(),
             new_input.clone(),
-            self.filter.clone(),
         )))
     }
 
@@ -234,7 +230,6 @@ struct PartSortStream {
     metrics: BaselineMetrics,
     context: Arc<TaskContext>,
     root_metrics: ExecutionPlanMetricsSet,
-    filter: Arc<RwLock<TopKDynamicFilters>>,
 }
 
 impl PartSortStream {
@@ -245,9 +240,11 @@ impl PartSortStream {
         input: DfSendableRecordBatchStream,
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
-        filter: Arc<RwLock<TopKDynamicFilters>>,
     ) -> datafusion_common::Result<Self> {
         let buffer = if let Some(limit) = limit {
+            let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+                DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+            ))));
             PartSortBuffer::Top(
                 TopK::try_new(
                     partition,
@@ -258,7 +255,7 @@ impl PartSortStream {
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
-                    filter.clone(),
+                    filter,
                 )?,
                 0,
             )
@@ -283,7 +280,6 @@ impl PartSortStream {
             metrics: BaselineMetrics::new(&sort.metrics, partition),
             context,
             root_metrics: sort.metrics.clone(),
-            filter,
         })
     }
 }
@@ -507,6 +503,9 @@ impl PartSortStream {
 
     /// Internal method for sorting `Top` buffer (with limit).
     fn sort_top_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+            DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+        ))));
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
@@ -516,7 +515,7 @@ impl PartSortStream {
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
-            self.filter.clone(),
+            filter,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
@@ -685,7 +684,6 @@ mod test {
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
     use common_time::Timestamp;
-    use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion_physical_expr::expressions::Column;
     use futures::StreamExt;
     use store_api::region_engine::PartitionRange;
@@ -1044,19 +1042,16 @@ mod test {
                 cols
             })
             .collect_vec();
-        let mock_input = Arc::new(MockInputExec::new(batches, schema.clone()));
+        let mock_input = MockInputExec::new(batches, schema.clone());
 
-        let expr = PhysicalSortExpr {
-            expr: Arc::new(Column::new("ts", 0)),
-            options: opt,
-        };
-        let sort_exec = SortExec::new([expr.clone()].into(), mock_input.clone());
         let exec = PartSortExec::new(
-            expr,
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options: opt,
+            },
             limit,
             vec![ranges.clone()],
-            mock_input,
-            sort_exec.create_filter(),
+            Arc::new(mock_input),
         );
 
         let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
