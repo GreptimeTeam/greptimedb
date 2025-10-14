@@ -117,28 +117,33 @@ fn compact_signature() -> Signature {
 /// - `[<table_name>]`: only tables name provided, using default compaction type: regular
 /// - `[<table_name>, <type>]`: specify table name and compaction type. The compaction options will be default.
 /// - `[<table_name>, <type>, <options>]`: provides both type and type-specific options.
+/// - `[<table_name>, <type>, <options>, <parallelism>]`: provides type, type-specific options, and parallelism.
 fn parse_compact_params(
     params: &[ValueRef<'_>],
     query_ctx: &QueryContextRef,
 ) -> Result<CompactTableRequest> {
     ensure!(
-        !params.is_empty(),
+        !params.is_empty() && params.len() <= 4,
         InvalidFuncArgsSnafu {
-            err_msg: "Args cannot be empty",
+            err_msg: format!(
+                "The length of the args is not correct, expect 1-4, have: {}",
+                params.len()
+            ),
         }
     );
 
-    let (table_name, compact_type) = match params {
+    let (table_name, compact_type, parallelism) = match params {
         [ValueRef::String(table_name)] => (
             table_name,
             compact_request::Options::Regular(Default::default()),
+            None,
         ),
         [
             ValueRef::String(table_name),
             ValueRef::String(compact_ty_str),
         ] => {
             let compact_type = parse_compact_type(compact_ty_str, None)?;
-            (table_name, compact_type)
+            (table_name, compact_type, None)
         }
 
         [
@@ -147,7 +152,26 @@ fn parse_compact_params(
             ValueRef::String(options_str),
         ] => {
             let compact_type = parse_compact_type(compact_ty_str, Some(options_str))?;
-            (table_name, compact_type)
+            (table_name, compact_type, None)
+        }
+
+        [
+            ValueRef::String(table_name),
+            ValueRef::String(compact_ty_str),
+            ValueRef::String(options_str),
+            ValueRef::String(parallelism_str),
+        ] => {
+            let compact_type = parse_compact_type(compact_ty_str, Some(options_str))?;
+            let parallelism = Some(u32::from_str(parallelism_str).map_err(|_| {
+                InvalidFuncArgsSnafu {
+                    err_msg: format!(
+                        "Parallelism is expected to be a valid number, provided: {}",
+                        parallelism_str
+                    ),
+                }
+                .build()
+            })?);
+            (table_name, compact_type, parallelism)
         }
         _ => {
             return UnsupportedInputDataTypeSnafu {
@@ -167,6 +191,7 @@ fn parse_compact_params(
         schema_name,
         table_name,
         compact_options: compact_type,
+        parallelism,
     })
 }
 
@@ -316,6 +341,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: None,
                 },
             ),
             (
@@ -325,6 +351,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: None,
                 },
             ),
             (
@@ -337,6 +364,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: None,
                 },
             ),
             (
@@ -346,6 +374,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: None,
                 },
             ),
             (
@@ -355,6 +384,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::StrictWindow(StrictWindow { window_seconds: 0 }),
+                    parallelism: None,
                 },
             ),
             (
@@ -366,6 +396,7 @@ mod tests {
                     compact_options: Options::StrictWindow(StrictWindow {
                         window_seconds: 3600,
                     }),
+                    parallelism: None,
                 },
             ),
             (
@@ -375,6 +406,7 @@ mod tests {
                     schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                     table_name: "table".to_string(),
                     compact_options: Options::Regular(Default::default()),
+                    parallelism: None,
                 },
             ),
             (
@@ -386,6 +418,30 @@ mod tests {
                     compact_options: Options::StrictWindow(StrictWindow {
                         window_seconds: 120,
                     }),
+                    parallelism: None,
+                },
+            ),
+            // Test with parallelism parameter
+            (
+                &["table", "regular", "options", "4"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::Regular(Default::default()),
+                    parallelism: Some(4),
+                },
+            ),
+            (
+                &["table", "strict_window", "3600", "2"],
+                CompactTableRequest {
+                    catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "table".to_string(),
+                    compact_options: Options::StrictWindow(StrictWindow {
+                        window_seconds: 3600,
+                    }),
+                    parallelism: Some(2),
                 },
             ),
         ]);
@@ -404,6 +460,30 @@ mod tests {
         assert!(
             parse_compact_params(
                 &["a.b.table", "strict_window", "abc"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test invalid parallelism
+        assert!(
+            parse_compact_params(
+                &["table", "regular", "options", "invalid"]
+                    .into_iter()
+                    .map(ValueRef::String)
+                    .collect::<Vec<_>>(),
+                &QueryContext::arc(),
+            )
+            .is_err()
+        );
+
+        // Test too many parameters
+        assert!(
+            parse_compact_params(
+                &["table", "regular", "options", "4", "extra"]
                     .into_iter()
                     .map(ValueRef::String)
                     .collect::<Vec<_>>(),

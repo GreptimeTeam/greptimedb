@@ -109,6 +109,7 @@ impl Requester {
             .map(|partition| {
                 RegionRequestBody::Compact(CompactRequest {
                     region_id: partition.id.into(),
+                    parallelism: request.parallelism.unwrap_or(1),
                     options: Some(request.compact_options),
                 })
             })
@@ -146,6 +147,7 @@ impl Requester {
     ) -> Result<AffectedRows> {
         let request = RegionRequestBody::Compact(CompactRequest {
             region_id: region_id.into(),
+            parallelism: 1,
             options: None, // todo(hl): maybe also support parameters in region compaction.
         });
 
