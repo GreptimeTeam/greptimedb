@@ -457,50 +457,63 @@ impl MitoEngine {
             let puffin_factory = access_layer.puffin_manager_factory().clone();
             let path_factory = RegionFilePathFactory::new(table_dir, path_type);
 
-            for entry in manifest_entries {
-                if entry.index_file_path.is_none() {
-                    continue;
+            let entry_futures = manifest_entries.into_iter().map(|entry| {
+                let object_store = object_store.clone();
+                let path_factory = path_factory.clone();
+                let puffin_factory = puffin_factory.clone();
+                let puffin_metadata_cache = puffin_metadata_cache.clone();
+                let bloom_filter_cache = bloom_filter_cache.clone();
+                let inverted_index_cache = inverted_index_cache.clone();
+
+                async move {
+                    let Some(index_file_path) = entry.index_file_path.as_ref() else {
+                        return Vec::new();
+                    };
+
+                    let file_id = match FileId::parse_str(&entry.file_id) {
+                        Ok(file_id) => file_id,
+                        Err(err) => {
+                            warn!(
+                                err;
+                                "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
+                                entry.table_dir,
+                                entry.file_id
+                            );
+                            return Vec::new();
+                        }
+                    };
+
+                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let context = IndexEntryContext {
+                        table_dir: &entry.table_dir,
+                        index_file_path: index_file_path.as_str(),
+                        region_id: entry.region_id,
+                        table_id: entry.table_id,
+                        region_number: entry.region_number,
+                        region_group: entry.region_group,
+                        region_sequence: entry.region_sequence,
+                        file_id: &entry.file_id,
+                        index_file_size: entry.index_file_size,
+                        node_id,
+                    };
+
+                    let manager = puffin_factory
+                        .build(object_store, path_factory)
+                        .with_puffin_metadata_cache(puffin_metadata_cache);
+
+                    collect_index_entries_from_puffin(
+                        manager,
+                        region_file_id,
+                        context,
+                        bloom_filter_cache,
+                        inverted_index_cache,
+                    )
+                    .await
                 }
+            });
 
-                let file_id = match FileId::parse_str(&entry.file_id) {
-                    Ok(file_id) => file_id,
-                    Err(err) => {
-                        warn!(
-                            err;
-                            "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
-                            entry.table_dir,
-                            entry.file_id
-                        );
-                        continue;
-                    }
-                };
-
-                let region_file_id = RegionFileId::new(entry.region_id, file_id);
-                let context = IndexEntryContext {
-                    table_dir: &entry.table_dir,
-                    index_file_path: entry.index_file_path.as_ref().unwrap(), // Safety: entry.index_file_path is not None
-                    region_id: entry.region_id,
-                    table_id: entry.table_id,
-                    region_number: entry.region_number,
-                    region_group: entry.region_group,
-                    region_sequence: entry.region_sequence,
-                    file_id: &entry.file_id,
-                    index_file_size: entry.index_file_size,
-                    node_id,
-                };
-
-                let manager = puffin_factory
-                    .build(object_store.clone(), path_factory.clone())
-                    .with_puffin_metadata_cache(puffin_metadata_cache.clone());
-
-                let mut metas = collect_index_entries_from_puffin(
-                    manager,
-                    region_file_id,
-                    context,
-                    bloom_filter_cache.clone(),
-                    inverted_index_cache.clone(),
-                )
-                .await;
+            let mut meta_stream = stream::iter(entry_futures).buffer_unordered(8); // Parallelism is 8.
+            while let Some(mut metas) = meta_stream.next().await {
                 results.append(&mut metas);
             }
         }
