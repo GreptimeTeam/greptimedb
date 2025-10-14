@@ -315,6 +315,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to run gc for mito engine"))]
+    GcMitoEngine {
+        region_id: RegionId,
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to list SST entries from storage"))]
     ListStorageSsts {
         #[snafu(implicit)]
@@ -458,7 +466,7 @@ impl ErrorExt for Error {
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
-            BuildMitoEngine { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } | GcMitoEngine { source, .. } => source.status_code(),
             BuildMetricEngine { source, .. } => source.status_code(),
             ListStorageSsts { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionReply};
+use common_telemetry::info;
 use store_api::storage::FileRefsManifest;
 
 use crate::heartbeat::handler::HandlerContext;
@@ -23,7 +24,7 @@ impl HandlerContext {
         get_file_refs: GetFileRefs,
     ) -> Option<InstructionReply> {
         let region_server = self.region_server;
-
+        info!("Getting mito Engine");
         // Get the MitoEngine
         let Some(mito_engine) = region_server.mito_engine() else {
             return Some(InstructionReply::GetFileRefs(GetFileRefsReply {
@@ -32,7 +33,10 @@ impl HandlerContext {
                 error: Some("MitoEngine not found".to_string()),
             }));
         };
-
+        info!(
+            "Mito Engine found, getting file refs for regions: {:?}",
+            get_file_refs.region_ids
+        );
         match mito_engine
             .get_snapshot_of_unmanifested_refs(get_file_refs.region_ids)
             .await

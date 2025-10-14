@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use dashmap::{DashMap, Entry};
 use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
@@ -105,11 +105,13 @@ impl FileReferenceManager {
                 ref_files.extend(files);
             }
         }
+        info!("Unfiltered ref files: {:?}", ref_files);
 
         let mut in_manifest_files = HashSet::new();
         let mut manifest_version = HashMap::new();
 
         for r in &regions {
+            info!("Getting manifest for region {}", r.region_id());
             let manifest = r.manifest_ctx.manifest().await;
             let files = manifest.files.keys().cloned().collect::<Vec<_>>();
             in_manifest_files.extend(files);
@@ -121,6 +123,10 @@ impl FileReferenceManager {
             .filter(|f| !in_manifest_files.contains(&f.file_id))
             .cloned()
             .collect::<HashSet<_>>();
+        info!(
+            "Ref files excluding in-manifest files: {:?}, manifest_version: {:?}",
+            ref_files_excluding_in_manifest, manifest_version
+        );
 
         Ok(FileRefsManifest {
             file_refs: ref_files_excluding_in_manifest,

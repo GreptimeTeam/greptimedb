@@ -91,12 +91,35 @@ pub struct FileRefsManifest {
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     /// deleted files per region
     pub deleted_files: HashMap<RegionId, Vec<FileId>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
+}
+
+impl GcReport {
+    pub fn new(
+        deleted_files: HashMap<RegionId, Vec<FileId>>,
+        need_retry_regions: HashSet<RegionId>,
+    ) -> Self {
+        Self {
+            deleted_files,
+            need_retry_regions,
+        }
+    }
+
+    pub fn merge(&mut self, other: GcReport) {
+        for (region, files) in other.deleted_files {
+            self.deleted_files
+                .entry(region)
+                .or_default()
+                .extend(files.into_iter());
+        }
+        self.need_retry_regions
+            .extend(other.need_retry_regions.into_iter());
+    }
 }
 
 #[cfg(test)]
