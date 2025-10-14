@@ -5325,7 +5325,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d75496d5d09dedcd0edcade57ccf0a522f4393ae#d75496d5d09dedcd0edcade57ccf0a522f4393ae"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=91ba046b33ce746dc398851af51ac8cf616806cf#91ba046b33ce746dc398851af51ac8cf616806cf"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",

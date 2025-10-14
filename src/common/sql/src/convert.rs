@@ -210,7 +210,8 @@ pub fn sql_value_to_value(
             | Value::Duration(_)
             | Value::IntervalYearMonth(_)
             | Value::IntervalDayTime(_)
-            | Value::IntervalMonthDayNano(_) => match unary_op {
+            | Value::IntervalMonthDayNano(_)
+            | Value::Json(_) => match unary_op {
                 UnaryOperator::Plus => {}
                 UnaryOperator::Minus => {
                     value = value

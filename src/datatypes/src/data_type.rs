@@ -668,10 +668,6 @@ impl ConcreteDataType {
     pub fn vector_default_datatype() -> ConcreteDataType {
         Self::vector_datatype(0)
     }
-
-    pub fn json_native_datatype() -> ConcreteDataType {
-        ConcreteDataType::Json(JsonType::new(JsonFormat::ArrowNative))
-    }
 }
 
 /// Data type abstraction.

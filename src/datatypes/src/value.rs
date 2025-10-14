@@ -197,7 +197,7 @@ macro_rules! define_data_type_func {
                 $struct::Struct(struct_value) => {
                     ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
-                $struct::Json(_) => ConcreteDataType::json_native_datatype(),
+                $struct::Json(v) => v.data_type(),
             }
         }
     };

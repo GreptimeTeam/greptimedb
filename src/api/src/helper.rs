@@ -23,8 +23,8 @@ use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
-    Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
-    UInt16Type,
+    Int8Type, Int16Type, IntervalType, JsonFormat, StructField, StructType, TimeType,
+    TimestampType, UInt8Type, UInt16Type,
 };
 use datatypes::value::{
     ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
@@ -116,7 +116,21 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::binary_datatype()
                 }
             }
-            ColumnDataType::Json => ConcreteDataType::json_datatype(),
+            ColumnDataType::Json => {
+                if let Some(TypeExt::JsonType(json_type_ext)) = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
+                {
+                    if *json_type_ext == JsonTypeExtension::Native as i32 {
+                        ConcreteDataType::json_native_datatype()
+                    } else {
+                        ConcreteDataType::json_datatype()
+                    }
+                } else {
+                    ConcreteDataType::json_datatype()
+                }
+            }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::timestamp_microsecond_datatype(),
@@ -270,6 +284,16 @@ impl_column_type_functions_with_snake!(
 );
 
 impl ColumnDataTypeWrapper {
+    /// Create a JSON column data type wrapper with the given format.
+    pub fn json_datatype(format: i32) -> Self {
+        ColumnDataTypeWrapper {
+            datatype: ColumnDataType::Json,
+            datatype_ext: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(format)),
+            }),
+        }
+    }
+
     pub fn decimal128_datatype(precision: i32, scale: i32) -> Self {
         ColumnDataTypeWrapper {
             datatype: ColumnDataType::Decimal128,
@@ -383,8 +407,14 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         })),
                     })
             }
-            ColumnDataType::Json => datatype.as_json().map(|_| ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            ColumnDataType::Json => datatype.as_json().map(|json_type| {
+                let format = match json_type.format {
+                    JsonFormat::Jsonb => JsonTypeExtension::JsonBinary,
+                    JsonFormat::Native => JsonTypeExtension::Native,
+                };
+                ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonType(format.into())),
+                }
             }),
             ColumnDataType::Vector => {
                 datatype
@@ -549,7 +579,6 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::Json => Values {
-            string_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::Vector => Values {
@@ -630,7 +659,7 @@ pub fn pb_value_to_value_ref<'a>(
         return ValueRef::Null;
     };
 
-    match value {
+    let value_ref = match value {
         ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
         ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
         ValueData::I32Value(v) => ValueRef::Int32(*v),
@@ -762,7 +791,16 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::Struct(struct_value_ref)
         }
+    };
+
+    // if the data is json native format, wrap it in a json ValueRef
+    if let Some(TypeExt::JsonType(json_type_ext)) = datatype_ext.and_then(|d| d.type_ext.as_ref()) {
+        if *json_type_ext == JsonTypeExtension::Native as i32 {
+            return ValueRef::Json(Box::new(value_ref));
+        }
     }
+
+    value_ref
 }
 
 pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> VectorRef {
@@ -843,6 +881,7 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
             }),
         )),
         ConcreteDataType::Vector(_) => Arc::new(BinaryVector::from_vec(values.binary_values)),
+        // TODO(sunng87):
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
         | ConcreteDataType::Struct(_)
@@ -1134,6 +1173,7 @@ pub fn to_proto_value(value: Value) -> v1::Value {
             })),
         },
         Value::Duration(_) => v1::Value { value_data: None },
+        Value::Json(v) => to_proto_value(*v),
     }
 }
 
