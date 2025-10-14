@@ -441,12 +441,10 @@ impl MitoEngine {
     /// Lists metadata about all puffin index targets stored in the engine.
     pub async fn all_index_metas(&self) -> Vec<PuffinIndexMetaEntry> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
-        let puffin_metadata_cache = self
-            .inner
-            .workers
-            .cache_manager()
-            .puffin_metadata_cache()
-            .cloned();
+        let cache_manager = self.inner.workers.cache_manager();
+        let puffin_metadata_cache = cache_manager.puffin_metadata_cache().cloned();
+        let bloom_filter_cache = cache_manager.bloom_filter_index_cache().cloned();
+        let inverted_index_cache = cache_manager.inverted_index_cache().cloned();
 
         let mut results = Vec::new();
 
@@ -495,8 +493,14 @@ impl MitoEngine {
                     .build(object_store.clone(), path_factory.clone())
                     .with_puffin_metadata_cache(puffin_metadata_cache.clone());
 
-                let mut metas =
-                    collect_index_entries_from_puffin(manager, region_file_id, context).await;
+                let mut metas = collect_index_entries_from_puffin(
+                    manager,
+                    region_file_id,
+                    context,
+                    bloom_filter_cache.clone(),
+                    inverted_index_cache.clone(),
+                )
+                .await;
                 results.append(&mut metas);
             }
         }

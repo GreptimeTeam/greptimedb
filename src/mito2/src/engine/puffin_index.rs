@@ -14,6 +14,7 @@
 
 use std::convert::TryFrom;
 
+use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use greptime_proto::v1::index::{BloomFilterMeta, InvertedIndexMeta, InvertedIndexMetas};
 use index::bitmap::BitmapType;
@@ -25,8 +26,12 @@ use puffin::blob_metadata::BlobMetadata;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use serde_json::{Map, Value, json};
 use store_api::sst_entry::PuffinIndexMetaEntry;
-use store_api::storage::{RegionGroup, RegionId, RegionNumber, RegionSeq, TableId};
+use store_api::storage::{ColumnId, RegionGroup, RegionId, RegionNumber, RegionSeq, TableId};
 
+use crate::cache::index::bloom_filter_index::{
+    BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
+};
+use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::sst::file::RegionFileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE as BLOOM_BLOB_TYPE;
 use crate::sst::index::fulltext_index::{
@@ -63,6 +68,8 @@ pub(crate) async fn collect_index_entries_from_puffin(
     manager: SstPuffinManager,
     region_file_id: RegionFileId,
     context: IndexEntryContext<'_>,
+    bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
 ) -> Vec<PuffinIndexMetaEntry> {
     let mut entries = Vec::new();
 
@@ -95,9 +102,16 @@ pub(crate) async fn collect_index_entries_from_puffin(
     for blob in &file_metadata.blobs {
         match BlobIndexTypeTargetKey::from_blob_type(&blob.blob_type) {
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key)) => {
-                let bloom_meta =
-                    try_read_bloom_meta(&reader, blob.blob_type.as_str(), &context, "bloom filter")
-                        .await;
+                let bloom_meta = try_read_bloom_meta(
+                    &reader,
+                    region_file_id,
+                    blob.blob_type.as_str(),
+                    target_key,
+                    bloom_filter_cache.as_ref(),
+                    Tag::Skipping,
+                    &context,
+                )
+                .await;
 
                 let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
                 let (target_type, target_json) = decode_target_info(target_key);
@@ -116,9 +130,12 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::FulltextBloom(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
+                    region_file_id,
                     blob.blob_type.as_str(),
+                    target_key,
+                    bloom_filter_cache.as_ref(),
+                    Tag::Fulltext,
                     &context,
-                    "fulltext bloom",
                 )
                 .await;
 
@@ -153,7 +170,13 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 entries.push(entry);
             }
             Some(BlobIndexTypeTargetKey::Inverted) => {
-                let mut inverted_entries = collect_inverted_entries(&reader, &context).await;
+                let mut inverted_entries = collect_inverted_entries(
+                    &reader,
+                    region_file_id,
+                    inverted_index_cache.as_ref(),
+                    &context,
+                )
+                .await;
                 entries.append(&mut inverted_entries);
             }
             None => {}
@@ -165,10 +188,12 @@ pub(crate) async fn collect_index_entries_from_puffin(
 
 async fn collect_inverted_entries(
     reader: &SstPuffinReader,
+    region_file_id: RegionFileId,
+    cache: Option<&InvertedIndexCacheRef>,
     context: &IndexEntryContext<'_>,
 ) -> Vec<PuffinIndexMetaEntry> {
     // Read the inverted index blob and surface its per-column metadata entries.
-    let mut entries = Vec::new();
+    let file_id = region_file_id.file_id();
 
     let guard = match reader.blob(INVERTED_BLOB_TYPE).await {
         Ok(guard) => guard,
@@ -179,7 +204,7 @@ async fn collect_inverted_entries(
                 context.table_dir,
                 context.file_id
             );
-            return entries;
+            return Vec::new();
         }
     };
 
@@ -192,27 +217,61 @@ async fn collect_inverted_entries(
                 context.table_dir,
                 context.file_id
             );
-            return entries;
+            return Vec::new();
         }
     };
 
-    let reader = InvertedIndexBlobReader::new(blob_reader);
-    let metas = match reader.metadata().await {
-        Ok(metas) => metas,
-        Err(err) => {
-            warn!(
-                err;
-                "Failed to read inverted index metadata, table_dir: {}, file_id: {}",
-                context.table_dir,
-                context.file_id
-            );
-            return entries;
+    let blob_size = blob_reader
+        .metadata()
+        .await
+        .ok()
+        .map(|meta| meta.content_length);
+    let metas = if let (Some(cache), Some(blob_size)) = (cache, blob_size) {
+        let reader = CachedInvertedIndexBlobReader::new(
+            file_id,
+            blob_size,
+            InvertedIndexBlobReader::new(blob_reader),
+            cache.clone(),
+        );
+        match reader.metadata().await {
+            Ok(metas) => metas,
+            Err(err) => {
+                warn!(
+                    err;
+                    "Failed to read inverted index metadata, table_dir: {}, file_id: {}",
+                    context.table_dir,
+                    context.file_id
+                );
+                return Vec::new();
+            }
+        }
+    } else {
+        let reader = InvertedIndexBlobReader::new(blob_reader);
+        match reader.metadata().await {
+            Ok(metas) => metas,
+            Err(err) => {
+                warn!(
+                    err;
+                    "Failed to read inverted index metadata, table_dir: {}, file_id: {}",
+                    context.table_dir,
+                    context.file_id
+                );
+                return Vec::new();
+            }
         }
     };
 
+    build_inverted_entries(context, metas.as_ref())
+}
+
+fn build_inverted_entries(
+    context: &IndexEntryContext<'_>,
+    metas: &InvertedIndexMetas,
+) -> Vec<PuffinIndexMetaEntry> {
+    let mut entries = Vec::new();
     for (name, meta) in &metas.metas {
         let (target_type, target_json) = decode_target_info(name);
-        let inverted_value = inverted_meta_value(meta, metas.as_ref());
+        let inverted_value = inverted_meta_value(meta, metas);
         let meta_json = build_meta_json(None, None, Some(inverted_value));
         let entry = build_index_entry(
             context,
@@ -225,28 +284,52 @@ async fn collect_inverted_entries(
         );
         entries.push(entry);
     }
-
     entries
 }
 
 async fn try_read_bloom_meta(
     reader: &SstPuffinReader,
+    region_file_id: RegionFileId,
     blob_type: &str,
+    target_key: &str,
+    cache: Option<&BloomFilterIndexCacheRef>,
+    tag: Tag,
     context: &IndexEntryContext<'_>,
-    label: &str,
 ) -> Option<BloomFilterMeta> {
+    let column_id = decode_column_id(target_key);
+
     // Failures are logged but do not abort the overall metadata collection.
     match reader.blob(blob_type).await {
         Ok(guard) => match guard.reader().await {
             Ok(blob_reader) => {
+                let blob_size = blob_reader
+                    .metadata()
+                    .await
+                    .ok()
+                    .map(|meta| meta.content_length);
                 let bloom_reader = BloomFilterReaderImpl::new(blob_reader);
-                match bloom_reader.metadata().await {
+                let result = match (cache, column_id, blob_size) {
+                    (Some(cache), Some(column_id), Some(blob_size)) => {
+                        CachedBloomFilterIndexBlobReader::new(
+                            region_file_id.file_id(),
+                            column_id,
+                            tag,
+                            blob_size,
+                            bloom_reader,
+                            cache.clone(),
+                        )
+                        .metadata()
+                        .await
+                    }
+                    _ => bloom_reader.metadata().await,
+                };
+
+                match result {
                     Ok(meta) => Some(meta),
                     Err(err) => {
                         warn!(
                             err;
-                            "Failed to read {} metadata, table_dir: {}, file_id: {}, blob: {}",
-                            label,
+                            "Failed to read index metadata, table_dir: {}, file_id: {}, blob: {}",
                             context.table_dir,
                             context.file_id,
                             blob_type
@@ -258,8 +341,7 @@ async fn try_read_bloom_meta(
             Err(err) => {
                 warn!(
                     err;
-                    "Failed to open {} blob reader, table_dir: {}, file_id: {}, blob: {}",
-                    label,
+                    "Failed to open index blob reader, table_dir: {}, file_id: {}, blob: {}",
                     context.table_dir,
                     context.file_id,
                     blob_type
@@ -270,8 +352,7 @@ async fn try_read_bloom_meta(
         Err(err) => {
             warn!(
                 err;
-                "Failed to open {} blob, table_dir: {}, file_id: {}, blob: {}",
-                label,
+                "Failed to open index blob, table_dir: {}, file_id: {}, blob: {}",
                 context.table_dir,
                 context.file_id,
                 blob_type
@@ -291,6 +372,13 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),
         ),
+    }
+}
+
+fn decode_column_id(target_key: &str) -> Option<ColumnId> {
+    match IndexTarget::decode(target_key) {
+        Ok(IndexTarget::ColumnId(id)) => Some(id),
+        _ => None,
     }
 }
 
