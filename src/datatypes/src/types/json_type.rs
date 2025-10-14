@@ -29,20 +29,16 @@ use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonFormat {
     #[default]
     Jsonb,
-    Native(ConcreteDataType),
+    Native(Box<ConcreteDataType>),
 }
 
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
 /// It utilizes current binary value and vector implementation.
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JsonType {
     pub format: JsonFormat,
 }
@@ -52,8 +48,8 @@ impl JsonType {
         Self { format }
     }
 
-    pub fn format(&self) -> JsonFormat {
-        self.format
+    pub fn format(&self) -> &JsonFormat {
+        &self.format
     }
 }
 
@@ -96,7 +92,7 @@ pub fn json_type_value_to_string(val: &[u8], format: &JsonFormat) -> Result<Stri
             }
             Err(e) => InvalidJsonbSnafu { error: e }.fail(),
         },
-        JsonFormat::Native => todo!(),
+        JsonFormat::Native(_) => todo!(),
     }
 }
 
@@ -108,7 +104,7 @@ pub fn json_type_value_to_serde_json(val: &[u8], format: &JsonFormat) -> Result<
             serde_json::Value::from_str(json_string.as_str())
                 .context(DeserializeSnafu { json: json_string })
         }
-        JsonFormat::Native => todo!(),
+        JsonFormat::Native(_) => todo!(),
     }
 }
 
@@ -118,6 +114,6 @@ pub fn parse_string_to_json_type_value(s: &str, format: &JsonFormat) -> Result<V
         JsonFormat::Jsonb => jsonb::parse_value(s.as_bytes())
             .map_err(|_| InvalidJsonSnafu { value: s }.build())
             .map(|json| json.to_vec()),
-        JsonFormat::Native => todo!(),
+        JsonFormat::Native(_) => todo!(),
     }
 }

@@ -20,7 +20,9 @@ use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
-use datatypes::types::{IntervalType, StructField, StructType, TimeType, TimestampType};
+use datatypes::types::{
+    IntervalType, JsonFormat, StructField, StructType, TimeType, TimestampType,
+};
 use datatypes::value::{
     ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
 };
@@ -31,8 +33,9 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension,
-    ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension, VectorTypeExtension,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonNativeTypeExtension,
+    JsonTypeExtension, ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension,
+    VectorTypeExtension,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -105,18 +108,27 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                 }
             }
             ColumnDataType::Json => {
-                if let Some(TypeExt::JsonType(json_type_ext)) = datatype_wrapper
+                let type_ext = datatype_wrapper
                     .datatype_ext
                     .as_ref()
-                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
-                {
-                    if *json_type_ext == JsonTypeExtension::Native as i32 {
-                        ConcreteDataType::json_native_datatype()
-                    } else {
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref());
+                match type_ext {
+                    Some(TypeExt::JsonType(_)) => {
+                        // legacy json type
                         ConcreteDataType::json_datatype()
                     }
-                } else {
-                    ConcreteDataType::json_datatype()
+                    Some(TypeExt::JsonNativeType(type_ext)) => {
+                        // native json type
+                        let inner_type = ColumnDataTypeWrapper {
+                            datatype: type_ext.datatype(),
+                            datatype_ext: type_ext.datatype_extension.clone().map(|d| *d),
+                        };
+                        ConcreteDataType::json_native_datatype(inner_type.into())
+                    }
+                    _ => {
+                        // invalid state, type extension is missing or invalid
+                        ConcreteDataType::null_datatype()
+                    }
                 }
             }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
@@ -395,15 +407,28 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         })),
                     })
             }
-            ColumnDataType::Json => datatype.as_json().map(|json_type| {
-                let format = match json_type.format {
-                    JsonFormat::Jsonb => JsonTypeExtension::JsonBinary,
-                    JsonFormat::Native => JsonTypeExtension::Native,
-                };
-                ColumnDataTypeExtension {
-                    type_ext: Some(TypeExt::JsonType(format.into())),
+            ColumnDataType::Json => {
+                if let Some(json_type) = datatype.as_json() {
+                    match &json_type.format {
+                        JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                        }),
+                        JsonFormat::Native(inner) => {
+                            let inner_type = ColumnDataTypeWrapper::try_from(*inner.clone())?;
+                            Some(ColumnDataTypeExtension {
+                                type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                                    JsonNativeTypeExtension {
+                                        datatype: inner_type.datatype.into(),
+                                        datatype_extension: inner_type.datatype_ext.map(Box::new),
+                                    },
+                                ))),
+                            })
+                        }
+                    }
+                } else {
+                    None
                 }
-            }),
+            }
             ColumnDataType::Vector => {
                 datatype
                     .as_vector()
@@ -567,6 +592,8 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::Json => Values {
+            // we will use native json by default
+            json_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::Vector => Values {
@@ -647,7 +674,7 @@ pub fn pb_value_to_value_ref<'a>(
         return ValueRef::Null;
     };
 
-    let value_ref = match value {
+    match value {
         ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
         ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
         ValueData::I32Value(v) => ValueRef::Int32(*v),
@@ -779,16 +806,25 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::Struct(struct_value_ref)
         }
-    };
 
-    // if the data is json native format, wrap it in a json ValueRef
-    if let Some(TypeExt::JsonType(json_type_ext)) = datatype_ext.and_then(|d| d.type_ext.as_ref()) {
-        if *json_type_ext == JsonTypeExtension::Native as i32 {
-            return ValueRef::Json(Box::new(value_ref));
+        ValueData::JsonValue(inner_value) => {
+            let json_datatype_ext = datatype_ext
+                .as_ref()
+                .and_then(|ext| {
+                    if let Some(TypeExt::JsonNativeType(l)) = &ext.type_ext {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .expect("json value must contain datatype ext");
+
+            ValueRef::Json(Box::new(pb_value_to_value_ref(
+                inner_value,
+                json_datatype_ext.datatype_extension.as_deref(),
+            )))
         }
     }
-
-    value_ref
 }
 
 /// Returns true if the pb semantic type is valid.
@@ -908,8 +944,10 @@ pub fn to_proto_value(value: Value) -> v1::Value {
                 items: convert_struct_to_pb_values(struct_value),
             })),
         },
+        Value::Json(v) => v1::Value {
+            value_data: Some(ValueData::JsonValue(Box::new(to_proto_value(*v)))),
+        },
         Value::Duration(_) => v1::Value { value_data: None },
-        Value::Json(v) => to_proto_value(*v),
     }
 }
 
@@ -963,6 +1001,7 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
         ValueData::ListValue(_) => ColumnDataType::List,
         ValueData::StructValue(_) => ColumnDataType::Struct,
+        ValueData::JsonValue(_) => ColumnDataType::Json,
     };
     Some(value_type)
 }
@@ -1033,6 +1072,9 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     .collect();
                 Some(ValueData::StructValue(v1::StructValue { items }))
             }
+            Value::Json(inner_value) => Some(ValueData::JsonValue(Box::new(value_to_grpc_value(
+                *inner_value,
+            )))),
             Value::Duration(_) => unreachable!(),
         },
     }

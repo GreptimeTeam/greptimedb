@@ -229,6 +229,12 @@ impl Limiter {
                         .unwrap_or(0)
                 })
                 .sum(),
+            ValueData::JsonValue(inner) => inner
+                .as_ref()
+                .value_data
+                .as_ref()
+                .map(Self::size_of_value_data)
+                .unwrap_or(0),
         }
     }
 }

@@ -538,13 +538,7 @@ impl Value {
             Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
             Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
 
-            Value::Json(v) => {
-                if let Some(neg) = v.try_negative() {
-                    Some(Value::Json(Box::new(neg)))
-                } else {
-                    None
-                }
-            }
+            Value::Json(v) => v.try_negative().map(|neg| Value::Json(Box::new(neg))),
 
             Value::Binary(_)
             | Value::String(_)

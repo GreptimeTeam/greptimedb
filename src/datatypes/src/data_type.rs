@@ -350,7 +350,7 @@ impl ConcreteDataType {
 
     pub fn as_json(&self) -> Option<JsonType> {
         match self {
-            ConcreteDataType::Json(j) => Some(*j),
+            ConcreteDataType::Json(j) => Some(j.clone()),
             _ => None,
         }
     }
@@ -667,6 +667,10 @@ impl ConcreteDataType {
 
     pub fn vector_default_datatype() -> ConcreteDataType {
         Self::vector_datatype(0)
+    }
+
+    pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(inner_type))))
     }
 }
 
