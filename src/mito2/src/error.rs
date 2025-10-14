@@ -25,6 +25,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
+use partition::error::Error as PartitionError;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::ManifestVersion;
@@ -213,6 +214,57 @@ pub enum Error {
     InvalidRequest {
         region_id: RegionId,
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Old manifest missing for region {}", region_id))]
+    MissingOldManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("New manifest missing for region {}", region_id))]
+    MissingNewManifest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File consistency check failed for file {}: {}", file_id, reason))]
+    InconsistentFile {
+        file_id: FileId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
+    FilesLost {
+        old_count: usize,
+        new_count: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("No old manifests provided (need at least one for template)"))]
+    NoOldManifests {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Partition expression missing for region {}", region_id))]
+    MissingPartitionExpr {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    SerializePartitionExpr {
+        #[snafu(source)]
+        source: PartitionError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1096,12 +1148,14 @@ impl ErrorExt for Error {
             | Utf8 { .. }
             | NewRecordBatch { .. }
             | RegionCorrupted { .. }
+            | InconsistentFile { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | IndexEncodeNull { .. }
             | NoCheckpoint { .. }
             | NoManifests { .. }
+            | FilesLost { .. }
             | InstallManifestTo { .. }
             | Unexpected { .. }
             | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
@@ -1119,7 +1173,12 @@ impl ErrorExt for Error {
             | InvalidWalReadRequest { .. }
             | PartitionOutOfRange { .. }
             | ParseJobId { .. }
-            | DurationOutOfRange { .. } => StatusCode::InvalidArguments,
+            | DurationOutOfRange { .. }
+            | MissingOldManifest { .. }
+            | MissingNewManifest { .. }
+            | NoOldManifests { .. }
+            | MissingPartitionExpr { .. }
+            | SerializePartitionExpr { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }

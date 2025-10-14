@@ -40,7 +40,8 @@ use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
-use crate::region::options::{MemtableOptions, MergeMode};
+use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
+use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::SstInfo;
 
@@ -324,7 +325,7 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
-    compact_dispatcher: Option<Arc<CompactDispatcher>>,
+    compact_dispatcher: Arc<CompactDispatcher>,
 }
 
 impl MemtableBuilderProvider {
@@ -332,9 +333,8 @@ impl MemtableBuilderProvider {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: Arc<MitoConfig>,
     ) -> Self {
-        let compact_dispatcher = config
-            .enable_experimental_flat_format
-            .then(|| Arc::new(CompactDispatcher::new(config.max_background_compactions)));
+        let compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
 
         Self {
             write_buffer_manager,
@@ -343,16 +343,19 @@ impl MemtableBuilderProvider {
         }
     }
 
-    pub(crate) fn builder_for_options(
-        &self,
-        options: Option<&MemtableOptions>,
-        dedup: bool,
-        merge_mode: MergeMode,
-    ) -> MemtableBuilderRef {
-        if self.config.enable_experimental_flat_format {
-            common_telemetry::info!(
-                "Overriding memtable config, use BulkMemtable under flat format"
-            );
+    pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
+        let dedup = options.need_dedup();
+        let merge_mode = options.merge_mode();
+        let flat_format = options
+            .sst_format
+            .map(|format| format == FormatType::Flat)
+            .unwrap_or(self.config.default_experimental_flat_format);
+        if flat_format {
+            if options.memtable.is_some() {
+                common_telemetry::info!(
+                    "Overriding memtable config, use BulkMemtable under flat format"
+                );
+            }
 
             return Arc::new(
                 BulkMemtableBuilder::new(
@@ -360,12 +363,11 @@ impl MemtableBuilderProvider {
                     !dedup, // append_mode: true if not dedup, false if dedup
                     merge_mode,
                 )
-                // Safety: We create the dispatcher if flat_format is enabled.
-                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
+                .with_compact_dispatcher(self.compact_dispatcher.clone()),
             );
         }
 
-        match options {
+        match &options.memtable {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
                 dedup,
@@ -388,15 +390,14 @@ impl MemtableBuilderProvider {
     }
 
     fn default_memtable_builder(&self, dedup: bool, merge_mode: MergeMode) -> MemtableBuilderRef {
-        if self.config.enable_experimental_flat_format {
+        if self.config.default_experimental_flat_format {
             return Arc::new(
                 BulkMemtableBuilder::new(
                     self.write_buffer_manager.clone(),
                     !dedup, // append_mode: true if not dedup, false if dedup
                     merge_mode,
                 )
-                // Safety: We create the dispatcher if flat_format is enabled.
-                .with_compact_dispatcher(self.compact_dispatcher.clone().unwrap()),
+                .with_compact_dispatcher(self.compact_dispatcher.clone()),
             );
         }
 

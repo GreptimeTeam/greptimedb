@@ -30,7 +30,9 @@ use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use futures::StreamExt;
+use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
+use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
@@ -41,7 +43,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
-use crate::error::Result;
+use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::MemtableRange;
@@ -384,7 +386,7 @@ impl ScanRegion {
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -465,7 +467,7 @@ impl ScanRegion {
         let inverted_index_applier = self.build_invereted_index_applier();
         let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         if self.flat_format {
             // The batch is already large enough so we use a small channel size here.
@@ -663,6 +665,8 @@ pub struct ScanInput {
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: PredicateGroup,
+    /// Region partition expr applied at read time.
+    region_partition_expr: Option<PartitionExpr>,
     /// Memtable range builders for memtables in the time range..
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
@@ -708,6 +712,7 @@ impl ScanInput {
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
+            region_partition_expr: None,
             memtables: Vec::new(),
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
@@ -740,6 +745,7 @@ impl ScanInput {
     /// Sets predicate to push down.
     #[must_use]
     pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.region_partition_expr = predicate.region_partition_expr().cloned();
         self.predicate = predicate;
         self
     }
@@ -916,16 +922,35 @@ impl ScanInput {
         ranges
     }
 
+    fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+        if self.should_skip_region_partition(file) {
+            self.predicate.predicate_without_region().cloned()
+        } else {
+            self.predicate.predicate().cloned()
+        }
+    }
+
+    fn should_skip_region_partition(&self, file: &FileHandle) -> bool {
+        match (
+            self.region_partition_expr.as_ref(),
+            file.meta_ref().partition_expr.as_ref(),
+        ) {
+            (Some(region_expr), Some(file_expr)) => region_expr == file_expr,
+            _ => false,
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     pub async fn prune_file(
         &self,
         file: &FileHandle,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
+        let predicate = self.predicate_for_file(file);
         let res = self
             .access_layer
             .read_sst(file.clone())
-            .predicate(self.predicate.predicate().cloned())
+            .predicate(predicate)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_strategy.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
@@ -1314,19 +1339,39 @@ impl StreamContext {
 #[derive(Clone, Default)]
 pub struct PredicateGroup {
     time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
-
-    /// Table predicate for all logical exprs to evaluate.
-    /// Parquet reader uses it to prune row groups.
-    predicate: Option<Predicate>,
+    /// Predicate that includes request filters and region partition expr (if any).
+    predicate_all: Option<Predicate>,
+    /// Predicate that only includes request filters.
+    predicate_without_region: Option<Predicate>,
+    /// Region partition expression restored from metadata.
+    region_partition_expr: Option<PartitionExpr>,
 }
 
 impl PredicateGroup {
     /// Creates a new `PredicateGroup` from exprs according to the metadata.
-    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Self {
-        let mut time_filters = Vec::with_capacity(exprs.len());
+    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Result<Self> {
+        let mut combined_exprs = exprs.to_vec();
+        let mut region_partition_expr = None;
+
+        if let Some(expr_json) = metadata.partition_expr.as_ref()
+            && !expr_json.is_empty()
+            && let Some(expr) = PartitionExpr::from_json_str(expr_json)
+                .context(InvalidPartitionExprSnafu { expr: expr_json })?
+        {
+            let logical_expr = expr
+                .try_as_logical_expr()
+                .context(InvalidPartitionExprSnafu {
+                    expr: expr_json.clone(),
+                })?;
+
+            combined_exprs.push(logical_expr);
+            region_partition_expr = Some(expr);
+        }
+
+        let mut time_filters = Vec::with_capacity(combined_exprs.len());
         // Columns in the expr.
         let mut columns = HashSet::new();
-        for expr in exprs {
+        for expr in &combined_exprs {
             columns.clear();
             let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
                 continue;
@@ -1338,12 +1383,24 @@ impl PredicateGroup {
         } else {
             Some(Arc::new(time_filters))
         };
-        let predicate = Predicate::new(exprs.to_vec());
 
-        Self {
+        let predicate_all = if combined_exprs.is_empty() {
+            None
+        } else {
+            Some(Predicate::new(combined_exprs))
+        };
+        let predicate_without_region = if exprs.is_empty() {
+            None
+        } else {
+            Some(Predicate::new(exprs.to_vec()))
+        };
+
+        Ok(Self {
             time_filters,
-            predicate: Some(predicate),
-        }
+            predicate_all,
+            predicate_without_region,
+            region_partition_expr,
+        })
     }
 
     /// Returns time filters.
@@ -1351,9 +1408,19 @@ impl PredicateGroup {
         self.time_filters.clone()
     }
 
-    /// Returns predicate of all exprs.
+    /// Returns predicate of all exprs (including region partition expr if present).
     pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate.as_ref()
+        self.predicate_all.as_ref()
+    }
+
+    /// Returns predicate that excludes region partition expr.
+    pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
+        self.predicate_without_region.as_ref()
+    }
+
+    /// Returns the region partition expr from metadata, if any.
+    pub(crate) fn region_partition_expr(&self) -> Option<&PartitionExpr> {
+        self.region_partition_expr.as_ref()
     }
 
     fn expr_to_filter(
