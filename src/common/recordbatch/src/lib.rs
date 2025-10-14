@@ -91,7 +91,7 @@ pub fn map_json_type_to_string(
     let mut vectors = Vec::with_capacity(original_schema.column_schemas().len());
     for (vector, schema) in batch.columns.iter().zip(original_schema.column_schemas()) {
         if let ConcreteDataType::Json(j) = &schema.data_type {
-            if matches!(j.format(), JsonFormat::Jsonb) {
+            if matches!(&j.format, JsonFormat::Jsonb) {
                 let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
                 let binary_vector = vector
                     .as_any()

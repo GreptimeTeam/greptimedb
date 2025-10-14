@@ -47,10 +47,6 @@ impl JsonType {
     pub fn new(format: JsonFormat) -> Self {
         Self { format }
     }
-
-    pub fn format(&self) -> &JsonFormat {
-        &self.format
-    }
 }
 
 impl DataType for JsonType {

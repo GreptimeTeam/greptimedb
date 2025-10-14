@@ -284,16 +284,6 @@ impl_column_type_functions_with_snake!(
 );
 
 impl ColumnDataTypeWrapper {
-    /// Create a JSON column data type wrapper with the given format.
-    pub fn json_datatype(format: i32) -> Self {
-        ColumnDataTypeWrapper {
-            datatype: ColumnDataType::Json,
-            datatype_ext: Some(ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(format)),
-            }),
-        }
-    }
-
     pub fn decimal128_datatype(precision: i32, scale: i32) -> Self {
         ColumnDataTypeWrapper {
             datatype: ColumnDataType::Decimal128,
@@ -592,7 +582,9 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::Json => Values {
-            // we will use native json by default
+            // TODO(sunng87): remove this when we finally sunset legacy jsonb
+            string_values: Vec::with_capacity(capacity),
+            // for native json
             json_values: Vec::with_capacity(capacity),
             ..Default::default()
         },

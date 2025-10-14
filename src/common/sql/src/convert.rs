@@ -299,7 +299,7 @@ pub(crate) fn parse_string_to_value(
         }
         ConcreteDataType::Binary(_) => Ok(Value::Binary(s.as_bytes().into())),
         ConcreteDataType::Json(j) => {
-            match j.format() {
+            match &j.format {
                 JsonFormat::Jsonb => {
                     let v = parse_string_to_jsonb(&s).context(DatatypeSnafu)?;
                     Ok(Value::Binary(v.into()))

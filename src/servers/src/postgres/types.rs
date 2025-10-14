@@ -349,7 +349,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
-        ConcreteDataType::Json(j) => match j.format() {
+        ConcreteDataType::Json(j) => match &j.format {
             JsonFormat::Jsonb => {
                 let array = value_list
                     .take_items()
