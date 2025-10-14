@@ -264,7 +264,7 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
-        let blob_name = Self::column_blob_name(column_id)?;
+        let blob_name = Self::column_blob_name(column_id);
 
         let reader = puffin_manager
             .reader(&file_id)
@@ -281,11 +281,11 @@ impl BloomFilterIndexApplier {
     }
 
     // TODO(ruihang): use the same util with the code in creator
-    fn column_blob_name(column_id: ColumnId) -> Result<String> {
-        Ok(format!(
+    fn column_blob_name(column_id: ColumnId) -> String {
+        format!(
             "{INDEX_BLOB_TYPE}-{}",
             IndexTarget::ColumnId(column_id).encode()
-        ))
+        )
     }
 
     /// Creates a blob reader from the remote index file
@@ -303,7 +303,7 @@ impl BloomFilterIndexApplier {
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let blob_name = Self::column_blob_name(column_id)?;
+        let blob_name = Self::column_blob_name(column_id);
 
         puffin_manager
             .reader(&file_id)

@@ -41,6 +41,10 @@ const INDEX_TYPE_FULLTEXT_BLOOM: &str = "fulltext_bloom";
 const INDEX_TYPE_FULLTEXT_TANTIVY: &str = "fulltext_tantivy";
 const INDEX_TYPE_INVERTED: &str = "inverted";
 
+const TARGET_TYPE_UNKNOWN: &str = "unknown";
+
+const TARGET_TYPE_COLUMN: &str = "column";
+
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
     pub(crate) index_file_path: &'a str,
@@ -214,7 +218,7 @@ async fn collect_inverted_entries(
             context,
             INDEX_TYPE_INVERTED,
             target_type,
-            name.to_string(),
+            name.clone(),
             target_json,
             meta.inverted_index_size,
             meta_json,
@@ -279,10 +283,14 @@ async fn try_read_bloom_meta(
 
 fn decode_target_info(target_key: &str) -> (String, String) {
     match IndexTarget::decode(target_key) {
-        Ok(IndexTarget::ColumnId(id)) => {
-            ("column".to_string(), json!({ "column": id }).to_string())
-        }
-        _ => ("unknown".to_string(), "unknown".to_string()),
+        Ok(IndexTarget::ColumnId(id)) => (
+            TARGET_TYPE_COLUMN.to_string(),
+            json!({ "column": id }).to_string(),
+        ),
+        _ => (
+            TARGET_TYPE_UNKNOWN.to_string(),
+            json!({ "error": "failed_to_decode" }).to_string(),
+        ),
     }
 }
 
