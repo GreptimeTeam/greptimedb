@@ -1306,7 +1306,11 @@ impl<'a> ValueRef<'a> {
 
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
-        matches!(self, ValueRef::Null)
+        match self {
+            ValueRef::Null => true,
+            ValueRef::Json(v) => v.is_null(),
+            _ => false,
+        }
     }
 
     /// Cast itself to binary slice.
