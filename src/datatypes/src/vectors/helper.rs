@@ -67,16 +67,18 @@ impl Helper {
     pub fn extract_string_vector_values(vector: &dyn Vector) -> Result<Vec<Option<String>>> {
         // Try StringVector first
         if let Some(string_vector) = vector.as_any().downcast_ref::<StringVector>() {
-            Ok((0..string_vector.len())
-                .map(|i| string_vector.get_data(i).map(|s| s.to_string()))
+            Ok(string_vector
+                .iter_data()
+                .map(|opt_s| opt_s.map(|s| s.to_string()))
                 .collect())
         }
         // Try LargeStringVector
         else if let Some(large_string_vector) =
             vector.as_any().downcast_ref::<LargeStringVector>()
         {
-            Ok((0..large_string_vector.len())
-                .map(|i| large_string_vector.get_data(i).map(|s| s.0.to_string()))
+            Ok(large_string_vector
+                .iter_data()
+                .map(|opt_s| opt_s.map(|s| s.0.to_string()))
                 .collect())
         } else {
             error::UnknownVectorSnafu {
