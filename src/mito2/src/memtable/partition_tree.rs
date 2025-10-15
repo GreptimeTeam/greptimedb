@@ -428,7 +428,13 @@ mod tests {
 
         let expected_ts = kvs
             .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
+            .map(|kv| {
+                kv.timestamp()
+                    .try_into_timestamp()
+                    .unwrap()
+                    .unwrap()
+                    .value()
+            })
             .collect::<Vec<_>>();
 
         let iter = memtable.iter(None, None, None).unwrap();

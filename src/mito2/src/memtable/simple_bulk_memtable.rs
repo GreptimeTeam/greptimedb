@@ -111,7 +111,12 @@ impl SimpleBulkMemtable {
         let size = series.push(ts, sequence, op_type, kv.fields());
         stats.value_bytes += size;
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
     }

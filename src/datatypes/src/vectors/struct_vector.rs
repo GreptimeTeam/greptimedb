@@ -351,7 +351,7 @@ impl MutableVector for StructVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        if let Some(struct_ref) = value.as_struct()? {
+        if let Some(struct_ref) = value.try_into_struct()? {
             match struct_ref {
                 StructValueRef::Indexed { vector, idx } => match vector.get(idx).as_struct()? {
                     Some(struct_value) => self.push_struct_value(struct_value)?,

@@ -242,7 +242,7 @@ impl MutableVector for BinaryVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match value.as_binary()? {
+        match value.try_into_binary()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
         }
@@ -475,7 +475,7 @@ mod tests {
             .collect::<Vec<_>>();
         for i in 0..3 {
             assert_eq!(
-                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                json_vector.get_ref(i).try_into_binary().unwrap().unwrap(),
                 jsonbs.get(i).unwrap().as_slice()
             );
         }
@@ -486,7 +486,7 @@ mod tests {
             .unwrap();
         for i in 0..3 {
             assert_eq!(
-                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                json_vector.get_ref(i).try_into_binary().unwrap().unwrap(),
                 jsonbs.get(i).unwrap().as_slice()
             );
         }
@@ -551,8 +551,8 @@ mod tests {
         assert_eq!(converted.len(), expected.len());
         for i in 0..3 {
             assert_eq!(
-                converted.get_ref(i).as_binary().unwrap().unwrap(),
-                expected.get_ref(i).as_binary().unwrap().unwrap()
+                converted.get_ref(i).try_into_binary().unwrap().unwrap(),
+                expected.get_ref(i).try_into_binary().unwrap().unwrap()
             );
         }
     }

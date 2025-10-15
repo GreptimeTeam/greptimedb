@@ -193,9 +193,8 @@ impl MutableVector for StringVectorBuilder {
     fn to_vector_cloned(&self) -> VectorRef {
         Arc::new(self.finish_cloned())
     }
-
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match value.as_string()? {
+        match value.try_into_string()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
         }

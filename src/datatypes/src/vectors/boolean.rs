@@ -180,7 +180,7 @@ impl MutableVector for BooleanVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match value.as_boolean()? {
+        match value.try_into_boolean()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
         }

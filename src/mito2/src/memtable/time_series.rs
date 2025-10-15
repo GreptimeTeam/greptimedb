@@ -197,7 +197,12 @@ impl TimeSeriesMemtable {
         stats.value_bytes += value_allocated;
 
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
         Ok(())
@@ -896,7 +901,7 @@ impl ValueBuilder {
         };
 
         self.timestamp
-            .push(ts.as_timestamp().unwrap().unwrap().value());
+            .push(ts.try_into_timestamp().unwrap().unwrap().value());
         self.sequence.push(sequence);
         self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
@@ -1650,10 +1655,13 @@ mod tests {
         memtable.write(&kvs).unwrap();
 
         let mut expected_ts: HashMap<i64, usize> = HashMap::new();
-        for ts in kvs
-            .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
-        {
+        for ts in kvs.iter().map(|kv| {
+            kv.timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value()
+        }) {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 

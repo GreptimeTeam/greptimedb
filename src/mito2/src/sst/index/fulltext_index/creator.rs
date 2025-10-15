@@ -297,7 +297,7 @@ impl SingleCreator {
                 for i in 0..batch.num_rows() {
                     let data = data.get_ref(i);
                     let text = data
-                        .as_string()
+                        .try_into_string()
                         .context(DataTypeMismatchSnafu)?
                         .unwrap_or_default();
                     self.inner.push_text(text).await?;
