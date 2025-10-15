@@ -81,6 +81,7 @@ macro_rules! sql_tests {
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_declare_fetch_close_cursor,
+                test_alter_update_on,
             );
         )*
     };
@@ -515,6 +516,70 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_alter_update_on(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_crud").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let row_before_alter = sqlx::query(
+        "SELECT *
+         FROM information_schema.tables WHERE table_name = $1;",
+    )
+    .bind("demo")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row_before_alter.len(), 1);
+    let before_row = &row_before_alter[0];
+
+    let created_on: NaiveDateTime = before_row.get("create_time");
+    let updated_on_before: NaiveDateTime = before_row.get("update_time");
+    assert_eq!(created_on, updated_on_before);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    sqlx::query("alter table demo add column j json;")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let row_after_alter = sqlx::query(
+        "SELECT *
+         FROM information_schema.tables WHERE table_name = $1;",
+    )
+    .bind("demo")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row_after_alter.len(), 1);
+    let after_row = &row_after_alter[0];
+
+    let updated_on_after: NaiveDateTime = after_row.get("update_time");
+    assert_ne!(updated_on_before, updated_on_after);
+
+    let _ = sqlx::query("delete from demo")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
