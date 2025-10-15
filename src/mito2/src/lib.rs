@@ -18,6 +18,7 @@
 
 #![feature(assert_matches)]
 #![feature(int_roundings)]
+#![recursion_limit = "256"]
 #![feature(debug_closure_helpers)]
 #![feature(duration_constructors)]
 

@@ -62,6 +62,18 @@ lazy_static! {
         "query push down fallback errors total"
     )
     .unwrap();
+
+    pub static ref QUERY_MEMORY_POOL_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_query_memory_pool_usage_bytes",
+        "current query memory pool usage in bytes"
+    )
+    .unwrap();
+
+    pub static ref QUERY_MEMORY_POOL_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_query_memory_pool_rejected_total",
+        "total number of query memory allocations rejected"
+    )
+    .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.

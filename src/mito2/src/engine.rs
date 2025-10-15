@@ -122,7 +122,9 @@ use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
-use crate::metrics::HANDLE_REQUEST_ELAPSED;
+use crate::metrics::{
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+};
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
@@ -204,7 +206,13 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
-        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize);
+        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize)
+            .with_update_callback(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_reject_callback(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
 
         let inner = EngineInner {
             workers,
@@ -1264,7 +1272,13 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
-        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize);
+        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize)
+            .with_update_callback(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_reject_callback(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(

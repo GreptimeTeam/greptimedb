@@ -21,6 +21,7 @@ pub mod filter;
 mod recordbatch;
 pub mod util;
 
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -408,10 +409,23 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 }
 
 /// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QueryMemoryTracker {
     current: Arc<AtomicUsize>,
     limit: usize,
+    on_update: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    on_reject: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl fmt::Debug for QueryMemoryTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryMemoryTracker")
+            .field("current", &self.current.load(Ordering::Relaxed))
+            .field("limit", &self.limit)
+            .field("on_update", &self.on_update.is_some())
+            .field("on_reject", &self.on_reject.is_some())
+            .finish()
+    }
 }
 
 impl QueryMemoryTracker {
@@ -421,43 +435,85 @@ impl QueryMemoryTracker {
         Self {
             current: Arc::new(AtomicUsize::new(0)),
             limit,
+            on_update: None,
+            on_reject: None,
         }
+    }
+
+    /// Set a callback to be called whenever the usage changes successfully.
+    /// The callback receives the new total usage in bytes.
+    ///
+    /// # Note
+    /// The callback is called after both successful `track()` and `release()` operations.
+    /// It is called even when `limit == 0` (unlimited mode) to track actual usage.
+    pub fn with_update_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        self.on_update = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set a callback to be called when memory allocation is rejected.
+    ///
+    /// # Note
+    /// This is only called when `track()` fails due to exceeding the limit.
+    /// It is never called when `limit == 0` (unlimited mode).
+    pub fn with_reject_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_reject = Some(Arc::new(callback));
+        self
     }
 
     /// Track memory usage. Returns error if limit is exceeded.
     pub fn track(&self, size: usize) -> Result<()> {
+        let new_total = self.current.fetch_add(size, Ordering::Relaxed) + size;
+
         if self.limit == 0 {
+            // Unlimited mode: still track usage but never reject
+            if let Some(callback) = &self.on_update {
+                callback(new_total);
+            }
             return Ok(());
         }
 
-        let new_total = self.current.fetch_add(size, Ordering::Relaxed) + size;
         if new_total > self.limit {
-            self.release(size);
+            self.release_internal(size, false);
+            if let Some(callback) = &self.on_reject {
+                callback();
+            }
             return error::ExceedMemoryLimitSnafu {
                 used: new_total,
                 limit: self.limit,
             }
             .fail();
         }
+
+        if let Some(callback) = &self.on_update {
+            callback(new_total);
+        }
+
         Ok(())
     }
 
     /// Release tracked memory.
     pub fn release(&self, size: usize) {
-        if self.limit == 0 {
-            return;
-        }
-
-        self.current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(size))
-            })
-            .ok();
+        self.release_internal(size, true);
     }
 
-    /// Get current memory usage.
-    pub fn current(&self) -> usize {
-        self.current.load(Ordering::Relaxed)
+    fn release_internal(&self, size: usize, trigger_callback: bool) {
+        if let Ok(old_value) =
+            self.current
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(size))
+                })
+            && trigger_callback
+            && let Some(callback) = &self.on_update
+        {
+            callback(old_value.saturating_sub(size));
+        }
     }
 }
 

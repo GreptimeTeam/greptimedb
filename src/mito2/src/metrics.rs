@@ -207,6 +207,16 @@ lazy_static! {
         "Number of rows returned in a scan task",
         exponential_buckets(100.0, 10.0, 7).unwrap(),
     ).unwrap();
+    /// Gauge for scan memory usage in bytes.
+    pub static ref SCAN_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_scan_memory_usage_bytes",
+        "current scan memory usage in bytes"
+    ).unwrap();
+    /// Counter of rejected scan requests due to memory limit.
+    pub static ref SCAN_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_scan_requests_rejected_total",
+        "total number of scan requests rejected due to memory limit"
+    ).unwrap();
     // ------- End of query metrics.
 
     // Cache related metrics.
