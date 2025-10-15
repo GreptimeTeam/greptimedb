@@ -577,9 +577,7 @@ impl FlatConvertFormat {
 
     /// Converts a batch to have decoded primary key columns in flat format.
     ///
-    /// The primary key array in the batch is a dictionary array. We decode each value which is a
-    /// primary key and reuse the keys array to build a dictionary array for each tag column.
-    /// The decoded columns are inserted in front of other columns.
+    /// The primary key array in the batch is a dictionary array.
     pub(crate) fn convert(&self, batch: RecordBatch) -> Result<RecordBatch> {
         if self.projected_primary_keys.is_empty() {
             return Ok(batch);
@@ -593,7 +591,6 @@ impl FlatConvertFormat {
             .with_context(|| InvalidRecordBatchSnafu {
                 reason: "Primary key column is not a dictionary array".to_string(),
             })?;
-
         let pk_values_array = pk_dict_array
             .values()
             .as_any()
@@ -602,17 +599,39 @@ impl FlatConvertFormat {
                 reason: "Primary key values are not binary array".to_string(),
             })?;
 
-        // Decodes all primary key values
-        let mut decoded_pk_values = Vec::with_capacity(pk_values_array.len());
-        for i in 0..pk_values_array.len() {
-            if pk_values_array.is_null(i) {
-                decoded_pk_values.push(None);
-            } else {
-                let pk_bytes = pk_values_array.value(i);
-                let decoded = self.codec.decode(pk_bytes).context(DecodeSnafu)?;
-                decoded_pk_values.push(Some(decoded));
+        let keys = pk_dict_array.keys();
+
+        // Decodes primary key values by iterating through keys, reusing decoded values for duplicate keys.
+        // Maps original key index -> new decoded value index
+        let mut key_to_decoded_index = Vec::with_capacity(keys.len());
+        let mut decoded_pk_values = Vec::new();
+        let mut prev_key: Option<u32> = None;
+
+        // The parquet reader may read the whole dictionary page into the dictionary values, so
+        // we may decode many primary keys not in this batch if we decode the values array directly.
+        for i in 0..keys.len() {
+            let current_key = keys.value(i);
+
+            // Check if current key is the same as previous key
+            if let Some(prev) = prev_key {
+                if prev == current_key {
+                    // Reuse the last decoded index
+                    key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+                    continue;
+                }
             }
+
+            // New key, decodes the value
+            let pk_bytes = pk_values_array.value(current_key as usize);
+            let decoded_value = self.codec.decode(pk_bytes).context(DecodeSnafu)?;
+
+            decoded_pk_values.push(decoded_value);
+            key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+            prev_key = Some(current_key);
         }
+
+        // Create the new keys array from key_to_decoded_index
+        let keys_array = UInt32Array::from(key_to_decoded_index);
 
         // Builds decoded tag column arrays.
         let mut decoded_columns = Vec::new();
@@ -622,7 +641,7 @@ impl FlatConvertFormat {
                 *column_id,
                 *pk_index,
                 &column_metadata.column_schema.data_type,
-                pk_dict_array.keys(),
+                &keys_array,
                 &decoded_pk_values,
             )?;
             decoded_columns.push(tag_column);
@@ -659,29 +678,24 @@ impl FlatConvertFormat {
         pk_index: usize,
         column_type: &ConcreteDataType,
         keys: &UInt32Array,
-        decoded_pk_values: &[Option<CompositeValues>],
+        decoded_pk_values: &[CompositeValues],
     ) -> Result<ArrayRef> {
         // Gets values from the primary key.
         let mut builder = column_type.create_mutable_vector(decoded_pk_values.len());
-        for decoded_opt in decoded_pk_values {
-            match decoded_opt {
-                Some(decoded) => {
-                    match decoded {
-                        CompositeValues::Dense(dense) => {
-                            if pk_index < dense.len() {
-                                builder.push_value_ref(&dense[pk_index].1.as_value_ref());
-                            } else {
-                                builder.push_null();
-                            }
-                        }
-                        CompositeValues::Sparse(sparse) => {
-                            let value = sparse.get_or_null(column_id);
-                            builder.push_value_ref(&value.as_value_ref());
-                        }
-                    };
+        for decoded in decoded_pk_values {
+            match decoded {
+                CompositeValues::Dense(dense) => {
+                    if pk_index < dense.len() {
+                        builder.push_value_ref(&dense[pk_index].1.as_value_ref());
+                    } else {
+                        builder.push_null();
+                    }
                 }
-                None => builder.push_null(),
-            }
+                CompositeValues::Sparse(sparse) => {
+                    let value = sparse.get_or_null(column_id);
+                    builder.push_value_ref(&value.as_value_ref());
+                }
+            };
         }
 
         let values_vector = builder.to_vector();
