@@ -192,7 +192,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_limiter_concurrent() {
         let limiter = RequestMemoryLimiter::new(1000);
         let mut handles = vec![];
