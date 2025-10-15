@@ -88,7 +88,7 @@ impl Default for GcSchedulerOptions {
 }
 
 /// Represents a region candidate for GC with its priority score.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GcCandidate {
     region_id: RegionId,
     score: OrderedFloat<f64>,
@@ -223,13 +223,18 @@ impl GcScheduler {
         let dn_stats = self.meta_peer_client.get_all_dn_stat_kvs().await?;
         let mut table_to_region_stats: HashMap<TableId, Vec<RegionStat>> = HashMap::new();
         for (_dn_id, stats) in dn_stats {
-            for stat in stats.stats {
-                for region_stat in stat.region_stats {
-                    table_to_region_stats
-                        .entry(region_stat.id.table_id())
-                        .or_default()
-                        .push(region_stat);
-                }
+            let mut stats = stats.stats;
+            stats.sort_by_key(|s| s.timestamp_millis);
+
+            let Some(latest_stat) = stats.last().cloned() else {
+                continue;
+            };
+
+            for region_stat in latest_stat.region_stats {
+                table_to_region_stats
+                    .entry(region_stat.id.table_id())
+                    .or_default()
+                    .push(region_stat);
             }
         }
         Ok(table_to_region_stats)
@@ -297,8 +302,8 @@ impl GcScheduler {
     async fn select_gc_candidates(
         &self,
         table_to_region_stats: &HashMap<TableId, Vec<RegionStat>>,
-    ) -> Result<HashMap<TableId, HashSet<GcCandidate>>> {
-        let mut table_candidates: HashMap<TableId, HashSet<GcCandidate>> = HashMap::new();
+    ) -> Result<HashMap<TableId, Vec<GcCandidate>>> {
+        let mut table_candidates: HashMap<TableId, Vec<GcCandidate>> = HashMap::new();
         let now = Instant::now();
         let gc_tracker = self.region_gc_tracker.lock().await;
 
@@ -329,7 +334,7 @@ impl GcScheduler {
 
             // Sort candidates by score in descending order and take top N
             candidates.sort_by(|a, b| b.score.cmp(&a.score));
-            let top_candidates: HashSet<GcCandidate> = candidates
+            let top_candidates: Vec<GcCandidate> = candidates
                 .into_iter()
                 .take(self.config.regions_per_table_threshold)
                 .collect();
@@ -427,7 +432,7 @@ impl GcScheduler {
     async fn process_table_gc(
         &self,
         table_id: TableId,
-        candidates: HashSet<GcCandidate>,
+        candidates: Vec<GcCandidate>,
     ) -> Result<usize> {
         info!(
             "Starting GC for table {} with {} candidate regions",
@@ -606,12 +611,10 @@ impl GcScheduler {
         // TODO(discord9): Select the best peer based on GC load
         // for now gc worker need to be run from datanode that hosts the region
         // this limit might be lifted in the future
-        let mut peer = 
-            region_to_peer
-                .get(&region_id)
-                .with_context(|| RegionRouteNotFoundSnafu { region_id })?
-                .clone()
-        ;
+        let mut peer = region_to_peer
+            .get(&region_id)
+            .with_context(|| RegionRouteNotFoundSnafu { region_id })?
+            .clone();
 
         let mut retries = 0;
         let mut current_manifest = file_refs_manifest.clone();
@@ -626,7 +629,10 @@ impl GcScheduler {
                 Ok(report) => {
                     if report.need_retry_regions.is_empty() {
                         final_report.merge(report);
-                        info!("Successfully completed GC for region {} with report: {final_report:?}", region_id);
+                        info!(
+                            "Successfully completed GC for region {} with report: {final_report:?}",
+                            region_id
+                        );
                         // note that need_retry_regions should be empty here
                         // since no more outdated regions
                         final_report.need_retry_regions.clear();

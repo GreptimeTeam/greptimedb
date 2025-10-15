@@ -71,7 +71,7 @@ pub struct Stat {
 }
 
 /// The statistics of a region.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionStat {
     /// The region_id.
     pub id: RegionId,
