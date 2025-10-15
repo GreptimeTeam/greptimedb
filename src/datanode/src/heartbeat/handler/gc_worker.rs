@@ -18,7 +18,9 @@ use mito2::gc::LocalGcWorker;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{FileRefsManifest, RegionId};
 
-use crate::error::{GcMitoEngineSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    GcMitoEngineSnafu, InvalidGcArgsSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu,
+};
 use crate::heartbeat::handler::HandlerContext;
 
 impl HandlerContext {
@@ -108,8 +110,13 @@ impl HandlerContext {
         // Find the access layer from one of the regions that exists on this datanode
         let access_layer = region_ids
             .iter()
-            .find_map(|rid| mito_engine.find_region(rid))
-            .context(RegionNotFoundSnafu { region_id })?
+            .find_map(|rid| mito_engine.find_region(*rid))
+            .with_context(|| InvalidGcArgsSnafu {
+                msg: format!(
+                    "None of the regions is on current datanode:{:?}",
+                    region_ids
+                ),
+            })?
             .access_layer();
 
         let cache_manager = mito_engine.cache_manager();

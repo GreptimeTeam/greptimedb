@@ -603,19 +603,15 @@ impl GcScheduler {
     ) -> Result<GcReport> {
         let region_id = candidate.region_id;
 
-        // Get GC stats for all datanodes to choose the best peer based on load
-        let datanode_gc_stats = self.get_datanode_gc_stats().await?;
-
-        // Select the best peer based on GC load, or fall back to region-specific peer
-        let mut peer = if let Some(best_peer) = self.select_best_peer_for_gc(&datanode_gc_stats) {
-            best_peer
-        } else {
-            // Fall back to the original region-specific peer if no suitable peer found
+        // TODO(discord9): Select the best peer based on GC load
+        // for now gc worker need to be run from datanode that hosts the region
+        // this limit might be lifted in the future
+        let mut peer = 
             region_to_peer
                 .get(&region_id)
                 .with_context(|| RegionRouteNotFoundSnafu { region_id })?
                 .clone()
-        };
+        ;
 
         let mut retries = 0;
         let mut current_manifest = file_refs_manifest.clone();
@@ -629,8 +625,8 @@ impl GcScheduler {
             {
                 Ok(report) => {
                     if report.need_retry_regions.is_empty() {
-                        info!("Successfully completed GC for region {}", region_id);
                         final_report.merge(report);
+                        info!("Successfully completed GC for region {} with report: {final_report:?}", region_id);
                         // note that need_retry_regions should be empty here
                         // since no more outdated regions
                         final_report.need_retry_regions.clear();

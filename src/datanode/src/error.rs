@@ -323,6 +323,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid arguments for GC: {}", msg))]
+    InvalidGcArgs {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to list SST entries from storage"))]
     ListStorageSsts {
         #[snafu(implicit)]
@@ -437,7 +444,8 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | TomlFormat { .. } => StatusCode::InvalidArguments,
+            | TomlFormat { .. }
+            | InvalidGcArgs { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
             | Unexpected { .. }
