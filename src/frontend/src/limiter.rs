@@ -229,6 +229,7 @@ impl Limiter {
                         .unwrap_or(0)
                 })
                 .sum(),
+            ValueData::JsonValue(_) => todo!(),
         }
     }
 }

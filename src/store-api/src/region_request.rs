@@ -178,7 +178,6 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
-            region_request::Body::BuildIndex(_) => todo!(),
         }
     }
 

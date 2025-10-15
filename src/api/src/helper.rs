@@ -750,6 +750,7 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::Struct(struct_value_ref)
         }
+        ValueData::JsonValue(_) => todo!(),
     }
 }
 
@@ -924,6 +925,7 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
         ValueData::ListValue(_) => ColumnDataType::List,
         ValueData::StructValue(_) => ColumnDataType::Struct,
+        ValueData::JsonValue(_) => todo!(),
     };
     Some(value_type)
 }

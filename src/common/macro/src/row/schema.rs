@@ -108,6 +108,7 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
                                 Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::StructType(StructTypeExtension { fields: [#(#fields),*] })) })
                             }
                         }
+                        Some(TypeExt::JsonNativeType(_)) => todo!(),
                         None => {
                             quote! { None }
                         }

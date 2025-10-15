@@ -383,6 +383,8 @@ pub struct MetasrvNodeInfo {
     pub hostname: String,
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
+#[allow(deprecated)]
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
         Self {
@@ -390,6 +392,14 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
+            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
+            // New code should use the fields in `info.NodeInfo` instead.
+            version: node_info.version.clone(),
+            git_commit: node_info.git_commit.clone(),
+            start_time_ms: node_info.start_time_ms,
+            cpus: node_info.cpus,
+            memory_bytes: node_info.memory_bytes,
+            // The canonical location for node information.
             info: Some(api::v1::meta::NodeInfo {
                 version: node_info.version,
                 git_commit: node_info.git_commit,
