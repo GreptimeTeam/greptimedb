@@ -20,7 +20,9 @@ use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
-use datatypes::types::{IntervalType, StructField, StructType, TimeType, TimestampType};
+use datatypes::types::{
+    IntervalType, JsonFormat, StructField, StructType, TimeType, TimestampType,
+};
 use datatypes::value::{
     ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
 };
@@ -31,8 +33,9 @@ use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension,
-    ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension, VectorTypeExtension,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonNativeTypeExtension,
+    JsonTypeExtension, ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension,
+    VectorTypeExtension,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -104,7 +107,30 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::binary_datatype()
                 }
             }
-            ColumnDataType::Json => ConcreteDataType::json_datatype(),
+            ColumnDataType::Json => {
+                let type_ext = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref());
+                match type_ext {
+                    Some(TypeExt::JsonType(_)) => {
+                        // legacy json type
+                        ConcreteDataType::json_datatype()
+                    }
+                    Some(TypeExt::JsonNativeType(type_ext)) => {
+                        // native json type
+                        let inner_type = ColumnDataTypeWrapper {
+                            datatype: type_ext.datatype(),
+                            datatype_ext: type_ext.datatype_extension.clone().map(|d| *d),
+                        };
+                        ConcreteDataType::json_native_datatype(inner_type.into())
+                    }
+                    _ => {
+                        // invalid state, type extension is missing or invalid
+                        ConcreteDataType::null_datatype()
+                    }
+                }
+            }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::timestamp_microsecond_datatype(),
@@ -371,9 +397,28 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         })),
                     })
             }
-            ColumnDataType::Json => datatype.as_json().map(|_| ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-            }),
+            ColumnDataType::Json => {
+                if let Some(json_type) = datatype.as_json() {
+                    match &json_type.format {
+                        JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                        }),
+                        JsonFormat::Native(inner) => {
+                            let inner_type = ColumnDataTypeWrapper::try_from(*inner.clone())?;
+                            Some(ColumnDataTypeExtension {
+                                type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                                    JsonNativeTypeExtension {
+                                        datatype: inner_type.datatype.into(),
+                                        datatype_extension: inner_type.datatype_ext.map(Box::new),
+                                    },
+                                ))),
+                            })
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
             ColumnDataType::Vector => {
                 datatype
                     .as_vector()
@@ -537,7 +582,10 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::Json => Values {
+            // TODO(sunng87): remove this when we finally sunset legacy jsonb
             string_values: Vec::with_capacity(capacity),
+            // for native json
+            json_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::Vector => Values {
@@ -750,6 +798,24 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::Struct(struct_value_ref)
         }
+
+        ValueData::JsonValue(inner_value) => {
+            let json_datatype_ext = datatype_ext
+                .as_ref()
+                .and_then(|ext| {
+                    if let Some(TypeExt::JsonNativeType(l)) = &ext.type_ext {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .expect("json value must contain datatype ext");
+
+            ValueRef::Json(Box::new(pb_value_to_value_ref(
+                inner_value,
+                json_datatype_ext.datatype_extension.as_deref(),
+            )))
+        }
     }
 }
 
@@ -870,6 +936,9 @@ pub fn to_proto_value(value: Value) -> v1::Value {
                 items: convert_struct_to_pb_values(struct_value),
             })),
         },
+        Value::Json(v) => v1::Value {
+            value_data: Some(ValueData::JsonValue(Box::new(to_proto_value(*v)))),
+        },
         Value::Duration(_) => v1::Value { value_data: None },
     }
 }
@@ -924,6 +993,7 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
         ValueData::ListValue(_) => ColumnDataType::List,
         ValueData::StructValue(_) => ColumnDataType::Struct,
+        ValueData::JsonValue(_) => ColumnDataType::Json,
     };
     Some(value_type)
 }
@@ -994,6 +1064,9 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     .collect();
                 Some(ValueData::StructValue(v1::StructValue { items }))
             }
+            Value::Json(inner_value) => Some(ValueData::JsonValue(Box::new(value_to_grpc_value(
+                *inner_value,
+            )))),
             Value::Duration(_) => unreachable!(),
         },
     }
@@ -1181,6 +1254,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Struct, 2);
         let values = values.struct_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Json, 2);
+        assert_eq!(2, values.json_values.capacity());
+        assert_eq!(2, values.string_values.capacity());
     }
 
     #[test]
@@ -1304,6 +1381,54 @@ mod tests {
             ])
             .into()
         );
+        assert_eq!(
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            )),
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            )
+            .into()
+        )
     }
 
     #[test]
@@ -1429,7 +1554,71 @@ mod tests {
                     ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
                 )
             ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
-        )
+        );
+
+        let struct_type = StructType::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
+            StructField::new(
+                "address".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            ),
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            ))
+            .try_into()
+            .expect("failed to convert json type")
+        );
     }
 
     #[test]

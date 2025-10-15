@@ -90,6 +90,7 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
                                 Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: #dim })) })
                             }
                         }
+                        // TODO(sunng87): revisit all these implementations
                         Some(TypeExt::ListType(ext)) => {
                             let item_type = syn::Ident::new(&ext.datatype.to_string(), ident.span());
                             quote! {
@@ -106,6 +107,12 @@ fn impl_schema_method(fields: &[ParsedField<'_>]) -> Result<TokenStream2> {
                             }).collect::<Vec<_>>();
                             quote! {
                                 Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::StructType(StructTypeExtension { fields: [#(#fields),*] })) })
+                            }
+                        }
+                        Some(TypeExt::JsonNativeType(ext)) => {
+                            let inner = syn::Ident::new(&ext.datatype.to_string(), ident.span());
+                            quote! {
+                                Some(ColumnDataTypeExtension { type_ext: Some(TypeExt::JsonNativeType(JsonNativeTypeExtension { datatype: #inner })) })
                             }
                         }
                         None => {
