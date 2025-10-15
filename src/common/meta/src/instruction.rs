@@ -548,6 +548,8 @@ impl Display for InstructionReply {
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::{FileId, FileRef};
+
     use super::*;
 
     #[test]
@@ -758,5 +760,31 @@ mod tests {
             }
             _ => panic!("Expected FlushRegions instruction"),
         }
+    }
+
+    #[test]
+    fn test_serialize_get_file_refs_instruction_reply() {
+        let mut manifest = FileRefsManifest::default();
+        let r0 = RegionId::new(1024, 1);
+        let r1 = RegionId::new(1024, 2);
+        manifest
+            .file_refs
+            .insert(FileRef::new(r0, FileId::random()));
+        manifest
+            .file_refs
+            .insert(FileRef::new(r1, FileId::random()));
+        manifest.manifest_version.insert(r0, 10);
+        manifest.manifest_version.insert(r1, 20);
+
+        let instruction_reply = InstructionReply::GetFileRefs(GetFileRefsReply {
+            file_refs_manifest: manifest,
+            success: true,
+            error: None,
+        });
+
+        let serialized = serde_json::to_string(&instruction_reply).unwrap();
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(instruction_reply, deserialized);
     }
 }
