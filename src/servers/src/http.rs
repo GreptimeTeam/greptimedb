@@ -34,7 +34,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use datatypes::types::json_type_value_to_serde_json;
+use datatypes::types::jsonb_to_serde_json;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
@@ -301,11 +301,11 @@ impl HttpRecordsOutput {
                     let schema = &schemas[col_idx];
                     for row_idx in 0..recordbatch.num_rows() {
                         let value = col.get(row_idx);
-                        let value = if let ConcreteDataType::Json(json_type) = schema.data_type
+                        // TODO(sunng87): is this duplicated with `map_json_type_to_string` in recordbatch?
+                        let value = if let ConcreteDataType::Json(_json_type) = &schema.data_type
                             && let datatypes::value::Value::Binary(bytes) = value
                         {
-                            json_type_value_to_serde_json(bytes.as_ref(), &json_type.format)
-                                .context(ConvertSqlValueSnafu)?
+                            jsonb_to_serde_json(bytes.as_ref()).context(ConvertSqlValueSnafu)?
                         } else {
                             serde_json::Value::try_from(col.get(row_idx)).context(ToJsonSnafu)?
                         };

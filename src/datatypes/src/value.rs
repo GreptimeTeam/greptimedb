@@ -81,8 +81,12 @@ pub enum Value {
     IntervalDayTime(IntervalDayTime),
     IntervalMonthDayNano(IntervalMonthDayNano),
 
+    // Collection types:
     List(ListValue),
     Struct(StructValue),
+
+    // Json Logical types:
+    Json(Box<Value>),
 }
 
 impl Display for Value {
@@ -144,6 +148,9 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{{ {items} }}")
             }
+            Value::Json(json_data) => {
+                write!(f, "Json({})", json_data)
+            }
         }
     }
 }
@@ -190,6 +197,7 @@ macro_rules! define_data_type_func {
                 $struct::Struct(struct_value) => {
                     ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
                 }
+                $struct::Json(v) => ConcreteDataType::json_native_datatype(v.data_type()),
             }
         }
     };
@@ -200,7 +208,11 @@ impl Value {
 
     /// Returns true if this is a null value.
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        match self {
+            Value::Null => true,
+            Value::Json(inner) => inner.is_null(),
+            _ => false,
+        }
     }
 
     /// Cast itself to [ListValue].
@@ -208,6 +220,7 @@ impl Value {
         match self {
             Value::Null => Ok(None),
             Value::List(v) => Ok(Some(v)),
+            Value::Json(inner) => inner.as_list(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast {other:?} to list value"),
             }
@@ -219,6 +232,7 @@ impl Value {
         match self {
             Value::Null => Ok(None),
             Value::Struct(v) => Ok(Some(v)),
+            Value::Json(inner) => inner.as_struct(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast {other:?} to struct value"),
             }
@@ -253,6 +267,7 @@ impl Value {
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
             Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
+            Value::Json(v) => ValueRef::Json(Box::new(v.as_value_ref())),
         }
     }
 
@@ -322,6 +337,7 @@ impl Value {
             Value::UInt8(v) => Some(*v as _),
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_i64(),
             _ => None,
         }
     }
@@ -333,6 +349,7 @@ impl Value {
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
             Value::UInt64(v) => Some(*v),
+            Value::Json(inner) => inner.as_u64(),
             _ => None,
         }
     }
@@ -349,6 +366,7 @@ impl Value {
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
             Value::UInt64(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_f64_lossy(),
             _ => None,
         }
     }
@@ -365,6 +383,15 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Boolean(b) => Some(*b),
+            Value::Json(inner) => inner.as_bool(),
+            _ => None,
+        }
+    }
+
+    /// Extract the inner JSON value from a JSON type.
+    pub fn into_json_inner(self) -> Option<Value> {
+        match self {
+            Value::Json(v) => Some(*v),
             _ => None,
         }
     }
@@ -411,6 +438,7 @@ impl Value {
             },
             Value::Decimal128(_) => LogicalTypeId::Decimal128,
             Value::Struct(_) => LogicalTypeId::Struct,
+            Value::Json(_) => LogicalTypeId::Json,
         }
     }
 
@@ -420,11 +448,11 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            // Json type leverage Value(Binary) for storage.
             output_type_id == value_type_id
                 || self.is_null()
                 || (output_type_id == LogicalTypeId::Json
-                    && value_type_id == LogicalTypeId::Binary),
+                    && (value_type_id == LogicalTypeId::Binary
+                        || value_type_id == LogicalTypeId::Json)),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -467,6 +495,7 @@ impl Value {
                 let struct_type = output_type.as_struct().unwrap();
                 struct_value.try_to_scalar_value(struct_type)?
             }
+            Value::Json(v) => v.try_to_scalar_value(output_type)?,
         };
 
         Ok(scalar_value)
@@ -518,6 +547,8 @@ impl Value {
             Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
             Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
             Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+
+            Value::Json(v) => v.try_negative().map(|neg| Value::Json(Box::new(neg))),
 
             Value::Binary(_)
             | Value::String(_)
@@ -877,6 +908,7 @@ impl TryFrom<Value> for serde_json::Value {
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
             }
+            Value::Json(v) => serde_json::Value::try_from(*v)?,
         };
 
         Ok(json_value)
@@ -1205,6 +1237,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
             ValueRef::Struct(v) => v.to_value(),
+            ValueRef::Json(v) => Value::Json(Box::new(Value::from(*v))),
         }
     }
 }
@@ -1247,6 +1280,8 @@ pub enum ValueRef<'a> {
     // Compound types:
     List(ListValueRef<'a>),
     Struct(StructValueRef<'a>),
+
+    Json(Box<ValueRef<'a>>),
 }
 
 macro_rules! impl_as_for_value_ref {
@@ -1271,7 +1306,11 @@ impl<'a> ValueRef<'a> {
 
     /// Returns true if this is null.
     pub fn is_null(&self) -> bool {
-        matches!(self, ValueRef::Null)
+        match self {
+            ValueRef::Null => true,
+            ValueRef::Json(v) => v.is_null(),
+            _ => false,
+        }
     }
 
     /// Cast itself to binary slice.
@@ -1648,6 +1687,7 @@ impl ValueRef<'_> {
                 StructValueRef::Ref(val) => val.estimated_size(),
                 StructValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
             },
+            ValueRef::Json(v) => v.data_size(),
         }
     }
 }
@@ -1708,6 +1748,10 @@ pub(crate) mod tests {
         ];
         let struct_arrow_array = StructArray::new(struct_type.as_arrow_fields(), arrays, None);
         ScalarValue::Struct(Arc::new(struct_arrow_array))
+    }
+
+    pub fn build_list_type() -> ConcreteDataType {
+        ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype())
     }
 
     pub(crate) fn build_list_value() -> ListValue {
@@ -2185,6 +2229,23 @@ pub(crate) mod tests {
             &ConcreteDataType::struct_datatype(build_struct_type()),
             &Value::Struct(build_struct_value()),
         );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(ConcreteDataType::boolean_datatype()),
+            &Value::Json(Box::new(Value::Boolean(true))),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(build_list_type()),
+            &Value::Json(Box::new(Value::List(build_list_value()))),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                build_struct_type(),
+            )),
+            &Value::Json(Box::new(Value::Struct(build_struct_value()))),
+        );
     }
 
     #[test]
@@ -2315,7 +2376,35 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(
-            serde_json::Value::try_from(Value::Struct(struct_value)).unwrap(),
+            serde_json::Value::try_from(Value::Struct(struct_value.clone())).unwrap(),
+            serde_json::json!({
+                "num": 42,
+                "name": "tomcat",
+                "yes_or_no": true
+            })
+        );
+
+        // string wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new(Value::String("hello".into()))))
+                .unwrap(),
+            serde_json::json!("hello")
+        );
+
+        // list wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new(Value::List(ListValue::new(
+                vec![Value::Int32(1), Value::Int32(2), Value::Int32(3),],
+                ConcreteDataType::int32_datatype()
+            )))))
+            .unwrap(),
+            serde_json::json!([1, 2, 3])
+        );
+
+        // struct wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new(Value::Struct(struct_value))))
+                .unwrap(),
             serde_json::json!({
                 "num": 42,
                 "name": "tomcat",
@@ -2327,6 +2416,7 @@ pub(crate) mod tests {
     #[test]
     fn test_null_value() {
         assert!(Value::Null.is_null());
+        assert!(Value::Json(Box::new(Value::Null)).is_null());
         assert!(!Value::Boolean(true).is_null());
         assert!(Value::Null < Value::Boolean(false));
         assert!(Value::Boolean(true) > Value::Null);
@@ -2404,6 +2494,13 @@ pub(crate) mod tests {
         assert_eq!(
             ValueRef::Struct(StructValueRef::Ref(&struct_value)),
             Value::Struct(struct_value.clone()).as_value_ref()
+        );
+
+        assert_eq!(
+            ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
+                &struct_value
+            )))),
+            Value::Json(Box::new(Value::Struct(struct_value.clone()))).as_value_ref()
         );
     }
 
@@ -2525,6 +2622,11 @@ pub(crate) mod tests {
             Value::Struct(build_struct_value()).to_string(),
             "{ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] }"
         );
+
+        assert_eq!(
+            Value::Json(Box::new(Value::Struct(build_struct_value()))).to_string(),
+            "Json({ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] })"
+        )
     }
 
     #[test]
@@ -3011,6 +3113,13 @@ pub(crate) mod tests {
 
         check_value_ref_size_eq(
             &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
+            15,
+        );
+
+        check_value_ref_size_eq(
+            &ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
+                &build_struct_value(),
+            )))),
             15,
         );
     }

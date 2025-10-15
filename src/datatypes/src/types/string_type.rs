@@ -89,6 +89,8 @@ impl DataType for StringType {
             Value::Duration(v) => Some(Value::String(StringBytes::from(v.to_string()))),
             Value::Decimal128(v) => Some(Value::String(StringBytes::from(v.to_string()))),
 
+            Value::Json(v) => self.try_cast(*v),
+
             // StringBytes is only support for utf-8, Value::Binary and collections are not allowed.
             Value::Binary(_) | Value::List(_) | Value::Struct(_) => None,
         }
