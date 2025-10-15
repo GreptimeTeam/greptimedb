@@ -52,8 +52,18 @@ use crate::vectors::{
 pub struct Helper;
 
 impl Helper {
-    /// Extract string values from a vector that could be either StringVector or LargeStringVector.
-    /// Returns a vector of optional strings that can be used for further processing.
+    /// Extracts string values from a vector that is expected to be either a `StringVector` or `LargeStringVector`.
+    ///
+    /// # Parameters
+    /// - `vector`: A reference to a trait object implementing `Vector`. This should be either a `StringVector` or `LargeStringVector`.
+    ///
+    /// # Returns
+    /// Returns a `Result` containing a `Vec<Option<String>>`, where each element corresponds to a value in the vector:
+    /// - `Some(String)` if the value is present.
+    /// - `None` if the value is null.
+    ///
+    /// # Errors
+    /// Returns an error if the provided vector is not a `StringVector` or `LargeStringVector`.
     pub fn extract_string_vector_values(vector: &dyn Vector) -> Result<Vec<Option<String>>> {
         // Try StringVector first
         if let Some(string_vector) = vector.as_any().downcast_ref::<StringVector>() {
