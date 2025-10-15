@@ -104,10 +104,13 @@ impl HandlerContext {
         })?;
 
         let mito_config = mito_engine.mito_config();
-        let region = mito_engine
-            .find_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-        let access_layer = region.access_layer();
+
+        // Find the access layer from one of the regions that exists on this datanode
+        let access_layer = region_ids
+            .iter()
+            .find_map(|rid| mito_engine.find_region(rid))
+            .context(RegionNotFoundSnafu { region_id })?
+            .access_layer();
 
         let cache_manager = mito_engine.cache_manager();
 
