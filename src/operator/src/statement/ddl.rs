@@ -66,7 +66,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
-use sql::statements::alter::{AlterDatabase, AlterTable};
+use sql::statements::alter::{AlterDatabase, AlterTable, AlterTableOperation};
 #[cfg(feature = "enterprise")]
 use sql::statements::create::trigger::CreateTrigger;
 use sql::statements::create::{
@@ -87,10 +87,10 @@ use crate::error::{
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
     InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::StatementExecutor;
@@ -1194,6 +1194,17 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        if matches!(
+            alter_table.alter_operation(),
+            AlterTableOperation::Repartition { .. }
+        ) {
+            let _request = expr_helper::to_repartition_request(alter_table, &query_context)?;
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE REPARTITION",
+            }
+            .fail();
+        }
+
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
