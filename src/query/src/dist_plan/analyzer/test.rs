@@ -92,6 +92,7 @@ impl TestTable {
             next_column_id: 5,
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: vec![0, 1],
             column_ids: vec![0, 1, 2, 3, 4],
         };

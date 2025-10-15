@@ -1503,6 +1503,7 @@ mod tests {
             region_numbers: vec![0],
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: Default::default(),
             column_ids: Default::default(),
         };
