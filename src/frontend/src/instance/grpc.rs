@@ -230,6 +230,11 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::DropView(_) => {
                         todo!("implemented in the following PR")
                     }
+                    DdlExpr::CommentOn(expr) => {
+                        self.statement_executor
+                            .comment_by_expr(expr, ctx.clone())
+                            .await?
+                    }
                 }
             }
         };
@@ -328,6 +333,9 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
             check_and_fill!(expr);
         }
         Expr::DropView(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::CommentOn(expr) => {
             check_and_fill!(expr);
         }
     }

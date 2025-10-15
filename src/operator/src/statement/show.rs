@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_error::ext::BoxedError;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
@@ -120,7 +122,30 @@ impl StatementExecutor {
         table: TableRef,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let table_info = table.table_info();
+        let mut table_info = table.table_info();
+        let partition_column_names: Vec<_> =
+            table_info.meta.partition_column_names().cloned().collect();
+
+        if let Some(latest) = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_info.table_id())
+            .await
+            .context(TableMetadataManagerSnafu)?
+        {
+            let mut latest_info = TableInfo::try_from(latest.into_inner().table_info)
+                .context(error::CreateTableInfoSnafu)?;
+
+            if !partition_column_names.is_empty() {
+                latest_info.meta.partition_key_indices = partition_column_names
+                    .iter()
+                    .filter_map(|name| latest_info.meta.schema.column_index_by_name(name.as_str()))
+                    .collect();
+            }
+
+            table_info = Arc::new(latest_info);
+        }
+
         if table_info.table_type != TableType::Base {
             return error::ShowCreateTableBaseOnlySnafu {
                 table_name: table_name.to_string(),
@@ -150,7 +175,7 @@ impl StatementExecutor {
 
         let partitions = create_partitions_stmt(&table_info, partitions)?;
 
-        query::sql::show_create_table(table, schema_options, partitions, query_ctx)
+        query::sql::show_create_table(table_info, schema_options, partitions, query_ctx)
             .context(ExecuteStatementSnafu)
     }
 

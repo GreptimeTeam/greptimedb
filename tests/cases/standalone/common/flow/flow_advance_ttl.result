@@ -46,6 +46,7 @@ SHOW CREATE TABLE distinct_basic;
 |                | )                                                         |
 +----------------+-----------------------------------------------------------+
 
+-- SQLNESS REPLACE \d{4} REDACTED
 SHOW CREATE TABLE out_distinct_basic;
 
 +--------------------+---------------------------------------------------+
@@ -60,7 +61,9 @@ SHOW CREATE TABLE out_distinct_basic;
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
-|                    |                                                   |
+|                    | WITH(                                             |
+|                    |   'comment' = 'Sink table for flow flow-id=REDACTED'  |
+|                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
 -- SQLNESS SLEEP 3s
@@ -242,7 +245,9 @@ SHOW CREATE TABLE out_distinct_basic;
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
-|                    |                                                   |
+|                    | WITH(                                             |
+|                    |   'comment' = 'Auto created table by flow engine' |
+|                    | )                                                 |
 +--------------------+---------------------------------------------------+
 
 SELECT
