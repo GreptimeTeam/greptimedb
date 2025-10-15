@@ -125,6 +125,7 @@ pub struct NodeInfo {
     #[serde(default)]
     pub memory_bytes: u64,
     // The node build hostname
+    #[serde(default)]
     pub hostname: String,
 }
 

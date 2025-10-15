@@ -4,22 +4,22 @@ Affected Rows: 0
 
 DESC TABLE CLUSTER_INFO;
 
-+--------------+----------------------+-----+------+---------+---------------+
-| Column       | Type                 | Key | Null | Default | Semantic Type |
-+--------------+----------------------+-----+------+---------+---------------+
-| peer_id      | Int64                |     | NO   |         | FIELD         |
-| peer_type    | String               |     | NO   |         | FIELD         |
-| peer_addr    | String               |     | YES  |         | FIELD         |
-| cpus         | UInt32               |     | NO   |         | FIELD         |
-| memory_bytes | UInt64               |     | NO   |         | FIELD         |
-| version      | String               |     | NO   |         | FIELD         |
-| git_commit   | String               |     | NO   |         | FIELD         |
-| start_time   | TimestampMillisecond |     | YES  |         | FIELD         |
-| uptime       | String               |     | YES  |         | FIELD         |
-| active_time  | String               |     | YES  |         | FIELD         |
-| node_status  | String               |     | YES  |         | FIELD         |
-| hostname     | String               |     | YES  |         | FIELD         |
-+--------------+----------------------+-----+------+---------+---------------+
++---------------+----------------------+-----+------+---------+---------------+
+| Column        | Type                 | Key | Null | Default | Semantic Type |
++---------------+----------------------+-----+------+---------+---------------+
+| peer_id       | Int64                |     | NO   |         | FIELD         |
+| peer_type     | String               |     | NO   |         | FIELD         |
+| peer_addr     | String               |     | YES  |         | FIELD         |
+| peer_hostname | String               |     | YES  |         | FIELD         |
+| cpus          | UInt32               |     | NO   |         | FIELD         |
+| memory_bytes  | UInt64               |     | NO   |         | FIELD         |
+| version       | String               |     | NO   |         | FIELD         |
+| git_commit    | String               |     | NO   |         | FIELD         |
+| start_time    | TimestampMillisecond |     | YES  |         | FIELD         |
+| uptime        | String               |     | YES  |         | FIELD         |
+| active_time   | String               |     | YES  |         | FIELD         |
+| node_status   | String               |     | YES  |         | FIELD         |
++---------------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version

@@ -375,10 +375,11 @@ pub struct MetasrvNodeInfo {
     // The node cpus
     #[serde(default)]
     pub cpus: u32,
-    #[serde(default)]
     // The node memory bytes
+    #[serde(default)]
     pub memory_bytes: u64,
     // The node hostname
+    #[serde(default)]
     pub hostname: String,
 }
 
