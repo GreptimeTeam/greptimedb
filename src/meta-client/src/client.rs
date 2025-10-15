@@ -826,7 +826,7 @@ mod tests {
 
         let request_sent = Arc::new(AtomicUsize::new(0));
         let request_sent_clone = request_sent.clone();
-        let _handle = tokio::spawn(async move {
+        let handle_send = tokio::spawn(async move {
             for _ in 0..5 {
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
@@ -839,6 +839,9 @@ mod tests {
                 request_sent_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
+
+        // sender should have enough capacity to send all requests
+        handle_send.await.unwrap();
 
         let heartbeat_count = Arc::new(AtomicUsize::new(0));
         let heartbeat_count_clone = heartbeat_count.clone();
