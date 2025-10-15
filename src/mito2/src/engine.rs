@@ -83,7 +83,7 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::{MemoryTrackedStream, QueryMemoryTracker, SendableRecordBatchStream};
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
@@ -345,17 +345,11 @@ impl MitoEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        let stream = self
-            .scanner(region_id, request)
+        self.scanner(region_id, request)
             .await
             .map_err(BoxedError::new)?
             .scan()
-            .await?;
-
-        Ok(Box::pin(MemoryTrackedStream::new(
-            stream,
-            self.inner.scan_memory_tracker.clone(),
-        )))
+            .await
     }
 
     /// Scan [`Batch`]es by [`ScanRequest`].
@@ -962,7 +956,8 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start)
-        .with_flat_format(self.config.default_experimental_flat_format);
+        .with_flat_format(self.config.default_experimental_flat_format)
+        .with_query_memory_tracker(self.scan_memory_tracker.clone());
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);

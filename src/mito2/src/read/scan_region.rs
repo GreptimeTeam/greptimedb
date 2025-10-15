@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
@@ -223,6 +223,8 @@ pub(crate) struct ScanRegion {
     filter_deleted: bool,
     /// Whether to use flat format.
     flat_format: bool,
+    /// Memory tracker for the query.
+    query_memory_tracker: Option<QueryMemoryTracker>,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -248,6 +250,7 @@ impl ScanRegion {
             start_time: None,
             filter_deleted: true,
             flat_format: false,
+            query_memory_tracker: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -311,6 +314,13 @@ impl ScanRegion {
         self
     }
 
+    /// Sets memory tracker for the query.
+    #[must_use]
+    pub(crate) fn with_query_memory_tracker(mut self, tracker: QueryMemoryTracker) -> Self {
+        self.query_memory_tracker = Some(tracker);
+        self
+    }
+
     #[cfg(feature = "enterprise")]
     pub(crate) fn set_extension_range_provider(
         &mut self,
@@ -350,20 +360,20 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?.with_compaction(false);
-        Ok(SeqScan::new(input))
+        let (input, tracker) = self.scan_input().await?;
+        Ok(SeqScan::new(input.with_compaction(false), tracker))
     }
 
     /// Unordered scan.
     pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
-        let input = self.scan_input().await?;
-        Ok(UnorderedScan::new(input))
+        let (input, tracker) = self.scan_input().await?;
+        Ok(UnorderedScan::new(input, tracker))
     }
 
     /// Scans by series.
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
-        let input = self.scan_input().await?;
-        Ok(SeriesScan::new(input))
+        let (input, tracker) = self.scan_input().await?;
+        Ok(SeriesScan::new(input, tracker))
     }
 
     /// Returns true if the region can use unordered scan for current request.
@@ -386,7 +396,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
-    async fn scan_input(mut self) -> Result<ScanInput> {
+    async fn scan_input(mut self) -> Result<(ScanInput, Option<QueryMemoryTracker>)> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
@@ -521,7 +531,7 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok(input)
+        Ok((input, self.query_memory_tracker))
     }
 
     fn region_id(&self) -> RegionId {
@@ -1186,11 +1196,16 @@ pub struct StreamContext {
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
+    /// Memory tracker for the query.
+    pub(crate) query_memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
+    pub(crate) fn seq_scan_ctx(
+        input: ScanInput,
+        query_memory_tracker: Option<QueryMemoryTracker>,
+    ) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -1199,11 +1214,15 @@ impl StreamContext {
             input,
             ranges,
             query_start,
+            query_memory_tracker,
         }
     }
 
     /// Creates a new [StreamContext] for [UnorderedScan].
-    pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
+    pub(crate) fn unordered_scan_ctx(
+        input: ScanInput,
+        query_memory_tracker: Option<QueryMemoryTracker>,
+    ) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -1212,6 +1231,7 @@ impl StreamContext {
             input,
             ranges,
             query_start,
+            query_memory_tracker,
         }
     }
 

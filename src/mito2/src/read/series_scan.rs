@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
-use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_recordbatch::{
+    MemoryTrackedStream, QueryMemoryTracker, RecordBatchStreamWrapper, SendableRecordBatchStream,
+};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -76,11 +78,11 @@ pub struct SeriesScan {
 
 impl SeriesScan {
     /// Creates a new [SeriesScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
+    pub(crate) fn new(input: ScanInput, query_memory_tracker: Option<QueryMemoryTracker>) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, query_memory_tracker));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
@@ -116,10 +118,18 @@ impl SeriesScan {
             metrics,
         );
 
-        Ok(Box::pin(RecordBatchStreamWrapper::new(
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
-        )))
+        ));
+
+        Ok(
+            if let Some(tracker) = &self.stream_ctx.query_memory_tracker {
+                Box::pin(MemoryTrackedStream::new(stream, tracker.clone()))
+            } else {
+                stream
+            },
+        )
     }
 
     fn scan_batch_in_partition(
