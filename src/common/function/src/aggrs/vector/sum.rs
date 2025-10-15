@@ -99,10 +99,7 @@ impl VectorSum {
                 }
             }
             DataType::LargeUtf8 => {
-                let arr: &LargeStringArray = values[0]
-                    .as_any()
-                    .downcast_ref::<LargeStringArray>()
-                    .unwrap();
+                let arr: &LargeStringArray = values[0].as_string();
                 for s in arr.iter() {
                     let Some(s) = s else {
                         if is_update {

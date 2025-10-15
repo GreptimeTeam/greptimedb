@@ -92,10 +92,7 @@ impl VectorProduct {
                     .collect::<Result<Vec<_>>>()?
             }
             DataType::LargeUtf8 => {
-                let arr: &LargeStringArray = values[0]
-                    .as_any()
-                    .downcast_ref::<LargeStringArray>()
-                    .unwrap();
+                let arr: &LargeStringArray = values[0].as_string();
                 arr.iter()
                     .filter_map(|x| x.map(|s| parse_veclit_from_strlit(s).map_err(Into::into)))
                     .map(|x: Result<Vec<f32>>| x.map(Cow::Owned))
