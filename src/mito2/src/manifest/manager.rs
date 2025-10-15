@@ -35,9 +35,8 @@ use crate::manifest::storage::{
     ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
 use crate::sst::FormatType;
-use crate::region::{ManifestStats};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
