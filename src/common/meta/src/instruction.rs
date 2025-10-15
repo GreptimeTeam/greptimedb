@@ -762,6 +762,9 @@ mod tests {
         }
     }
 
+    /// Could trigger a serde-json bug: https://github.com/serde-rs/json/issues/1254
+    ///
+    /// workaround is allow `RegionId` to be deserialized from string
     #[test]
     fn test_serialize_get_file_refs_instruction_reply() {
         let mut manifest = FileRefsManifest::default();
