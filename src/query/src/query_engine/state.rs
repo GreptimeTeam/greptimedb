@@ -31,7 +31,9 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
-use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
+};
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
@@ -50,6 +52,7 @@ use crate::QueryEngineContext;
 use crate::dist_plan::{
     DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
 };
+use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
@@ -105,7 +108,7 @@ impl QueryEngineState {
         let runtime_env = if memory_pool_size > 0 {
             Arc::new(
                 RuntimeEnvBuilder::new()
-                    .with_memory_pool(Arc::new(GreedyMemoryPool::new(memory_pool_size)))
+                    .with_memory_pool(Arc::new(MetricsMemoryPool::new(memory_pool_size)))
                     .build()
                     .expect("Failed to build RuntimeEnv"),
             )
@@ -429,5 +432,68 @@ impl DfQueryPlanner {
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
         }
+    }
+}
+
+/// A wrapper around GreedyMemoryPool that records metrics.
+///
+/// This wrapper intercepts all memory pool operations and updates
+/// Prometheus metrics for monitoring query memory usage and rejections.
+#[derive(Debug)]
+struct MetricsMemoryPool {
+    inner: Arc<GreedyMemoryPool>,
+}
+
+impl MetricsMemoryPool {
+    fn new(limit: usize) -> Self {
+        Self {
+            inner: Arc::new(GreedyMemoryPool::new(limit)),
+        }
+    }
+
+    #[inline]
+    fn update_metrics(&self) {
+        QUERY_MEMORY_POOL_USAGE_BYTES.set(self.inner.reserved() as i64);
+    }
+}
+
+impl MemoryPool for MetricsMemoryPool {
+    fn register(&self, consumer: &MemoryConsumer) {
+        self.inner.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+        self.update_metrics();
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+        self.update_metrics();
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &MemoryReservation,
+        additional: usize,
+    ) -> datafusion_common::Result<()> {
+        let result = self.inner.try_grow(reservation, additional);
+        if result.is_err() {
+            QUERY_MEMORY_POOL_REJECTED_TOTAL.inc();
+        }
+        self.update_metrics();
+        result
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        self.inner.memory_limit()
     }
 }
