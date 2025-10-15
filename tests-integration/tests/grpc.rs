@@ -1157,8 +1157,11 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
+    let err_msg = err.to_string();
     assert!(
-        err.to_string().contains("RESOURCE_EXHAUSTED") || err.to_string().contains("memory limit")
+        err_msg.contains("Too many concurrent"),
+        "Expected memory limit error, got: {}",
+        err_msg
     );
 
     let _ = fe_grpc_server.shutdown().await;

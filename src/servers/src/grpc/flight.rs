@@ -45,6 +45,7 @@ use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
+use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
 use crate::request_limiter::{RequestMemoryGuard, RequestMemoryLimiter};
 use crate::{error, hint_headers};
 
@@ -270,11 +271,19 @@ impl PutRecordBatchRequest {
         };
 
         let _guard = limiter
-            .as_ref()
             .filter(|limiter| limiter.is_enabled())
             .map(|limiter| {
                 let message_size = flight_data.encoded_len();
-                limiter.try_acquire(message_size)
+                limiter
+                    .try_acquire(message_size)
+                    .map(|guard| {
+                        guard.inspect(|g| {
+                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                        })
+                    })
+                    .inspect_err(|_| {
+                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                    })
             })
             .transpose()?
             .flatten();

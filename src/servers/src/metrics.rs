@@ -298,6 +298,26 @@ lazy_static! {
         "greptime_servers_bulk_insert_elapsed",
         "servers handle bulk insert elapsed",
     ).unwrap();
+
+    pub static ref METRIC_HTTP_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_servers_http_memory_usage_bytes",
+        "current http request memory usage in bytes"
+    ).unwrap();
+
+    pub static ref METRIC_HTTP_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_servers_http_requests_rejected_total",
+        "total number of http requests rejected due to memory limit"
+    ).unwrap();
+
+    pub static ref METRIC_GRPC_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_servers_grpc_memory_usage_bytes",
+        "current grpc request memory usage in bytes"
+    ).unwrap();
+
+    pub static ref METRIC_GRPC_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_servers_grpc_requests_rejected_total",
+        "total number of grpc requests rejected due to memory limit"
+    ).unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs

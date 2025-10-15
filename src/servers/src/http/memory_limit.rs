@@ -19,6 +19,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 
+use crate::metrics::{METRIC_HTTP_MEMORY_USAGE_BYTES, METRIC_HTTP_REQUESTS_REJECTED_TOTAL};
 use crate::request_limiter::RequestMemoryLimiter;
 
 pub async fn memory_limit_middleware(
@@ -34,8 +35,11 @@ pub async fn memory_limit_middleware(
         .unwrap_or(0);
 
     let _guard = match limiter.try_acquire(content_length) {
-        Ok(guard) => guard,
+        Ok(guard) => guard.inspect(|g| {
+            METRIC_HTTP_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+        }),
         Err(e) => {
+            METRIC_HTTP_REQUESTS_REJECTED_TOTAL.inc();
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 format!("Request body memory limit exceeded: {}", e),

@@ -26,6 +26,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{TonicResult, cancellation};
 use crate::hint_headers;
+use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
 use crate::request_limiter::RequestMemoryLimiter;
 
 pub(crate) struct DatabaseService {
@@ -57,7 +58,17 @@ impl GreptimeDatabase for DatabaseService {
             .filter(|limiter| limiter.is_enabled())
             .and_then(|limiter| {
                 let message_size = request.get_ref().encoded_len();
-                limiter.try_acquire(message_size).transpose()
+                limiter
+                    .try_acquire(message_size)
+                    .map(|guard| {
+                        guard.inspect(|g| {
+                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                        })
+                    })
+                    .inspect_err(|_| {
+                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                    })
+                    .transpose()
             })
             .transpose()?;
 
@@ -123,7 +134,17 @@ impl GreptimeDatabase for DatabaseService {
                     .filter(|limiter| limiter.is_enabled())
                     .and_then(|limiter| {
                         let message_size = request.encoded_len();
-                        limiter.try_acquire(message_size).transpose()
+                        limiter
+                            .try_acquire(message_size)
+                            .map(|guard| {
+                                guard.inspect(|g| {
+                                    METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                                })
+                            })
+                            .inspect_err(|_| {
+                                METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                            })
+                            .transpose()
                     })
                     .transpose()?;
                 let output = handler.handle_request(request, hints.clone()).await?;

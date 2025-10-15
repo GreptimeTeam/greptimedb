@@ -84,6 +84,7 @@ impl RequestMemoryLimiter {
                     return Ok(Some(RequestMemoryGuard {
                         size: request_size,
                         limiter: Arc::clone(inner),
+                        usage_snapshot: new_usage,
                     }));
                 }
                 Err(actual) => {
@@ -119,6 +120,14 @@ impl RequestMemoryLimiter {
 pub struct RequestMemoryGuard {
     size: usize,
     limiter: Arc<LimiterInner>,
+    usage_snapshot: usize,
+}
+
+impl RequestMemoryGuard {
+    /// Returns the total memory usage snapshot at the time this guard was acquired.
+    pub fn current_usage(&self) -> usize {
+        self.usage_snapshot
+    }
 }
 
 impl Drop for RequestMemoryGuard {
