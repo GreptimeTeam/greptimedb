@@ -682,6 +682,40 @@ pub fn column_schemas_to_defs(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepartitionRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub from_exprs: Vec<Expr>,
+    pub into_exprs: Vec<Expr>,
+}
+
+pub(crate) fn to_repartition_request(
+    alter_table: AlterTable,
+    query_ctx: &QueryContextRef,
+) -> Result<RepartitionRequest> {
+    let (catalog_name, schema_name, table_name) =
+        table_idents_to_full_name(alter_table.table_name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    let AlterTableOperation::Repartition { operation } = alter_table.alter_operation else {
+        return InvalidSqlSnafu {
+            err_msg: "expected REPARTITION operation",
+        }
+        .fail();
+    };
+
+    Ok(RepartitionRequest {
+        catalog_name,
+        schema_name,
+        table_name,
+        from_exprs: operation.from_exprs,
+        into_exprs: operation.into_exprs,
+    })
+}
+
 /// Converts a SQL alter table statement into a gRPC alter table expression.
 pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
@@ -763,6 +797,12 @@ pub(crate) fn to_alter_table_expr(
         }
         AlterTableOperation::UnsetTableOptions { keys } => {
             AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
+        }
+        AlterTableOperation::Repartition { .. } => {
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE ... REPARTITION",
+            }
+            .fail();
         }
         AlterTableOperation::SetIndex { options } => {
             let option = match options {
@@ -1390,6 +1430,50 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             modify_column_type.target_type
         );
         assert!(modify_column_type.target_type_extension.is_none());
+    }
+
+    #[test]
+    fn test_to_repartition_request() {
+        let sql = r#"
+ALTER TABLE metrics REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+
+        let request = to_repartition_request(alter_table, &QueryContext::arc()).unwrap();
+        assert_eq!("greptime", request.catalog_name);
+        assert_eq!("public", request.schema_name);
+        assert_eq!("metrics", request.table_name);
+        assert_eq!(
+            request
+                .from_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec!["device_id < 100".to_string()]
+        );
+        assert_eq!(
+            request
+                .into_exprs
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "device_id < 100 AND area < 'South'".to_string(),
+                "device_id < 100 AND area >= 'South'".to_string()
+            ]
+        );
     }
 
     fn new_test_table_names() -> Vec<TableName> {
