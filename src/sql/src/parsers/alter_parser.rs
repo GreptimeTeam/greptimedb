@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use common_query::AddColumnLocation;
 use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
 use snafu::{ResultExt, ensure};
-use sqlparser::ast::Ident;
+use sqlparser::ast::{Expr, Ident};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
@@ -34,8 +34,8 @@ use crate::parsers::utils::{
 };
 use crate::statements::alter::{
     AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
-    DropDefaultsOperation, KeyValueOption, SetDefaultsOperation, SetIndexOperation,
-    UnsetIndexOperation,
+    DropDefaultsOperation, KeyValueOption, RepartitionOperation, SetDefaultsOperation,
+    SetIndexOperation, UnsetIndexOperation,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -124,6 +124,8 @@ impl ParserContext<'_> {
                     self.parse_alter_table_modify()?
                 } else if w.value.eq_ignore_ascii_case("UNSET") {
                     self.parse_alter_table_unset()?
+                } else if w.value.eq_ignore_ascii_case("REPARTITION") {
+                    self.parse_alter_table_repartition()?
                 } else {
                     match w.keyword {
                         Keyword::ADD => self.parse_alter_table_add()?,
@@ -166,7 +168,7 @@ impl ParserContext<'_> {
                             AlterTableOperation::SetTableOptions { options }
                         }
                         _ => self.expected(
-                            "ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE",
+                            "ADD or DROP or MODIFY or RENAME or SET or REPARTITION after ALTER TABLE",
                             self.parser.peek_token(),
                         )?,
                     }
@@ -187,6 +189,65 @@ impl ParserContext<'_> {
             .collect();
 
         Ok(AlterTableOperation::UnsetTableOptions { keys })
+    }
+
+    fn parse_alter_table_repartition(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+
+        let from_exprs = self.parse_repartition_expr_list()?;
+        self.parser
+            .expect_keyword(Keyword::INTO)
+            .context(error::SyntaxSnafu)?;
+        let into_exprs = self.parse_repartition_expr_list()?;
+
+        if matches!(self.parser.peek_token().token, Token::Comma) {
+            return self.expected("end of REPARTITION clause", self.parser.peek_token());
+        }
+
+        Ok(AlterTableOperation::Repartition {
+            operation: RepartitionOperation::new(from_exprs, into_exprs),
+        })
+    }
+
+    fn parse_repartition_expr_list(&mut self) -> Result<Vec<Expr>> {
+        self.parser
+            .expect_token(&Token::LParen)
+            .context(error::SyntaxSnafu)?;
+
+        if matches!(self.parser.peek_token().token, Token::RParen) {
+            return self.expected(
+                "expression inside REPARTITION clause",
+                self.parser.peek_token(),
+            );
+        }
+
+        let mut exprs = Vec::new();
+        loop {
+            let expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+            exprs.push(expr);
+
+            match self.parser.peek_token().token {
+                Token::Comma => {
+                    self.parser.next_token();
+                    if matches!(self.parser.peek_token().token, Token::RParen) {
+                        self.parser.next_token();
+                        break;
+                    }
+                }
+                Token::RParen => {
+                    self.parser.next_token();
+                    break;
+                }
+                _ => {
+                    return self.expected(
+                        "comma or right parenthesis after repartition expression",
+                        self.parser.peek_token(),
+                    );
+                }
+            }
+        }
+
+        Ok(exprs)
     }
 
     fn parse_alter_table_add(&mut self) -> Result<AlterTableOperation> {
@@ -810,6 +871,70 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_alter_table_repartition() {
+        let sql = r#"
+ALTER TABLE t REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South',
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Repartition { .. }
+            );
+
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(operation.from_exprs.len(), 1);
+                assert_eq!(operation.from_exprs[0].to_string(), "device_id < 100");
+                assert_eq!(operation.into_exprs.len(), 2);
+                assert_eq!(
+                    operation.into_exprs[0].to_string(),
+                    "device_id < 100 AND area < 'South'"
+                );
+                assert_eq!(
+                    operation.into_exprs[1].to_string(),
+                    "device_id < 100 AND area >= 'South'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_repartition_multiple() {
+        let sql = r#"
+ALTER TABLE metrics REPARTITION
+(
+  a < 10,
+  a >= 10
+) INTO (
+  a < 20
+),
+(
+  b < 20
+) INTO (
+  b < 10,
+  b >= 10,
+);"#;
+
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert_eq!(
+            result.output_msg(),
+            "Invalid SQL syntax: sql parser error: Expected end of REPARTITION clause, found: ,"
+        );
+    }
+
+    #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
         let result =
@@ -966,7 +1091,7 @@ mod tests {
         let err = result.output_msg();
         assert_eq!(
             err,
-            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t"
+            "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET or REPARTITION after ALTER TABLE, found: table_t"
         );
 
         let sql = "ALTER TABLE test_table RENAME table_t";

@@ -33,6 +33,7 @@ use strum::EnumString;
 
 use crate::error::{Error, InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::partition_tree::{DEFAULT_FREEZE_THRESHOLD, DEFAULT_MAX_KEYS_PER_SHARD};
+use crate::sst::FormatType;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
@@ -73,6 +74,8 @@ pub struct RegionOptions {
     /// The mode to merge duplicate rows.
     /// Only takes effect when `append_mode` is `false`.
     pub merge_mode: Option<MergeMode>,
+    /// SST format type.
+    pub sst_format: Option<FormatType>,
 }
 
 impl RegionOptions {
@@ -151,6 +154,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             index_options,
             memtable,
             merge_mode: options.merge_mode,
+            sst_format: options.sst_format,
         };
         opts.validate()?;
 
@@ -256,6 +260,8 @@ struct RegionOptionsWithoutEnum {
     append_mode: bool,
     #[serde_as(as = "NoneAsEmptyString")]
     merge_mode: Option<MergeMode>,
+    #[serde_as(as = "NoneAsEmptyString")]
+    sst_format: Option<FormatType>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -266,6 +272,7 @@ impl Default for RegionOptionsWithoutEnum {
             storage: options.storage,
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
+            sst_format: options.sst_format,
         }
     }
 }
@@ -652,6 +659,7 @@ mod tests {
                 primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
+            sst_format: None,
         };
         assert_eq!(expect, options);
     }
@@ -685,6 +693,7 @@ mod tests {
                 primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
+            sst_format: None,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -748,6 +757,7 @@ mod tests {
                 primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
+            sst_format: None,
         };
         assert_eq!(options, got);
     }

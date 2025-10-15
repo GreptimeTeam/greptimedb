@@ -35,6 +35,7 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequestWithTime;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
+use crate::sst::FormatType;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -134,6 +135,7 @@ impl SchedulerEnv {
                 },
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .unwrap(),
