@@ -26,7 +26,7 @@ use datatypes::schema::{
     SkippingIndexOptions,
 };
 use derive_builder::Builder;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
@@ -1155,7 +1155,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -1172,6 +1172,7 @@ pub struct RawTableMeta {
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    #[serde(default)]
     pub updated_on: DateTime<Utc>,
     /// Order doesn't matter to this array.
     #[serde(default)]
@@ -1180,47 +1181,6 @@ pub struct RawTableMeta {
     /// Note: This field may be empty for older versions that did not include this field.
     #[serde(default)]
     pub column_ids: Vec<ColumnId>,
-}
-
-impl<'de> Deserialize<'de> for RawTableMeta {
-    fn deserialize<D>(
-        deserializer: D,
-    ) -> std::result::Result<RawTableMeta, <D as Deserializer<'de>>::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper {
-            schema: RawSchema,
-            primary_key_indices: Vec<usize>,
-            value_indices: Vec<usize>,
-            engine: String,
-            next_column_id: u32,
-            region_numbers: Vec<u32>,
-            options: TableOptions,
-            created_on: DateTime<Utc>,
-            updated_on: Option<DateTime<Utc>>,
-            #[serde(default)]
-            partition_key_indices: Vec<usize>,
-            #[serde(default)]
-            column_ids: Vec<ColumnId>,
-        }
-
-        let h = Helper::deserialize(deserializer)?;
-        Ok(RawTableMeta {
-            schema: h.schema,
-            primary_key_indices: h.primary_key_indices,
-            value_indices: h.value_indices,
-            engine: h.engine,
-            next_column_id: h.next_column_id,
-            region_numbers: h.region_numbers,
-            options: h.options,
-            created_on: h.created_on,
-            updated_on: h.updated_on.unwrap_or(h.created_on),
-            partition_key_indices: h.partition_key_indices,
-            column_ids: h.column_ids,
-        })
-    }
 }
 
 impl From<TableMeta> for RawTableMeta {

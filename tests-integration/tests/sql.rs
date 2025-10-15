@@ -554,6 +554,8 @@ pub async fn test_alter_update_on(store_type: StorageType) {
     let updated_on_before: NaiveDateTime = before_row.get("update_time");
     assert_eq!(created_on, updated_on_before);
 
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
     sqlx::query("alter table demo add column j json;")
         .execute(&pool)
         .await
