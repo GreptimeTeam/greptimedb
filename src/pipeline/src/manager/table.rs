@@ -21,7 +21,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::col;
@@ -540,9 +540,10 @@ impl PipelineTable {
             let pipeline_schema_values = Helper::extract_string_vector_values(
                 pipeline_schema_column.as_ref(),
             )
-            .map_err(|_| {
+            .map_err(|e| {
+                error!(e;"Failed to extract pipeline schema values");
                 CastTypeSnafu {
-                    msg: "Failed to extract pipeline schema values".to_string(),
+                    msg: "Failed to extract pipeline schema values",
                 }
                 .build()
             })?;

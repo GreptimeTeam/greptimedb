@@ -79,7 +79,7 @@ impl SortField {
             | ConcreteDataType::Json(_)
             | ConcreteDataType::Vector(_) => 11,
             ConcreteDataType::String(_) => 11, // a non-empty string takes at least 11 bytes.
-            ConcreteDataType::LargeString(_) => 11, // a non-empty large string takes at least 11 bytes.
+            ConcreteDataType::LargeString(_) => 11,
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::Timestamp(_) => 10,
             ConcreteDataType::Time(_) => 10,
@@ -626,6 +626,39 @@ mod tests {
                 Value::Timestamp(Timestamp::new_millisecond(42)),
                 Value::Int64(43),
             ],
+        );
+    }
+
+    #[test]
+    fn test_memcmp_large_string() {
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::largestring_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ],
+            vec![
+                Value::String("large_string_value".into()),
+                Value::Int64(100),
+            ],
+        );
+
+        // Test with null large string
+        check_encode_and_decode(
+            &[ConcreteDataType::largestring_datatype()],
+            vec![Value::Null],
+        );
+
+        // Test with empty large string
+        check_encode_and_decode(
+            &[ConcreteDataType::largestring_datatype()],
+            vec![Value::String("".into())],
+        );
+
+        // Test with very long large string
+        let long_string = "a".repeat(1000);
+        check_encode_and_decode(
+            &[ConcreteDataType::largestring_datatype()],
+            vec![Value::String(long_string.into())],
         );
     }
 

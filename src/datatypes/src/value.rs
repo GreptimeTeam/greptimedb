@@ -472,13 +472,14 @@ impl Value {
             Value::Int64(v) => ScalarValue::Int64(Some(*v)),
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
-            Value::String(v) => match output_type {
-                ConcreteDataType::String(_) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
-                ConcreteDataType::LargeString(_) => {
-                    ScalarValue::LargeUtf8(Some(v.as_utf8().to_string()))
+            Value::String(v) => {
+                let s = v.as_utf8().to_string();
+                match output_type {
+                    ConcreteDataType::String(_) => ScalarValue::Utf8(Some(s)),
+                    ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(Some(s)),
+                    _ => ScalarValue::Utf8(Some(s)), // fallback to Utf8 for compatibility
                 }
-                _ => ScalarValue::Utf8(Some(v.as_utf8().to_string())), // fallback to Utf8 for compatibility
-            },
+            }
             Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
