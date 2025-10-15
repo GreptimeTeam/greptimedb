@@ -25,7 +25,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
+use datatypes::vectors::{Float64Vector, Helper, TimestampMillisecondVector};
 use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
@@ -240,20 +240,14 @@ impl PrometheusJsonResponse {
 
         // Preserves the order of output tags.
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
-        let mut buffer = IndexMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
+        let mut buffer = IndexMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
 
         let schema = batches.schema();
         for batch in batches.iter() {
             // prepare things...
-            let tag_columns = tag_column_indices
+            let tag_columns_values = tag_column_indices
                 .iter()
-                .map(|i| {
-                    batch
-                        .column(*i)
-                        .as_any()
-                        .downcast_ref::<StringVector>()
-                        .unwrap()
-                })
+                .map(|i| Helper::extract_string_vector_values(batch.column(*i).as_ref()).unwrap())
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
@@ -285,12 +279,16 @@ impl PrometheusJsonResponse {
                     // retrieve tags
                     let mut tags = Vec::with_capacity(num_label_columns + 1);
                     if let Some(metric_name) = &metric_name {
-                        tags.push((METRIC_NAME, metric_name.as_str()));
+                        tags.push((METRIC_NAME.to_string(), metric_name.clone()));
                     }
-                    for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                    for (tag_column_values, tag_name) in
+                        tag_columns_values.iter().zip(tag_names.iter())
+                    {
                         // TODO(ruihang): add test for NULL tag
-                        if let Some(tag_value) = tag_column.get_data(row_index) {
-                            tags.push((tag_name, tag_value));
+                        if let Some(tag_value) =
+                            tag_column_values.get(row_index).and_then(|v| v.as_ref())
+                        {
+                            tags.push((tag_name.to_string(), tag_value.clone()));
                         }
                     }
 
@@ -317,10 +315,7 @@ impl PrometheusJsonResponse {
 
         // accumulate data into result
         buffer.into_iter().for_each(|(tags, mut values)| {
-            let metric = tags
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>();
+            let metric = tags.into_iter().collect::<BTreeMap<_, _>>();
             match result {
                 PromQueryResult::Vector(ref mut v) => {
                     v.push(PromSeriesVector {

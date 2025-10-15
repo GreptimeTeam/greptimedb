@@ -179,7 +179,9 @@ impl ConstraintPruner {
                         *val = Value::Float64(OrderedFloat(new_lit));
                     }
 
-                    ConcreteDataType::String(_) | ConcreteDataType::Boolean(_) => {
+                    ConcreteDataType::String(_)
+                    | ConcreteDataType::LargeString(_)
+                    | ConcreteDataType::Boolean(_) => {
                         // no operation needed
                     }
 

@@ -357,6 +357,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Float64(_) => ColumnDataType::Float64,
             ConcreteDataType::Binary(_) => ColumnDataType::Binary,
             ConcreteDataType::String(_) => ColumnDataType::String,
+            ConcreteDataType::LargeString(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::Timestamp(t) => match t {
                 TimestampType::Second(_) => ColumnDataType::TimestampSecond,

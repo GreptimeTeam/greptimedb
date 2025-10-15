@@ -29,7 +29,7 @@ use datafusion_common::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan};
 use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
-use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
+use datatypes::vectors::{Helper, TimestampNanosecondVector, Vector};
 use itertools::Itertools;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
@@ -526,26 +526,26 @@ impl PipelineTable {
         let mut re = Vec::with_capacity(records.len());
         for r in records {
             let pipeline_content_column = r.column(0);
-            let pipeline_content = pipeline_content_column
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!(
-                        "can't downcast {:?} array into string vector",
-                        pipeline_content_column.data_type()
-                    ),
-                })?;
+            let pipeline_content_values = Helper::extract_string_vector_values(
+                pipeline_content_column.as_ref(),
+            )
+            .map_err(|_| {
+                CastTypeSnafu {
+                    msg: "Failed to extract pipeline content values".to_string(),
+                }
+                .build()
+            })?;
 
             let pipeline_schema_column = r.column(1);
-            let pipeline_schema = pipeline_schema_column
-                .as_any()
-                .downcast_ref::<StringVector>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!(
-                        "can't downcast {:?} array into string vector",
-                        pipeline_schema_column.data_type()
-                    ),
-                })?;
+            let pipeline_schema_values = Helper::extract_string_vector_values(
+                pipeline_schema_column.as_ref(),
+            )
+            .map_err(|_| {
+                CastTypeSnafu {
+                    msg: "Failed to extract pipeline schema values".to_string(),
+                }
+                .build()
+            })?;
 
             let pipeline_created_at_column = r.column(2);
             let pipeline_created_at = pipeline_created_at_column
@@ -560,20 +560,20 @@ impl PipelineTable {
 
             debug!(
                 "find_pipeline_by_name: pipeline_content: {:?}, pipeline_schema: {:?}, pipeline_created_at: {:?}",
-                pipeline_content, pipeline_schema, pipeline_created_at
+                pipeline_content_values, pipeline_schema_values, pipeline_created_at
             );
 
             ensure!(
-                pipeline_content.len() == pipeline_schema.len()
-                    && pipeline_schema.len() == pipeline_created_at.len(),
+                pipeline_content_values.len() == pipeline_schema_values.len()
+                    && pipeline_schema_values.len() == pipeline_created_at.len(),
                 RecordBatchLenNotMatchSnafu
             );
 
-            let len = pipeline_content.len();
+            let len = pipeline_content_values.len();
             for i in 0..len {
                 re.push((
-                    pipeline_content.get_data(i).unwrap().to_string(),
-                    pipeline_schema.get_data(i).unwrap().to_string(),
+                    pipeline_content_values[i].as_ref().unwrap().clone(),
+                    pipeline_schema_values[i].as_ref().unwrap().clone(),
                     pipeline_created_at.get_data(i).unwrap(),
                 ));
             }

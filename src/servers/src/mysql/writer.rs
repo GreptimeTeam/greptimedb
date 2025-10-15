@@ -296,9 +296,9 @@ pub(crate) fn create_mysql_column(
         }
         ConcreteDataType::Float32(_) => Ok(ColumnType::MYSQL_TYPE_FLOAT),
         ConcreteDataType::Float64(_) => Ok(ColumnType::MYSQL_TYPE_DOUBLE),
-        ConcreteDataType::Binary(_) | ConcreteDataType::String(_) => {
-            Ok(ColumnType::MYSQL_TYPE_VARCHAR)
-        }
+        ConcreteDataType::Binary(_)
+        | ConcreteDataType::String(_)
+        | ConcreteDataType::LargeString(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
         ConcreteDataType::Time(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),

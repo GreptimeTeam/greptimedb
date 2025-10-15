@@ -33,12 +33,23 @@ Affected Rows: 9
 
 SELECT g, STRING_AGG(x,'|') FROM strings GROUP BY g ORDER BY g;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 1
++---+---------------------------------+
+| g | string_agg(strings.x,Utf8("|")) |
++---+---------------------------------+
+| 1 | a|b                             |
+| 2 | i|j                             |
+| 3 | p                               |
+| 4 | x|y|z                           |
++---+---------------------------------+
 
 -- test agg on empty set
 SELECT STRING_AGG(x,',') FROM strings WHERE g > 100;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 0
++---------------------------------+
+| string_agg(strings.x,Utf8(",")) |
++---------------------------------+
+|                                 |
++---------------------------------+
 
 -- string_agg can be used instead of group_concat
 SELECT string_agg('a', ',');
@@ -59,35 +70,75 @@ SELECT string_agg('a', ',');
 
 SELECT g, string_agg(x, ',') FROM strings GROUP BY g ORDER BY g;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 1
++---+---------------------------------+
+| g | string_agg(strings.x,Utf8(",")) |
++---+---------------------------------+
+| 1 | a,b                             |
+| 2 | i,j                             |
+| 3 | p                               |
+| 4 | x,y,z                           |
++---+---------------------------------+
 
 -- Test ORDER BY
 -- Single group
 SELECT STRING_AGG(x, '' ORDER BY x ASC), STRING_AGG(x, '|' ORDER BY x ASC) FROM strings;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 0
++--------------------------------------------------------------------+---------------------------------------------------------------------+
+| string_agg(strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++--------------------------------------------------------------------+---------------------------------------------------------------------+
+| abijpxyz                                                           | a|b|i|j|p|x|y|z                                                     |
++--------------------------------------------------------------------+---------------------------------------------------------------------+
 
 SELECT STRING_AGG(x, '' ORDER BY x DESC), STRING_AGG(x,'|' ORDER BY x DESC) FROM strings;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 0
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| string_agg(strings.x,Utf8("")) ORDER BY [strings.x DESC NULLS FIRST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x DESC NULLS FIRST] |
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| zyxpjiba                                                             | z|y|x|p|j|i|b|a                                                       |
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
 
 -- Grouped with ORDER BY
 SELECT g, STRING_AGG(x, '' ORDER BY x ASC), STRING_AGG(x, '|' ORDER BY x ASC) FROM strings GROUP BY g ORDER BY g;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 1
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
+| g | string_agg(strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
+| 1 | ab                                                                 | a|b                                                                 |
+| 2 | ij                                                                 | i|j                                                                 |
+| 3 | p                                                                  | p                                                                   |
+| 4 | xyz                                                                | x|y|z                                                               |
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
 
 SELECT g, STRING_AGG(x, '' ORDER BY x DESC), STRING_AGG(x,'|' ORDER BY x DESC) FROM strings GROUP BY g ORDER BY g;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 1
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| g | string_agg(strings.x,Utf8("")) ORDER BY [strings.x DESC NULLS FIRST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x DESC NULLS FIRST] |
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| 1 | ba                                                                   | b|a                                                                   |
+| 2 | ji                                                                   | j|i                                                                   |
+| 3 | p                                                                    | p                                                                     |
+| 4 | zyx                                                                  | z|y|x                                                                 |
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
 
 -- Test with DISTINCT
 SELECT STRING_AGG(DISTINCT x, '' ORDER BY x), STRING_AGG(DISTINCT x, '|' ORDER BY x) FROM strings;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 0
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
+| string_agg(DISTINCT strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(DISTINCT strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
+| abijpxyz                                                                    | a|b|i|j|p|x|y|z                                                              |
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
 
 SELECT g, STRING_AGG(DISTINCT x, '' ORDER BY x) FROM strings GROUP BY g ORDER BY g;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected LargeUtf8 but found Utf8 at column index 1
++---+-----------------------------------------------------------------------------+
+| g | string_agg(DISTINCT strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] |
++---+-----------------------------------------------------------------------------+
+| 1 | ab                                                                          |
+| 2 | ij                                                                          |
+| 3 | p                                                                           |
+| 4 | xyz                                                                         |
++---+-----------------------------------------------------------------------------+
 
 -- cleanup
 DROP TABLE strings;

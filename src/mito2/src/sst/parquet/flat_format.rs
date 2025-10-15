@@ -688,7 +688,10 @@ impl FlatConvertFormat {
         let values_array = values_vector.to_arrow_array();
 
         // Only creates dictionary array for string types, otherwise take values by keys
-        if matches!(column_type, ConcreteDataType::String(_)) {
+        if matches!(
+            column_type,
+            ConcreteDataType::String(_) | ConcreteDataType::LargeString(_)
+        ) {
             // Creates dictionary array using the same keys for string types
             // Note that the dictionary values may have nulls.
             let dict_array = DictionaryArray::new(keys.clone(), values_array);

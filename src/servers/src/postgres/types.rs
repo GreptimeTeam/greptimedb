@@ -241,7 +241,7 @@ fn encode_array(
                 }
             }
         }
-        ConcreteDataType::String(_) => {
+        &ConcreteDataType::String(_) | &ConcreteDataType::LargeString(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -490,7 +490,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4),
         &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8),
         &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => Ok(Type::BYTEA),
-        &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
+        &ConcreteDataType::String(_) | &ConcreteDataType::LargeString(_) => Ok(Type::VARCHAR),
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
@@ -507,7 +507,9 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4_ARRAY),
             &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8_ARRAY),
             &ConcreteDataType::Binary(_) => Ok(Type::BYTEA_ARRAY),
-            &ConcreteDataType::String(_) => Ok(Type::VARCHAR_ARRAY),
+            &ConcreteDataType::String(_) | &ConcreteDataType::LargeString(_) => {
+                Ok(Type::VARCHAR_ARRAY)
+            }
             &ConcreteDataType::Date(_) => Ok(Type::DATE_ARRAY),
             &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP_ARRAY),
             &ConcreteDataType::Time(_) => Ok(Type::TIME_ARRAY),
@@ -688,6 +690,7 @@ pub(super) fn parameters_to_scalar_values(
                 if let Some(server_type) = &server_type {
                     match server_type {
                         ConcreteDataType::String(_) => ScalarValue::Utf8(data),
+                        ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(data),
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -972,6 +975,9 @@ pub(super) fn parameters_to_scalar_values(
                         ConcreteDataType::String(_) => {
                             ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
                         }
+                        ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(
+                            data.map(|d| String::from_utf8_lossy(&d).to_string()),
+                        ),
                         ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
                         _ => {
                             return Err(invalid_parameter_error(

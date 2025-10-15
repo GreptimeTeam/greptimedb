@@ -472,7 +472,13 @@ impl Value {
             Value::Int64(v) => ScalarValue::Int64(Some(*v)),
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
-            Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
+            Value::String(v) => match output_type {
+                ConcreteDataType::String(_) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
+                ConcreteDataType::LargeString(_) => {
+                    ScalarValue::LargeUtf8(Some(v.as_utf8().to_string()))
+                }
+                _ => ScalarValue::Utf8(Some(v.as_utf8().to_string())), // fallback to Utf8 for compatibility
+            },
             Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
@@ -607,6 +613,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
             ScalarValue::Binary(None)
         }
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::Interval(v) => match v {

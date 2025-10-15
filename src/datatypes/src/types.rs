@@ -21,6 +21,7 @@ mod dictionary_type;
 mod duration_type;
 mod interval_type;
 mod json_type;
+mod large_string_type;
 mod list_type;
 mod null_type;
 mod primitive_type;
@@ -47,6 +48,7 @@ pub use json_type::{
     JSON_TYPE_NAME, JsonFormat, JsonType, jsonb_to_serde_json, jsonb_to_string,
     parse_string_to_jsonb,
 };
+pub use large_string_type::LargeStringType;
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{

@@ -35,6 +35,7 @@ mod duration;
 mod eq;
 mod helper;
 mod interval;
+mod large_string;
 mod list;
 mod null;
 pub(crate) mod operations;
@@ -61,6 +62,7 @@ pub use interval::{
     IntervalDayTimeVector, IntervalDayTimeVectorBuilder, IntervalMonthDayNanoVector,
     IntervalMonthDayNanoVectorBuilder, IntervalYearMonthVector, IntervalYearMonthVectorBuilder,
 };
+pub use large_string::{LargeStringVector, LargeStringVectorBuilder};
 pub use list::{ListIter, ListVector, ListVectorBuilder};
 pub use null::{NullVector, NullVectorBuilder};
 pub use primitive::{

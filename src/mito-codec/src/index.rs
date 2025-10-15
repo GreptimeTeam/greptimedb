@@ -49,7 +49,10 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if matches!(field.data_type(), ConcreteDataType::String(_)) {
+        if matches!(
+            field.data_type(),
+            ConcreteDataType::String(_) | ConcreteDataType::LargeString(_)
+        ) {
             let value = value
                 .try_into_string()
                 .context(FieldTypeMismatchSnafu)?

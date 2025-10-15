@@ -259,7 +259,9 @@ pub(crate) fn parse_string_to_value(
     );
 
     match data_type {
-        ConcreteDataType::String(_) => Ok(Value::String(s.into())),
+        ConcreteDataType::String(_) | ConcreteDataType::LargeString(_) => {
+            Ok(Value::String(s.into()))
+        }
         ConcreteDataType::Date(_) => {
             if let Ok(date) = common_time::date::Date::from_str(&s, timezone) {
                 Ok(Value::Date(date))

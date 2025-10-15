@@ -32,7 +32,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
-use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::scalars::{Scalar, ScalarVector, ScalarVectorBuilder};
 use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::struct_vector::StructVector;
@@ -41,16 +41,43 @@ use crate::vectors::{
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int8Vector, Int16Vector, Int32Vector,
     Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
-    ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector, TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
-    UInt16Vector, UInt32Vector, UInt64Vector, Vector, VectorRef,
+    LargeStringVector, ListVector, ListVectorBuilder, MutableVector, NullVector, StringVector,
+    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
+    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, Vector,
+    VectorRef,
 };
 
 /// Helper functions for `Vector`.
 pub struct Helper;
 
 impl Helper {
+    /// Extract string values from a vector that could be either StringVector or LargeStringVector.
+    /// Returns a vector of optional strings that can be used for further processing.
+    pub fn extract_string_vector_values(vector: &dyn Vector) -> Result<Vec<Option<String>>> {
+        // Try StringVector first
+        if let Some(string_vector) = vector.as_any().downcast_ref::<StringVector>() {
+            Ok((0..string_vector.len())
+                .map(|i| string_vector.get_data(i).map(|s| s.to_string()))
+                .collect())
+        }
+        // Try LargeStringVector
+        else if let Some(large_string_vector) =
+            vector.as_any().downcast_ref::<LargeStringVector>()
+        {
+            Ok((0..large_string_vector.len())
+                .map(|i| large_string_vector.get_data(i).map(|s| s.0.to_string()))
+                .collect())
+        } else {
+            error::UnknownVectorSnafu {
+                msg: format!(
+                    "can't extract string values from {:?} vector (expected StringVector or LargeStringVector)",
+                    vector.data_type()
+                ),
+            }.fail()
+        }
+    }
+
     /// Get a pointer to the underlying data of this vectors.
     /// Can be useful for fast comparisons.
     /// # Safety
@@ -159,8 +186,11 @@ impl Helper {
             ScalarValue::UInt64(v) => {
                 ConstantVector::new(Arc::new(UInt64Vector::from(vec![v])), length)
             }
-            ScalarValue::Utf8(v) | ScalarValue::LargeUtf8(v) => {
+            ScalarValue::Utf8(v) => {
                 ConstantVector::new(Arc::new(StringVector::from(vec![v])), length)
+            }
+            ScalarValue::LargeUtf8(v) => {
+                ConstantVector::new(Arc::new(LargeStringVector::from(vec![v])), length)
             }
             ScalarValue::Binary(v)
             | ScalarValue::LargeBinary(v)
@@ -291,7 +321,8 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            ArrowDataType::LargeUtf8 => Arc::new(LargeStringVector::try_from_arrow_array(array)?),
+            ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -742,17 +773,17 @@ mod tests {
     #[test]
     fn test_large_string_array_into_vector() {
         let input_vec = vec!["a", "b"];
-        let assertion_array = StringArray::from(input_vec.clone());
+        let assertion_array = LargeStringArray::from(input_vec.clone());
 
         let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
         let vector = Helper::try_into_vector(large_string_array).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(0, vector.null_count());
 
-        let output_arrow_array: StringArray = vector
+        let output_arrow_array: LargeStringArray = vector
             .to_arrow_array()
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap()
             .clone();
         assert_eq!(&assertion_array, &output_arrow_array);

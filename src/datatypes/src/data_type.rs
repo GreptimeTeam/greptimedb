@@ -33,10 +33,10 @@ use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType, ListType,
-    NullType, StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
+    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType,
+    LargeStringType, ListType, NullType, StringType, StructType, TimeMillisecondType, TimeType,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, TimestampType, UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -65,6 +65,7 @@ pub enum ConcreteDataType {
     // String types:
     Binary(BinaryType),
     String(StringType),
+    LargeString(LargeStringType),
 
     // Date and time types:
     Date(DateType),
@@ -106,6 +107,7 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Float64(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Binary(v) => write!(f, "{}", v.name()),
             ConcreteDataType::String(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::LargeString(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Date(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Timestamp(t) => match t {
                 TimestampType::Second(v) => write!(f, "{}", v.name()),
@@ -155,13 +157,17 @@ impl ConcreteDataType {
     }
 
     pub fn is_string(&self) -> bool {
-        matches!(self, ConcreteDataType::String(_))
+        matches!(
+            self,
+            ConcreteDataType::String(_) | ConcreteDataType::LargeString(_)
+        )
     }
 
     pub fn is_stringifiable(&self) -> bool {
         matches!(
             self,
             ConcreteDataType::String(_)
+                | ConcreteDataType::LargeString(_)
                 | ConcreteDataType::Date(_)
                 | ConcreteDataType::Timestamp(_)
                 | ConcreteDataType::Time(_)
@@ -388,7 +394,7 @@ impl ConcreteDataType {
             &ConcreteDataType::Float32(_) => "FLOAT4",
             &ConcreteDataType::Float64(_) => "FLOAT8",
             &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => "BYTEA",
-            &ConcreteDataType::String(_) => "VARCHAR",
+            &ConcreteDataType::String(_) | &ConcreteDataType::LargeString(_) => "VARCHAR",
             &ConcreteDataType::Date(_) => "DATE",
             &ConcreteDataType::Timestamp(_) => "TIMESTAMP",
             &ConcreteDataType::Time(_) => "TIME",
@@ -405,7 +411,7 @@ impl ConcreteDataType {
                 &ConcreteDataType::Float32(_) => "_FLOAT4",
                 &ConcreteDataType::Float64(_) => "_FLOAT8",
                 &ConcreteDataType::Binary(_) => "_BYTEA",
-                &ConcreteDataType::String(_) => "_VARCHAR",
+                &ConcreteDataType::String(_) | &ConcreteDataType::LargeString(_) => "_VARCHAR",
                 &ConcreteDataType::Date(_) => "_DATE",
                 &ConcreteDataType::Timestamp(_) => "_TIMESTAMP",
                 &ConcreteDataType::Time(_) => "_TIME",
@@ -454,9 +460,8 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Binary | ArrowDataType::LargeBinary | ArrowDataType::BinaryView => {
                 Self::binary_datatype()
             }
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
-                Self::string_datatype()
-            }
+            ArrowDataType::Utf8 | ArrowDataType::Utf8View => Self::string_datatype(),
+            ArrowDataType::LargeUtf8 => Self::largestring_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
             )),
@@ -513,8 +518,23 @@ macro_rules! impl_new_concrete_type_functions {
 }
 
 impl_new_concrete_type_functions!(
-    Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, Date, String, Json
+    Null,
+    Boolean,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    Binary,
+    Date,
+    String,
+    LargeString,
+    Json
 );
 
 impl ConcreteDataType {
@@ -777,6 +797,11 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
+        // Test LargeUtf8 mapping to LargeString
+        assert!(matches!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8),
+            ConcreteDataType::LargeString(_)
+        ));
         assert_eq!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
                 "item",
@@ -789,6 +814,28 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
         ));
+    }
+
+    #[test]
+    fn test_large_utf8_round_trip() {
+        // Test round-trip conversion for LargeUtf8
+        let large_utf8_arrow = ArrowDataType::LargeUtf8;
+        let concrete_type = ConcreteDataType::from_arrow_type(&large_utf8_arrow);
+        let back_to_arrow = concrete_type.as_arrow_type();
+
+        assert!(matches!(concrete_type, ConcreteDataType::LargeString(_)));
+        assert_eq!(large_utf8_arrow, back_to_arrow);
+
+        // Test that Utf8 and LargeUtf8 map to different types
+        let utf8_concrete = ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8);
+        let large_utf8_concrete = ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8);
+
+        assert!(matches!(utf8_concrete, ConcreteDataType::String(_)));
+        assert!(matches!(
+            large_utf8_concrete,
+            ConcreteDataType::LargeString(_)
+        ));
+        assert_ne!(utf8_concrete, large_utf8_concrete);
     }
 
     #[test]
