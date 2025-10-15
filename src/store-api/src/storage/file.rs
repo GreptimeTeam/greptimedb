@@ -147,4 +147,23 @@ mod tests {
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn test_file_refs_manifest_serialization() {
+        let mut manifest = FileRefsManifest::default();
+        let r0 = RegionId::new(1024, 1);
+        let r1 = RegionId::new(1024, 2);
+        manifest
+            .file_refs
+            .insert(FileRef::new(r0, FileId::random()));
+        manifest
+            .file_refs
+            .insert(FileRef::new(r1, FileId::random()));
+        manifest.manifest_version.insert(r0, 10);
+        manifest.manifest_version.insert(r1, 20);
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(manifest, parsed);
+    }
 }
