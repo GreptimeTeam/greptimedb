@@ -150,9 +150,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table options value is not valid, key: `{}`, value: `{}`", key, value))]
-    InvalidTableOptionValue { key: String, value: String },
-
     #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
     InvalidColumnOption {
         column_name: String,
@@ -228,8 +225,7 @@ impl ErrorExt for Error {
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
-            Error::InvalidTableOptionValue { .. }
-            | Error::SetSkippingOptions { .. }
+            Error::SetSkippingOptions { .. }
             | Error::UnsetSkippingOptions { .. }
             | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
         }
