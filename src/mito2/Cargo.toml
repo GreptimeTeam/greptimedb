@@ -16,6 +16,7 @@ workspace = true
 api.workspace = true
 aquamarine.workspace = true
 async-channel = "1.9"
+common-stat.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytemuck.workspace = true

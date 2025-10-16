@@ -30,6 +30,6 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID > 0;
 
-SELECT peer_type, cpus!=0, memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
+SELECT peer_type, total_cpu_millicores!=0, total_memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
 USE PUBLIC;
