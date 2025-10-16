@@ -34,7 +34,6 @@ pub enum LogicalTypeId {
 
     // String types:
     String,
-    LargeString,
     Binary,
 
     // Date & Time types:
@@ -97,7 +96,6 @@ impl LogicalTypeId {
             LogicalTypeId::Float32 => ConcreteDataType::float32_datatype(),
             LogicalTypeId::Float64 => ConcreteDataType::float64_datatype(),
             LogicalTypeId::String => ConcreteDataType::string_datatype(),
-            LogicalTypeId::LargeString => ConcreteDataType::largestring_datatype(),
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
             LogicalTypeId::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),

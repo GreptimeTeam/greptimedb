@@ -13,9 +13,7 @@
 // limitations under the License.
 
 pub use crate::data_type::{ConcreteDataType, DataType, DataTypeRef};
-pub use crate::scalars::{
-    LargeString, LargeStringRef, Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder,
-};
+pub use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 pub use crate::type_id::LogicalTypeId;
 pub use crate::types::{LogicalPrimitiveType, WrapperType};
 pub use crate::value::{Value, ValueRef};

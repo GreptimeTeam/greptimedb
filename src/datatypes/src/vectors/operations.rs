@@ -23,8 +23,8 @@ use crate::error::{self, Result};
 use crate::types::LogicalPrimitiveType;
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConcreteDataType, Decimal128Vector, LargeStringVector, ListVector,
-    NullVector, PrimitiveVector, StringVector, UInt32Vector, Vector, VectorRef,
+    BinaryVector, BooleanVector, ConcreteDataType, Decimal128Vector, ListVector, NullVector,
+    PrimitiveVector, StringVector, UInt32Vector, Vector, VectorRef,
 };
 
 /// Vector compute operations.
@@ -89,13 +89,7 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(
-    BinaryVector,
-    BooleanVector,
-    LargeStringVector,
-    ListVector,
-    StringVector
-);
+impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
 
 impl VectorOp for Decimal128Vector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {

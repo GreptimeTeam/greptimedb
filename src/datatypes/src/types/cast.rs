@@ -107,32 +107,32 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         // numeric and string types cast
         (
             UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
-            | Float32(_) | Float64(_) | String(_) | LargeString(_),
+            | Float32(_) | Float64(_) | String(_),
             UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
-            | Float32(_) | Float64(_) | String(_) | LargeString(_),
+            | Float32(_) | Float64(_) | String(_),
         ) => true,
 
-        (String(_) | LargeString(_), Binary(_)) => true,
+        (String(_), Binary(_)) => true,
 
         // temporal types cast
         // Date type
-        (Date(_), Int32(_) | Timestamp(_) | String(_) | LargeString(_)) => true,
-        (Int32(_) | String(_) | LargeString(_) | Timestamp(_), Date(_)) => true,
+        (Date(_), Int32(_) | Timestamp(_) | String(_)) => true,
+        (Int32(_) | String(_) | Timestamp(_), Date(_)) => true,
         (Date(_), Date(_)) => true,
         // Timestamp type
-        (Timestamp(_), Int64(_) | String(_) | LargeString(_)) => true,
-        (Int64(_) | String(_) | LargeString(_), Timestamp(_)) => true,
+        (Timestamp(_), Int64(_) | String(_)) => true,
+        (Int64(_) | String(_), Timestamp(_)) => true,
         (Timestamp(_), Timestamp(_)) => true,
         // Time type
-        (Time(_), String(_) | LargeString(_)) => true,
+        (Time(_), String(_)) => true,
         (Time(Second(_)), Int32(_)) => true,
         (Time(Millisecond(_)), Int32(_)) => true,
         (Time(Microsecond(_)), Int64(_)) => true,
         (Time(Nanosecond(_)), Int64(_)) => true,
         (Time(_), Time(_)) => true,
         // TODO(QuenKar): interval type cast
-        (Interval(_), String(_) | LargeString(_)) => true,
-        (Duration(_), String(_) | LargeString(_)) => true,
+        (Interval(_), String(_)) => true,
+        (Duration(_), String(_)) => true,
         // other situations return false
         (_, _) => false,
     }

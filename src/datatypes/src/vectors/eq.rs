@@ -23,8 +23,8 @@ use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, DurationMicrosecondVector,
     DurationMillisecondVector, DurationNanosecondVector, DurationSecondVector,
-    IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector, LargeStringVector,
-    ListVector, PrimitiveVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector,
+    IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector,
+    PrimitiveVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector,
     TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
@@ -83,7 +83,6 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
         Binary(_) | Json(_) | Vector(_) => is_vector_eq!(BinaryVector, lhs, rhs),
         String(_) => is_vector_eq!(StringVector, lhs, rhs),
-        LargeString(_) => is_vector_eq!(LargeStringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         Timestamp(t) => match t {
             TimestampType::Second(_) => {

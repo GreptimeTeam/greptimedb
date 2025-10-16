@@ -19,10 +19,10 @@ use datatypes::types::{IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
     Int8Vector, Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector,
-    IntervalMonthDayNanoVector, IntervalYearMonthVector, LargeStringVector, StringVector,
-    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+    IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
+    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
+    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt8Vector,
+    UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
 };
 use snafu::OptionExt;
 
@@ -137,12 +137,6 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             StringVector,
             string_values,
             |x| { x.into() }
-        ),
-        (
-            ConcreteDataType::LargeString(_),
-            LargeStringVector,
-            string_values,
-            |x| { x.to_string() }
         ),
         (ConcreteDataType::Date(_), DateVector, date_values, |x| {
             x.val()
@@ -305,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_convert_arrow_arrays_large_string() {
-        let array = LargeStringVector::from(vec![
+        let array = StringVector::from(vec![
             Some("hello".to_string()),
             Some("world".to_string()),
             None,

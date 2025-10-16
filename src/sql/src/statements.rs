@@ -287,7 +287,6 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
         ConcreteDataType::UInt8(_) => Ok(SqlDataType::TinyIntUnsigned(None)),
         ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
-        ConcreteDataType::LargeString(_) => Ok(SqlDataType::String(None)),
         ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double(ExactNumberInfo::None)),
         ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),

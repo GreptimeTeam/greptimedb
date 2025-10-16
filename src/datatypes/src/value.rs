@@ -476,7 +476,6 @@ impl Value {
                 let s = v.as_utf8().to_string();
                 match output_type {
                     ConcreteDataType::String(_) => ScalarValue::Utf8(Some(s)),
-                    ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(Some(s)),
                     _ => ScalarValue::Utf8(Some(s)), // fallback to Utf8 for compatibility
                 }
             }
@@ -614,7 +613,6 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
             ScalarValue::Binary(None)
         }
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
-        ConcreteDataType::LargeString(_) => ScalarValue::LargeUtf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::Interval(v) => match v {

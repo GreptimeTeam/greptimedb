@@ -79,7 +79,6 @@ impl SortField {
             | ConcreteDataType::Json(_)
             | ConcreteDataType::Vector(_) => 11,
             ConcreteDataType::String(_) => 11, // a non-empty string takes at least 11 bytes.
-            ConcreteDataType::LargeString(_) => 11,
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::Timestamp(_) => 10,
             ConcreteDataType::Time(_) => 10,
@@ -182,7 +181,6 @@ impl SortField {
             Float32, f32,
             Float64, f64,
             String, string,
-            LargeString, string,
             Date, date,
             Time, time,
             Duration, duration,
@@ -284,7 +282,6 @@ impl SortField {
             Float32, f32,
             Float64, f64,
             String, String,
-            LargeString, String,
             Date, Date,
             Time, Time,
             Duration, Duration,
@@ -340,14 +337,6 @@ impl SortField {
                 return Ok(to_skip);
             }
             ConcreteDataType::String(_) => {
-                let pos_before = deserializer.position();
-                deserializer.advance(1);
-                deserializer
-                    .skip_bytes()
-                    .context(error::DeserializeFieldSnafu)?;
-                return Ok(deserializer.position() - pos_before);
-            }
-            ConcreteDataType::LargeString(_) => {
                 let pos_before = deserializer.position();
                 deserializer.advance(1);
                 deserializer
@@ -633,7 +622,7 @@ mod tests {
     fn test_memcmp_large_string() {
         check_encode_and_decode(
             &[
-                ConcreteDataType::largestring_datatype(),
+                ConcreteDataType::string_datatype(),
                 ConcreteDataType::int64_datatype(),
             ],
             vec![
@@ -643,21 +632,18 @@ mod tests {
         );
 
         // Test with null large string
-        check_encode_and_decode(
-            &[ConcreteDataType::largestring_datatype()],
-            vec![Value::Null],
-        );
+        check_encode_and_decode(&[ConcreteDataType::string_datatype()], vec![Value::Null]);
 
         // Test with empty large string
         check_encode_and_decode(
-            &[ConcreteDataType::largestring_datatype()],
+            &[ConcreteDataType::string_datatype()],
             vec![Value::String("".into())],
         );
 
         // Test with very long large string
         let long_string = "a".repeat(1000);
         check_encode_and_decode(
-            &[ConcreteDataType::largestring_datatype()],
+            &[ConcreteDataType::string_datatype()],
             vec![Value::String(long_string.into())],
         );
     }
