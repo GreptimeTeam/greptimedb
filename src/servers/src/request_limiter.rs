@@ -17,8 +17,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use snafu::ensure;
-
 use crate::error::{Result, TooManyConcurrentRequestsSnafu};
 
 /// Limiter for total memory usage of concurrent request bodies.
@@ -62,35 +60,30 @@ impl RequestMemoryLimiter {
             return Ok(None);
         };
 
-        let mut current = inner.current_usage.load(Ordering::Relaxed);
-        loop {
-            let new_usage = current.saturating_add(request_size);
+        let mut new_usage = 0;
+        let result =
+            inner
+                .current_usage
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    new_usage = current.saturating_add(request_size);
+                    if new_usage <= inner.max_memory {
+                        Some(new_usage)
+                    } else {
+                        None
+                    }
+                });
 
-            ensure!(
-                new_usage <= inner.max_memory,
-                TooManyConcurrentRequestsSnafu {
-                    limit: inner.max_memory,
-                    request_size,
-                }
-            );
-
-            match inner.current_usage.compare_exchange_weak(
-                current,
-                new_usage,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return Ok(Some(RequestMemoryGuard {
-                        size: request_size,
-                        limiter: Arc::clone(inner),
-                        usage_snapshot: new_usage,
-                    }));
-                }
-                Err(actual) => {
-                    current = actual;
-                }
+        match result {
+            Ok(_) => Ok(Some(RequestMemoryGuard {
+                size: request_size,
+                limiter: Arc::clone(inner),
+                usage_snapshot: new_usage,
+            })),
+            Err(_current) => TooManyConcurrentRequestsSnafu {
+                limit: inner.max_memory,
+                request_size,
             }
+            .fail(),
         }
     }
 
