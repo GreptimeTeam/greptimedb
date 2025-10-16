@@ -81,6 +81,7 @@ use std::time::Instant;
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
+use common_config::utils::get_sys_total_memory;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
@@ -206,13 +207,16 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
-        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize)
-            .with_update_callback(|usage| {
-                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-            })
-            .with_reject_callback(|| {
-                SCAN_REQUESTS_REJECTED_TOTAL.inc();
-            });
+        let total_memory = get_sys_total_memory().map(|s| s.as_bytes()).unwrap_or(0);
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker =
+            QueryMemoryTracker::new(scan_memory_limit, config.scan_memory_soft_limit_ratio.0)
+                .with_update_callback(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .with_reject_callback(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                });
 
         let inner = EngineInner {
             workers,
@@ -1267,13 +1271,16 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
-        let scan_memory_tracker = QueryMemoryTracker::new(config.scan_memory_limit.0 as usize)
-            .with_update_callback(|usage| {
-                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-            })
-            .with_reject_callback(|| {
-                SCAN_REQUESTS_REJECTED_TOTAL.inc();
-            });
+        let total_memory = get_sys_total_memory().map(|s| s.as_bytes()).unwrap_or(0);
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker =
+            QueryMemoryTracker::new(scan_memory_limit, config.scan_memory_soft_limit_ratio.0)
+                .with_update_callback(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .with_reject_callback(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                });
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(

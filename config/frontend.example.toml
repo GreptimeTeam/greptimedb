@@ -257,12 +257,11 @@ parallelism = 0
 allow_query_fallback = false
 
 ## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
 ## Setting it to 0 disables the limit (unbounded, default behavior).
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
-## Example: "4GB", "8GB"
-## @toml2docs:none-default
-#+ memory_pool_size = "4GB"
+memory_pool_size = "50%"
 
 ## Datanode options.
 [datanode]

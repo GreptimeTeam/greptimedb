@@ -18,9 +18,11 @@ use std::cmp;
 use std::path::Path;
 use std::time::Duration;
 
+use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
 use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
+use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -129,7 +131,12 @@ pub struct MitoConfig {
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
     /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
-    pub scan_memory_limit: ReadableSize,
+    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    pub scan_memory_limit: MemoryLimit,
+    /// Soft limit ratio for scan memory (0.0 to 1.0).
+    /// When memory usage exceeds soft limit, new queries are rejected but existing queries continue.
+    /// This helps prevent thundering herd in high concurrency scenarios.
+    pub scan_memory_soft_limit_ratio: OrderedFloat<f64>,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -184,7 +191,8 @@ impl Default for MitoConfig {
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
-            scan_memory_limit: ReadableSize(0),
+            scan_memory_limit: MemoryLimit::default(),
+            scan_memory_soft_limit_ratio: OrderedFloat(0.7),
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),

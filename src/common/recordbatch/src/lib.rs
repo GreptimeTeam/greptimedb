@@ -409,10 +409,15 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 }
 
 /// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
+///
+/// Uses soft and hard limit strategy to prevent thundering herd in high concurrency:
+/// - Soft limit: Reject new allocations but allow existing streams to continue
+/// - Hard limit: Reject all allocations
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
     current: Arc<AtomicUsize>,
-    limit: usize,
+    soft_limit: usize,
+    hard_limit: usize,
     on_update: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     on_reject: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -421,7 +426,8 @@ impl fmt::Debug for QueryMemoryTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryMemoryTracker")
             .field("current", &self.current.load(Ordering::Relaxed))
-            .field("limit", &self.limit)
+            .field("soft_limit", &self.soft_limit)
+            .field("hard_limit", &self.hard_limit)
             .field("on_update", &self.on_update.is_some())
             .field("on_reject", &self.on_reject.is_some())
             .finish()
@@ -429,12 +435,23 @@ impl fmt::Debug for QueryMemoryTracker {
 }
 
 impl QueryMemoryTracker {
-    /// Create a new memory tracker with the given limit (in bytes).
-    /// If limit is 0, no limit is enforced.
-    pub fn new(limit: usize) -> Self {
+    /// Create a new memory tracker with the given hard limit (in bytes).
+    ///
+    /// # Arguments
+    /// * `hard_limit` - Maximum memory usage in bytes. 0 means unlimited.
+    /// * `soft_limit_ratio` - Ratio of soft limit to hard limit (0.0 to 1.0).
+    ///   When current usage exceeds soft limit, new allocations are rejected
+    ///   but existing streams can continue until hard limit.
+    pub fn new(hard_limit: usize, soft_limit_ratio: f64) -> Self {
+        let soft_limit = if hard_limit > 0 {
+            (hard_limit as f64 * soft_limit_ratio.clamp(0.0, 1.0)) as usize
+        } else {
+            0
+        };
         Self {
             current: Arc::new(AtomicUsize::new(0)),
-            limit,
+            soft_limit,
+            hard_limit,
             on_update: None,
             on_reject: None,
         }
@@ -468,13 +485,31 @@ impl QueryMemoryTracker {
     }
 
     /// Track memory usage. Returns error if limit is exceeded.
-    pub fn track(&self, size: usize) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `size` - Memory size to track in bytes
+    /// * `is_initial` - True for first allocation of a stream, false for subsequent allocations
+    ///
+    /// When `is_initial` is true, soft limit is checked to prevent thundering herd.
+    /// When `is_initial` is false, hard limit is checked to allow existing streams to continue.
+    pub fn track(&self, size: usize, is_initial: bool) -> Result<()> {
         let mut new_total = 0;
         let result = self
             .current
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 new_total = current.saturating_add(size);
-                if self.limit == 0 || new_total <= self.limit {
+                let limit = if self.hard_limit == 0 {
+                    // Unlimited mode
+                    return Some(new_total);
+                } else if is_initial {
+                    // New allocation: check soft limit
+                    self.soft_limit
+                } else {
+                    // Existing stream: check hard limit
+                    self.hard_limit
+                };
+
+                if new_total <= limit {
                     Some(new_total)
                 } else {
                     None
@@ -494,7 +529,7 @@ impl QueryMemoryTracker {
                 }
                 error::ExceedMemoryLimitSnafu {
                     used: current,
-                    limit: self.limit,
+                    limit: self.hard_limit,
                 }
                 .fail()
             }
@@ -539,8 +574,9 @@ impl Stream for MemoryTrackedStream {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 let size = batch.estimated_size();
+                let is_initial = self.total_tracked == 0;
 
-                if let Err(e) = self.tracker.track(size) {
+                if let Err(e) = self.tracker.track(size, is_initial) {
                     return Poll::Ready(Some(Err(e)));
                 }
 

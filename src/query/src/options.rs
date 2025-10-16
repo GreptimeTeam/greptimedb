@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::readable_size::ReadableSize;
+use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
 
 /// Query engine config
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct QueryOptions {
     /// Parallelism of query engine. Default to 0, which implies the number of logical CPUs.
@@ -24,8 +24,9 @@ pub struct QueryOptions {
     /// Whether to allow query fallback when push down fails.
     pub allow_query_fallback: bool,
     /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
+    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
-    pub memory_pool_size: ReadableSize,
+    pub memory_pool_size: MemoryLimit,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -34,7 +35,7 @@ impl Default for QueryOptions {
         Self {
             parallelism: 0,
             allow_query_fallback: false,
-            memory_pool_size: ReadableSize(0),
+            memory_pool_size: MemoryLimit::default(),
         }
     }
 }
