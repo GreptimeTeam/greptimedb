@@ -454,8 +454,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Binary | ArrowDataType::LargeBinary | ArrowDataType::BinaryView => {
                 Self::binary_datatype()
             }
-            ArrowDataType::Utf8 | ArrowDataType::Utf8View => Self::string_datatype(),
-            ArrowDataType::LargeUtf8 => Self::string_datatype(),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+                Self::string_datatype()
+            }
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
             )),

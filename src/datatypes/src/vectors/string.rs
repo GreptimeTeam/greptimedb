@@ -414,7 +414,6 @@ impl Serializable for StringVector {
     }
 }
 
-// Custom implementation to handle both StringArray and LargeStringArray
 impl StringVector {
     pub fn try_from_arrow_array(
         array: impl AsRef<dyn Array>,

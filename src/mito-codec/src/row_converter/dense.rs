@@ -619,36 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn test_memcmp_large_string() {
-        check_encode_and_decode(
-            &[
-                ConcreteDataType::string_datatype(),
-                ConcreteDataType::int64_datatype(),
-            ],
-            vec![
-                Value::String("large_string_value".into()),
-                Value::Int64(100),
-            ],
-        );
-
-        // Test with null large string
-        check_encode_and_decode(&[ConcreteDataType::string_datatype()], vec![Value::Null]);
-
-        // Test with empty large string
-        check_encode_and_decode(
-            &[ConcreteDataType::string_datatype()],
-            vec![Value::String("".into())],
-        );
-
-        // Test with very long large string
-        let long_string = "a".repeat(1000);
-        check_encode_and_decode(
-            &[ConcreteDataType::string_datatype()],
-            vec![Value::String(long_string.into())],
-        );
-    }
-
-    #[test]
     fn test_memcmp_duration() {
         check_encode_and_decode(
             &[

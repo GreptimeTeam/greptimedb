@@ -298,22 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_arrow_arrays_large_string() {
-        let array = StringVector::from(vec![
-            Some("hello".to_string()),
-            Some("world".to_string()),
-            None,
-            Some("test".to_string()),
-            None,
-        ]);
-        let array: VectorRef = Arc::new(array);
-
-        let values = values(&[array]).unwrap();
-
-        assert_eq!(vec!["hello", "world", "test"], values.string_values);
-    }
-
-    #[test]
     fn test_convert_arrow_array_decimal128() {
         let array = Decimal128Vector::from(vec![Some(1), Some(2), None, Some(3)]);
 

@@ -32,7 +32,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
-use crate::scalars::{Scalar, ScalarVector, ScalarVectorBuilder};
+use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::struct_vector::StructVector;
@@ -51,35 +51,6 @@ use crate::vectors::{
 pub struct Helper;
 
 impl Helper {
-    /// Extracts string values from a vector that is expected to be a `StringVector`.
-    ///
-    /// # Parameters
-    /// - `vector`: A reference to a trait object implementing `Vector`. This should be a `StringVector`.
-    ///
-    /// # Returns
-    /// Returns a `Result` containing a `Vec<Option<String>>`, where each element corresponds to a value in the vector:
-    /// - `Some(String)` if the value is present.
-    /// - `None` if the value is null.
-    ///
-    /// # Errors
-    /// Returns an error if the provided vector is not a `StringVector`.
-    pub fn extract_string_vector_values(vector: &dyn Vector) -> Result<Vec<Option<String>>> {
-        if let Some(string_vector) = vector.as_any().downcast_ref::<StringVector>() {
-            Ok(string_vector
-                .iter_data()
-                .map(|opt_s| opt_s.map(|s| s.to_string()))
-                .collect())
-        } else {
-            error::UnknownVectorSnafu {
-                msg: format!(
-                    "can't extract string values from {:?} vector (expected StringVector)",
-                    vector.data_type()
-                ),
-            }
-            .fail()
-        }
-    }
-
     /// Get a pointer to the underlying data of this vectors.
     /// Can be useful for fast comparisons.
     /// # Safety
@@ -188,10 +159,7 @@ impl Helper {
             ScalarValue::UInt64(v) => {
                 ConstantVector::new(Arc::new(UInt64Vector::from(vec![v])), length)
             }
-            ScalarValue::Utf8(v) => {
-                ConstantVector::new(Arc::new(StringVector::from(vec![v])), length)
-            }
-            ScalarValue::LargeUtf8(v) => {
+            ScalarValue::Utf8(v) | ScalarValue::LargeUtf8(v) => {
                 ConstantVector::new(Arc::new(StringVector::from(vec![v])), length)
             }
             ScalarValue::Binary(v)
