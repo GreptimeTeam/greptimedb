@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 
 use crate::error;
 use crate::memtable::simple_bulk_memtable::{Iter, SimpleBulkMemtable};
@@ -33,7 +33,7 @@ impl SimpleBulkMemtable {
     pub(crate) fn create_iter(
         &self,
         projection: Option<&[ColumnId]>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> error::Result<BatchIterBuilderDeprecated> {
         let mut series = self.series.write().unwrap();
 
@@ -59,7 +59,7 @@ pub(crate) struct BatchIterBuilderDeprecated {
     region_metadata: RegionMetadataRef,
     values: Option<Values>,
     projection: HashSet<ColumnId>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     dedup: bool,
     merge_mode: MergeMode,
 }
