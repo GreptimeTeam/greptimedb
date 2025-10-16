@@ -1289,6 +1289,18 @@ macro_rules! impl_as_for_value_ref {
         match $value {
             ValueRef::Null => Ok(None),
             ValueRef::$Variant(v) => Ok(Some(v.clone())),
+            ValueRef::Json(v) => match v.as_ref() {
+                ValueRef::Null => Ok(None),
+                ValueRef::$Variant(v) => Ok(Some(v.clone())),
+                other => error::CastTypeSnafu {
+                    msg: format!(
+                        "Failed to cast value ref {:?} to {}",
+                        other,
+                        stringify!($Variant)
+                    ),
+                }
+                .fail(),
+            },
             other => error::CastTypeSnafu {
                 msg: format!(
                     "Failed to cast value ref {:?} to {}",
@@ -1314,56 +1326,57 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to binary slice.
-    pub fn as_binary(&self) -> Result<Option<&'a [u8]>> {
+    pub fn try_into_binary(&self) -> Result<Option<&'a [u8]>> {
         impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
-    pub fn as_string(&self) -> Result<Option<&'a str>> {
+    pub fn try_into_string(&self) -> Result<Option<&'a str>> {
         impl_as_for_value_ref!(self, String)
     }
 
     /// Cast itself to boolean.
-    pub fn as_boolean(&self) -> Result<Option<bool>> {
+    pub fn try_into_boolean(&self) -> Result<Option<bool>> {
         impl_as_for_value_ref!(self, Boolean)
     }
 
-    pub fn as_i8(&self) -> Result<Option<i8>> {
+    pub fn try_into_i8(&self) -> Result<Option<i8>> {
         impl_as_for_value_ref!(self, Int8)
     }
 
-    pub fn as_u8(&self) -> Result<Option<u8>> {
+    pub fn try_into_u8(&self) -> Result<Option<u8>> {
         impl_as_for_value_ref!(self, UInt8)
     }
 
-    pub fn as_i16(&self) -> Result<Option<i16>> {
+    pub fn try_into_i16(&self) -> Result<Option<i16>> {
         impl_as_for_value_ref!(self, Int16)
     }
 
-    pub fn as_u16(&self) -> Result<Option<u16>> {
+    pub fn try_into_u16(&self) -> Result<Option<u16>> {
         impl_as_for_value_ref!(self, UInt16)
     }
 
-    pub fn as_i32(&self) -> Result<Option<i32>> {
+    pub fn try_into_i32(&self) -> Result<Option<i32>> {
         impl_as_for_value_ref!(self, Int32)
     }
 
-    pub fn as_u32(&self) -> Result<Option<u32>> {
+    pub fn try_into_u32(&self) -> Result<Option<u32>> {
         impl_as_for_value_ref!(self, UInt32)
     }
 
-    pub fn as_i64(&self) -> Result<Option<i64>> {
+    pub fn try_into_i64(&self) -> Result<Option<i64>> {
         impl_as_for_value_ref!(self, Int64)
     }
 
-    pub fn as_u64(&self) -> Result<Option<u64>> {
+    pub fn try_into_u64(&self) -> Result<Option<u64>> {
         impl_as_for_value_ref!(self, UInt64)
     }
 
-    pub fn as_f32(&self) -> Result<Option<f32>> {
+    pub fn try_into_f32(&self) -> Result<Option<f32>> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float32(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => v.try_into_f32(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
             }
@@ -1371,10 +1384,11 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    pub fn as_f64(&self) -> Result<Option<f64>> {
+    pub fn try_into_f64(&self) -> Result<Option<f64>> {
         match self {
             ValueRef::Null => Ok(None),
             ValueRef::Float64(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => v.try_into_f64(),
             other => error::CastTypeSnafu {
                 msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
             }
@@ -1383,50 +1397,51 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to [Date].
-    pub fn as_date(&self) -> Result<Option<Date>> {
+    pub fn try_into_date(&self) -> Result<Option<Date>> {
         impl_as_for_value_ref!(self, Date)
     }
 
     /// Cast itself to [Timestamp].
-    pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
+    pub fn try_into_timestamp(&self) -> Result<Option<Timestamp>> {
         impl_as_for_value_ref!(self, Timestamp)
     }
 
     /// Cast itself to [Time].
-    pub fn as_time(&self) -> Result<Option<Time>> {
+    pub fn try_into_time(&self) -> Result<Option<Time>> {
         impl_as_for_value_ref!(self, Time)
     }
 
-    pub fn as_duration(&self) -> Result<Option<Duration>> {
+    pub fn try_into_duration(&self) -> Result<Option<Duration>> {
         impl_as_for_value_ref!(self, Duration)
     }
 
     /// Cast itself to [IntervalYearMonth].
-    pub fn as_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
+    pub fn try_into_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
         impl_as_for_value_ref!(self, IntervalYearMonth)
     }
 
     /// Cast itself to [IntervalDayTime].
-    pub fn as_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
+    pub fn try_into_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
         impl_as_for_value_ref!(self, IntervalDayTime)
     }
 
     /// Cast itself to [IntervalMonthDayNano].
-    pub fn as_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
+    pub fn try_into_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
         impl_as_for_value_ref!(self, IntervalMonthDayNano)
     }
 
     /// Cast itself to [ListValueRef].
-    pub fn as_list(&self) -> Result<Option<ListValueRef<'_>>> {
+    pub fn try_into_list(&self) -> Result<Option<ListValueRef<'_>>> {
         impl_as_for_value_ref!(self, List)
     }
 
-    pub fn as_struct(&self) -> Result<Option<StructValueRef<'_>>> {
+    /// Cast itself to [StructValueRef].
+    pub fn try_into_struct(&self) -> Result<Option<StructValueRef<'_>>> {
         impl_as_for_value_ref!(self, Struct)
     }
 
     /// Cast itself to [Decimal128].
-    pub fn as_decimal128(&self) -> Result<Option<Decimal128>> {
+    pub fn try_into_decimal128(&self) -> Result<Option<Decimal128>> {
         impl_as_for_value_ref!(self, Decimal128)
     }
 }
@@ -2512,11 +2527,11 @@ pub(crate) mod tests {
             };
         }
 
-        check_as_null!(as_binary);
-        check_as_null!(as_string);
-        check_as_null!(as_boolean);
-        check_as_null!(as_date);
-        check_as_null!(as_list);
+        check_as_null!(try_into_binary);
+        check_as_null!(try_into_string);
+        check_as_null!(try_into_boolean);
+        check_as_null!(try_into_list);
+        check_as_null!(try_into_struct);
 
         macro_rules! check_as_correct {
             ($data: expr, $Variant: ident, $method: ident) => {
@@ -2524,27 +2539,29 @@ pub(crate) mod tests {
             };
         }
 
-        check_as_correct!("hello", String, as_string);
-        check_as_correct!("hello".as_bytes(), Binary, as_binary);
-        check_as_correct!(true, Boolean, as_boolean);
-        check_as_correct!(Date::new(123), Date, as_date);
-        check_as_correct!(Time::new_second(12), Time, as_time);
-        check_as_correct!(Duration::new_second(12), Duration, as_duration);
+        check_as_correct!("hello", String, try_into_string);
+        check_as_correct!("hello".as_bytes(), Binary, try_into_binary);
+        check_as_correct!(true, Boolean, try_into_boolean);
+        check_as_correct!(Date::new(123), Date, try_into_date);
+        check_as_correct!(Time::new_second(12), Time, try_into_time);
+        check_as_correct!(Duration::new_second(12), Duration, try_into_duration);
 
         let list = build_list_value();
-        check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
+        check_as_correct!(ListValueRef::Ref { val: &list }, List, try_into_list);
 
         let struct_value = build_struct_value();
-        check_as_correct!(StructValueRef::Ref(&struct_value), Struct, as_struct);
+        check_as_correct!(StructValueRef::Ref(&struct_value), Struct, try_into_struct);
 
         let wrong_value = ValueRef::Int32(12345);
-        assert!(wrong_value.as_binary().is_err());
-        assert!(wrong_value.as_string().is_err());
-        assert!(wrong_value.as_boolean().is_err());
-        assert!(wrong_value.as_date().is_err());
-        assert!(wrong_value.as_list().is_err());
-        assert!(wrong_value.as_time().is_err());
-        assert!(wrong_value.as_timestamp().is_err());
+        assert!(wrong_value.try_into_binary().is_err());
+        assert!(wrong_value.try_into_string().is_err());
+        assert!(wrong_value.try_into_boolean().is_err());
+        assert!(wrong_value.try_into_list().is_err());
+        assert!(wrong_value.try_into_struct().is_err());
+        assert!(wrong_value.try_into_date().is_err());
+        assert!(wrong_value.try_into_time().is_err());
+        assert!(wrong_value.try_into_timestamp().is_err());
+        assert!(wrong_value.try_into_duration().is_err());
     }
 
     #[test]

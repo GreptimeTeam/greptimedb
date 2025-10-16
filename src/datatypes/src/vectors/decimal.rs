@@ -315,7 +315,7 @@ impl MutableVector for Decimal128VectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        let decimal_val = value.as_decimal128()?.map(|v| v.val());
+        let decimal_val = value.try_into_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
         Ok(())
     }

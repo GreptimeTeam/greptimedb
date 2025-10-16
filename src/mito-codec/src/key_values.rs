@@ -182,19 +182,19 @@ impl KeyValue<'_> {
             let Some(primary_key) = self.primary_keys().next() else {
                 return 0;
             };
-            let key = primary_key.as_binary().unwrap().unwrap();
+            let key = primary_key.try_into_binary().unwrap().unwrap();
 
             let mut deserializer = Deserializer::new(key);
             deserializer.advance(COLUMN_ID_ENCODE_SIZE);
             let field = SortField::new(ConcreteDataType::uint32_datatype());
             let table_id = field.deserialize(&mut deserializer).unwrap();
-            table_id.as_value_ref().as_u32().unwrap().unwrap()
+            table_id.as_value_ref().try_into_u32().unwrap().unwrap()
         } else {
             let Some(value) = self.primary_keys().next() else {
                 return 0;
             };
 
-            value.as_u32().unwrap().unwrap()
+            value.try_into_u32().unwrap().unwrap()
         }
     }
 
