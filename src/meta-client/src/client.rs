@@ -353,6 +353,8 @@ impl ProcedureExecutor for MetaClient {
     }
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl ClusterInfo for MetaClient {
     type Error = Error;
@@ -373,31 +375,59 @@ impl ClusterInfo for MetaClient {
             followers
                 .into_iter()
                 .map(|node| {
-                    let node_info = node.info.unwrap_or_default();
-                    NodeInfo {
-                        peer: node.peer.unwrap_or_default(),
-                        last_activity_ts,
-                        status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
-                        version: node_info.version,
-                        git_commit: node_info.git_commit,
-                        start_time_ms: node_info.start_time_ms,
-                        cpus: node_info.cpus,
-                        memory_bytes: node_info.memory_bytes,
-                        hostname: node_info.hostname,
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            cpus: node_info.cpus,
+                            memory_bytes: node_info.memory_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            cpus: node.cpus,
+                            memory_bytes: node.memory_bytes,
+                            hostname: "".to_string(),
+                        }
                     }
                 })
                 .chain(leader.into_iter().map(|node| {
-                    let node_info = node.info.unwrap_or_default();
-                    NodeInfo {
-                        peer: node.peer.unwrap_or_default(),
-                        last_activity_ts,
-                        status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
-                        version: node_info.version,
-                        git_commit: node_info.git_commit,
-                        start_time_ms: node_info.start_time_ms,
-                        cpus: node_info.cpus,
-                        memory_bytes: node_info.memory_bytes,
-                        hostname: node_info.hostname,
+                    if let Some(node_info) = node.info {
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node_info.version,
+                            git_commit: node_info.git_commit,
+                            start_time_ms: node_info.start_time_ms,
+                            cpus: node_info.cpus,
+                            memory_bytes: node_info.memory_bytes,
+                            hostname: node_info.hostname,
+                        }
+                    } else {
+                        // TODO(zyy17): It's for backward compatibility. Remove this when the deprecated fields are removed from the proto.
+                        NodeInfo {
+                            peer: node.peer.unwrap_or_default(),
+                            last_activity_ts,
+                            status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                            version: node.version,
+                            git_commit: node.git_commit,
+                            start_time_ms: node.start_time_ms,
+                            cpus: node.cpus,
+                            memory_bytes: node.memory_bytes,
+                            hostname: "".to_string(),
+                        }
                     }
                 }))
                 .collect::<Vec<_>>()
