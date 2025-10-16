@@ -247,7 +247,7 @@ async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<
             Duration::from_secs(240),
             || {
                 let greptime = ctx.greptime.clone();
-                let procedure_id = procedure_id.to_string();
+                let procedure_id = procedure_id.clone();
                 Box::pin(async move {
                     {
                         let output = procedure_state(&greptime, &procedure_id).await;

@@ -33,6 +33,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
@@ -237,8 +238,14 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
+            ScalarValue::Struct(v) => {
+                let struct_type = StructType::try_from(v.fields())?;
+                ConstantVector::new(
+                    Arc::new(StructVector::try_new(struct_type, (*v).clone())?),
+                    length,
+                )
+            }
             ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
@@ -386,13 +393,16 @@ impl Helper {
                 }
             }
 
-            ArrowDataType::Struct(_fields) => {
+            ArrowDataType::Struct(fields) => {
                 let array = array
                     .as_ref()
                     .as_any()
                     .downcast_ref::<StructArray>()
                     .unwrap();
-                Arc::new(StructVector::new(array.clone())?)
+                Arc::new(StructVector::try_new(
+                    StructType::try_from(fields)?,
+                    array.clone(),
+                )?)
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
@@ -418,7 +428,7 @@ impl Helper {
     pub fn try_from_row_into_vector(row: &[Value], dt: &ConcreteDataType) -> Result<VectorRef> {
         let mut builder = dt.create_mutable_vector(row.len());
         for val in row {
-            builder.try_push_value_ref(val.as_value_ref())?;
+            builder.try_push_value_ref(&val.as_value_ref())?;
         }
         let vector = builder.to_vector();
         Ok(vector)

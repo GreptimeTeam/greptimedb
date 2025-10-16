@@ -10,6 +10,7 @@ DESC TABLE CLUSTER_INFO;
 | peer_id              | Int64                |     | NO   |         | FIELD         |
 | peer_type            | String               |     | NO   |         | FIELD         |
 | peer_addr            | String               |     | YES  |         | FIELD         |
+| peer_hostname        | String               |     | YES  |         | FIELD         |
 | total_cpu_millicores | UInt32               |     | NO   |         | FIELD         |
 | total_memory_bytes   | UInt64               |     | NO   |         | FIELD         |
 | version              | String               |     | NO   |         | FIELD         |

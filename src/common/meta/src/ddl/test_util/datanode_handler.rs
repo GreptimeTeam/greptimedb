@@ -218,7 +218,7 @@ pub struct PartialSuccessDatanodeHandler {
 #[async_trait::async_trait]
 impl MockDatanodeHandler for PartialSuccessDatanodeHandler {
     async fn handle(&self, peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
-        let success = peer.id % 2 == 0;
+        let success = peer.id.is_multiple_of(2);
         if success {
             Ok(RegionResponse::new(0))
         } else if self.retryable {

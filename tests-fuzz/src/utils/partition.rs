@@ -60,7 +60,7 @@ pub async fn fetch_partitions(db: &MySqlPool, table_name: Ident) -> Result<Vec<P
 from information_schema.partitions a left join information_schema.region_peers b
 on a.greptime_partition_id = b.region_id where a.table_name= ? order by datanode_id asc;";
     sqlx::query_as::<_, Partition>(sql)
-        .bind(table_name.value.to_string())
+        .bind(table_name.value.clone())
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })

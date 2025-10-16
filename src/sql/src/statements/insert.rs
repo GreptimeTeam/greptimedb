@@ -160,7 +160,7 @@ fn sql_exprs_to_values(exprs: &[Vec<Expr>]) -> Result<Vec<Vec<Value>>> {
                     {
                         match op {
                             UnaryOperator::Minus => Value::Number(format!("-{s}"), *b),
-                            UnaryOperator::Plus => Value::Number(s.to_string(), *b),
+                            UnaryOperator::Plus => Value::Number(s.clone(), *b),
                             _ => unreachable!(),
                         }
                     } else {

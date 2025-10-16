@@ -143,7 +143,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
             serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             }))
             .unwrap(),
         );

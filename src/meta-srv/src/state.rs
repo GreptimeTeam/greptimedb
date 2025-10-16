@@ -94,7 +94,7 @@ pub fn become_leader(enable_leader_cache: bool) -> impl FnOnce(&State) -> State 
     move |prev| match prev {
         State::Leader(leader) => State::Leader(LeaderState { ..leader.clone() }),
         State::Follower(follower) => State::Leader(LeaderState {
-            server_addr: follower.server_addr.to_string(),
+            server_addr: follower.server_addr.clone(),
             enable_leader_cache,
         }),
     }
@@ -103,7 +103,7 @@ pub fn become_leader(enable_leader_cache: bool) -> impl FnOnce(&State) -> State 
 pub fn become_follower() -> impl FnOnce(&State) -> State {
     move |prev| match prev {
         State::Leader(leader) => State::Follower(FollowerState {
-            server_addr: leader.server_addr.to_string(),
+            server_addr: leader.server_addr.clone(),
         }),
         State::Follower(follower) => State::Follower(FollowerState { ..follower.clone() }),
     }

@@ -60,6 +60,7 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
+use crate::sst::FormatType;
 use crate::sst::file_purger::create_local_file_purger;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -254,6 +255,15 @@ impl RegionOpener {
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
+        // Set the sst_format based on options or flat_format flag
+        let sst_format = if let Some(format) = options.sst_format {
+            format
+        } else if config.default_experimental_flat_format {
+            FormatType::Flat
+        } else {
+            // Default to PrimaryKeyParquet for newly created regions
+            FormatType::PrimaryKey
+        };
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
@@ -265,14 +275,11 @@ impl RegionOpener {
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
+            sst_format,
         )
         .await?;
 
-        let memtable_builder = self.memtable_builder_provider.builder_for_options(
-            options.memtable.as_ref(),
-            options.need_dedup(),
-            options.merge_mode(),
-        );
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(&options);
         let part_duration = options.compaction.time_window();
         // Initial memtable id is 0.
         let mutable = Arc::new(TimePartitions::new(
@@ -319,6 +326,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
             written_bytes: Arc::new(AtomicU64::new(0)),
+            sst_format,
             stats: self.stats,
         })
     }
@@ -375,7 +383,7 @@ impl RegionOpener {
                         region: "`kafka`",
                     }
                 );
-                Ok(Provider::kafka_provider(options.topic.to_string()))
+                Ok(Provider::kafka_provider(options.topic.clone()))
             }
             WalOptions::Noop => Ok(Provider::noop_provider()),
         }
@@ -445,11 +453,9 @@ impl RegionOpener {
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
         );
-        let memtable_builder = self.memtable_builder_provider.builder_for_options(
-            region_options.memtable.as_ref(),
-            region_options.need_dedup(),
-            region_options.merge_mode(),
-        );
+        let memtable_builder = self
+            .memtable_builder_provider
+            .builder_for_options(&region_options);
         // Use compaction time window in the manifest if region doesn't provide
         // the time window option.
         let part_duration = region_options
@@ -525,6 +531,9 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
+        // Read sst_format from manifest
+        let sst_format = manifest.sst_format;
+
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
@@ -542,6 +551,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
+            sst_format,
             stats: self.stats.clone(),
         };
         Ok(Some(region))
@@ -579,7 +589,7 @@ pub fn get_object_store(
         Ok(object_store_manager
             .find(name)
             .with_context(|| ObjectStoreNotFoundSnafu {
-                object_store: name.to_string(),
+                object_store: name.clone(),
             })?
             .clone())
     } else {

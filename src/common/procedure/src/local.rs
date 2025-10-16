@@ -195,18 +195,18 @@ pub async fn acquire_dynamic_key_lock(
 ) -> DynamicKeyLockGuard {
     match key {
         StringKey::Share(key) => {
-            let guard = lock.read(key.to_string()).await;
+            let guard = lock.read(key.clone()).await;
             DynamicKeyLockGuard {
                 guard: Some(OwnedKeyRwLockGuard::from(guard)),
-                key: key.to_string(),
+                key: key.clone(),
                 lock: lock.clone(),
             }
         }
         StringKey::Exclusive(key) => {
-            let guard = lock.write(key.to_string()).await;
+            let guard = lock.write(key.clone()).await;
             DynamicKeyLockGuard {
                 guard: Some(OwnedKeyRwLockGuard::from(guard)),
-                key: key.to_string(),
+                key: key.clone(),
                 lock: lock.clone(),
             }
         }
@@ -227,7 +227,7 @@ impl Drop for DynamicKeyLockGuard {
         if let Some(guard) = self.guard.take() {
             drop(guard);
         }
-        self.lock.clean_keys(&[self.key.to_string()]);
+        self.lock.clean_keys(std::slice::from_ref(&self.key));
     }
 }
 

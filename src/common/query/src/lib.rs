@@ -145,7 +145,7 @@ impl From<&AddColumnLocation> for Location {
             },
             AddColumnLocation::After { column_name } => Location {
                 location_type: LocationType::After.into(),
-                after_column_name: column_name.to_string(),
+                after_column_name: column_name.clone(),
             },
         }
     }

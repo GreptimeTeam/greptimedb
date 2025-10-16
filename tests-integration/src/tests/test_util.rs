@@ -275,7 +275,7 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
                 ..Default::default()
             },
             kafka_topic: KafkaTopicConfig {
-                topic_name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.clone(),
                 num_topics: 3,
                 ..Default::default()
             },
@@ -314,7 +314,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
                 ..Default::default()
             },
             kafka_topic: KafkaTopicConfig {
-                topic_name_prefix: test_name.to_string(),
+                topic_name_prefix: test_name.clone(),
                 num_topics: 3,
                 ..Default::default()
             },

@@ -124,6 +124,9 @@ pub struct NodeInfo {
     // The node build memory bytes
     #[serde(default)]
     pub memory_bytes: u64,
+    // The node build hostname
+    #[serde(default)]
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -332,6 +335,7 @@ mod tests {
             start_time_ms: 1,
             cpus: 0,
             memory_bytes: 0,
+            hostname: "test_hostname".to_string(),
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();

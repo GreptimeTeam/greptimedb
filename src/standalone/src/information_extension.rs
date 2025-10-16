@@ -77,6 +77,10 @@ impl InformationExtension for StandaloneInformationExtension {
             start_time_ms: self.start_time_ms,
             cpus: common_stat::get_total_cpu_millicores() as u32,
             memory_bytes: common_stat::get_total_memory_bytes() as u64,
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         };
         Ok(vec![node_info])
     }

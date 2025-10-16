@@ -17,14 +17,14 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use datatypes::arrow::array::{BooleanArray, Scalar, UInt64Array};
+use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
-use store_api::storage::SequenceNumber;
+use store_api::storage::SequenceRange;
 
 use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
@@ -39,7 +39,7 @@ pub struct EncodedBulkPartIter {
     current_reader: Option<ParquetRecordBatchReader>,
     builder: MemtableRowGroupReaderBuilder,
     /// Sequence number filter.
-    sequence: Option<Scalar<UInt64Array>>,
+    sequence: Option<SequenceRange>,
 }
 
 impl EncodedBulkPartIter {
@@ -49,11 +49,9 @@ impl EncodedBulkPartIter {
         mut row_groups_to_read: VecDeque<usize>,
         parquet_meta: Arc<ParquetMetaData>,
         data: Bytes,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> error::Result<Self> {
         assert!(context.read_format().as_flat().is_some());
-
-        let sequence = sequence.map(UInt64Array::new_scalar);
 
         let projection_mask = ProjectionMask::roots(
             parquet_meta.file_metadata().schema_descr(),
@@ -121,7 +119,7 @@ pub struct BulkPartRecordBatchIter {
     /// Iterator context for filtering
     context: BulkIterContextRef,
     /// Sequence number filter.
-    sequence: Option<Scalar<UInt64Array>>,
+    sequence: Option<SequenceRange>,
 }
 
 impl BulkPartRecordBatchIter {
@@ -129,11 +127,9 @@ impl BulkPartRecordBatchIter {
     pub fn new(
         record_batch: RecordBatch,
         context: BulkIterContextRef,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
-
-        let sequence = sequence.map(UInt64Array::new_scalar);
 
         Self {
             record_batch: Some(record_batch),
@@ -185,7 +181,7 @@ impl Iterator for BulkPartRecordBatchIter {
 /// Panics if the format is not flat.
 fn apply_combined_filters(
     context: &BulkIterContext,
-    sequence: &Option<Scalar<UInt64Array>>,
+    sequence: &Option<SequenceRange>,
     record_batch: RecordBatch,
 ) -> error::Result<Option<RecordBatch>> {
     // Converts the format to the flat format first.
@@ -234,9 +230,9 @@ fn apply_combined_filters(
     if let Some(sequence) = sequence {
         let sequence_column =
             record_batch.column(sequence_column_index(record_batch.num_columns()));
-        let sequence_filter =
-            datatypes::arrow::compute::kernels::cmp::lt_eq(sequence_column, sequence)
-                .context(ComputeArrowSnafu)?;
+        let sequence_filter = sequence
+            .filter(&sequence_column)
+            .context(ComputeArrowSnafu)?;
         // Combine with existing filter using AND operation
         combined_filter = match combined_filter {
             None => Some(sequence_filter),
@@ -385,7 +381,11 @@ mod tests {
         assert_eq!(6, result[0].num_columns(),);
 
         // Creates iter with sequence filter (only include sequences <= 2)
-        let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context, Some(2));
+        let iter = BulkPartRecordBatchIter::new(
+            record_batch.clone(),
+            context,
+            Some(SequenceRange::LtEq { max: 2 }),
+        );
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         let expect_sequence = Arc::new(UInt64Array::from(vec![1, 2])) as ArrayRef;

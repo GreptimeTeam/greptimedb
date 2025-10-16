@@ -33,7 +33,7 @@ use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -182,7 +182,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -191,7 +191,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> Result<MemtableRanges> {
         let projection = projection.map(|ids| ids.to_vec());
@@ -315,7 +315,7 @@ impl PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -362,7 +362,7 @@ struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {

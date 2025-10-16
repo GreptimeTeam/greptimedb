@@ -74,6 +74,7 @@ use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
+use crate::sst::FormatType;
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
@@ -609,6 +610,7 @@ impl TestEnv {
                 manifest_opts,
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .map(Some)
@@ -813,7 +815,7 @@ impl CreateRequestBuilder {
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
             let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
+                topic: topic.clone(),
             });
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
@@ -821,7 +823,7 @@ impl CreateRequestBuilder {
             );
         }
         RegionCreateRequest {
-            engine: self.engine.to_string(),
+            engine: self.engine.clone(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options,

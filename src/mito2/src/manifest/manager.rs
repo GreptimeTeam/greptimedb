@@ -36,6 +36,7 @@ use crate::manifest::storage::{
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
 use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::sst::FormatType;
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -154,6 +155,7 @@ impl RegionManifestManager {
         options: RegionManifestOptions,
         total_manifest_size: Arc<AtomicU64>,
         manifest_version: Arc<AtomicU64>,
+        sst_format: FormatType,
     ) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
@@ -175,6 +177,7 @@ impl RegionManifestManager {
             version,
             RegionChange {
                 metadata: metadata.clone(),
+                sst_format,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -185,7 +188,10 @@ impl RegionManifestManager {
             options.manifest_dir, manifest
         );
 
-        let mut actions = vec![RegionMetaAction::Change(RegionChange { metadata })];
+        let mut actions = vec![RegionMetaAction::Change(RegionChange {
+            metadata,
+            sst_format,
+        })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
                 files_to_add: vec![],
@@ -792,6 +798,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                sst_format: FormatType::PrimaryKey,
             }));
 
         let current_version = manager
@@ -860,6 +867,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                sst_format: FormatType::PrimaryKey,
             }));
 
         let current_version = manager
@@ -915,6 +923,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1721);
+        assert_eq!(manifest_size, 1748);
     }
 }

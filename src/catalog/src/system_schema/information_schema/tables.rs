@@ -371,7 +371,8 @@ impl InformationSchemaTablesBuilder {
         self.auto_increment.push(Some(0));
         self.row_format.push(Some("Fixed"));
         self.table_collation.push(Some("utf8_bin"));
-        self.update_time.push(None);
+        self.update_time
+            .push(Some(table_info.meta.updated_on.timestamp().into()));
         self.check_time.push(None);
         // use mariadb default table version number here
         self.version.push(Some(11));

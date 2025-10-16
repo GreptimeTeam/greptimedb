@@ -33,8 +33,8 @@ use crate::types::{
     BinaryType, BooleanType, DateType, Decimal128Type, DictionaryType, DurationMicrosecondType,
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
-    StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonFormat, JsonType, ListType,
+    NullType, StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt8Type, UInt16Type, UInt32Type, UInt64Type, VectorType,
 };
@@ -285,6 +285,13 @@ impl ConcreteDataType {
         }
     }
 
+    pub fn as_struct(&self) -> Option<&StructType> {
+        match self {
+            ConcreteDataType::Struct(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Try to cast data type as a [`TimestampType`].
     pub fn as_timestamp(&self) -> Option<TimestampType> {
         match self {
@@ -343,7 +350,7 @@ impl ConcreteDataType {
 
     pub fn as_json(&self) -> Option<JsonType> {
         match self {
-            ConcreteDataType::Json(j) => Some(*j),
+            ConcreteDataType::Json(j) => Some(j.clone()),
             _ => None,
         }
     }
@@ -660,6 +667,10 @@ impl ConcreteDataType {
 
     pub fn vector_default_datatype() -> ConcreteDataType {
         Self::vector_datatype(0)
+    }
+
+    pub fn json_native_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::Json(JsonType::new(JsonFormat::Native(Box::new(inner_type))))
     }
 }
 

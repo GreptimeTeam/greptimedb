@@ -65,7 +65,11 @@ impl DataType for ListType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        let field = Arc::new(Field::new("item", self.item_type.as_arrow_type(), true));
+        let field = Arc::new(Field::new(
+            Field::LIST_FIELD_DEFAULT_NAME,
+            self.item_type.as_arrow_type(),
+            true,
+        ));
         ArrowDataType::List(field)
     }
 

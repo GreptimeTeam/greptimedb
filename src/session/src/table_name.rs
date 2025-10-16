@@ -47,7 +47,7 @@ pub fn table_idents_to_full_name(
     match &obj_name.0[..] {
         [table] => Ok((
             query_ctx.current_catalog().to_string(),
-            query_ctx.current_schema().to_string(),
+            query_ctx.current_schema().clone(),
             table.to_string_unquoted(),
         )),
         [schema, table] => Ok((

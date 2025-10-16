@@ -80,6 +80,7 @@ impl NumbersTable {
             next_column_id: 1,
             options: Default::default(),
             created_on: Default::default(),
+            updated_on: Default::default(),
             partition_key_indices: vec![],
             column_ids: vec![],
         };

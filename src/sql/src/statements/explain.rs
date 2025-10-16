@@ -15,36 +15,44 @@
 use std::fmt::{Display, Formatter};
 
 use serde::Serialize;
-use sqlparser::ast::{AnalyzeFormat, Statement as SpStatement};
+use sqlparser::ast::AnalyzeFormat;
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::error::Error;
+use crate::statements::statement::Statement;
 
 /// Explain statement.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
-pub struct Explain {
-    pub inner: SpStatement,
+pub struct ExplainStatement {
+    /// `EXPLAIN ANALYZE ..`
+    pub analyze: bool,
+    /// `EXPLAIN .. VERBOSE ..`
+    pub verbose: bool,
+    /// `EXPLAIN .. FORMAT `
+    pub format: Option<AnalyzeFormat>,
+    /// The statement to analyze. Note this is a Greptime [`Statement`] (not a
+    /// [`sqlparser::ast::Statement`] so that we can use
+    /// Greptime specific statements
+    pub statement: Box<Statement>,
 }
 
-impl Explain {
+impl ExplainStatement {
     pub fn format(&self) -> Option<AnalyzeFormat> {
-        match self.inner {
-            SpStatement::Explain { format, .. } => format,
-            _ => None,
-        }
+        self.format
     }
 }
 
-impl TryFrom<SpStatement> for Explain {
-    type Error = Error;
-
-    fn try_from(value: SpStatement) -> Result<Self, Self::Error> {
-        Ok(Explain { inner: value })
-    }
-}
-
-impl Display for Explain {
+impl Display for ExplainStatement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
+        write!(f, "EXPLAIN")?;
+        if self.analyze {
+            write!(f, " ANALYZE")?;
+        }
+        if self.verbose {
+            write!(f, " VERBOSE")?;
+        }
+        if let Some(format) = &self.format {
+            write!(f, " FORMAT {}", format)?;
+        }
+        write!(f, " {}", self.statement)
     }
 }

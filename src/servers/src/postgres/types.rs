@@ -25,10 +25,11 @@ use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{IntervalType, TimestampType, json_type_value_to_string};
-use datatypes::value::ListValue;
+use datatypes::types::{IntervalType, JsonFormat, TimestampType, jsonb_to_string};
+use datatypes::value::{ListValue, StructValue};
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -62,13 +63,35 @@ pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Ve
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
-fn encode_array(
-    query_ctx: &QueryContextRef,
-    value_list: &ListValue,
+/// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
+///
+/// Note that greptimedb has different types of StructValue for storing json data,
+/// based on policy defined in `JsonStructureSettings`. But here the `StructValue`
+/// should be fully structured.
+///
+/// there are alternatives like records, arrays, etc. but there are also limitations:
+/// records: there is no support for include keys
+/// arrays: element in array must be the same type
+fn encode_struct(
+    _query_ctx: &QueryContextRef,
+    struct_value: StructValue,
     builder: &mut DataRowEncoder,
 ) -> PgWireResult<()> {
-    match value_list.datatype() {
-        &ConcreteDataType::Boolean(_) => {
+    let encoding_setting = JsonStructureSettings::Structured(None);
+    let json_value = encoding_setting
+        .decode(Value::Struct(struct_value))
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+    builder.encode_field(&json_value)
+}
+
+fn encode_array(
+    query_ctx: &QueryContextRef,
+    value_list: ListValue,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
+    match &value_list.datatype() {
+        ConcreteDataType::Boolean(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -82,7 +105,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<bool>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => {
+        ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -99,7 +122,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<i8>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => {
+        ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -116,7 +139,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<i16>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => {
+        ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -133,7 +156,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<i32>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => {
+        ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -150,7 +173,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<i64>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Float32(_) => {
+        ConcreteDataType::Float32(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -164,7 +187,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<f32>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Float64(_) => {
+        ConcreteDataType::Float64(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -178,7 +201,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<f64>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => {
+        ConcreteDataType::Binary(_) | ConcreteDataType::Vector(_) => {
             let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
 
             match *bytea_output {
@@ -218,7 +241,7 @@ fn encode_array(
                 }
             }
         }
-        &ConcreteDataType::String(_) => {
+        ConcreteDataType::String(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -232,7 +255,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<&str>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Date(_) => {
+        ConcreteDataType::Date(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -256,7 +279,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Timestamp(_) => {
+        ConcreteDataType::Timestamp(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -282,7 +305,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Time(_) => {
+        ConcreteDataType::Time(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -296,7 +319,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<NaiveTime>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Interval(_) => {
+        ConcreteDataType::Interval(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -312,7 +335,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<PgInterval>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Decimal128(_) => {
+        ConcreteDataType::Decimal128(_) => {
             let array = value_list
                 .items()
                 .iter()
@@ -326,23 +349,42 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Json(j) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Binary(v) => {
-                        let s = json_type_value_to_string(v, &j.format).map_err(convert_err)?;
-                        Ok(Some(s))
-                    }
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected json",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<String>>>>()?;
-            builder.encode_field(&array)
-        }
+        ConcreteDataType::Json(j) => match &j.format {
+            JsonFormat::Jsonb => {
+                let array = value_list
+                    .take_items()
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::Null => Ok(None),
+                        Value::Binary(v) => {
+                            let s = jsonb_to_string(&v).map_err(convert_err)?;
+                            Ok(Some(s))
+                        }
+
+                        _ => Err(convert_err(Error::Internal {
+                            err_msg: format!("Invalid list item type, find {v:?}, expected json",),
+                        })),
+                    })
+                    .collect::<PgWireResult<Vec<Option<String>>>>()?;
+                builder.encode_field(&array)
+            }
+            JsonFormat::Native(_) => {
+                let array = value_list
+                    .take_items()
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::Null => Ok(None),
+                        Value::Json(inner) => serde_json::Value::try_from(*inner)
+                            .map(Some)
+                            .map_err(|e| PgWireError::ApiError(Box::new(e))),
+                        _ => Err(convert_err(Error::Internal {
+                            err_msg: format!("Invalid list item type, find {v:?}, expected json",),
+                        })),
+                    })
+                    .collect::<PgWireResult<Vec<Option<serde_json::Value>>>>()?;
+                builder.encode_field(&array)
+            }
+        },
         _ => Err(convert_err(Error::Internal {
             err_msg: format!(
                 "cannot write array type {:?} in postgres protocol: unimplemented",
@@ -354,27 +396,27 @@ fn encode_array(
 
 pub(super) fn encode_value(
     query_ctx: &QueryContextRef,
-    value: &Value,
+    value: Value,
     builder: &mut DataRowEncoder,
     datatype: &ConcreteDataType,
 ) -> PgWireResult<()> {
     match value {
         Value::Null => builder.encode_field(&None::<&i8>),
-        Value::Boolean(v) => builder.encode_field(v),
-        Value::UInt8(v) => builder.encode_field(&(*v as i8)),
-        Value::UInt16(v) => builder.encode_field(&(*v as i16)),
-        Value::UInt32(v) => builder.encode_field(v),
-        Value::UInt64(v) => builder.encode_field(&(*v as i64)),
-        Value::Int8(v) => builder.encode_field(v),
-        Value::Int16(v) => builder.encode_field(v),
-        Value::Int32(v) => builder.encode_field(v),
-        Value::Int64(v) => builder.encode_field(v),
+        Value::Boolean(v) => builder.encode_field(&v),
+        Value::UInt8(v) => builder.encode_field(&(v as i8)),
+        Value::UInt16(v) => builder.encode_field(&(v as i16)),
+        Value::UInt32(v) => builder.encode_field(&v),
+        Value::UInt64(v) => builder.encode_field(&(v as i64)),
+        Value::Int8(v) => builder.encode_field(&v),
+        Value::Int16(v) => builder.encode_field(&v),
+        Value::Int32(v) => builder.encode_field(&v),
+        Value::Int64(v) => builder.encode_field(&v),
         Value::Float32(v) => builder.encode_field(&v.0),
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
-            ConcreteDataType::Json(j) => {
-                let s = json_type_value_to_string(v, &j.format).map_err(convert_err)?;
+            ConcreteDataType::Json(_j) => {
+                let s = jsonb_to_string(v.as_ref()).map_err(convert_err)?;
                 builder.encode_field(&s)
             }
             _ => {
@@ -417,17 +459,23 @@ pub(super) fn encode_value(
                 }))
             }
         }
-        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(*v)),
-        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
-        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(v)),
+        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(v)),
+        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::Duration(d) => match PgInterval::try_from(*d) {
+        Value::Duration(d) => match PgInterval::try_from(d) {
             Ok(i) => builder.encode_field(&i),
             Err(e) => Err(convert_err(Error::Internal {
                 err_msg: e.to_string(),
             })),
         },
         Value::List(values) => encode_array(query_ctx, values, builder),
+        Value::Struct(values) => encode_struct(query_ctx, values, builder),
+        Value::Json(inner) => {
+            let json_value = serde_json::Value::try_from(*inner)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            builder.encode_field(&json_value)
+        }
     }
 }
 
@@ -467,10 +515,10 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL_ARRAY),
+            &ConcreteDataType::Struct(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Dictionary(_)
             | &ConcreteDataType::Vector(_)
-            | &ConcreteDataType::List(_)
-            | &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
+            | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
                 reason: "not implemented",
             }
@@ -482,11 +530,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         }
         .fail(),
         &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL),
-        &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
-            data_type: origin,
-            reason: "not implemented",
-        }
-        .fail(),
+        &ConcreteDataType::Struct(_) => Ok(Type::JSON),
     }
 }
 
@@ -1346,7 +1390,7 @@ mod test {
             .build()
             .into();
         let mut builder = DataRowEncoder::new(Arc::new(schema));
-        for (value, datatype) in values.iter().zip(datatypes) {
+        for (value, datatype) in values.into_iter().zip(datatypes) {
             encode_value(&query_context, value, &mut builder, &datatype).unwrap();
         }
     }

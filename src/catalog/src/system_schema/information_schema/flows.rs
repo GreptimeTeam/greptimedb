@@ -254,9 +254,9 @@ impl InformationSchemaFlowsBuilder {
                 .await
                 .map_err(BoxedError::new)
                 .context(InternalSnafu)?
-                .context(FlowInfoNotFoundSnafu {
-                    catalog_name: catalog_name.to_string(),
-                    flow_name: flow_name.to_string(),
+                .with_context(|| FlowInfoNotFoundSnafu {
+                    catalog_name: catalog_name.clone(),
+                    flow_name: flow_name.clone(),
                 })?;
             self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
                 .await?;
@@ -273,11 +273,11 @@ impl InformationSchemaFlowsBuilder {
         flow_stat: &Option<FlowStat>,
     ) -> Result<()> {
         let row = [
-            (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
+            (FLOW_NAME, &Value::from(flow_info.flow_name().clone())),
             (FLOW_ID, &Value::from(flow_id)),
             (
                 TABLE_CATALOG,
-                &Value::from(flow_info.catalog_name().to_string()),
+                &Value::from(flow_info.catalog_name().clone()),
             ),
         ];
         if !predicates.eval(&row) {

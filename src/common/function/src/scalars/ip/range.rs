@@ -309,7 +309,7 @@ fn is_ipv6_in_range(ip: &Ipv6Addr, cidr_base: &Ipv6Addr, prefix_len: u8) -> Opti
     }
 
     // If there's a partial byte to check
-    if prefix_len % 8 != 0 && full_bytes < 16 {
+    if !prefix_len.is_multiple_of(8) && full_bytes < 16 {
         let bits_to_check = prefix_len % 8;
         let mask = 0xFF_u8 << (8 - bits_to_check);
 

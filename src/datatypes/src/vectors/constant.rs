@@ -52,7 +52,7 @@ impl ConstantVector {
     }
 
     /// Returns the constant value.
-    pub fn get_constant_ref(&self) -> ValueRef {
+    pub fn get_constant_ref(&self) -> ValueRef<'_> {
         self.vector.get_ref(0)
     }
 
@@ -179,7 +179,7 @@ impl Vector for ConstantVector {
         self.vector.get(0)
     }
 
-    fn get_ref(&self, _index: usize) -> ValueRef {
+    fn get_ref(&self, _index: usize) -> ValueRef<'_> {
         self.vector.get_ref(0)
     }
 

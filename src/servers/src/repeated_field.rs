@@ -32,6 +32,8 @@ use std::{fmt, slice, vec};
 
 use bytes::Bytes;
 
+const NULL_BYTES: &[u8] = &[];
+
 /// anything that can be cleared
 pub trait Clear {
     /// Clear this make, make it equivalent to newly created object.
@@ -39,7 +41,9 @@ pub trait Clear {
 }
 
 impl Clear for &[u8] {
-    fn clear(&mut self) {}
+    fn clear(&mut self) {
+        *self = NULL_BYTES;
+    }
 }
 
 impl<T> Clear for Option<T> {
@@ -277,13 +281,13 @@ impl<T> RepeatedField<T> {
 
     /// Immutable data iterator.
     #[inline]
-    pub fn iter(&self) -> slice::Iter<T> {
+    pub fn iter(&self) -> slice::Iter<'_, T> {
         self.as_ref().iter()
     }
 
     /// Mutable data iterator.
     #[inline]
-    pub fn iter_mut(&mut self) -> slice::IterMut<T> {
+    pub fn iter_mut(&mut self) -> slice::IterMut<'_, T> {
         self.as_mut_slice().iter_mut()
     }
 
@@ -510,5 +514,20 @@ impl<T: fmt::Debug> fmt::Debug for RepeatedField<T> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.as_ref().fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::repeated_field::RepeatedField;
+
+    #[test]
+    fn test_null_ptr() {
+        let mut vec: RepeatedField<&'static [u8]> = RepeatedField::new();
+        let borrowed_value = vec.push_default();
+        *borrowed_value = b"hello";
+        vec.clear();
+        let new_value = vec.push_default();
+        assert!((*new_value).is_empty());
     }
 }

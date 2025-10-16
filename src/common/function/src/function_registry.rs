@@ -71,7 +71,7 @@ impl FunctionRegistry {
         for alias in func.aliases() {
             let func: ScalarFunctionFactory = func.clone().into();
             let alias = ScalarFunctionFactory {
-                name: alias.to_string(),
+                name: alias.clone(),
                 ..func
             };
             self.register(alias);

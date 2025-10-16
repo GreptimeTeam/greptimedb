@@ -113,7 +113,7 @@ impl TableInfoValue {
         }
     }
 
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference::full(
             &self.table_info.catalog_name,
             &self.table_info.schema_name,
@@ -123,9 +123,9 @@ impl TableInfoValue {
 
     pub fn table_name(&self) -> TableName {
         TableName {
-            catalog_name: self.table_info.catalog_name.to_string(),
-            schema_name: self.table_info.schema_name.to_string(),
-            table_name: self.table_info.name.to_string(),
+            catalog_name: self.table_info.catalog_name.clone(),
+            schema_name: self.table_info.schema_name.clone(),
+            table_name: self.table_info.name.clone(),
         }
     }
 
@@ -289,6 +289,7 @@ mod tests {
     fn test_deserialization_compatibility() {
         let s = r#"{"version":1,"table_info":{"ident":{"table_id":8714,"version":0},"name":"go_gc_duration_seconds","desc":"Created on insertion","catalog_name":"e87lehzy63d4cloud_docs_test","schema_name":"public","meta":{"schema":{"column_schemas":[{"name":"instance","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"job","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"quantile","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}}],"timestamp_index":3,"version":0},"primary_key_indices":[0,1,2],"value_indices":[],"engine":"mito","next_column_id":5,"region_numbers":[],"engine_options":{},"options":{"write_buffer_size":null,"ttl":null,"extra_options":{}},"created_on":"1970-01-01T00:00:00Z"},"table_type":"Base"}}"#;
         let v = TableInfoValue::try_from_raw_value(s.as_bytes()).unwrap();
+        assert_eq!(v.table_info.meta.created_on, v.table_info.meta.updated_on);
         assert!(v.table_info.meta.partition_key_indices.is_empty());
     }
 
@@ -328,6 +329,7 @@ mod tests {
             schema: RawSchema::from(&schema),
             engine: "mito".to_string(),
             created_on: chrono::DateTime::default(),
+            updated_on: chrono::DateTime::default(),
             primary_key_indices: vec![0, 1],
             next_column_id: 3,
             value_indices: vec![2, 3],

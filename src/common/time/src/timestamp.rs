@@ -308,12 +308,12 @@ impl Timestamp {
     fn from_splits(sec: i64, nsec: u32) -> Option<Self> {
         if nsec == 0 {
             Some(Timestamp::new_second(sec))
-        } else if nsec % 1_000_000 == 0 {
+        } else if nsec.is_multiple_of(1_000_000) {
             let millis = nsec / 1_000_000;
             sec.checked_mul(1000)
                 .and_then(|v| v.checked_add(millis as i64))
                 .map(Timestamp::new_millisecond)
-        } else if nsec % 1000 == 0 {
+        } else if nsec.is_multiple_of(1_000) {
             let micros = nsec / 1000;
             sec.checked_mul(1_000_000)
                 .and_then(|v| v.checked_add(micros as i64))

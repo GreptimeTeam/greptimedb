@@ -38,7 +38,7 @@ pub(crate) fn one_of_sigs2(args1: Vec<DataType>, args2: Vec<DataType>) -> Signat
 
 /// Cast a [`ValueRef`] to u64, returns `None` if fails
 pub fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
-    cast((*value).into(), &ConcreteDataType::uint64_datatype())
+    cast(value.clone().into(), &ConcreteDataType::uint64_datatype())
         .context(InvalidInputTypeSnafu {
             err_msg: format!(
                 "Failed to cast input into uint64, actual type: {:#?}",
@@ -50,7 +50,7 @@ pub fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
 
 /// Cast a [`ValueRef`] to u32, returns `None` if fails
 pub fn cast_u32(value: &ValueRef) -> Result<Option<u32>> {
-    cast((*value).into(), &ConcreteDataType::uint32_datatype())
+    cast(value.clone().into(), &ConcreteDataType::uint32_datatype())
         .context(InvalidInputTypeSnafu {
             err_msg: format!(
                 "Failed to cast input into uint32, actual type: {:#?}",

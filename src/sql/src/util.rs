@@ -62,7 +62,7 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
         Expr::Value(ValueWithSpan {
             value: Value::Number(v, _),
             ..
-        }) => v.to_string(),
+        }) => v.clone(),
         value => return InvalidTableOptionValueSnafu { key, value }.fail(),
     };
     let k = key.value.to_lowercase();

@@ -66,7 +66,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
-use sql::statements::alter::{AlterDatabase, AlterTable};
+use sql::statements::alter::{AlterDatabase, AlterTable, AlterTableOperation};
 #[cfg(feature = "enterprise")]
 use sql::statements::create::trigger::CreateTrigger;
 use sql::statements::create::{
@@ -87,10 +87,10 @@ use crate::error::{
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
     InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::StatementExecutor;
@@ -1014,7 +1014,7 @@ impl StatementExecutor {
             let schema = if expr.schema_name.is_empty() {
                 query_context.current_schema()
             } else {
-                expr.schema_name.to_string()
+                expr.schema_name.clone()
             };
             let table_name = &expr.table_name;
             let table = self
@@ -1194,6 +1194,17 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
+        if matches!(
+            alter_table.alter_operation(),
+            AlterTableOperation::Repartition { .. }
+        ) {
+            let _request = expr_helper::to_repartition_request(alter_table, &query_context)?;
+            return NotSupportedSnafu {
+                feat: "ALTER TABLE REPARTITION",
+            }
+            .fail();
+        }
+
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
@@ -1446,9 +1457,9 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
                 drop_if_exists,
             ),
@@ -1504,9 +1515,9 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_truncate_table(
-                table_name.catalog_name.to_string(),
-                table_name.schema_name.to_string(),
-                table_name.table_name.to_string(),
+                table_name.catalog_name.clone(),
+                table_name.schema_name.clone(),
+                table_name.table_name.clone(),
                 table_id,
                 time_ranges,
             ),
@@ -1720,6 +1731,7 @@ pub fn create_table_info(
         region_numbers: vec![],
         options: table_options,
         created_on: Utc::now(),
+        updated_on: Utc::now(),
         partition_key_indices,
         column_ids: vec![],
     };
@@ -1784,7 +1796,7 @@ fn find_partition_entries(
                 .unwrap();
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
                     .context(ColumnDataTypeSnafu)?,
             );
             Ok((column_name, data_type))

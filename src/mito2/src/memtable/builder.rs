@@ -54,7 +54,7 @@ impl FieldBuilder {
                 }
                 Ok(())
             }
-            FieldBuilder::Other(b) => b.try_push_value_ref(value),
+            FieldBuilder::Other(b) => b.try_push_value_ref(&value),
         }
     }
 

@@ -66,7 +66,7 @@ pub fn table_name(q: &Query) -> Result<String> {
         .iter()
         .find_map(|m| {
             if m.name == METRIC_NAME_LABEL {
-                Some(m.value.to_string())
+                Some(m.value.clone())
             } else {
                 None
             }

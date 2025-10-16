@@ -16,7 +16,6 @@
 //! It can transform substrait plan into it's own plan and execute it.
 //! It also contains definition of expression, adapter and plan, and internal state management.
 
-#![feature(let_chains)]
 #![allow(dead_code)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::too_many_lines)]

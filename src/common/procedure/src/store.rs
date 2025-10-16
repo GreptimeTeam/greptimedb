@@ -37,6 +37,7 @@ macro_rules! proc_path {
     ($store: expr, $fmt:expr, $($args:tt)*) => { format!("{}{}", $store.proc_path(), format_args!($fmt, $($args)*)) };
 }
 
+#[cfg(test)]
 pub(crate) use proc_path;
 
 /// Serialized data of a procedure.
@@ -579,13 +580,7 @@ mod tests {
         let type_name = procedure.type_name().to_string();
         let data = procedure.dump().unwrap();
         store
-            .store_procedure(
-                procedure_id,
-                0,
-                type_name.to_string(),
-                data.to_string(),
-                None,
-            )
+            .store_procedure(procedure_id, 0, type_name.clone(), data.clone(), None)
             .await
             .unwrap();
         let message = ProcedureMessage {

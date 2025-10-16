@@ -214,14 +214,14 @@ mod tests {
 
         // Gets all clients sequentially.
         for (_, topic) in region_topic {
-            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            let provider = Arc::new(KafkaProvider::new(topic.clone()));
             manager.get_or_insert(&provider).await.unwrap();
         }
 
         // Ensures all clients exist.
         let client_pool = manager.instances.read().await;
         let all_exist = topics.iter().all(|topic| {
-            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            let provider = Arc::new(KafkaProvider::new(topic.clone()));
             client_pool.contains_key(&provider)
         });
         assert!(all_exist);
@@ -259,7 +259,7 @@ mod tests {
         // Ensures all clients exist.
         let client_pool = manager.instances.read().await;
         let all_exist = topics.iter().all(|topic| {
-            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            let provider = Arc::new(KafkaProvider::new(topic.clone()));
             client_pool.contains_key(&provider)
         });
         assert!(all_exist);

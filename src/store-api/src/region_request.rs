@@ -338,9 +338,18 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     let options = compact
         .options
         .unwrap_or(compact_request::Options::Regular(Default::default()));
+    // Convert parallelism: a value of 0 indicates no specific parallelism requested (None)
+    let parallelism = if compact.parallelism == 0 {
+        None
+    } else {
+        Some(compact.parallelism)
+    };
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest { options }),
+        RegionRequest::Compact(RegionCompactRequest {
+            options,
+            parallelism,
+        }),
     )])
 }
 
@@ -1261,7 +1270,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Ttl(Some(ttl)))
             }
             TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
-                Ok(Self::Twsc(key.to_string(), value.to_string()))
+                Ok(Self::Twsc(key.clone(), value.clone()))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1332,6 +1341,7 @@ pub struct RegionFlushRequest {
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
+    pub parallelism: Option<u32>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1339,6 +1349,7 @@ impl Default for RegionCompactRequest {
         Self {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
+            parallelism: None,
         }
     }
 }

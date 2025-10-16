@@ -335,7 +335,7 @@ impl FlowDualEngine {
                             .or_else(|| {
                                 Some(
                                     QueryContextBuilder::default()
-                                        .current_catalog(info.catalog_name().to_string())
+                                        .current_catalog(info.catalog_name().clone())
                                         .build(),
                                 )
                             }),

@@ -210,8 +210,8 @@ impl TimeWindowExpr {
 
             let mut vector = cdt.create_mutable_vector(rows.rows.len());
             for row in rows.rows {
-                let value = pb_value_to_value_ref(&row.values[ts_col_index], &None);
-                vector.try_push_value_ref(value).context(DataTypeSnafu {
+                let value = pb_value_to_value_ref(&row.values[ts_col_index], None);
+                vector.try_push_value_ref(&value).context(DataTypeSnafu {
                     msg: "Failed to convert rows to columns",
                 })?;
             }
@@ -928,13 +928,13 @@ mod test {
                 .await
                 .unwrap();
             let (col_name, lower, upper) = real;
-            let new_sql = if lower.is_some() {
+            let new_sql = if let Some(lower) = lower {
                 let to_df_literal = |value| {
                     let value = Value::from(value);
 
                     value.try_to_scalar_value(&value.data_type()).unwrap()
                 };
-                let lower = to_df_literal(lower.unwrap());
+                let lower = to_df_literal(lower);
                 let upper = to_df_literal(upper.unwrap());
                 let expr = col(&col_name)
                     .gt_eq(lit(lower))

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(btree_extract_if)]
-#![feature(let_chains)]
 #![feature(duration_millis_float)]
 
 pub mod cache;

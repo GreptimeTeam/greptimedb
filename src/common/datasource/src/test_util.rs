@@ -87,7 +87,7 @@ pub(crate) fn scan_config(
 ) -> FileScanConfig {
     // object_store only recognize the Unix style path, so make it happy.
     let filename = &filename.replace('\\', "/");
-    let file_group = FileGroup::new(vec![PartitionedFile::new(filename.to_string(), 4096)]);
+    let file_group = FileGroup::new(vec![PartitionedFile::new(filename.clone(), 4096)]);
 
     FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_schema, file_source)
         .with_file_group(file_group)
