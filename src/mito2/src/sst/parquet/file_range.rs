@@ -20,28 +20,31 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
-use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, UInt32Array};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::value::Value;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::TimeSeriesRowSelector;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{
-    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
-    Result, StatsNotPresentSnafu,
+    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    InvalidRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::flat_format::primary_key_column_index;
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
-
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
 #[derive(Clone)]
@@ -389,6 +392,92 @@ impl RangeBase {
             }
         }
 
+        let filtered_batch =
+            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
+                .context(ComputeArrowSnafu)?;
+
+        if filtered_batch.num_rows() > 0 {
+            Ok(Some(filtered_batch))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Filters the input RecordBatch by table id filters if the encoding is sparse.
+    ///
+    /// This process the RecordBatch before the format converts the batch.
+    pub(crate) fn filter_sparse_table_id(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
+        if self.codec.encoding() != PrimaryKeyEncoding::Sparse {
+            return Ok(Some(input));
+        }
+
+        let table_id_column_id = ReservedColumnId::table_id();
+        let has_table_id_filter = self
+            .filters
+            .iter()
+            .any(|filter_ctx| filter_ctx.column_id() == table_id_column_id);
+
+        // No table_id filters, returns the input as-is
+        if !has_table_id_filter {
+            return Ok(Some(input));
+        }
+
+        let primary_key_index = primary_key_column_index(input.num_columns());
+        let pk_dict_array = input
+            .column(primary_key_index)
+            .as_any()
+            .downcast_ref::<PrimaryKeyArray>()
+            .context(InvalidRecordBatchSnafu {
+                reason: "Primary key column is not a dictionary array",
+            })?;
+        let pk_values_array = pk_dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        // Decodes leftmost value (table_id) for each row.
+        let num_pk_values = pk_dict_array.len();
+        let mut decoded_table_ids = Vec::with_capacity(num_pk_values);
+        for i in 0..num_pk_values {
+            // Primary key array should not contain null values.
+            let key = pk_dict_array.keys().value(i) as usize;
+            let pk_bytes = pk_values_array.value(key);
+            let table_id_opt = self.codec.decode_leftmost(pk_bytes).context(DecodeSnafu)?;
+            // Extract u32 value from Value::UInt32
+            let table_id = match table_id_opt {
+                Some(Value::UInt32(val)) => val,
+                _ => panic!("Expect table id, found: {:?}", table_id_opt),
+            };
+            decoded_table_ids.push(table_id);
+        }
+        let table_id_array = Arc::new(UInt32Array::from(decoded_table_ids)) as _;
+
+        // Build a boolean mask by applying table_id filters
+        let mut mask = BooleanBuffer::new_set(input.num_rows());
+        for filter_ctx in &self.filters {
+            // Skip non-table_id filters
+            if filter_ctx.column_id() != table_id_column_id {
+                continue;
+            }
+
+            let filter = match filter_ctx.filter() {
+                MaybeFilter::Filter(f) => f,
+                // Column matches.
+                MaybeFilter::Matched => continue,
+                // Column doesn't match, filter the entire batch.
+                MaybeFilter::Pruned => return Ok(None),
+            };
+
+            // Evaluate filter on the table_id array
+            let result = filter
+                .evaluate_array(&table_id_array)
+                .context(RecordBatchSnafu)?;
+
+            mask = mask.bitand(&result);
+        }
+
+        // Filter the batch by the mask
         let filtered_batch =
             datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
                 .context(ComputeArrowSnafu)?;
