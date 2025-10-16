@@ -322,13 +322,6 @@ impl BloomFilterIndexer {
                         "Column {} not found in the batch during building bloom filter index",
                         column_name
                     );
-                    // Push empty elements to maintain alignment
-                    for _ in 0..n {
-                        creator
-                            .push_row_elems(None)
-                            .await
-                            .context(PushBloomFilterValueSnafu)?;
-                    }
                 }
             }
         }
