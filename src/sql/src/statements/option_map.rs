@@ -19,33 +19,55 @@ use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
 use serde::Serialize;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 
+use crate::util::OptionValue;
+
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
 /// Options hashmap.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct OptionMap {
-    options: BTreeMap<String, String>,
+    options: BTreeMap<String, OptionValue>,
     #[serde(skip_serializing)]
     secrets: BTreeMap<String, SecretString>,
 }
 
 impl OptionMap {
+    pub fn new<I: IntoIterator<Item = (String, OptionValue)>>(options: I) -> Self {
+        let (secrets, options): (Vec<_>, Vec<_>) = options
+            .into_iter()
+            .partition(|(k, _)| REDACTED_OPTIONS.contains(&k.as_str()));
+        Self {
+            options: options.into_iter().collect(),
+            secrets: secrets
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    v.as_string()
+                        .map(|v| (k, SecretString::new(Box::new(v.to_string()))))
+                })
+                .collect(),
+        }
+    }
+
     pub fn insert(&mut self, k: String, v: String) {
         if REDACTED_OPTIONS.contains(&k.as_str()) {
             self.secrets.insert(k, SecretString::new(Box::new(v)));
         } else {
-            self.options.insert(k, v);
+            self.options.insert(k, v.into());
         }
     }
 
-    pub fn get(&self, k: &str) -> Option<&String> {
+    pub fn get(&self, k: &str) -> Option<&str> {
         if let Some(value) = self.options.get(k) {
-            Some(value)
+            value.as_string()
         } else if let Some(value) = self.secrets.get(k) {
             Some(value.expose_secret())
         } else {
             None
         }
+    }
+
+    pub fn value(&self, k: &str) -> Option<&OptionValue> {
+        self.options.get(k)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -58,7 +80,11 @@ impl OptionMap {
 
     pub fn to_str_map(&self) -> HashMap<&str, &str> {
         let mut map = HashMap::with_capacity(self.len());
-        map.extend(self.options.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        map.extend(
+            self.options
+                .iter()
+                .filter_map(|(k, v)| v.as_string().map(|v| (k.as_str(), v))),
+        );
         map.extend(
             self.secrets
                 .iter()
@@ -69,7 +95,11 @@ impl OptionMap {
 
     pub fn into_map(self) -> HashMap<String, String> {
         let mut map = HashMap::with_capacity(self.len());
-        map.extend(self.options);
+        map.extend(
+            self.options
+                .into_iter()
+                .filter_map(|(k, v)| v.into_string().map(|v| (k, v))),
+        );
         map.extend(
             self.secrets
                 .into_iter()
@@ -80,7 +110,11 @@ impl OptionMap {
 
     pub fn kv_pairs(&self) -> Vec<String> {
         let mut result = Vec::with_capacity(self.options.len() + self.secrets.len());
-        for (k, v) in self.options.iter() {
+        for (k, v) in self
+            .options
+            .iter()
+            .filter_map(|(k, v)| v.as_string().map(|v| (k, v)))
+        {
             if k.contains(".") {
                 result.push(format!("'{k}' = '{}'", v.escape_debug()));
             } else {

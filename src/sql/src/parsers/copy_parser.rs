@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
@@ -21,15 +19,13 @@ use sqlparser::tokenizer::Token::Word;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
+use crate::statements::OptionMap;
 use crate::statements::copy::{
     CopyDatabase, CopyDatabaseArgument, CopyQueryTo, CopyQueryToArgument, CopyTable,
     CopyTableArgument,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
-
-pub type With = HashMap<String, String>;
-pub type Connection = HashMap<String, String>;
 
 // COPY tbl TO 'output.parquet';
 impl ParserContext<'_> {
@@ -73,8 +69,8 @@ impl ParserContext<'_> {
 
             let argument = CopyDatabaseArgument {
                 database_name,
-                with: with.into(),
-                connection: connection.into(),
+                with,
+                connection,
                 location,
             };
             CopyDatabase::To(argument)
@@ -92,8 +88,8 @@ impl ParserContext<'_> {
 
             let argument = CopyDatabaseArgument {
                 database_name,
-                with: with.into(),
-                connection: connection.into(),
+                with,
+                connection,
                 location,
             };
             CopyDatabase::From(argument)
@@ -114,8 +110,8 @@ impl ParserContext<'_> {
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
             Ok(CopyTable::To(CopyTableArgument {
                 table_name,
-                with: with.into(),
-                connection: connection.into(),
+                with,
+                connection,
                 location,
                 limit,
             }))
@@ -126,8 +122,8 @@ impl ParserContext<'_> {
             let (with, connection, location, limit) = self.parse_copy_parameters()?;
             Ok(CopyTable::From(CopyTableArgument {
                 table_name,
-                with: with.into(),
-                connection: connection.into(),
+                with,
+                connection,
                 location,
                 limit,
             }))
@@ -161,14 +157,14 @@ impl ParserContext<'_> {
         Ok(CopyQueryTo {
             query: Box::new(query),
             arg: CopyQueryToArgument {
-                with: with.into(),
-                connection: connection.into(),
+                with,
+                connection,
                 location,
             },
         })
     }
 
-    fn parse_copy_parameters(&mut self) -> Result<(With, Connection, String, Option<u64>)> {
+    fn parse_copy_parameters(&mut self) -> Result<(OptionMap, OptionMap, String, Option<u64>)> {
         let location =
             self.parser
                 .parse_literal_string()
@@ -185,7 +181,8 @@ impl ParserContext<'_> {
         let with = options
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<With>>()?;
+            .collect::<Result<Vec<_>>>()?;
+        let with = OptionMap::new(with);
 
         let connection_options = self
             .parser
@@ -195,7 +192,8 @@ impl ParserContext<'_> {
         let connection = connection_options
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<Connection>>()?;
+            .collect::<Result<Vec<_>>>()?;
+        let connection = OptionMap::new(connection);
 
         let limit = if self.parser.parse_keyword(Keyword::LIMIT) {
             Some(

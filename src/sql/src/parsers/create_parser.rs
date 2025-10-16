@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod json;
 #[cfg(feature = "enterprise")]
 pub mod trigger;
 
@@ -50,7 +51,7 @@ use crate::statements::create::{
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
 use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
-use crate::util::{location_to_index, parse_option_string};
+use crate::util::{OptionValue, location_to_index, parse_option_string};
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
@@ -203,7 +204,7 @@ impl<'a> ParserContext<'a> {
             .context(SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<HashMap<String, OptionValue>>>()?;
 
         for key in options.keys() {
             ensure!(
@@ -211,7 +212,7 @@ impl<'a> ParserContext<'a> {
                 InvalidDatabaseOptionSnafu { key: key.clone() }
             );
         }
-        if let Some(append_mode) = options.get("append_mode")
+        if let Some(append_mode) = options.get("append_mode").and_then(|x| x.as_string())
             && append_mode == "true"
             && options.contains_key("merge_mode")
         {
@@ -224,7 +225,7 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
             if_not_exists,
-            options: options.into(),
+            options: OptionMap::new(options),
         }))
     }
 
@@ -450,11 +451,11 @@ impl<'a> ParserContext<'a> {
             .context(SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<HashMap<String, OptionValue>>>()?;
         for key in options.keys() {
             ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
         }
-        Ok(options.into())
+        Ok(OptionMap::new(options))
     }
 
     /// "PARTITION ON COLUMNS (...)" clause
@@ -662,9 +663,17 @@ impl<'a> ParserContext<'a> {
             }
         );
 
-        let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-        let mut options = vec![];
         let mut extensions = ColumnExtensions::default();
+
+        let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
+        // Must immediately parse the JSON datatype format because it is closely after the "JSON"
+        // datatype, like this: "JSON(format = ...)".
+        if matches!(data_type, DataType::JSON) {
+            let options = json::parse_json_datatype_options(parser)?;
+            extensions.json_datatype_options = Some(options);
+        }
+
+        let mut options = vec![];
         loop {
             if parser.parse_keyword(Keyword::CONSTRAINT) {
                 let name = Some(parser.parse_identifier().context(SyntaxSnafu)?);
@@ -810,9 +819,9 @@ impl<'a> ParserContext<'a> {
                 .context(error::SyntaxSnafu)?
                 .into_iter()
                 .map(parse_option_string)
-                .collect::<Result<HashMap<String, String>>>()?;
+                .collect::<Result<Vec<_>>>()?;
 
-            for key in options.keys() {
+            for (key, _) in options.iter() {
                 ensure!(
                     validate_column_skipping_index_create_option(key),
                     InvalidColumnOptionSnafu {
@@ -822,7 +831,8 @@ impl<'a> ParserContext<'a> {
                 );
             }
 
-            column_extensions.skipping_index_options = Some(options.into());
+            let options = OptionMap::new(options);
+            column_extensions.skipping_index_options = Some(options);
             is_index_declared |= true;
         }
 
@@ -860,9 +870,9 @@ impl<'a> ParserContext<'a> {
                 .context(error::SyntaxSnafu)?
                 .into_iter()
                 .map(parse_option_string)
-                .collect::<Result<HashMap<String, String>>>()?;
+                .collect::<Result<Vec<_>>>()?;
 
-            for key in options.keys() {
+            for (key, _) in options.iter() {
                 ensure!(
                     validate_column_fulltext_create_option(key),
                     InvalidColumnOptionSnafu {
@@ -872,7 +882,8 @@ impl<'a> ParserContext<'a> {
                 );
             }
 
-            column_extensions.fulltext_index_options = Some(options.into());
+            let options = OptionMap::new(options);
+            column_extensions.fulltext_index_options = Some(options);
             is_index_declared |= true;
         }
 
@@ -2723,7 +2734,7 @@ CREATE TABLE log (
         assert!(result.is_ok());
         assert!(extensions.vector_options.is_some());
         let vector_options = extensions.vector_options.unwrap();
-        assert_eq!(vector_options.get(VECTOR_OPT_DIM), Some(&"128".to_string()));
+        assert_eq!(vector_options.get(VECTOR_OPT_DIM), Some("128"));
     }
 
     #[test]
@@ -2783,14 +2794,8 @@ CREATE TABLE log (
             assert!(result.unwrap());
             assert!(extensions.fulltext_index_options.is_some());
             let fulltext_options = extensions.fulltext_index_options.unwrap();
-            assert_eq!(
-                fulltext_options.get("analyzer"),
-                Some(&"English".to_string())
-            );
-            assert_eq!(
-                fulltext_options.get("case_sensitive"),
-                Some(&"true".to_string())
-            );
+            assert_eq!(fulltext_options.get("analyzer"), Some("English"));
+            assert_eq!(fulltext_options.get("case_sensitive"), Some("true"));
         }
 
         // Test fulltext index with invalid type (should fail)

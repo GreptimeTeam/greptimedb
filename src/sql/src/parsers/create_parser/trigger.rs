@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use snafu::{OptionExt, ResultExt, ensure};
@@ -210,11 +209,11 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         self.parser
             .expect_token(&Token::RParen)
             .context(error::SyntaxSnafu)?;
-        Ok(options.into())
+        Ok(OptionMap::new(options))
     }
 
     /// The SQL format as follows:
@@ -251,11 +250,11 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         self.parser
             .expect_token(&Token::RParen)
             .context(error::SyntaxSnafu)?;
-        Ok(options.into())
+        Ok(OptionMap::new(options))
     }
 
     /// The SQL format as follows:
@@ -374,9 +373,9 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
-        for key in options.keys() {
+        for (key, _) in options.iter() {
             ensure!(
                 validate_webhook_option(key),
                 error::InvalidTriggerWebhookOptionSnafu { key: key.clone() }
@@ -385,7 +384,7 @@ impl<'a> ParserContext<'a> {
 
         let webhook = AlertManagerWebhook {
             url,
-            options: options.into(),
+            options: OptionMap::new(options),
         };
 
         Ok(NotifyChannel {
