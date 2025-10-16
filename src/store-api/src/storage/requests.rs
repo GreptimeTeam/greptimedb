@@ -55,9 +55,12 @@ pub struct ScanRequest {
     /// Optional hint to select rows from time-series.
     pub series_row_selector: Option<TimeSeriesRowSelector>,
     /// Optional constraint on the sequence number of the rows to read.
-    /// If set, only rows with a sequence number lesser or equal to this value
+    /// If set, only rows with a sequence number **lesser or equal** to this value
     /// will be returned.
-    pub sequence: Option<SequenceNumber>,
+    pub memtable_max_sequence: Option<SequenceNumber>,
+    /// Optional constraint on the minimal sequence number in the memtable.
+    /// If set, only the memtables that contain sequences **greater than** this value will be scanned
+    pub memtable_min_sequence: Option<SequenceNumber>,
     /// Optional constraint on the minimal sequence number in the SST files.
     /// If set, only the SST files that contain sequences greater than this value will be scanned.
     pub sst_min_sequence: Option<SequenceNumber>,
@@ -121,7 +124,7 @@ impl Display for ScanRequest {
                 series_row_selector
             )?;
         }
-        if let Some(sequence) = &self.sequence {
+        if let Some(sequence) = &self.memtable_max_sequence {
             write!(f, "{}sequence: {}", delimiter.as_str(), sequence)?;
         }
         if let Some(sst_min_sequence) = &self.sst_min_sequence {

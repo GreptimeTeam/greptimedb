@@ -30,7 +30,7 @@ use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -229,7 +229,7 @@ impl PartitionTree {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
     ) -> Result<BoxedBatchIterator> {
         let start = Instant::now();
@@ -465,7 +465,7 @@ struct TreeIterMetrics {
 
 struct TreeIter {
     /// Optional Sequence number of the current reader which limit results batch to lower than this sequence number.
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
     metrics: TreeIterMetrics,
