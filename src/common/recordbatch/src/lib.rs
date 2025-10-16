@@ -21,7 +21,6 @@ pub mod filter;
 mod recordbatch;
 pub mod util;
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -549,6 +548,7 @@ impl QueryMemoryTracker {
                     self.hard_limit
                 };
                 error::ExceedMemoryLimitSnafu {
+                    requested: size,
                     used: current,
                     limit,
                 }
@@ -571,19 +571,12 @@ impl QueryMemoryTracker {
     }
 }
 
-/// Window size for staged memory release.
-/// Keeps the most recent N batches tracked, releases older ones progressively.
-const MEMORY_RELEASE_WINDOW_SIZE: usize = 3;
-
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
     tracker: QueryMemoryTracker,
-    // Whether this is the first batch (for soft limit check).
-    is_initial: bool,
-    // Window of recent batch sizes for staged release.
-    // When the window is full, the oldest batch is released from tracking.
-    batch_window: VecDeque<usize>,
+    // Total tracked size, released when stream drops.
+    total_tracked: usize,
 }
 
 impl MemoryTrackedStream {
@@ -591,8 +584,7 @@ impl MemoryTrackedStream {
         Self {
             inner,
             tracker,
-            is_initial: true,
-            batch_window: VecDeque::with_capacity(MEMORY_RELEASE_WINDOW_SIZE),
+            total_tracked: 0,
         }
     }
 }
@@ -604,20 +596,13 @@ impl Stream for MemoryTrackedStream {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 let size = batch.estimated_size();
+                let is_initial = self.total_tracked == 0;
 
-                if let Err(e) = self.tracker.track(size, self.is_initial) {
+                if let Err(e) = self.tracker.track(size, is_initial) {
                     return Poll::Ready(Some(Err(e)));
                 }
 
-                self.is_initial = false;
-                self.batch_window.push_back(size);
-
-                // Staged release: if window is full, release the oldest batch
-                if self.batch_window.len() > MEMORY_RELEASE_WINDOW_SIZE
-                    && let Some(old_size) = self.batch_window.pop_front()
-                {
-                    self.tracker.release(old_size);
-                }
+                self.total_tracked += size;
 
                 Poll::Ready(Some(Ok(batch)))
             }
@@ -630,9 +615,8 @@ impl Stream for MemoryTrackedStream {
 
 impl Drop for MemoryTrackedStream {
     fn drop(&mut self) {
-        let remaining: usize = self.batch_window.iter().sum();
-        if remaining > 0 {
-            self.tracker.release(remaining);
+        if self.total_tracked > 0 {
+            self.tracker.release(self.total_tracked);
         }
     }
 }
