@@ -704,8 +704,6 @@ pub type DataTypeRef = Arc<dyn DataType>;
 
 #[cfg(test)]
 mod tests {
-    use core::panic;
-
     use arrow::datatypes::Field;
 
     use super::*;
