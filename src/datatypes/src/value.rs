@@ -475,8 +475,8 @@ impl Value {
             Value::String(v) => {
                 let s = v.as_utf8().to_string();
                 match output_type {
-                    ConcreteDataType::String(_) => ScalarValue::Utf8(Some(s)),
-                    _ => ScalarValue::Utf8(Some(s)), // fallback to Utf8 for compatibility
+                    ConcreteDataType::String(t) if t.is_large() => ScalarValue::LargeUtf8(Some(s)),
+                    _ => ScalarValue::Utf8(Some(s)),
                 }
             }
             Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
@@ -612,7 +612,13 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => {
             ScalarValue::Binary(None)
         }
-        ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::String(t) => {
+            if t.is_large() {
+                ScalarValue::LargeUtf8(None)
+            } else {
+                ScalarValue::Utf8(None)
+            }
+        }
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::Interval(v) => match v {

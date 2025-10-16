@@ -687,7 +687,13 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<String>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::String(_) => ScalarValue::Utf8(data),
+                        ConcreteDataType::String(t) => {
+                            if t.is_large() {
+                                ScalarValue::LargeUtf8(data)
+                            } else {
+                                ScalarValue::Utf8(data)
+                            }
+                        }
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -969,8 +975,13 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<Vec<u8>>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::String(_) => {
-                            ScalarValue::Utf8(data.map(|d| String::from_utf8_lossy(&d).to_string()))
+                        ConcreteDataType::String(t) => {
+                            let s = data.map(|d| String::from_utf8_lossy(&d).to_string());
+                            if t.is_large() {
+                                ScalarValue::LargeUtf8(s)
+                            } else {
+                                ScalarValue::Utf8(s)
+                            }
                         }
                         ConcreteDataType::Binary(_) => ScalarValue::Binary(data),
                         _ => {

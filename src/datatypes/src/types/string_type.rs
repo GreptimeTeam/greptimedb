@@ -19,17 +19,72 @@ use common_base::bytes::StringBytes;
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::{DataType, DataTypeRef};
-use crate::prelude::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
 use crate::vectors::{MutableVector, StringVectorBuilder};
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct StringType;
+/// String size variant to distinguish between UTF8 and LargeUTF8
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum StringSizeType {
+    /// Regular UTF8 strings (up to 2GB)
+    /// #[default]
+    Utf8,
+    /// Large UTF8 strings (up to 2^63 bytes)
+    LargeUtf8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct StringType {
+    size_type: StringSizeType,
+}
+
+impl Default for StringType {
+    fn default() -> Self {
+        Self {
+            size_type: StringSizeType::Utf8,
+        }
+    }
+}
 
 impl StringType {
+    /// Create a new StringType with default (Utf8) size
+    pub fn new() -> Self {
+        Self {
+            size_type: StringSizeType::Utf8,
+        }
+    }
+
+    /// Create a new StringType with specified size
+    pub fn with_size(size_type: StringSizeType) -> Self {
+        Self { size_type }
+    }
+
+    /// Create a StringType for regular UTF8 strings
+    pub fn utf8() -> Self {
+        Self::with_size(StringSizeType::Utf8)
+    }
+
+    /// Create a StringType for large UTF8 strings
+    pub fn large_utf8() -> Self {
+        Self::with_size(StringSizeType::LargeUtf8)
+    }
+
+    /// Get the size type
+    pub fn size_type(&self) -> StringSizeType {
+        self.size_type
+    }
+
+    /// Check if this is a large UTF8 string type
+    pub fn is_large(&self) -> bool {
+        matches!(self.size_type, StringSizeType::LargeUtf8)
+    }
+
     pub fn arc() -> DataTypeRef {
-        Arc::new(Self)
+        Arc::new(Self::new())
+    }
+
+    pub fn large_arc() -> DataTypeRef {
+        Arc::new(Self::large_utf8())
     }
 }
 
@@ -47,11 +102,19 @@ impl DataType for StringType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Utf8
+        match self.size_type {
+            StringSizeType::Utf8 => ArrowDataType::Utf8,
+            StringSizeType::LargeUtf8 => ArrowDataType::LargeUtf8,
+        }
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(StringVectorBuilder::with_capacity(capacity))
+        match self.size_type {
+            StringSizeType::Utf8 => Box::new(StringVectorBuilder::with_string_capacity(capacity)),
+            StringSizeType::LargeUtf8 => {
+                Box::new(StringVectorBuilder::with_large_capacity(capacity))
+            }
+        }
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {
