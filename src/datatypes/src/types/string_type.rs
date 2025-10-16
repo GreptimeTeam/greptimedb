@@ -24,10 +24,10 @@ use crate::value::Value;
 use crate::vectors::{MutableVector, StringVectorBuilder};
 
 /// String size variant to distinguish between UTF8 and LargeUTF8
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum StringSizeType {
     /// Regular UTF8 strings (up to 2GB)
-    /// #[default]
+    #[default]
     Utf8,
     /// Large UTF8 strings (up to 2^63 bytes)
     LargeUtf8,
@@ -35,6 +35,7 @@ pub enum StringSizeType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StringType {
+    #[serde(default)]
     size_type: StringSizeType,
 }
 
