@@ -469,47 +469,45 @@ impl QueryMemoryTracker {
 
     /// Track memory usage. Returns error if limit is exceeded.
     pub fn track(&self, size: usize) -> Result<()> {
-        let new_total = self.current.fetch_add(size, Ordering::Relaxed) + size;
+        let mut new_total = 0;
+        let result = self
+            .current
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                new_total = current.saturating_add(size);
+                if self.limit == 0 || new_total <= self.limit {
+                    Some(new_total)
+                } else {
+                    None
+                }
+            });
 
-        if self.limit == 0 {
-            // Unlimited mode: still track usage but never reject
-            if let Some(callback) = &self.on_update {
-                callback(new_total);
+        match result {
+            Ok(_) => {
+                if let Some(callback) = &self.on_update {
+                    callback(new_total);
+                }
+                Ok(())
             }
-            return Ok(());
-        }
-
-        if new_total > self.limit {
-            self.release_internal(size, false);
-            if let Some(callback) = &self.on_reject {
-                callback();
+            Err(current) => {
+                if let Some(callback) = &self.on_reject {
+                    callback();
+                }
+                error::ExceedMemoryLimitSnafu {
+                    used: current,
+                    limit: self.limit,
+                }
+                .fail()
             }
-            return error::ExceedMemoryLimitSnafu {
-                used: new_total,
-                limit: self.limit,
-            }
-            .fail();
         }
-
-        if let Some(callback) = &self.on_update {
-            callback(new_total);
-        }
-
-        Ok(())
     }
 
     /// Release tracked memory.
     pub fn release(&self, size: usize) {
-        self.release_internal(size, true);
-    }
-
-    fn release_internal(&self, size: usize, trigger_callback: bool) {
         if let Ok(old_value) =
             self.current
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     Some(current.saturating_sub(size))
                 })
-            && trigger_callback
             && let Some(callback) = &self.on_update
         {
             callback(old_value.saturating_sub(size));
