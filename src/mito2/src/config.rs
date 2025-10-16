@@ -19,6 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_stat::{get_total_cpu_cores, get_total_memory_readable};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -162,7 +163,7 @@ impl Default for MitoConfig {
             max_background_index_builds: divide_num_cpus(8),
             max_background_flushes: divide_num_cpus(2),
             max_background_compactions: divide_num_cpus(4),
-            max_background_purges: common_config::utils::get_cpus(),
+            max_background_purges: get_total_cpu_cores(),
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
@@ -188,7 +189,7 @@ impl Default for MitoConfig {
         };
 
         // Adjust buffer and cache size according to system memory if we can.
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(sys_memory) = get_total_memory_readable() {
             mito_config.adjust_buffer_and_cache_size(sys_memory);
         }
 
@@ -227,11 +228,9 @@ impl MitoConfig {
             self.max_background_compactions = divide_num_cpus(4);
         }
         if self.max_background_purges == 0 {
-            warn!(
-                "Sanitize max background purges 0 to {}",
-                common_config::utils::get_cpus()
-            );
-            self.max_background_purges = common_config::utils::get_cpus();
+            let cpu_cores = get_total_cpu_cores();
+            warn!("Sanitize max background purges 0 to {}", cpu_cores);
+            self.max_background_purges = cpu_cores;
         }
 
         if self.global_write_buffer_reject_size <= self.global_write_buffer_size {
@@ -504,7 +503,7 @@ impl InvertedIndexConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
                 } else {
                     Some(ReadableSize::mb(64).as_bytes() as usize)
@@ -549,7 +548,7 @@ impl FulltextIndexConfig {
     pub fn mem_threshold_on_create(&self) -> usize {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     (sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as _
                 } else {
                     ReadableSize::mb(64).as_bytes() as _
@@ -591,7 +590,7 @@ impl BloomFilterConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {
-                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                if let Some(sys_memory) = get_total_memory_readable() {
                     Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
                 } else {
                     Some(ReadableSize::mb(64).as_bytes() as usize)
@@ -606,7 +605,7 @@ impl BloomFilterConfig {
 /// Divide cpu num by a non-zero `divisor` and returns at least 1.
 fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
-    let cores = common_config::utils::get_cpus();
+    let cores = get_total_cpu_cores();
     debug_assert!(cores > 0);
 
     cores.div_ceil(divisor)

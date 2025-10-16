@@ -2027,6 +2027,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-wal",
@@ -2034,13 +2035,11 @@ dependencies = [
  "datanode",
  "humantime-serde",
  "meta-client",
- "num_cpus",
  "object-store",
  "serde",
  "serde_json",
  "serde_with",
  "snafu 0.8.6",
- "sysinfo",
  "temp-env",
  "tempfile",
  "toml 0.8.23",
@@ -2547,9 +2546,12 @@ dependencies = [
 name = "common-stat"
 version = "0.18.0"
 dependencies = [
+ "common-base",
  "lazy_static",
  "nix 0.30.1",
+ "num_cpus",
  "prometheus",
+ "sysinfo",
 ]
 
 [[package]]
@@ -4779,6 +4781,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -7609,6 +7612,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -12285,6 +12289,7 @@ dependencies = [
  "common-options",
  "common-procedure",
  "common-query",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",
