@@ -156,7 +156,7 @@ impl<S> RegionWorkerLoop<S> {
                 &region,
                 file_handle.clone(),
                 request.build_type.clone(),
-                ResultMpscSender::new(tx.clone()),
+                tx.clone(),
             );
             let _ = self
                 .index_build_scheduler

@@ -14,6 +14,7 @@
 
 //! Index build tests for mito engine.
 //!
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,14 +30,9 @@ use crate::engine::listener::IndexBuildListener;
 use crate::read::scan_region::Scanner;
 use crate::sst::location;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv
 };
 
-// Wait interval for ensuring task finished.
-const WAIT_INTERVAL: Duration = Duration::from_millis(100);
-async fn wait() {
-    tokio::time::sleep(WAIT_INTERVAL).await;
-}
 // wait listener receives enough success count.
 async fn wait_finish(listener: &IndexBuildListener, times: usize) {
     listener.wait_finish(times).await;
@@ -267,6 +263,7 @@ async fn test_index_build_type_schema_change() {
 
     // Create a region without index.
     let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -275,7 +272,8 @@ async fn test_index_build_type_schema_change() {
 
     // Flush and make sure there is no index file.
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
-    wait().await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await

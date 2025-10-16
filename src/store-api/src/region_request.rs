@@ -1343,6 +1343,7 @@ impl Default for RegionCompactRequest {
         }
     }
 }
+
 #[derive(Debug, Clone, Default)]
 pub struct RegionBuildIndexRequest {}
 

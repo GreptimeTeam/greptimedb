@@ -247,7 +247,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let index_build_file_metas = request.edit.files_to_add.clone();
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // Notifies waiters and observes the flush timer.
         request.on_success();

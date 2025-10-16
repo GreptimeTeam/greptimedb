@@ -84,7 +84,7 @@ impl<S> RegionWorkerLoop<S> {
             region.file_purger.clone(),
         );
 
-        let index_build_file_metas = request.edit.files_to_add.clone();
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // compaction finished.
         request.on_success();

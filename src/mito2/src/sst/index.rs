@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, info, warn};
+use datafusion::functions::core::version;
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
@@ -51,6 +52,7 @@ use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
+use crate::sst;
 use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
@@ -437,15 +439,9 @@ pub enum IndexBuildOutcome {
     Finished,
     Aborted(String),
 }
-/// Mpsc output result sender.
-#[derive(Debug)]
-pub struct ResultMpscSender(Sender<Result<IndexBuildOutcome>>);
 
-impl ResultMpscSender {
-    pub fn new(tx: Sender<Result<IndexBuildOutcome>>) -> Self {
-        Self(tx)
-    }
-}
+/// Mpsc output result sender.
+pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
 pub struct IndexBuildTask {
     /// The file meta to build index for.
@@ -467,30 +463,27 @@ pub struct IndexBuildTask {
 impl IndexBuildTask {
     /// Notify the caller the job is success.
     pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
-        let _ = self.result_sender.0.send(Ok(outcome)).await;
+        let _ = self.result_sender.send(Ok(outcome)).await;
     }
 
     /// Send index build error to waiter.
     pub async fn on_failure(&mut self, err: Arc<Error>) {
         let _ = self
             .result_sender
-            .0
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
                 region_id: self.file_meta.region_id,
             }))
             .await;
     }
 
-    fn into_index_build_job(mut self, version_control: &VersionControlRef) -> Job {
-        let version_data = version_control.current();
-
+    fn into_index_build_job(mut self, version_control: VersionControlRef) -> Job {
         Box::pin(async move {
-            self.do_index_build(version_data).await;
+            self.do_index_build(version_control).await;
         })
     }
 
-    async fn do_index_build(&mut self, version_data: VersionControlData) {
-        match self.index_build(&version_data).await {
+    async fn do_index_build(&mut self, version_control: VersionControlRef) {
+        match self.index_build(version_control).await {
             Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
                 warn!(
@@ -503,41 +496,45 @@ impl IndexBuildTask {
     }
 
     // Checks if the SST file still exists in object store and version to avoid conflict with compaction.
-    async fn check_sst_file_exists(&self, version: &VersionRef) -> bool {
-        let region_id = self.file_meta.region_id;
+    async fn check_sst_file_exists(&self, version_control: &VersionControlRef) -> bool {
         let file_id = self.file_meta.file_id;
+        let level = self.file_meta.level;
+        // We should check current version instead of the version when the job is created.
+        let version = version_control.current().version;
 
-        let found_in_version = version
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.iter())
-            .any(|(id, handle)| {
-                *id == self.file_meta.file_id && !handle.is_deleted() && !handle.compacting()
-            });
-        if !found_in_version {
+        let Some(level_files) = version.ssts.levels().get(level as usize) else {
             warn!(
-                "File id {} not found in region version for index build, region: {}",
-                file_id, region_id
+                "File id {} not found in level {} for index build, region: {}",
+                file_id, level, self.file_meta.region_id
             );
-            false
-        } else {
-            // If the file's metadata is present in the current version, the physical SST file
-            // is guaranteed to exist on object store. The file purger removes the physical
-            // file only after its metadata is removed from the version.
-            true
+            return false;
+        };
+
+        match level_files.files.get(&file_id) {
+            Some(handle) if !handle.is_deleted() && !handle.compacting() => {
+                // If the file's metadata is present in the current version, the physical SST file
+                // is guaranteed to exist on object store. The file purger removes the physical
+                // file only after its metadata is removed from the version.
+                true
+            }
+            _ => {
+                warn!(
+                    "File id {} not found in region version for index build, region: {}",
+                    file_id, self.file_meta.region_id
+                );
+                false
+            }
         }
     }
 
     async fn index_build(
         &mut self,
-        version_data: &VersionControlData,
+        version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
-        let version = &version_data.version;
         let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
-        if !self.check_sst_file_exists(version).await {
+        if !self.check_sst_file_exists(&version_control).await {
             // Calls abort to clean up index files.
             indexer.abort().await;
             return Ok(IndexBuildOutcome::Aborted(format!(
@@ -572,7 +569,7 @@ impl IndexBuildTask {
 
         if index_output.file_size > 0 {
             // Check SST file existence again after building index.
-            if !self.check_sst_file_exists(version).await {
+            if !self.check_sst_file_exists(&version_control).await {
                 // Calls abort to clean up index files.
                 indexer.abort().await;
                 return Ok(IndexBuildOutcome::Aborted(format!(
@@ -696,7 +693,8 @@ impl IndexBuildScheduler {
         version_control: &VersionControlRef,
         task: IndexBuildTask,
     ) -> Result<()> {
-        let job = task.into_index_build_job(version_control);
+        // We should clone version control to expand the lifetime.
+        let job = task.into_index_build_job(version_control.clone());
         self.scheduler.schedule(job)?;
         Ok(())
     }
@@ -1146,7 +1144,7 @@ mod tests {
             file_purger,
             indexer_builder,
             request_sender: tx,
-            result_sender: ResultMpscSender(result_tx),
+            result_sender: result_tx,
         };
 
         // Schedule the build task and check result.
@@ -1196,7 +1194,7 @@ mod tests {
             file_purger,
             indexer_builder,
             request_sender: tx,
-            result_sender: ResultMpscSender(result_tx),
+            result_sender: result_tx,
         };
 
         scheduler.schedule_build(&version_control, task).unwrap();
@@ -1263,7 +1261,7 @@ mod tests {
             file_purger,
             indexer_builder,
             request_sender: tx,
-            result_sender: ResultMpscSender(result_tx),
+            result_sender: result_tx,
         };
 
         scheduler.schedule_build(&version_control, task).unwrap();
@@ -1359,7 +1357,7 @@ mod tests {
             file_purger,
             indexer_builder,
             request_sender: tx,
-            result_sender: ResultMpscSender(result_tx),
+            result_sender: result_tx,
         };
 
         scheduler.schedule_build(&version_control, task).unwrap();
@@ -1439,7 +1437,7 @@ mod tests {
             file_purger,
             indexer_builder,
             request_sender: tx,
-            result_sender: ResultMpscSender(result_tx),
+            result_sender: result_tx,
         };
 
         scheduler.schedule_build(&version_control, task).unwrap();

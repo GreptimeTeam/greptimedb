@@ -146,7 +146,7 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let need_index = can_fast_path_index(&request.kind);
+        let need_index = need_change_index(&request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -284,7 +284,7 @@ fn log_option_update<T: std::fmt::Debug>(
 }
 
 /// Used to determine whether we can build index directly after schema change.
-fn can_fast_path_index(kind: &AlterKind) -> bool {
+fn need_change_index(kind: &AlterKind) -> bool {
     match kind {
         // `SetIndexes` is a fast-path operation because it can build indexes for existing SSTs
         // in the background, without needing to wait for a flush or compaction cycle.
