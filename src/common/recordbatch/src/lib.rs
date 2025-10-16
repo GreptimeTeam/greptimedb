@@ -21,6 +21,7 @@ pub mod filter;
 mod recordbatch;
 pub mod util;
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -496,26 +497,34 @@ impl QueryMemoryTracker {
     /// * `size` - Memory size to track in bytes
     /// * `is_initial` - True for first allocation of a stream, false for subsequent allocations
     ///
-    /// When `is_initial` is true, soft limit is checked to prevent thundering herd.
-    /// When `is_initial` is false, hard limit is checked to allow existing streams to continue.
+    /// # Soft Limit Behavior
+    /// When `is_initial` is true and soft limit is enabled:
+    /// - If current usage < soft limit: allow the allocation (checked against hard limit)
+    /// - If current usage >= soft limit: reject the allocation immediately
+    ///
+    /// This ensures that new queries are only accepted when memory pressure is low,
+    /// while existing queries can continue until hard limit is reached.
     pub fn track(&self, size: usize, is_initial: bool) -> Result<()> {
         let mut new_total = 0;
         let result = self
             .current
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 new_total = current.saturating_add(size);
-                let limit = if self.hard_limit == 0 {
+
+                if self.hard_limit == 0 {
                     // Unlimited mode
                     return Some(new_total);
-                } else if is_initial && self.soft_limit > 0 {
-                    // New allocation: check soft limit (if enabled)
-                    self.soft_limit
-                } else {
-                    // Existing stream or soft limit disabled: check hard limit
-                    self.hard_limit
-                };
+                }
 
-                if new_total <= limit {
+                if is_initial && self.soft_limit > 0 {
+                    // New query: check if current usage is below soft limit
+                    if current >= self.soft_limit {
+                        return None; // Reject immediately
+                    }
+                }
+
+                // Check against hard limit
+                if new_total <= self.hard_limit {
                     Some(new_total)
                 } else {
                     None
@@ -533,9 +542,15 @@ impl QueryMemoryTracker {
                 if let Some(callback) = &self.on_reject {
                     callback();
                 }
+                // Distinguish soft vs hard limit rejection in error message
+                let limit = if is_initial && self.soft_limit > 0 && current >= self.soft_limit {
+                    self.soft_limit
+                } else {
+                    self.hard_limit
+                };
                 error::ExceedMemoryLimitSnafu {
                     used: current,
-                    limit: self.hard_limit,
+                    limit,
                 }
                 .fail()
             }
@@ -556,11 +571,19 @@ impl QueryMemoryTracker {
     }
 }
 
+/// Window size for staged memory release.
+/// Keeps the most recent N batches tracked, releases older ones progressively.
+const MEMORY_RELEASE_WINDOW_SIZE: usize = 3;
+
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
     tracker: QueryMemoryTracker,
-    total_tracked: usize,
+    // Whether this is the first batch (for soft limit check).
+    is_initial: bool,
+    // Window of recent batch sizes for staged release.
+    // When the window is full, the oldest batch is released from tracking.
+    batch_window: VecDeque<usize>,
 }
 
 impl MemoryTrackedStream {
@@ -568,7 +591,8 @@ impl MemoryTrackedStream {
         Self {
             inner,
             tracker,
-            total_tracked: 0,
+            is_initial: true,
+            batch_window: VecDeque::with_capacity(MEMORY_RELEASE_WINDOW_SIZE),
         }
     }
 }
@@ -580,13 +604,21 @@ impl Stream for MemoryTrackedStream {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 let size = batch.estimated_size();
-                let is_initial = self.total_tracked == 0;
 
-                if let Err(e) = self.tracker.track(size, is_initial) {
+                if let Err(e) = self.tracker.track(size, self.is_initial) {
                     return Poll::Ready(Some(Err(e)));
                 }
 
-                self.total_tracked += size;
+                self.is_initial = false;
+                self.batch_window.push_back(size);
+
+                // Staged release: if window is full, release the oldest batch
+                if self.batch_window.len() > MEMORY_RELEASE_WINDOW_SIZE
+                    && let Some(old_size) = self.batch_window.pop_front()
+                {
+                    self.tracker.release(old_size);
+                }
+
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
@@ -598,7 +630,10 @@ impl Stream for MemoryTrackedStream {
 
 impl Drop for MemoryTrackedStream {
     fn drop(&mut self) {
-        self.tracker.release(self.total_tracked);
+        let remaining: usize = self.batch_window.iter().sum();
+        if remaining > 0 {
+            self.tracker.release(remaining);
+        }
     }
 }
 
@@ -734,16 +769,20 @@ mod tests {
         // With soft_limit_ratio = 0.5, soft limit is 500
         let tracker = QueryMemoryTracker::new(1000, 0.5);
 
-        // First allocation (is_initial=true) checks soft limit
+        // First new query (is_initial=true): current=0 < soft_limit=500, allowed
         assert!(tracker.track(400, true).is_ok());
         assert_eq!(tracker.current(), 400);
 
-        // New allocation exceeding soft limit should fail
-        assert!(tracker.track(200, true).is_err());
-        assert_eq!(tracker.current(), 400);
+        // Second new query: current=400 < soft_limit=500, can allocate up to hard limit
+        assert!(tracker.track(400, true).is_ok());
+        assert_eq!(tracker.current(), 800);
 
-        // Existing stream (is_initial=false) can use up to hard limit
-        assert!(tracker.track(500, false).is_ok());
+        // Third new query: current=800 >= soft_limit=500, rejected
+        assert!(tracker.track(100, true).is_err());
+        assert_eq!(tracker.current(), 800);
+
+        // Existing stream (is_initial=false) can still allocate up to hard limit
+        assert!(tracker.track(100, false).is_ok());
         assert_eq!(tracker.current(), 900);
 
         // Exceeding hard limit should fail even for existing stream
