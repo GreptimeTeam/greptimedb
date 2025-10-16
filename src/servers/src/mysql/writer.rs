@@ -21,7 +21,7 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
-use datatypes::types::json_type_value_to_string;
+use datatypes::types::jsonb_to_string;
 use futures::StreamExt;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -31,7 +31,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, ConvertSqlValueSnafu, Result};
+use crate::error::{self, ConvertSqlValueSnafu, Result, ToJsonSnafu};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -212,10 +212,9 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Float32(v) => row_writer.write_col(v.0)?,
                     Value::Float64(v) => row_writer.write_col(v.0)?,
                     Value::String(v) => row_writer.write_col(v.as_utf8())?,
-                    Value::Binary(v) => match column.data_type {
-                        ConcreteDataType::Json(j) => {
-                            let s = json_type_value_to_string(&v, &j.format)
-                                .context(ConvertSqlValueSnafu)?;
+                    Value::Binary(v) => match &column.data_type {
+                        ConcreteDataType::Json(_j) => {
+                            let s = jsonb_to_string(&v).context(ConvertSqlValueSnafu)?;
                             row_writer.write_col(s)?;
                         }
                         _ => {
@@ -248,6 +247,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             .map(|(k, v)| format!("{k}: {v}"))
                             .join(", ")
                     ))?,
+                    Value::Json(inner) => {
+                        let json_value =
+                            serde_json::Value::try_from(*inner).context(ToJsonSnafu)?;
+                        row_writer.write_col(json_value.to_string())?
+                    }
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(Some(&query_context.timezone())))?,
                     Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
