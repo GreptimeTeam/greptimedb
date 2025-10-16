@@ -333,7 +333,7 @@ impl MutableVector for StringVectorBuilder {
         Arc::new(self.finish_cloned())
     }
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match  value.try_into_string()? {
+        match value.try_into_string()? {
             Some(v) => match &mut self.mutable_array {
                 MutableStringArrayData::String(array) => array.append_value(v),
                 MutableStringArrayData::LargeString(array) => array.append_value(v),

@@ -24,7 +24,9 @@ use crate::value::Value;
 use crate::vectors::{MutableVector, StringVectorBuilder};
 
 /// String size variant to distinguish between UTF8 and LargeUTF8
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 pub enum StringSizeType {
     /// Regular UTF8 strings (up to 2GB)
     #[default]
@@ -33,10 +35,32 @@ pub enum StringSizeType {
     LargeUtf8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct StringType {
     #[serde(default)]
     size_type: StringSizeType,
+}
+
+/// Custom deserialization to support both old and new formats.
+impl<'de> serde::Deserialize<'de> for StringType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            #[serde(default)]
+            size_type: StringSizeType,
+        }
+
+        let opt = Option::<Helper>::deserialize(deserializer)?;
+        Ok(match opt {
+            Some(helper) => Self {
+                size_type: helper.size_type,
+            },
+            None => Self::default(),
+        })
+    }
 }
 
 impl Default for StringType {
