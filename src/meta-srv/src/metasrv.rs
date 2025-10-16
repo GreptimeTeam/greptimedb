@@ -375,11 +375,16 @@ pub struct MetasrvNodeInfo {
     // The node cpus
     #[serde(default)]
     pub cpus: u32,
-    #[serde(default)]
     // The node memory bytes
+    #[serde(default)]
     pub memory_bytes: u64,
+    // The node hostname
+    #[serde(default)]
+    pub hostname: String,
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
+#[allow(deprecated)]
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
         Self {
@@ -387,11 +392,22 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
-            version: node_info.version,
-            git_commit: node_info.git_commit,
+            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
+            // New code should use the fields in `info.NodeInfo` instead.
+            version: node_info.version.clone(),
+            git_commit: node_info.git_commit.clone(),
             start_time_ms: node_info.start_time_ms,
             cpus: node_info.cpus,
             memory_bytes: node_info.memory_bytes,
+            // The canonical location for node information.
+            info: Some(api::v1::meta::NodeInfo {
+                version: node_info.version,
+                git_commit: node_info.git_commit,
+                start_time_ms: node_info.start_time_ms,
+                cpus: node_info.cpus,
+                memory_bytes: node_info.memory_bytes,
+                hostname: node_info.hostname,
+            }),
         }
     }
 }
@@ -696,6 +712,10 @@ impl Metasrv {
             start_time_ms: self.start_time_ms(),
             cpus: self.resource_spec().cpus as u32,
             memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         }
     }
 

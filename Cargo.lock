@@ -3919,6 +3919,7 @@ dependencies = [
  "file-engine",
  "futures",
  "futures-util",
+ "hostname 0.4.1",
  "humantime-serde",
  "lazy_static",
  "log-store",
@@ -4794,6 +4795,7 @@ dependencies = [
  "futures",
  "get-size2",
  "greptime-proto",
+ "hostname 0.4.1",
  "http 1.3.1",
  "humantime-serde",
  "itertools 0.14.0",
@@ -4910,6 +4912,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "futures",
+ "hostname 0.4.1",
  "humantime",
  "humantime-serde",
  "lazy_static",
@@ -5315,7 +5318,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d000eedd3739c003bb139aa42cefe05521a60f7d#d000eedd3739c003bb139aa42cefe05521a60f7d"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=710f1fa95cf68c1cf4e8b6d757bb418c4fddf4ed#710f1fa95cf68c1cf4e8b6d757bb418c4fddf4ed"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7407,6 +7410,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "h2 0.3.26",
+ "hostname 0.4.1",
  "http-body-util",
  "humantime",
  "humantime-serde",
@@ -12289,6 +12293,7 @@ dependencies = [
  "file-engine",
  "flow",
  "frontend",
+ "hostname 0.4.1",
  "log-store",
  "mito2",
  "query",
