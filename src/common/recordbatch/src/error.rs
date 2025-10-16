@@ -194,8 +194,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Exceeded memory limit: {} bytes used, {} bytes limit", used, limit))]
+    #[snafu(display(
+        "Exceeded memory limit: {} bytes requested, {} bytes used, {} bytes limit",
+        requested,
+        used,
+        limit
+    ))]
     ExceedMemoryLimit {
+        requested: usize,
         used: usize,
         limit: usize,
         #[snafu(implicit)]
