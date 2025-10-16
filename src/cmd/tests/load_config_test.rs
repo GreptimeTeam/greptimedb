@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
-use common_base::readable_size::ReadableSize;
+use common_base::memory_limit::MemoryLimit;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
@@ -75,6 +75,8 @@ fn test_load_datanode_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    scan_memory_limit: MemoryLimit::Percentage(0.5),
+                    scan_memory_soft_limit_ratio: ordered_float::OrderedFloat(0.7),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -83,6 +85,10 @@ fn test_load_datanode_example_config() {
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(0.5),
+                ..Default::default()
+            },
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
@@ -154,6 +160,10 @@ fn test_load_frontend_example_config() {
             internal_grpc: Some(GrpcOptions::internal_default()),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
+                ..Default::default()
+            },
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(0.5),
                 ..Default::default()
             },
             ..Default::default()
@@ -243,7 +253,7 @@ fn test_load_flownode_example_config() {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
-                memory_pool_size: ReadableSize(0),
+                memory_pool_size: MemoryLimit::Percentage(0.5),
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -288,6 +298,8 @@ fn test_load_standalone_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    scan_memory_limit: MemoryLimit::Percentage(0.5),
+                    scan_memory_soft_limit_ratio: ordered_float::OrderedFloat(0.7),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -316,7 +328,10 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
-
+            query: QueryOptions {
+                memory_pool_size: MemoryLimit::Percentage(0.5),
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()
