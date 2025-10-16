@@ -51,7 +51,7 @@ impl IndexValueCodec {
 
         if matches!(field.data_type(), ConcreteDataType::String(_)) {
             let value = value
-                .as_string()
+                .try_into_string()
                 .context(FieldTypeMismatchSnafu)?
                 .context(IndexEncodeNullSnafu)?;
             buffer.extend_from_slice(value.as_bytes());

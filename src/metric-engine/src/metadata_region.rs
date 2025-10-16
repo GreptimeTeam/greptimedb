@@ -324,7 +324,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
         .flat_map(move |row_index| {
             let key = key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
                 .map(|s| s.to_string());
 
@@ -333,7 +333,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
                     k,
                     val_col
                         .get_ref(row_index)
-                        .as_string()
+                        .try_into_string()
                         .unwrap()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
@@ -351,7 +351,7 @@ fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
         .flat_map(move |row_index| {
             key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
                 .map(|s| s.to_string())
         })
@@ -614,7 +614,7 @@ impl MetadataRegion {
         let val = first_batch
             .column(0)
             .get_ref(0)
-            .as_string()
+            .try_into_string()
             .unwrap()
             .map(|s| s.to_string());
 

@@ -578,7 +578,7 @@ impl HistogramFoldStream {
                 let le_str_val = le_array.get(cursor + bias);
                 let le_str_val_ref = le_str_val.as_value_ref();
                 let le_str = le_str_val_ref
-                    .as_string()
+                    .try_into_string()
                     .unwrap()
                     .expect("le column should not be nullable");
                 let le = le_str.parse::<f64>().unwrap();
@@ -587,7 +587,7 @@ impl HistogramFoldStream {
                 let counter = field_array
                     .get(cursor + bias)
                     .as_value_ref()
-                    .as_f64()
+                    .try_into_f64()
                     .unwrap()
                     .expect("field column should not be nullable");
                 counters.push(counter);

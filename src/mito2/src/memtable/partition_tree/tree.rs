@@ -151,7 +151,12 @@ impl PartitionTree {
         for kv in kvs.iter() {
             self.verify_primary_key_length(&kv)?;
             // Safety: timestamp of kv must be both present and a valid timestamp value.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            let ts = kv
+                .timestamp()
+                .try_into_timestamp()
+                .unwrap()
+                .unwrap()
+                .value();
             metrics.min_ts = metrics.min_ts.min(ts);
             metrics.max_ts = metrics.max_ts.max(ts);
             metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
@@ -196,7 +201,12 @@ impl PartitionTree {
 
         self.verify_primary_key_length(&kv)?;
         // Safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         metrics.min_ts = metrics.min_ts.min(ts);
         metrics.max_ts = metrics.max_ts.max(ts);
         metrics.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();

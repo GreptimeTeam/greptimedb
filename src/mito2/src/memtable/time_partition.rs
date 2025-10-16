@@ -273,7 +273,7 @@ impl TimePartitions {
             let mut all_in_partition = true;
             for kv in kvs.iter() {
                 // Safety: We checked the schema in the write request.
-                let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+                let ts = kv.timestamp().try_into_timestamp().unwrap().unwrap();
                 if !part.contains_timestamp(ts) {
                     all_in_partition = false;
                     break;
@@ -634,7 +634,7 @@ impl TimePartitions {
         for kv in kvs.iter() {
             let mut part_found = false;
             // Safety: We used the timestamp before.
-            let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
+            let ts = kv.timestamp().try_into_timestamp().unwrap().unwrap();
             for part in parts {
                 if part.contains_timestamp(ts) {
                     parts_to_write

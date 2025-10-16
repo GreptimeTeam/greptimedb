@@ -254,7 +254,7 @@ impl PrimaryKeyColumnBuilder {
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match self {
             PrimaryKeyColumnBuilder::StringDict(builder) => {
-                if let Some(s) = value.as_string().context(DataTypeMismatchSnafu)? {
+                if let Some(s) = value.try_into_string().context(DataTypeMismatchSnafu)? {
                     // We know the value is a string.
                     builder.append_value(s);
                 } else {
@@ -365,7 +365,7 @@ impl BulkPartConverter {
                 .context(ColumnNotFoundSnafu {
                     column: PRIMARY_KEY_COLUMN_NAME,
                 })?
-                .as_binary()
+                .try_into_binary()
                 .context(DataTypeMismatchSnafu)?
             {
                 self.key_array_builder
@@ -408,7 +408,12 @@ impl BulkPartConverter {
 
         // Updates statistics
         // Safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         self.max_sequence = self.max_sequence.max(kv.sequence());
