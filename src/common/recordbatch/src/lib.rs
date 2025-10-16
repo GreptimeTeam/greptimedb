@@ -440,10 +440,11 @@ impl QueryMemoryTracker {
     /// # Arguments
     /// * `hard_limit` - Maximum memory usage in bytes. 0 means unlimited.
     /// * `soft_limit_ratio` - Ratio of soft limit to hard limit (0.0 to 1.0).
+    ///   When ratio <= 0, soft limit is disabled (all queries use hard limit).
     ///   When current usage exceeds soft limit, new allocations are rejected
     ///   but existing streams can continue until hard limit.
     pub fn new(hard_limit: usize, soft_limit_ratio: f64) -> Self {
-        let soft_limit = if hard_limit > 0 {
+        let soft_limit = if hard_limit > 0 && soft_limit_ratio > 0.0 {
             (hard_limit as f64 * soft_limit_ratio.clamp(0.0, 1.0)) as usize
         } else {
             0
@@ -484,6 +485,11 @@ impl QueryMemoryTracker {
         self
     }
 
+    /// Get the current memory usage in bytes.
+    pub fn current(&self) -> usize {
+        self.current.load(Ordering::Relaxed)
+    }
+
     /// Track memory usage. Returns error if limit is exceeded.
     ///
     /// # Arguments
@@ -501,11 +507,11 @@ impl QueryMemoryTracker {
                 let limit = if self.hard_limit == 0 {
                     // Unlimited mode
                     return Some(new_total);
-                } else if is_initial {
-                    // New allocation: check soft limit
+                } else if is_initial && self.soft_limit > 0 {
+                    // New allocation: check soft limit (if enabled)
                     self.soft_limit
                 } else {
-                    // Existing stream: check hard limit
+                    // Existing stream or soft limit disabled: check hard limit
                     self.hard_limit
                 };
 
@@ -699,5 +705,52 @@ mod tests {
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0], batch1);
         assert_eq!(collected[1], batch2);
+    }
+
+    #[test]
+    fn test_query_memory_tracker_zero_soft_limit_ratio() {
+        // When soft_limit_ratio is 0, soft limit should be disabled
+        // and all queries should use hard limit
+        let tracker = QueryMemoryTracker::new(1000, 0.0);
+
+        // First allocation (is_initial=true) should succeed up to hard limit
+        assert!(tracker.track(500, true).is_ok());
+        assert_eq!(tracker.current(), 500);
+
+        // Second allocation should also succeed
+        assert!(tracker.track(400, true).is_ok());
+        assert_eq!(tracker.current(), 900);
+
+        // Exceeding hard limit should fail
+        assert!(tracker.track(200, true).is_err());
+        assert_eq!(tracker.current(), 900);
+
+        tracker.release(900);
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[test]
+    fn test_query_memory_tracker_with_soft_limit() {
+        // With soft_limit_ratio = 0.5, soft limit is 500
+        let tracker = QueryMemoryTracker::new(1000, 0.5);
+
+        // First allocation (is_initial=true) checks soft limit
+        assert!(tracker.track(400, true).is_ok());
+        assert_eq!(tracker.current(), 400);
+
+        // New allocation exceeding soft limit should fail
+        assert!(tracker.track(200, true).is_err());
+        assert_eq!(tracker.current(), 400);
+
+        // Existing stream (is_initial=false) can use up to hard limit
+        assert!(tracker.track(500, false).is_ok());
+        assert_eq!(tracker.current(), 900);
+
+        // Exceeding hard limit should fail even for existing stream
+        assert!(tracker.track(200, false).is_err());
+        assert_eq!(tracker.current(), 900);
+
+        tracker.release(900);
+        assert_eq!(tracker.current(), 0);
     }
 }
