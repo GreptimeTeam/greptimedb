@@ -38,6 +38,12 @@ const COMMA_SEP: &str = ", ";
 const INDENT: usize = 2;
 pub const VECTOR_OPT_DIM: &str = "dim";
 
+pub const JSON_OPT_UNSTRUCTURED_KEYS: &str = "unstructured_keys";
+pub const JSON_OPT_FORMAT: &str = "format";
+pub const JSON_FORMAT_FULL_STRUCTURED: &str = "structured";
+pub const JSON_FORMAT_RAW: &str = "raw";
+pub const JSON_FORMAT_PARTIAL: &str = "partial";
+
 macro_rules! format_indent {
     ($fmt: expr, $arg: expr) => {
         format!($fmt, format_args!("{: >1$}", "", INDENT), $arg)
@@ -219,7 +225,7 @@ impl ColumnExtensions {
         };
 
         let unstructured_keys = options
-            .value("unstructured_keys")
+            .value(JSON_OPT_UNSTRUCTURED_KEYS)
             .and_then(|v| {
                 v.as_list().map(|x| {
                     x.into_iter()
@@ -230,14 +236,14 @@ impl ColumnExtensions {
             .unwrap_or_default();
 
         options
-            .get("format")
+            .get(JSON_OPT_FORMAT)
             .map(|format| match format {
-                "structured" => Ok(JsonStructureSettings::Structured(None)),
-                "partial" => Ok(JsonStructureSettings::PartialUnstructuredByKey {
+                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(None)),
+                JSON_FORMAT_PARTIAL => Ok(JsonStructureSettings::PartialUnstructuredByKey {
                     fields: None,
                     unstructured_keys,
                 }),
-                "raw" => Ok(JsonStructureSettings::UnstructuredRaw),
+                JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
                 _ => InvalidSqlSnafu {
                     msg: format!("unknown JSON datatype 'format': {format}"),
                 }

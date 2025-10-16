@@ -45,7 +45,10 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::OptionMap;
-    use crate::statements::create::Column;
+    use crate::statements::create::{
+        Column, JSON_FORMAT_FULL_STRUCTURED, JSON_FORMAT_PARTIAL, JSON_FORMAT_RAW, JSON_OPT_FORMAT,
+        JSON_OPT_UNSTRUCTURED_KEYS,
+    };
     use crate::statements::statement::Statement;
 
     #[test]
@@ -81,12 +84,14 @@ CREATE TABLE json_data (
         let options = parse(sql);
         assert_eq!(options.len(), 2);
         assert_eq!(
-            options.value("format").and_then(|x| x.as_string()),
-            Some("partial")
+            options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
+            Some(JSON_FORMAT_PARTIAL)
         );
         let expected = vec!["k", "foo.bar", "a.b.c"];
         assert_eq!(
-            options.value("unstructured_keys").and_then(|x| x.as_list()),
+            options
+                .value(JSON_OPT_UNSTRUCTURED_KEYS)
+                .and_then(|x| x.as_list()),
             Some(expected)
         );
 
@@ -98,8 +103,8 @@ CREATE TABLE json_data (
         let options = parse(sql);
         assert_eq!(options.len(), 1);
         assert_eq!(
-            options.value("format").and_then(|x| x.as_string()),
-            Some("structured")
+            options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
+            Some(JSON_FORMAT_FULL_STRUCTURED)
         );
 
         let sql = r#"
@@ -110,8 +115,8 @@ CREATE TABLE json_data (
         let options = parse(sql);
         assert_eq!(options.len(), 1);
         assert_eq!(
-            options.value("format").and_then(|x| x.as_string()),
-            Some("raw")
+            options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
+            Some(JSON_FORMAT_RAW)
         );
 
         let sql = r#"
