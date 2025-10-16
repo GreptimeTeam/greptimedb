@@ -22,7 +22,6 @@ use store_api::storage::RegionId;
 use crate::error;
 pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
-use crate::sst::file::FileMeta;
 
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
@@ -167,11 +166,13 @@ impl RemapManifest {
                 Entry::Vacant(e) => {
                     e.insert(file_meta_clone);
                 }
+                #[cfg(debug_assertions)]
                 Entry::Occupied(e) => {
                     // File already exists - verify it's the same physical file
-                    #[cfg(debug_assertions)]
                     Self::verify_file_consistency(e.get(), &file_meta_clone)?;
                 }
+                #[cfg(not(debug_assertions))]
+                Entry::Occupied(_) => {}
             }
         }
 
@@ -180,7 +181,10 @@ impl RemapManifest {
 
     /// Verifies that two file metadata entries are consistent.
     #[cfg(debug_assertions)]
-    fn verify_file_consistency(existing: &FileMeta, new: &FileMeta) -> Result<()> {
+    fn verify_file_consistency(
+        existing: &crate::sst::file::FileMeta,
+        new: &crate::sst::file::FileMeta,
+    ) -> Result<()> {
         // When the same file appears from multiple overlapping old regions,
         // verify they are actually the same physical file with identical metadata
 
