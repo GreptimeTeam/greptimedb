@@ -50,6 +50,7 @@ const PEER_TYPE_METASRV: &str = "METASRV";
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";
 const PEER_ADDR: &str = "peer_addr";
+const PEER_HOSTNAME: &str = "peer_hostname";
 const CPUS: &str = "cpus";
 const MEMORY_BYTES: &str = "memory_bytes";
 const VERSION: &str = "version";
@@ -74,6 +75,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `uptime`: the uptime of the peer.
 /// - `active_time`: the time since the last activity of the peer.
 /// - `node_status`: the status info of the peer.
+/// - `peer_hostname`: the hostname of the peer.
 ///
 #[derive(Debug)]
 pub(super) struct InformationSchemaClusterInfo {
@@ -94,6 +96,7 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(PEER_ID, ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(PEER_HOSTNAME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(CPUS, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(MEMORY_BYTES, ConcreteDataType::uint64_datatype(), false),
             ColumnSchema::new(VERSION, ConcreteDataType::string_datatype(), false),
@@ -155,6 +158,7 @@ struct InformationSchemaClusterInfoBuilder {
     peer_ids: Int64VectorBuilder,
     peer_types: StringVectorBuilder,
     peer_addrs: StringVectorBuilder,
+    peer_hostnames: StringVectorBuilder,
     cpus: UInt32VectorBuilder,
     memory_bytes: UInt64VectorBuilder,
     versions: StringVectorBuilder,
@@ -173,6 +177,7 @@ impl InformationSchemaClusterInfoBuilder {
             peer_ids: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            peer_hostnames: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             cpus: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             memory_bytes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             versions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -203,6 +208,7 @@ impl InformationSchemaClusterInfoBuilder {
             (PEER_ID, &Value::from(peer_id)),
             (PEER_TYPE, &Value::from(peer_type)),
             (PEER_ADDR, &Value::from(node_info.peer.addr.as_str())),
+            (PEER_HOSTNAME, &Value::from(node_info.hostname.as_str())),
             (VERSION, &Value::from(node_info.version.as_str())),
             (GIT_COMMIT, &Value::from(node_info.git_commit.as_str())),
         ];
@@ -214,6 +220,7 @@ impl InformationSchemaClusterInfoBuilder {
         self.peer_ids.push(Some(peer_id));
         self.peer_types.push(Some(peer_type));
         self.peer_addrs.push(Some(&node_info.peer.addr));
+        self.peer_hostnames.push(Some(&node_info.hostname));
         self.versions.push(Some(&node_info.version));
         self.git_commits.push(Some(&node_info.git_commit));
         if node_info.start_time_ms > 0 {
@@ -253,6 +260,7 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.peer_ids.finish()),
             Arc::new(self.peer_types.finish()),
             Arc::new(self.peer_addrs.finish()),
+            Arc::new(self.peer_hostnames.finish()),
             Arc::new(self.cpus.finish()),
             Arc::new(self.memory_bytes.finish()),
             Arc::new(self.versions.finish()),
