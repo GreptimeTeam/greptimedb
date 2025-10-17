@@ -625,8 +625,8 @@ mod tests {
         };
 
         assert_eq!(labels.len(), 2);
-        assert_eq!(labels.get("key1"), Some(&"value1".to_string()));
-        assert_eq!(labels.get("key2"), Some(&"VALUE2".to_string()));
+        assert_eq!(labels.get("key1"), Some("value1"));
+        assert_eq!(labels.get("key2"), Some("VALUE2"));
 
         // Passed case: multiple ADD/DROP/MODIFY LABELS.
         let sql = r#"test_trigger ADD LABELS (key1='value1') MODIFY LABELS (key2='value2') DROP LABELS ('key3')"#;
