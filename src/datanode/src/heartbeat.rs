@@ -184,6 +184,7 @@ impl HeartbeatTask {
             .context(error::HandleHeartbeatResponseSnafu)
     }
 
+    #[allow(deprecated)]
     /// Start heartbeat task, spawn background task.
     pub async fn start(
         &self,
@@ -258,6 +259,7 @@ impl HeartbeatTask {
                     total_memory_bytes,
                     cpu_usage_millicores: 0,
                     memory_usage_bytes: 0,
+                    // TODO(zyy17): Remove these deprecated fields when the deprecated fields are removed from the proto.
                     cpus: total_cpu_millicores as u32,
                     memory_bytes: total_memory_bytes as u64,
                     hostname: hostname::get()

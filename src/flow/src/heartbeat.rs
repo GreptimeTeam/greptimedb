@@ -190,6 +190,7 @@ impl HeartbeatTask {
         Some(heartbeat_request)
     }
 
+    #[allow(deprecated)]
     fn build_node_info(
         start_time_ms: u64,
         total_cpu_millicores: i64,
@@ -204,8 +205,9 @@ impl HeartbeatTask {
             total_memory_bytes,
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
-            cpus: 0,
-            memory_bytes: 0,
+            // TODO(zyy17): Remove these deprecated fields when the deprecated fields are removed from the proto.
+            cpus: total_cpu_millicores as u32,
+            memory_bytes: total_memory_bytes as u64,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
