@@ -20,10 +20,8 @@ use common_macro::stack_trace_debug;
 use datafusion_common::DataFusionError;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
-use sqlparser::ast::Ident;
 use sqlparser::parser::ParserError;
 
-use crate::ast::Expr;
 use crate::parsers::error::TQLError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -210,10 +208,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unrecognized table option key: {}, value: {}", key, value))]
-    InvalidTableOptionValue {
-        key: Ident,
-        value: Expr,
+    #[snafu(display("Invalid expr as option value, error: {error}"))]
+    InvalidExprAsOptionValue {
+        error: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -361,7 +358,7 @@ impl ErrorExt for Error {
             }
 
             InvalidColumnOption { .. }
-            | InvalidTableOptionValue { .. }
+            | InvalidExprAsOptionValue { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
             | ColumnTypeMismatch { .. }

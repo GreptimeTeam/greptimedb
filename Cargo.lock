@@ -5333,7 +5333,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=75a00f345e7752605154f55d97e1b5ba4e64b3fa#75a00f345e7752605154f55d97e1b5ba4e64b3fa"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9f226478070fddffaa92deeb2c3a9971068816a#f9f226478070fddffaa92deeb2c3a9971068816a"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -12008,6 +12008,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-sql",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datafusion-common",

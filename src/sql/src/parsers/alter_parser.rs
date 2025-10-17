@@ -32,13 +32,14 @@ use crate::parsers::create_parser::INVERTED;
 use crate::parsers::utils::{
     validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
+use crate::statements::OptionMap;
 use crate::statements::alter::{
     AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
     DropDefaultsOperation, KeyValueOption, RepartitionOperation, SetDefaultsOperation,
     SetIndexOperation, UnsetIndexOperation,
 };
 use crate::statements::statement::Statement;
-use crate::util::parse_option_string;
+use crate::util::{OptionValue, parse_option_string};
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -455,7 +456,7 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<HashMap<String, OptionValue>>>()?;
 
         for key in options.keys() {
             ensure!(
@@ -469,9 +470,10 @@ impl ParserContext<'_> {
 
         options.insert(
             COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE.to_string(),
-            "true".to_string(),
+            "true".to_string().into(),
         );
 
+        let options = OptionMap::new(options).into_map();
         Ok(AlterTableOperation::SetIndex {
             options: SetIndexOperation::Fulltext {
                 column_name,
@@ -487,9 +489,9 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?
             .into_iter()
             .map(parse_option_string)
-            .collect::<Result<HashMap<String, String>>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
-        for key in options.keys() {
+        for (key, _) in options.iter() {
             ensure!(
                 validate_column_skipping_index_create_option(key),
                 InvalidColumnOptionSnafu {
@@ -499,6 +501,7 @@ impl ParserContext<'_> {
             );
         }
 
+        let options = OptionMap::new(options).into_map();
         Ok(AlterTableOperation::SetIndex {
             options: SetIndexOperation::Skipping {
                 column_name,
