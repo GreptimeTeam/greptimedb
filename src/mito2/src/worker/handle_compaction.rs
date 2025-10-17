@@ -39,6 +39,7 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
         COMPACTION_REQUEST_COUNT.inc();
+        let parallelism = req.parallelism.unwrap_or(1) as usize;
         if let Err(e) = self
             .compaction_scheduler
             .schedule_compaction(
@@ -49,8 +50,7 @@ impl<S> RegionWorkerLoop<S> {
                 sender,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
-                // TODO(yingwen): expose this to frontend
-                1,
+                parallelism,
             )
             .await
         {
@@ -137,7 +137,7 @@ impl<S> RegionWorkerLoop<S> {
                     OptionOutputTx::none(),
                     &region.manifest_ctx,
                     self.schema_metadata_manager.clone(),
-                    1,
+                    1, // Default for automatic compaction
                 )
                 .await
         {

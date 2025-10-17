@@ -339,9 +339,18 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     let options = compact
         .options
         .unwrap_or(compact_request::Options::Regular(Default::default()));
+    // Convert parallelism: a value of 0 indicates no specific parallelism requested (None)
+    let parallelism = if compact.parallelism == 0 {
+        None
+    } else {
+        Some(compact.parallelism)
+    };
     Ok(vec![(
         region_id,
-        RegionRequest::Compact(RegionCompactRequest { options }),
+        RegionRequest::Compact(RegionCompactRequest {
+            options,
+            parallelism,
+        }),
     )])
 }
 
@@ -1333,6 +1342,7 @@ pub struct RegionFlushRequest {
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
+    pub parallelism: Option<u32>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1340,6 +1350,7 @@ impl Default for RegionCompactRequest {
         Self {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
+            parallelism: None,
         }
     }
 }

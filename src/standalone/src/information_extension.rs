@@ -75,10 +75,12 @@ impl InformationExtension for StandaloneInformationExtension {
             // Use `self.start_time_ms` instead.
             // It's not precise but enough.
             start_time_ms: self.start_time_ms,
-            cpus: common_config::utils::get_cpus() as u32,
-            memory_bytes: common_config::utils::get_sys_total_memory()
+            cpus: common_stat::get_total_cpu_millicores() as u32,
+            memory_bytes: common_stat::get_total_memory_bytes() as u64,
+            hostname: hostname::get()
                 .unwrap_or_default()
-                .as_bytes(),
+                .to_string_lossy()
+                .to_string(),
         };
         Ok(vec![node_info])
     }

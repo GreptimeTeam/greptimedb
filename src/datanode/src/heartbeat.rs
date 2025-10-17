@@ -251,6 +251,10 @@ impl HeartbeatTask {
                     start_time_ms: node_epoch,
                     cpus,
                     memory_bytes,
+                    hostname: hostname::get()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
                 }),
                 node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
                     types: workload_types.iter().map(|w| w.to_i32()).collect(),

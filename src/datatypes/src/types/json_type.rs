@@ -21,6 +21,7 @@ use snafu::ResultExt;
 
 use crate::data_type::DataType;
 use crate::error::{DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result};
+use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
@@ -28,19 +29,16 @@ use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonFormat {
     #[default]
     Jsonb,
+    Native(Box<ConcreteDataType>),
 }
 
 /// JsonType is a data type for JSON data. It is stored as binary data of jsonb format.
 /// It utilizes current binary value and vector implementation.
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JsonType {
     pub format: JsonFormat,
 }
@@ -81,34 +79,26 @@ impl DataType for JsonType {
 }
 
 /// Converts a json type value to string
-pub fn json_type_value_to_string(val: &[u8], format: &JsonFormat) -> Result<String> {
-    match format {
-        JsonFormat::Jsonb => match jsonb::from_slice(val) {
-            Ok(jsonb_value) => {
-                let serialized = jsonb_value.to_string();
-                Ok(serialized)
-            }
-            Err(e) => InvalidJsonbSnafu { error: e }.fail(),
-        },
+pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
+    match jsonb::from_slice(val) {
+        Ok(jsonb_value) => {
+            let serialized = jsonb_value.to_string();
+            Ok(serialized)
+        }
+        Err(e) => InvalidJsonbSnafu { error: e }.fail(),
     }
 }
 
 /// Converts a json type value to serde_json::Value
-pub fn json_type_value_to_serde_json(val: &[u8], format: &JsonFormat) -> Result<serde_json::Value> {
-    match format {
-        JsonFormat::Jsonb => {
-            let json_string = json_type_value_to_string(val, format)?;
-            serde_json::Value::from_str(json_string.as_str())
-                .context(DeserializeSnafu { json: json_string })
-        }
-    }
+pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
+    let json_string = jsonb_to_string(val)?;
+    serde_json::Value::from_str(json_string.as_str())
+        .context(DeserializeSnafu { json: json_string })
 }
 
 /// Parses a string to a json type value
-pub fn parse_string_to_json_type_value(s: &str, format: &JsonFormat) -> Result<Vec<u8>> {
-    match format {
-        JsonFormat::Jsonb => jsonb::parse_value(s.as_bytes())
-            .map_err(|_| InvalidJsonSnafu { value: s }.build())
-            .map(|json| json.to_vec()),
-    }
+pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
+    jsonb::parse_value(s.as_bytes())
+        .map_err(|_| InvalidJsonSnafu { value: s }.build())
+        .map(|json| json.to_vec())
 }

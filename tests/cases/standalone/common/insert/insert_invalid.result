@@ -8,7 +8,7 @@ Affected Rows: 1
 
 INSERT INTO strings VALUES (3, 4);
 
-Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)
+Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType { size_type: Utf8 })
 
 SELECT * FROM strings WHERE i = 'â‚(';
 

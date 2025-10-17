@@ -53,6 +53,7 @@ either.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
+hostname.workspace = true
 http-body-util = "0.1"
 humantime.workspace = true
 humantime-serde.workspace = true

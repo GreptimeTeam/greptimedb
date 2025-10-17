@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use common_decimal::Decimal128;
 use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
@@ -21,30 +20,22 @@ use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
-use datatypes::scalars::ScalarVector;
 use datatypes::types::{
-    Int8Type, Int16Type, IntervalType, StructField, StructType, TimeType, TimestampType, UInt8Type,
-    UInt16Type,
+    IntervalType, JsonFormat, StructField, StructType, TimeType, TimestampType,
 };
 use datatypes::value::{
     ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
 };
-use datatypes::vectors::{
-    BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
-    Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
-    IntervalYearMonthVector, PrimitiveVector, StringVector, TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
-    UInt64Vector, VectorRef,
-};
+use datatypes::vectors::VectorRef;
 use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonTypeExtension,
-    ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension, VectorTypeExtension,
+    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, JsonNativeTypeExtension,
+    JsonTypeExtension, ListTypeExtension, QueryRequest, Row, SemanticType, StructTypeExtension,
+    VectorTypeExtension,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -116,7 +107,30 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                     ConcreteDataType::binary_datatype()
                 }
             }
-            ColumnDataType::Json => ConcreteDataType::json_datatype(),
+            ColumnDataType::Json => {
+                let type_ext = datatype_wrapper
+                    .datatype_ext
+                    .as_ref()
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref());
+                match type_ext {
+                    Some(TypeExt::JsonType(_)) => {
+                        // legacy json type
+                        ConcreteDataType::json_datatype()
+                    }
+                    Some(TypeExt::JsonNativeType(type_ext)) => {
+                        // native json type
+                        let inner_type = ColumnDataTypeWrapper {
+                            datatype: type_ext.datatype(),
+                            datatype_ext: type_ext.datatype_extension.clone().map(|d| *d),
+                        };
+                        ConcreteDataType::json_native_datatype(inner_type.into())
+                    }
+                    _ => {
+                        // invalid state, type extension is missing or invalid
+                        ConcreteDataType::null_datatype()
+                    }
+                }
+            }
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::timestamp_microsecond_datatype(),
@@ -383,9 +397,28 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         })),
                     })
             }
-            ColumnDataType::Json => datatype.as_json().map(|_| ColumnDataTypeExtension {
-                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-            }),
+            ColumnDataType::Json => {
+                if let Some(json_type) = datatype.as_json() {
+                    match &json_type.format {
+                        JsonFormat::Jsonb => Some(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                        }),
+                        JsonFormat::Native(inner) => {
+                            let inner_type = ColumnDataTypeWrapper::try_from(*inner.clone())?;
+                            Some(ColumnDataTypeExtension {
+                                type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                                    JsonNativeTypeExtension {
+                                        datatype: inner_type.datatype.into(),
+                                        datatype_extension: inner_type.datatype_ext.map(Box::new),
+                                    },
+                                ))),
+                            })
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
             ColumnDataType::Vector => {
                 datatype
                     .as_vector()
@@ -549,7 +582,10 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::Json => Values {
+            // TODO(sunng87): remove this when we finally sunset legacy jsonb
             string_values: Vec::with_capacity(capacity),
+            // for native json
+            json_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::Vector => Values {
@@ -762,256 +798,23 @@ pub fn pb_value_to_value_ref<'a>(
             };
             ValueRef::Struct(struct_value_ref)
         }
-    }
-}
 
-pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> VectorRef {
-    match data_type {
-        ConcreteDataType::Boolean(_) => Arc::new(BooleanVector::from(values.bool_values)),
-        ConcreteDataType::Int8(_) => Arc::new(PrimitiveVector::<Int8Type>::from_iter_values(
-            values.i8_values.into_iter().map(|x| x as i8),
-        )),
-        ConcreteDataType::Int16(_) => Arc::new(PrimitiveVector::<Int16Type>::from_iter_values(
-            values.i16_values.into_iter().map(|x| x as i16),
-        )),
-        ConcreteDataType::Int32(_) => Arc::new(Int32Vector::from_vec(values.i32_values)),
-        ConcreteDataType::Int64(_) => Arc::new(Int64Vector::from_vec(values.i64_values)),
-        ConcreteDataType::UInt8(_) => Arc::new(PrimitiveVector::<UInt8Type>::from_iter_values(
-            values.u8_values.into_iter().map(|x| x as u8),
-        )),
-        ConcreteDataType::UInt16(_) => Arc::new(PrimitiveVector::<UInt16Type>::from_iter_values(
-            values.u16_values.into_iter().map(|x| x as u16),
-        )),
-        ConcreteDataType::UInt32(_) => Arc::new(UInt32Vector::from_vec(values.u32_values)),
-        ConcreteDataType::UInt64(_) => Arc::new(UInt64Vector::from_vec(values.u64_values)),
-        ConcreteDataType::Float32(_) => Arc::new(Float32Vector::from_vec(values.f32_values)),
-        ConcreteDataType::Float64(_) => Arc::new(Float64Vector::from_vec(values.f64_values)),
-        ConcreteDataType::Binary(_) => Arc::new(BinaryVector::from(values.binary_values)),
-        ConcreteDataType::String(_) => Arc::new(StringVector::from_vec(values.string_values)),
-        ConcreteDataType::Date(_) => Arc::new(DateVector::from_vec(values.date_values)),
-        ConcreteDataType::Timestamp(unit) => match unit {
-            TimestampType::Second(_) => Arc::new(TimestampSecondVector::from_vec(
-                values.timestamp_second_values,
-            )),
-            TimestampType::Millisecond(_) => Arc::new(TimestampMillisecondVector::from_vec(
-                values.timestamp_millisecond_values,
-            )),
-            TimestampType::Microsecond(_) => Arc::new(TimestampMicrosecondVector::from_vec(
-                values.timestamp_microsecond_values,
-            )),
-            TimestampType::Nanosecond(_) => Arc::new(TimestampNanosecondVector::from_vec(
-                values.timestamp_nanosecond_values,
-            )),
-        },
-        ConcreteDataType::Time(unit) => match unit {
-            TimeType::Second(_) => Arc::new(TimeSecondVector::from_iter_values(
-                values.time_second_values.iter().map(|x| *x as i32),
-            )),
-            TimeType::Millisecond(_) => Arc::new(TimeMillisecondVector::from_iter_values(
-                values.time_millisecond_values.iter().map(|x| *x as i32),
-            )),
-            TimeType::Microsecond(_) => Arc::new(TimeMicrosecondVector::from_vec(
-                values.time_microsecond_values,
-            )),
-            TimeType::Nanosecond(_) => Arc::new(TimeNanosecondVector::from_vec(
-                values.time_nanosecond_values,
-            )),
-        },
+        ValueData::JsonValue(inner_value) => {
+            let json_datatype_ext = datatype_ext
+                .as_ref()
+                .and_then(|ext| {
+                    if let Some(TypeExt::JsonNativeType(l)) = &ext.type_ext {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .expect("json value must contain datatype ext");
 
-        ConcreteDataType::Interval(unit) => match unit {
-            IntervalType::YearMonth(_) => Arc::new(IntervalYearMonthVector::from_vec(
-                values.interval_year_month_values,
-            )),
-            IntervalType::DayTime(_) => Arc::new(IntervalDayTimeVector::from_iter_values(
-                values
-                    .interval_day_time_values
-                    .iter()
-                    .map(|x| IntervalDayTime::from_i64(*x).into()),
-            )),
-            IntervalType::MonthDayNano(_) => {
-                Arc::new(IntervalMonthDayNanoVector::from_iter_values(
-                    values
-                        .interval_month_day_nano_values
-                        .iter()
-                        .map(|x| IntervalMonthDayNano::new(x.months, x.days, x.nanoseconds).into()),
-                ))
-            }
-        },
-        ConcreteDataType::Decimal128(d) => Arc::new(Decimal128Vector::from_values(
-            values.decimal128_values.iter().map(|x| {
-                Decimal128::from_value_precision_scale(x.hi, x.lo, d.precision(), d.scale()).into()
-            }),
-        )),
-        ConcreteDataType::Vector(_) => Arc::new(BinaryVector::from_vec(values.binary_values)),
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::List(_)
-        | ConcreteDataType::Struct(_)
-        | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_)
-        | ConcreteDataType::Json(_) => {
-            unreachable!()
-        }
-    }
-}
-
-pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
-    match data_type {
-        ConcreteDataType::Int64(_) => values
-            .i64_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Float64(_) => values
-            .f64_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::String(_) => values
-            .string_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Boolean(_) => values
-            .bool_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Int8(_) => values
-            .i8_values
-            .into_iter()
-            // Safety: Since i32 only stores i8 data here, so i32 as i8 is safe.
-            .map(|val| (val as i8).into())
-            .collect(),
-        ConcreteDataType::Int16(_) => values
-            .i16_values
-            .into_iter()
-            // Safety: Since i32 only stores i16 data here, so i32 as i16 is safe.
-            .map(|val| (val as i16).into())
-            .collect(),
-        ConcreteDataType::Int32(_) => values
-            .i32_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::UInt8(_) => values
-            .u8_values
-            .into_iter()
-            // Safety: Since i32 only stores u8 data here, so i32 as u8 is safe.
-            .map(|val| (val as u8).into())
-            .collect(),
-        ConcreteDataType::UInt16(_) => values
-            .u16_values
-            .into_iter()
-            // Safety: Since i32 only stores u16 data here, so i32 as u16 is safe.
-            .map(|val| (val as u16).into())
-            .collect(),
-        ConcreteDataType::UInt32(_) => values
-            .u32_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::UInt64(_) => values
-            .u64_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Float32(_) => values
-            .f32_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Binary(_) => values
-            .binary_values
-            .into_iter()
-            .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::Date(_) => values
-            .date_values
-            .into_iter()
-            .map(|v| Value::Date(v.into()))
-            .collect(),
-        ConcreteDataType::Timestamp(TimestampType::Second(_)) => values
-            .timestamp_second_values
-            .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::new_second(v)))
-            .collect(),
-        ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => values
-            .timestamp_millisecond_values
-            .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
-            .collect(),
-        ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => values
-            .timestamp_microsecond_values
-            .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::new_microsecond(v)))
-            .collect(),
-        ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => values
-            .timestamp_nanosecond_values
-            .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::new_nanosecond(v)))
-            .collect(),
-        ConcreteDataType::Time(TimeType::Second(_)) => values
-            .time_second_values
-            .into_iter()
-            .map(|v| Value::Time(Time::new_second(v)))
-            .collect(),
-        ConcreteDataType::Time(TimeType::Millisecond(_)) => values
-            .time_millisecond_values
-            .into_iter()
-            .map(|v| Value::Time(Time::new_millisecond(v)))
-            .collect(),
-        ConcreteDataType::Time(TimeType::Microsecond(_)) => values
-            .time_microsecond_values
-            .into_iter()
-            .map(|v| Value::Time(Time::new_microsecond(v)))
-            .collect(),
-        ConcreteDataType::Time(TimeType::Nanosecond(_)) => values
-            .time_nanosecond_values
-            .into_iter()
-            .map(|v| Value::Time(Time::new_nanosecond(v)))
-            .collect(),
-
-        ConcreteDataType::Interval(IntervalType::YearMonth(_)) => values
-            .interval_year_month_values
-            .into_iter()
-            .map(|v| Value::IntervalYearMonth(IntervalYearMonth::from_i32(v)))
-            .collect(),
-        ConcreteDataType::Interval(IntervalType::DayTime(_)) => values
-            .interval_day_time_values
-            .into_iter()
-            .map(|v| Value::IntervalDayTime(IntervalDayTime::from_i64(v)))
-            .collect(),
-        ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => values
-            .interval_month_day_nano_values
-            .into_iter()
-            .map(|v| {
-                Value::IntervalMonthDayNano(IntervalMonthDayNano::new(
-                    v.months,
-                    v.days,
-                    v.nanoseconds,
-                ))
-            })
-            .collect(),
-        ConcreteDataType::Decimal128(d) => values
-            .decimal128_values
-            .into_iter()
-            .map(|v| {
-                Value::Decimal128(Decimal128::from_value_precision_scale(
-                    v.hi,
-                    v.lo,
-                    d.precision(),
-                    d.scale(),
-                ))
-            })
-            .collect(),
-        ConcreteDataType::Vector(_) => values.binary_values.into_iter().map(|v| v.into()).collect(),
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::List(_)
-        | ConcreteDataType::Struct(_)
-        | ConcreteDataType::Dictionary(_)
-        | ConcreteDataType::Duration(_)
-        | ConcreteDataType::Json(_) => {
-            unreachable!()
+            ValueRef::Json(Box::new(pb_value_to_value_ref(
+                inner_value,
+                json_datatype_ext.datatype_extension.as_deref(),
+            )))
         }
     }
 }
@@ -1133,6 +936,9 @@ pub fn to_proto_value(value: Value) -> v1::Value {
                 items: convert_struct_to_pb_values(struct_value),
             })),
         },
+        Value::Json(v) => v1::Value {
+            value_data: Some(ValueData::JsonValue(Box::new(to_proto_value(*v)))),
+        },
         Value::Duration(_) => v1::Value { value_data: None },
     }
 }
@@ -1187,6 +993,7 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
         ValueData::ListValue(_) => ColumnDataType::List,
         ValueData::StructValue(_) => ColumnDataType::Struct,
+        ValueData::JsonValue(_) => ColumnDataType::Json,
     };
     Some(value_type)
 }
@@ -1257,6 +1064,9 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     .collect();
                 Some(ValueData::StructValue(v1::StructValue { items }))
             }
+            Value::Json(inner_value) => Some(ValueData::JsonValue(Box::new(value_to_grpc_value(
+                *inner_value,
+            )))),
             Value::Duration(_) => unreachable!(),
         },
     }
@@ -1350,13 +1160,11 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::interval::IntervalUnit;
-    use datatypes::types::{
-        Int32Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
-        TimeMillisecondType, TimeSecondType, TimestampMillisecondType, TimestampSecondType,
-        UInt32Type,
+    use datatypes::scalars::ScalarVector;
+    use datatypes::types::{Int8Type, Int32Type, UInt8Type, UInt32Type};
+    use datatypes::vectors::{
+        BooleanVector, DateVector, Float32Vector, PrimitiveVector, StringVector,
     };
-    use datatypes::vectors::BooleanVector;
-    use paste::paste;
 
     use super::*;
     use crate::v1::Column;
@@ -1446,6 +1254,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::Struct, 2);
         let values = values.struct_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Json, 2);
+        assert_eq!(2, values.json_values.capacity());
+        assert_eq!(2, values.string_values.capacity());
     }
 
     #[test]
@@ -1569,6 +1381,54 @@ mod tests {
             ])
             .into()
         );
+        assert_eq!(
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            )),
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            )
+            .into()
+        )
     }
 
     #[test]
@@ -1694,7 +1554,71 @@ mod tests {
                     ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
                 )
             ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
-        )
+        );
+
+        let struct_type = StructType::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
+            StructField::new(
+                "address".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            ColumnDataTypeWrapper::new(
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Struct.into(),
+                        datatype_extension: Some(Box::new(ColumnDataTypeExtension {
+                            type_ext: Some(TypeExt::StructType(StructTypeExtension {
+                                fields: vec![
+                                    v1::StructField {
+                                        name: "id".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int64_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "name".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "age".to_string(),
+                                        datatype: ColumnDataTypeWrapper::int32_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    },
+                                    v1::StructField {
+                                        name: "address".to_string(),
+                                        datatype: ColumnDataTypeWrapper::string_datatype()
+                                            .datatype()
+                                            .into(),
+                                        datatype_extension: None
+                                    }
+                                ]
+                            }))
+                        }))
+                    })))
+                })
+            ),
+            ConcreteDataType::json_native_datatype(ConcreteDataType::struct_datatype(
+                struct_type.clone()
+            ))
+            .try_into()
+            .expect("failed to convert json type")
+        );
     }
 
     #[test]
@@ -1705,269 +1629,6 @@ mod tests {
         assert_eq!(interval.days, 0);
         assert_eq!(interval.nanoseconds, 3);
     }
-
-    #[test]
-    fn test_convert_timestamp_values() {
-        // second
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType)),
-            Values {
-                timestamp_second_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Timestamp(Timestamp::new_second(1_i64)),
-            Value::Timestamp(Timestamp::new_second(2_i64)),
-            Value::Timestamp(Timestamp::new_second(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-
-        // millisecond
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType)),
-            Values {
-                timestamp_millisecond_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Timestamp(Timestamp::new_millisecond(1_i64)),
-            Value::Timestamp(Timestamp::new_millisecond(2_i64)),
-            Value::Timestamp(Timestamp::new_millisecond(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-    }
-
-    #[test]
-    fn test_convert_time_values() {
-        // second
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Time(TimeType::Second(TimeSecondType)),
-            Values {
-                time_second_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Time(Time::new_second(1_i64)),
-            Value::Time(Time::new_second(2_i64)),
-            Value::Time(Time::new_second(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-
-        // millisecond
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Time(TimeType::Millisecond(TimeMillisecondType)),
-            Values {
-                time_millisecond_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Time(Time::new_millisecond(1_i64)),
-            Value::Time(Time::new_millisecond(2_i64)),
-            Value::Time(Time::new_millisecond(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-    }
-
-    #[test]
-    fn test_convert_interval_values() {
-        // year_month
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Interval(IntervalType::YearMonth(IntervalYearMonthType)),
-            Values {
-                interval_year_month_values: vec![1_i32, 2_i32, 3_i32],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::IntervalYearMonth(IntervalYearMonth::new(1_i32)),
-            Value::IntervalYearMonth(IntervalYearMonth::new(2_i32)),
-            Value::IntervalYearMonth(IntervalYearMonth::new(3_i32)),
-        ];
-        assert_eq!(expect, actual);
-
-        // day_time
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Interval(IntervalType::DayTime(IntervalDayTimeType)),
-            Values {
-                interval_day_time_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::IntervalDayTime(IntervalDayTime::from_i64(1_i64)),
-            Value::IntervalDayTime(IntervalDayTime::from_i64(2_i64)),
-            Value::IntervalDayTime(IntervalDayTime::from_i64(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-
-        // month_day_nano
-        let actual = pb_values_to_values(
-            &ConcreteDataType::Interval(IntervalType::MonthDayNano(IntervalMonthDayNanoType)),
-            Values {
-                interval_month_day_nano_values: vec![
-                    v1::IntervalMonthDayNano {
-                        months: 1,
-                        days: 2,
-                        nanoseconds: 3,
-                    },
-                    v1::IntervalMonthDayNano {
-                        months: 5,
-                        days: 6,
-                        nanoseconds: 7,
-                    },
-                    v1::IntervalMonthDayNano {
-                        months: 9,
-                        days: 10,
-                        nanoseconds: 11,
-                    },
-                ],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
-            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(5, 6, 7)),
-            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(9, 10, 11)),
-        ];
-        assert_eq!(expect, actual);
-    }
-
-    macro_rules! test_convert_values {
-        ($grpc_data_type: ident, $values: expr,  $concrete_data_type: ident, $expected_ret: expr) => {
-            paste! {
-                #[test]
-                fn [<test_convert_ $grpc_data_type _values>]() {
-                    let values = Values {
-                        [<$grpc_data_type _values>]: $values,
-                        ..Default::default()
-                    };
-
-                    let data_type = ConcreteDataType::[<$concrete_data_type _datatype>]();
-                    let result = pb_values_to_values(&data_type, values);
-
-                    assert_eq!(
-                        $expected_ret,
-                        result
-                    );
-                }
-            }
-        };
-    }
-
-    test_convert_values!(
-        i8,
-        vec![1_i32, 2, 3],
-        int8,
-        vec![Value::Int8(1), Value::Int8(2), Value::Int8(3)]
-    );
-
-    test_convert_values!(
-        u8,
-        vec![1_u32, 2, 3],
-        uint8,
-        vec![Value::UInt8(1), Value::UInt8(2), Value::UInt8(3)]
-    );
-
-    test_convert_values!(
-        i16,
-        vec![1_i32, 2, 3],
-        int16,
-        vec![Value::Int16(1), Value::Int16(2), Value::Int16(3)]
-    );
-
-    test_convert_values!(
-        u16,
-        vec![1_u32, 2, 3],
-        uint16,
-        vec![Value::UInt16(1), Value::UInt16(2), Value::UInt16(3)]
-    );
-
-    test_convert_values!(
-        i32,
-        vec![1, 2, 3],
-        int32,
-        vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]
-    );
-
-    test_convert_values!(
-        u32,
-        vec![1, 2, 3],
-        uint32,
-        vec![Value::UInt32(1), Value::UInt32(2), Value::UInt32(3)]
-    );
-
-    test_convert_values!(
-        i64,
-        vec![1, 2, 3],
-        int64,
-        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]
-    );
-
-    test_convert_values!(
-        u64,
-        vec![1, 2, 3],
-        uint64,
-        vec![Value::UInt64(1), Value::UInt64(2), Value::UInt64(3)]
-    );
-
-    test_convert_values!(
-        f32,
-        vec![1.0, 2.0, 3.0],
-        float32,
-        vec![
-            Value::Float32(1.0.into()),
-            Value::Float32(2.0.into()),
-            Value::Float32(3.0.into())
-        ]
-    );
-
-    test_convert_values!(
-        f64,
-        vec![1.0, 2.0, 3.0],
-        float64,
-        vec![
-            Value::Float64(1.0.into()),
-            Value::Float64(2.0.into()),
-            Value::Float64(3.0.into())
-        ]
-    );
-
-    test_convert_values!(
-        string,
-        vec!["1".to_string(), "2".to_string(), "3".to_string()],
-        string,
-        vec![
-            Value::String("1".into()),
-            Value::String("2".into()),
-            Value::String("3".into())
-        ]
-    );
-
-    test_convert_values!(
-        binary,
-        vec!["1".into(), "2".into(), "3".into()],
-        binary,
-        vec![
-            Value::Binary(b"1".to_vec().into()),
-            Value::Binary(b"2".to_vec().into()),
-            Value::Binary(b"3".to_vec().into())
-        ]
-    );
-
-    test_convert_values!(
-        date,
-        vec![1, 2, 3],
-        date,
-        vec![
-            Value::Date(1.into()),
-            Value::Date(2.into()),
-            Value::Date(3.into())
-        ]
-    );
 
     #[test]
     fn test_vectors_to_rows_for_different_types() {

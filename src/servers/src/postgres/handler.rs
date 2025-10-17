@@ -173,7 +173,7 @@ where
         .map(move |row| {
             row.and_then(|row| {
                 let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                for (value, column) in row.iter().zip(schema.column_schemas()) {
+                for (value, column) in row.into_iter().zip(schema.column_schemas()) {
                     encode_value(&query_ctx, value, &mut encoder, &column.data_type)?;
                 }
                 encoder.finish()

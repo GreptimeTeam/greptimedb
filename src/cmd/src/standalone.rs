@@ -19,6 +19,7 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
@@ -403,6 +404,8 @@ impl StartCommand {
             datanode.region_server(),
             procedure_manager.clone(),
         ));
+
+        plugins.insert::<InformationExtensionRef>(information_extension.clone());
 
         let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
         let builder = KvBackendCatalogManagerBuilder::new(

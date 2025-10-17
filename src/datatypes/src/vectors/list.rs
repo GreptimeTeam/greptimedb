@@ -284,7 +284,7 @@ impl MutableVector for ListVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        if let Some(list_ref) = value.as_list()? {
+        if let Some(list_ref) = value.try_into_list()? {
             match list_ref {
                 ListValueRef::Indexed { vector, idx } => match vector.get(idx).as_list()? {
                     Some(list_value) => self.push_list_value(list_value)?,

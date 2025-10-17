@@ -28,7 +28,7 @@ use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -186,7 +186,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
@@ -197,7 +197,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         for_flush: bool,
     ) -> Result<MemtableRanges>;
 

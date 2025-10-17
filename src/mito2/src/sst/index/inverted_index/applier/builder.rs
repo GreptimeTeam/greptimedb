@@ -27,6 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -139,8 +140,13 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let predicates = self
             .output
             .iter()
-            .map(|(column_id, predicates)| (column_id.to_string(), predicates.clone()))
-            .collect();
+            .map(|(column_id, predicates)| {
+                (
+                    format!("{}", IndexTarget::ColumnId(*column_id)),
+                    predicates.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
         Ok(Some(
