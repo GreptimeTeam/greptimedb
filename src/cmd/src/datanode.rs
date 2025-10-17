@@ -14,7 +14,7 @@
 
 pub mod builder;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,7 +25,10 @@ use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::Datanode;
 use meta_client::MetaClientOptions;
+use object_store::ObjectStore;
+use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::App;
@@ -100,6 +103,17 @@ impl Command {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+            SubCommand::Objbench(_) => {
+                // For objbench command, we don't need to load DatanodeOptions
+                // It's a standalone utility command
+                let mut opts = datanode::config::DatanodeOptions::default();
+                opts.sanitize();
+                Ok(DatanodeOptions {
+                    runtime: Default::default(),
+                    plugins: Default::default(),
+                    component: opts,
+                })
+            }
         }
     }
 }
@@ -107,6 +121,8 @@ impl Command {
 #[derive(Parser)]
 enum SubCommand {
     Start(StartCommand),
+    /// Object storage benchmark tool
+    Objbench(ObjbenchCommand),
 }
 
 impl SubCommand {
@@ -116,8 +132,71 @@ impl SubCommand {
                 info!("Building datanode with {:#?}", cmd);
                 builder.build().await
             }
+            SubCommand::Objbench(cmd) => {
+                cmd.execute().await?;
+                std::process::exit(0);
+            }
         }
     }
+}
+
+/// Object storage benchmark command
+#[derive(Debug, Parser)]
+pub struct ObjbenchCommand {
+    /// Path to the object-store config file (TOML). Must deserialize into object_store::config::ObjectStoreConfig.
+    #[clap(long, value_name = "FILE")]
+    pub config: PathBuf,
+
+    /// Source SST file path in object-store (e.g. "region_dir/<uuid>.parquet").
+    #[clap(long, value_name = "PATH")]
+    pub source: String,
+
+    /// Target SST file path in object-store; its parent directory is used as destination region dir.
+    #[clap(long, value_name = "PATH")]
+    pub target: String,
+
+    /// Verbose output
+    #[clap(short, long, default_value_t = false)]
+    pub verbose: bool,
+
+    /// Output file path for pprof flamegraph (enables profiling)
+    #[clap(long, value_name = "FILE")]
+    pub pprof_file: Option<PathBuf>,
+}
+
+impl ObjbenchCommand {
+    async fn execute(&self) -> Result<()> {
+        eprintln!("The objbench subcommand is not fully implemented in this build.");
+        eprintln!("It requires additional dependencies that may not be available.");
+
+        std::process::exit(1);
+    }
+}
+
+/// Storage engine config
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// The working directory of database
+    pub data_home: String,
+    #[serde(flatten)]
+    pub store: object_store::config::ObjectStoreConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct StorageConfigWrapper {
+    storage: StorageConfig,
+}
+
+// Minimal stub functions to satisfy compiler
+async fn build_object_store(_sc: &StorageConfig) -> Result<ObjectStore> {
+    use object_store::ObjectStore;
+    use object_store::services::Fs;
+
+    let builder = Fs::default().root("/");
+    let object_store = ObjectStore::new(builder).unwrap().finish();
+    Ok(object_store)
 }
 
 #[derive(Debug, Parser, Default)]
