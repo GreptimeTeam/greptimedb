@@ -434,7 +434,7 @@ impl MemoryPermit {
         self.tracker
             .privileged_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if count < self.tracker.capacity {
+                if count < self.tracker.privileged_slots {
                     Some(count + 1)
                 } else {
                     None
@@ -454,10 +454,10 @@ impl MemoryPermit {
     /// * `additional` - Additional memory size to track in bytes
     /// * `stream_tracked` - Total memory already tracked by this stream
     ///
-    /// # Top-K Behavior
-    /// - Privileged streams (Top-K): Can push global memory usage up to full limit
-    /// - Non-privileged streams: Can push global memory usage up to limit * non_privileged_ratio (default: 0.5)
-    /// - Non-privileged streams automatically attempt to acquire privilege if slots become available
+    /// # Behavior
+    /// - Privileged streams: Can push global memory usage up to full limit
+    /// - Standard-tier streams: Can push global memory usage up to limit * standard_tier_memory_fraction (default: 0.7)
+    /// - Standard-tier streams automatically attempt to acquire privilege if slots become available
     /// - The configured limit is absolute hard limit - no stream can exceed it
     pub fn track(&self, additional: usize, stream_tracked: usize) -> Result<()> {
         // Ensure privileged status if possible
@@ -489,18 +489,18 @@ impl Drop for MemoryPermit {
 
 /// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
 ///
-/// Uses Top-K first-come-first-served strategy:
-/// - First K streams (default: 10) get privileged status and can use full limit
-/// - Non-privileged streams use discounted limit (default: 0.5x, configurable)
-/// - The configured limit is absolute hard limit - no stream can exceed it
-/// - When privileged streams drop, waiting streams can promote to Top-K
+/// Implements a two-tier memory allocation strategy:
+/// - **Privileged tier**: First N streams (default: 20) can use up to the full memory limit
+/// - **Standard tier**: Remaining streams are restricted to a fraction of the limit (default: 70%)
+/// - Privilege is granted on a first-come-first-served basis
+/// - The configured limit is an absolute hard cap - no stream can exceed it
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
     current: Arc<AtomicUsize>,
     limit: usize,
-    non_privileged_ratio: f64,
+    standard_tier_memory_fraction: f64,
     privileged_count: Arc<AtomicUsize>,
-    capacity: usize,
+    privileged_slots: usize,
     on_update: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     on_reject: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -510,12 +510,15 @@ impl fmt::Debug for QueryMemoryTracker {
         f.debug_struct("QueryMemoryTracker")
             .field("current", &self.current.load(Ordering::Acquire))
             .field("limit", &self.limit)
-            .field("non_privileged_ratio", &self.non_privileged_ratio)
+            .field(
+                "standard_tier_memory_fraction",
+                &self.standard_tier_memory_fraction,
+            )
             .field(
                 "privileged_count",
                 &self.privileged_count.load(Ordering::Acquire),
             )
-            .field("capacity", &self.capacity)
+            .field("privileged_slots", &self.privileged_slots)
             .field("on_update", &self.on_update.is_some())
             .field("on_reject", &self.on_reject.is_some())
             .finish()
@@ -523,66 +526,80 @@ impl fmt::Debug for QueryMemoryTracker {
 }
 
 impl QueryMemoryTracker {
-    /// Default capacity for Top-K privileged streams.
-    pub const DEFAULT_CAPACITY: usize = 15;
-    /// Default memory ratio for non-privileged streams.
-    pub const DEFAULT_NON_PRIVILEGED_RATIO: f64 = 0.7;
+    /// Default maximum number of streams that can get privileged memory access.
+    /// Privileged streams can use up to the full memory limit.
+    /// Privilege is granted on a first-come-first-served basis.
+    pub const DEFAULT_PRIVILEGED_SLOTS: usize = 20;
+    /// Default memory fraction available to standard-tier (non-privileged) streams.
+    /// Standard-tier streams can only use up to `limit * this_fraction`.
+    /// Value range: [0.0, 1.0].
+    pub const DEFAULT_STANDARD_TIER_MEMORY_FRACTION: f64 = 0.7;
 
     /// Create a new memory tracker with the given limit (in bytes).
     ///
+    /// Uses default configuration:
+    /// - Privileged slots: 20
+    /// - Standard-tier memory fraction: 0.7 (70%)
+    ///
     /// # Arguments
     /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
-    /// * `non_privileged_ratio` - Memory ratio for non-privileged streams (default: 0.5).
-    ///   Non-privileged streams can only use `limit * non_privileged_ratio`.
-    ///   Privileged streams can use up to the full `limit`.
     pub fn new(limit: usize) -> Self {
-        Self::with_capacity_and_ratio(
+        Self::with_config(
             limit,
-            Self::DEFAULT_CAPACITY,
-            Self::DEFAULT_NON_PRIVILEGED_RATIO,
+            Self::DEFAULT_PRIVILEGED_SLOTS,
+            Self::DEFAULT_STANDARD_TIER_MEMORY_FRACTION,
         )
     }
 
-    /// Create a new memory tracker with custom Top-K capacity.
-    pub fn with_capacity(limit: usize, capacity: usize) -> Self {
-        Self::with_capacity_and_ratio(limit, capacity, Self::DEFAULT_NON_PRIVILEGED_RATIO)
+    /// Create a new memory tracker with custom privileged slots limit.
+    pub fn with_privileged_slots(limit: usize, privileged_slots: usize) -> Self {
+        Self::with_config(
+            limit,
+            privileged_slots,
+            Self::DEFAULT_STANDARD_TIER_MEMORY_FRACTION,
+        )
     }
 
-    /// Create a new memory tracker with custom Top-K capacity and non-privileged ratio.
+    /// Create a new memory tracker with full configuration.
+    ///
+    /// # Arguments
+    /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
+    /// * `privileged_slots` - Maximum number of streams that can get privileged status.
+    /// * `standard_tier_memory_fraction` - Memory fraction for standard-tier streams (range: [0.0, 1.0]).
     ///
     /// # Panics
-    /// Panics if `non_privileged_ratio` is not in the range [0.0, 1.0].
-    pub fn with_capacity_and_ratio(
+    /// Panics if `standard_tier_memory_fraction` is not in the range [0.0, 1.0].
+    pub fn with_config(
         limit: usize,
-        capacity: usize,
-        non_privileged_ratio: f64,
+        privileged_slots: usize,
+        standard_tier_memory_fraction: f64,
     ) -> Self {
         assert!(
-            (0.0..=1.0).contains(&non_privileged_ratio),
-            "non_privileged_ratio must be in [0.0, 1.0], got {}",
-            non_privileged_ratio
+            (0.0..=1.0).contains(&standard_tier_memory_fraction),
+            "standard_tier_memory_fraction must be in [0.0, 1.0], got {}",
+            standard_tier_memory_fraction
         );
 
         Self {
             current: Arc::new(AtomicUsize::new(0)),
             limit,
-            non_privileged_ratio,
+            standard_tier_memory_fraction,
             privileged_count: Arc::new(AtomicUsize::new(0)),
-            capacity,
+            privileged_slots,
             on_update: None,
             on_reject: None,
         }
     }
 
     /// Register a new permit for memory tracking.
-    /// The first `capacity` permits get privileged status automatically.
+    /// The first `privileged_slots` permits get privileged status automatically.
     /// The returned permit can be shared across multiple streams of the same query.
     pub fn register_permit(&self) -> MemoryPermit {
         // Try to claim a privileged slot
         let is_privileged = self
             .privileged_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if count < self.capacity {
+                if count < self.privileged_slots {
                     Some(count + 1)
                 } else {
                     None
@@ -639,11 +656,11 @@ impl QueryMemoryTracker {
     ) -> Result<()> {
         // Calculate effective global limit based on stream privilege
         // Privileged streams: can push global usage up to full limit
-        // Non-privileged streams: can only push global usage up to discounted limit
+        // Standard-tier streams: can only push global usage up to fraction of limit
         let effective_limit = if is_privileged {
             self.limit
         } else {
-            (self.limit as f64 * self.non_privileged_ratio) as usize
+            (self.limit as f64 * self.standard_tier_memory_fraction) as usize
         };
 
         let mut new_total = 0;
@@ -731,13 +748,17 @@ impl Stream for MemoryTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let size = batch.estimated_size();
+                let additional = batch
+                    .columns()
+                    .iter()
+                    .map(|c| c.memory_size())
+                    .sum::<usize>();
 
-                if let Err(e) = self.permit.track(size, self.total_tracked) {
+                if let Err(e) = self.permit.track(additional, self.total_tracked) {
                     return Poll::Ready(Some(Err(e)));
                 }
 
-                self.total_tracked += size;
+                self.total_tracked += additional;
 
                 Poll::Ready(Some(Ok(batch)))
             }
@@ -890,11 +911,11 @@ mod tests {
     }
 
     #[test]
-    fn test_query_memory_tracker_top_k_limit() {
-        // Capacity = 2 for easy testing
-        // Limit: 1000, non-privileged ratio: 0.5
-        // Privileged can push global to 1000, non-privileged can push global to 500
-        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 2));
+    fn test_query_memory_tracker_privileged_limit() {
+        // Privileged slots = 2 for easy testing
+        // Limit: 1000, standard-tier fraction: 0.7 (default)
+        // Privileged can push global to 1000, standard-tier can push global to 700
+        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 2));
 
         // First 2 streams are privileged
         let permit1 = tracker.register_permit();
@@ -902,7 +923,7 @@ mod tests {
         assert!(permit1.is_privileged());
         assert!(permit2.is_privileged());
 
-        // Third stream is not privileged
+        // Third stream is standard-tier (not privileged)
         let permit3 = tracker.register_permit();
         assert!(!permit3.is_privileged());
 
@@ -910,37 +931,37 @@ mod tests {
         assert!(permit1.track(300, 0).is_ok());
         assert_eq!(tracker.current(), 300);
 
-        // Non-privileged can add up to 200 (total becomes 500, its effective limit)
-        assert!(permit3.track(200, 0).is_ok());
-        assert_eq!(tracker.current(), 500);
+        // Standard-tier can add up to 400 (total becomes 700, its effective limit)
+        assert!(permit3.track(400, 0).is_ok());
+        assert_eq!(tracker.current(), 700);
 
-        // Non-privileged stream cannot push global beyond 500
-        let err = permit3.track(100, 200).unwrap_err();
+        // Standard-tier stream cannot push global beyond 700
+        let err = permit3.track(100, 400).unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("200B used by this stream"));
-        assert!(err_msg.contains("effective limit: 500B (50%)"));
-        assert!(err_msg.contains("500B used globally (50%)"));
-        assert_eq!(tracker.current(), 500);
+        assert!(err_msg.contains("400B used by this stream"));
+        assert!(err_msg.contains("effective limit: 700B (70%)"));
+        assert!(err_msg.contains("700B used globally (70%)"));
+        assert_eq!(tracker.current(), 700);
 
         permit1.release(300);
-        permit3.release(200);
+        permit3.release(400);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
     fn test_query_memory_tracker_promotion() {
-        // Capacity = 1 for easy testing
-        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
+        // Privileged slots = 1 for easy testing
+        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 1));
 
         // First stream is privileged
         let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
 
-        // Second stream is not privileged (can only use 500)
+        // Second stream is standard-tier (can only use 500)
         let permit2 = tracker.register_permit();
         assert!(!permit2.is_privileged());
 
-        // Non-privileged can only track 500
+        // Standard-tier can only track 500
         assert!(permit2.track(400, 0).is_ok());
         assert_eq!(tracker.current(), 400);
 
@@ -960,7 +981,7 @@ mod tests {
     fn test_query_memory_tracker_privileged_hard_limit() {
         // Test that the configured limit is absolute hard limit for all streams
         // Privileged: can use full limit (1000)
-        // Non-privileged: can use 0.5x limit (500)
+        // Standard-tier: can use 0.7x limit (700 with defaults)
         let tracker = Arc::new(QueryMemoryTracker::new(1000));
 
         let permit1 = tracker.register_permit();
@@ -987,10 +1008,10 @@ mod tests {
     }
 
     #[test]
-    fn test_query_memory_tracker_non_privileged_ratio() {
-        // Test non-privileged streams use discounted limit
-        // Limit: 1000, ratio: 0.5, so non-privileged can use 500
-        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
+    fn test_query_memory_tracker_standard_tier_fraction() {
+        // Test standard-tier streams use fraction of limit
+        // Limit: 1000, default fraction: 0.7, so standard-tier can use 700
+        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 1));
 
         let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
@@ -998,23 +1019,23 @@ mod tests {
         let permit2 = tracker.register_permit();
         assert!(!permit2.is_privileged());
 
-        // Non-privileged can use up to 500 (1000 * 0.5)
-        assert!(permit2.track(400, 0).is_ok());
-        assert_eq!(tracker.current(), 400);
+        // Standard-tier can use up to 700 (1000 * 0.7 default)
+        assert!(permit2.track(600, 0).is_ok());
+        assert_eq!(tracker.current(), 600);
 
-        // Cannot exceed discounted limit (500)
-        assert!(permit2.track(200, 400).is_err());
-        assert_eq!(tracker.current(), 400);
+        // Cannot exceed standard-tier limit (700)
+        assert!(permit2.track(200, 600).is_err());
+        assert_eq!(tracker.current(), 600);
 
-        // Can add within discounted limit
-        assert!(permit2.track(100, 400).is_ok());
-        assert_eq!(tracker.current(), 500);
+        // Can add within standard-tier limit
+        assert!(permit2.track(100, 600).is_ok());
+        assert_eq!(tracker.current(), 700);
 
-        // Cannot exceed discounted limit
-        assert!(permit2.track(1, 500).is_err());
-        assert_eq!(tracker.current(), 500);
+        // Cannot exceed standard-tier limit
+        assert!(permit2.track(1, 700).is_err());
+        assert_eq!(tracker.current(), 700);
 
-        permit2.release(500);
+        permit2.release(700);
         assert_eq!(tracker.current(), 0);
     }
 }
