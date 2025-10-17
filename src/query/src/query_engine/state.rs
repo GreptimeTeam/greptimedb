@@ -19,13 +19,13 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_config::utils::get_sys_total_memory;
 use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_function::state::FunctionState;
+use common_stat::get_total_memory_bytes;
 use common_telemetry::warn;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
@@ -105,7 +105,7 @@ impl QueryEngineState {
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> Self {
-        let total_memory = get_sys_total_memory().map(|s| s.as_bytes()).unwrap_or(0);
+        let total_memory = get_total_memory_bytes().max(0) as u64;
         let memory_pool_size = options.memory_pool_size.resolve(total_memory) as usize;
         let runtime_env = if memory_pool_size > 0 {
             Arc::new(
