@@ -474,7 +474,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `wal` | -- | -- | The WAL options. |
-| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
+| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `128MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `1GB` | The threshold of the WAL size to trigger a purge.<br/>**It's only used when the provider is `raft_engine`**. |

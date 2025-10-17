@@ -118,6 +118,7 @@ metadata_cache_tti = "5m"
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
+## - `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.

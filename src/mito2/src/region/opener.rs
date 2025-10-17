@@ -25,6 +25,7 @@ use common_wal::options::WalOptions;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
+use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
@@ -367,7 +368,8 @@ impl RegionOpener {
         match wal_options {
             WalOptions::RaftEngine => {
                 ensure!(
-                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>(),
+                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
+                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
                     error::IncompatibleWalProviderChangeSnafu {
                         global: "`kafka`",
                         region: "`raft_engine`",
@@ -377,7 +379,8 @@ impl RegionOpener {
             }
             WalOptions::Kafka(options) => {
                 ensure!(
-                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>(),
+                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
+                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
                     error::IncompatibleWalProviderChangeSnafu {
                         global: "`raft_engine`",
                         region: "`kafka`",
