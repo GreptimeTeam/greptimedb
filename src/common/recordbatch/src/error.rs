@@ -15,6 +15,7 @@
 //! Error of record batch.
 use std::any::Any;
 
+use common_base::readable_size::ReadableSize;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -195,15 +196,15 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Exceeded memory limit: {} bytes requested, {} bytes used globally ({}%), {} bytes used by this stream (privileged: {}), effective limit: {} bytes ({}%), hard limit: {} bytes",
-        requested,
-        global_used,
+        "Exceeded memory limit: {} requested, {} used globally ({}%), {} used by this stream (privileged: {}), effective limit: {} ({}%), hard limit: {}",
+        ReadableSize(*requested as u64),
+        ReadableSize(*global_used as u64),
         if *limit > 0 { global_used * 100 / limit } else { 0 },
-        stream_used,
+        ReadableSize(*stream_used as u64),
         is_privileged,
-        effective_limit,
+        ReadableSize(*effective_limit as u64),
         if *limit > 0 { effective_limit * 100 / limit } else { 0 },
-        limit
+        ReadableSize(*limit as u64)
     ))]
     ExceedMemoryLimit {
         requested: usize,

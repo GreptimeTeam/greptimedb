@@ -574,9 +574,10 @@ impl QueryMemoryTracker {
         }
     }
 
-    /// Register a new stream and get a memory permit.
-    /// The first `capacity` streams get privileged status automatically.
-    pub fn register_stream(&self) -> MemoryPermit {
+    /// Register a new permit for memory tracking.
+    /// The first `capacity` permits get privileged status automatically.
+    /// The returned permit can be shared across multiple streams of the same query.
+    pub fn register_permit(&self) -> MemoryPermit {
         // Try to claim a privileged slot
         let is_privileged = self
             .privileged_count
@@ -709,13 +710,13 @@ impl QueryMemoryTracker {
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
-    permit: MemoryPermit,
+    permit: Arc<MemoryPermit>,
     // Total tracked size, released when stream drops.
     total_tracked: usize,
 }
 
 impl MemoryTrackedStream {
-    pub fn new(inner: SendableRecordBatchStream, permit: MemoryPermit) -> Self {
+    pub fn new(inner: SendableRecordBatchStream, permit: Arc<MemoryPermit>) -> Self {
         Self {
             inner,
             permit,
@@ -873,7 +874,7 @@ mod tests {
         let tracker = Arc::new(QueryMemoryTracker::new(1000));
 
         // Register first stream - should get privileged status
-        let permit1 = tracker.register_stream();
+        let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
 
         // Privileged stream can use up to limit
@@ -881,7 +882,7 @@ mod tests {
         assert_eq!(tracker.current(), 500);
 
         // Register second stream - also privileged
-        let permit2 = tracker.register_stream();
+        let permit2 = tracker.register_permit();
         assert!(permit2.is_privileged());
         // Can add more but cannot exceed hard limit (1000)
         assert!(permit2.track(400, 0).is_ok());
@@ -900,13 +901,13 @@ mod tests {
         let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 2));
 
         // First 2 streams are privileged
-        let permit1 = tracker.register_stream();
-        let permit2 = tracker.register_stream();
+        let permit1 = tracker.register_permit();
+        let permit2 = tracker.register_permit();
         assert!(permit1.is_privileged());
         assert!(permit2.is_privileged());
 
         // Third stream is not privileged
-        let permit3 = tracker.register_stream();
+        let permit3 = tracker.register_permit();
         assert!(!permit3.is_privileged());
 
         // Privileged stream uses some memory
@@ -920,9 +921,9 @@ mod tests {
         // Non-privileged stream cannot push global beyond 500
         let err = permit3.track(100, 200).unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("200 bytes used by this stream"));
-        assert!(err_msg.contains("effective limit: 500 bytes (50%)"));
-        assert!(err_msg.contains("500 bytes used globally (50%)"));
+        assert!(err_msg.contains("200B used by this stream"));
+        assert!(err_msg.contains("effective limit: 500B (50%)"));
+        assert!(err_msg.contains("500B used globally (50%)"));
         assert_eq!(tracker.current(), 500);
 
         permit1.release(300);
@@ -936,11 +937,11 @@ mod tests {
         let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
 
         // First stream is privileged
-        let permit1 = tracker.register_stream();
+        let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
 
         // Second stream is not privileged (can only use 500)
-        let permit2 = tracker.register_stream();
+        let permit2 = tracker.register_permit();
         assert!(!permit2.is_privileged());
 
         // Non-privileged can only track 500
@@ -966,7 +967,7 @@ mod tests {
         // Non-privileged: can use 0.5x limit (500)
         let tracker = Arc::new(QueryMemoryTracker::new(1000));
 
-        let permit1 = tracker.register_stream();
+        let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
 
         // Privileged can use up to full limit (1000)
@@ -995,10 +996,10 @@ mod tests {
         // Limit: 1000, ratio: 0.5, so non-privileged can use 500
         let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
 
-        let permit1 = tracker.register_stream();
+        let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());
 
-        let permit2 = tracker.register_stream();
+        let permit2 = tracker.register_permit();
         assert!(!permit2.is_privileged());
 
         // Non-privileged can use up to 500 (1000 * 0.5)

@@ -22,7 +22,8 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{
-    MemoryTrackedStream, QueryMemoryTracker, RecordBatchStreamWrapper, SendableRecordBatchStream,
+    MemoryPermit, MemoryTrackedStream, QueryMemoryTracker, RecordBatchStreamWrapper,
+    SendableRecordBatchStream,
 };
 use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -68,6 +69,8 @@ pub struct SeqScan {
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: PartitionMetricsList,
+    /// Memory permit for the entire query (shared across all partitions).
+    query_memory_permit: Option<Arc<MemoryPermit>>,
 }
 
 impl SeqScan {
@@ -77,13 +80,17 @@ impl SeqScan {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, query_memory_tracker));
+        let query_memory_permit = query_memory_tracker
+            .as_ref()
+            .map(|t| Arc::new(t.register_permit()));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
             properties,
             stream_ctx,
             metrics_list: PartitionMetricsList::default(),
+            query_memory_permit,
         }
     }
 
@@ -357,14 +364,11 @@ impl SeqScan {
             Box::pin(record_batch_stream),
         ));
 
-        Ok(
-            if let Some(tracker) = &self.stream_ctx.query_memory_tracker {
-                let permit = tracker.register_stream();
-                Box::pin(MemoryTrackedStream::new(stream, permit))
-            } else {
-                stream
-            },
-        )
+        Ok(if let Some(permit) = &self.query_memory_permit {
+            Box::pin(MemoryTrackedStream::new(stream, permit.clone()))
+        } else {
+            stream
+        })
     }
 
     fn scan_batch_in_partition(

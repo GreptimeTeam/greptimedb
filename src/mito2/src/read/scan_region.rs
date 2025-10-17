@@ -1196,16 +1196,11 @@ pub struct StreamContext {
     // Metrics:
     /// The start time of the query.
     pub(crate) query_start: Instant,
-    /// Memory tracker for the query.
-    pub(crate) query_memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(
-        input: ScanInput,
-        query_memory_tracker: Option<QueryMemoryTracker>,
-    ) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -1214,15 +1209,11 @@ impl StreamContext {
             input,
             ranges,
             query_start,
-            query_memory_tracker,
         }
     }
 
     /// Creates a new [StreamContext] for [UnorderedScan].
-    pub(crate) fn unordered_scan_ctx(
-        input: ScanInput,
-        query_memory_tracker: Option<QueryMemoryTracker>,
-    ) -> Self {
+    pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
@@ -1231,7 +1222,6 @@ impl StreamContext {
             input,
             ranges,
             query_start,
-            query_memory_tracker,
         }
     }
 
