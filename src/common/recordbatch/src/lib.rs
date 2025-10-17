@@ -24,7 +24,7 @@ pub mod util;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
@@ -408,16 +408,99 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
     }
 }
 
+/// Memory permit for a stream, providing privileged access or rate limiting.
+///
+/// The permit tracks whether this stream has privileged Top-K status.
+/// When dropped, it automatically releases any privileged slot it holds.
+pub struct MemoryPermit {
+    tracker: QueryMemoryTracker,
+    is_privileged: AtomicBool,
+}
+
+impl MemoryPermit {
+    /// Check if this permit currently has privileged status.
+    pub fn is_privileged(&self) -> bool {
+        self.is_privileged.load(Ordering::Acquire)
+    }
+
+    /// Ensure this permit has privileged status by acquiring a slot if available.
+    /// Returns true if privileged (either already privileged or just acquired privilege).
+    fn ensure_privileged(&self) -> bool {
+        if self.is_privileged.load(Ordering::Acquire) {
+            return true;
+        }
+
+        // Try to claim a privileged slot
+        self.tracker
+            .privileged_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                if count < self.tracker.capacity {
+                    Some(count + 1)
+                } else {
+                    None
+                }
+            })
+            .map(|_| {
+                self.is_privileged.store(true, Ordering::Release);
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    /// Track additional memory usage with this permit.
+    /// Returns error if limit is exceeded.
+    ///
+    /// # Arguments
+    /// * `additional` - Additional memory size to track in bytes
+    /// * `stream_tracked` - Total memory already tracked by this stream
+    ///
+    /// # Top-K Behavior
+    /// - Privileged streams (Top-K): Can push global memory usage up to full limit
+    /// - Non-privileged streams: Can push global memory usage up to limit * non_privileged_ratio (default: 0.5)
+    /// - Non-privileged streams automatically attempt to acquire privilege if slots become available
+    /// - The configured limit is absolute hard limit - no stream can exceed it
+    pub fn track(&self, additional: usize, stream_tracked: usize) -> Result<()> {
+        // Ensure privileged status if possible
+        let is_privileged = self.ensure_privileged();
+
+        self.tracker
+            .track_internal(additional, is_privileged, stream_tracked)
+    }
+
+    /// Release tracked memory.
+    ///
+    /// # Arguments
+    /// * `amount` - Amount of memory to release in bytes
+    pub fn release(&self, amount: usize) {
+        self.tracker.release(amount);
+    }
+}
+
+impl Drop for MemoryPermit {
+    fn drop(&mut self) {
+        // Release privileged slot if we had one
+        if self.is_privileged.load(Ordering::Acquire) {
+            self.tracker
+                .privileged_count
+                .fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
 /// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
 ///
-/// Uses soft and hard limit strategy to prevent thundering herd in high concurrency:
-/// - Soft limit: Reject new allocations but allow existing streams to continue
-/// - Hard limit: Reject all allocations
+/// Uses Top-K first-come-first-served strategy:
+/// - First K streams (default: 10) get privileged status and can use full limit
+/// - Non-privileged streams use discounted limit (default: 0.5x, configurable)
+/// - The configured limit is absolute hard limit - no stream can exceed it
+/// - When privileged streams drop, waiting streams can promote to Top-K
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
     current: Arc<AtomicUsize>,
-    soft_limit: usize,
-    hard_limit: usize,
+    limit: usize,
+    non_privileged_ratio: f64,
+    privileged_count: Arc<AtomicUsize>,
+    capacity: usize,
     on_update: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     on_reject: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -425,9 +508,14 @@ pub struct QueryMemoryTracker {
 impl fmt::Debug for QueryMemoryTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryMemoryTracker")
-            .field("current", &self.current.load(Ordering::Relaxed))
-            .field("soft_limit", &self.soft_limit)
-            .field("hard_limit", &self.hard_limit)
+            .field("current", &self.current.load(Ordering::Acquire))
+            .field("limit", &self.limit)
+            .field("non_privileged_ratio", &self.non_privileged_ratio)
+            .field(
+                "privileged_count",
+                &self.privileged_count.load(Ordering::Acquire),
+            )
+            .field("capacity", &self.capacity)
             .field("on_update", &self.on_update.is_some())
             .field("on_reject", &self.on_reject.is_some())
             .finish()
@@ -435,26 +523,75 @@ impl fmt::Debug for QueryMemoryTracker {
 }
 
 impl QueryMemoryTracker {
-    /// Create a new memory tracker with the given hard limit (in bytes).
+    /// Default capacity for Top-K privileged streams.
+    pub const DEFAULT_CAPACITY: usize = 10;
+    /// Default memory ratio for non-privileged streams.
+    pub const DEFAULT_NON_PRIVILEGED_RATIO: f64 = 0.5;
+
+    /// Create a new memory tracker with the given limit (in bytes).
     ///
     /// # Arguments
-    /// * `hard_limit` - Maximum memory usage in bytes. 0 means unlimited.
-    /// * `soft_limit_ratio` - Ratio of soft limit to hard limit (0.0 to 1.0).
-    ///   When ratio <= 0, soft limit is disabled (all queries use hard limit).
-    ///   When current usage exceeds soft limit, new allocations are rejected
-    ///   but existing streams can continue until hard limit.
-    pub fn new(hard_limit: usize, soft_limit_ratio: f64) -> Self {
-        let soft_limit = if hard_limit > 0 && soft_limit_ratio > 0.0 {
-            (hard_limit as f64 * soft_limit_ratio.clamp(0.0, 1.0)) as usize
-        } else {
-            0
-        };
+    /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
+    /// * `non_privileged_ratio` - Memory ratio for non-privileged streams (default: 0.5).
+    ///   Non-privileged streams can only use `limit * non_privileged_ratio`.
+    ///   Privileged streams can use up to the full `limit`.
+    pub fn new(limit: usize) -> Self {
+        Self::with_capacity_and_ratio(
+            limit,
+            Self::DEFAULT_CAPACITY,
+            Self::DEFAULT_NON_PRIVILEGED_RATIO,
+        )
+    }
+
+    /// Create a new memory tracker with custom Top-K capacity.
+    pub fn with_capacity(limit: usize, capacity: usize) -> Self {
+        Self::with_capacity_and_ratio(limit, capacity, Self::DEFAULT_NON_PRIVILEGED_RATIO)
+    }
+
+    /// Create a new memory tracker with custom Top-K capacity and non-privileged ratio.
+    ///
+    /// # Panics
+    /// Panics if `non_privileged_ratio` is not in the range [0.0, 1.0].
+    pub fn with_capacity_and_ratio(
+        limit: usize,
+        capacity: usize,
+        non_privileged_ratio: f64,
+    ) -> Self {
+        assert!(
+            (0.0..=1.0).contains(&non_privileged_ratio),
+            "non_privileged_ratio must be in [0.0, 1.0], got {}",
+            non_privileged_ratio
+        );
+
         Self {
             current: Arc::new(AtomicUsize::new(0)),
-            soft_limit,
-            hard_limit,
+            limit,
+            non_privileged_ratio,
+            privileged_count: Arc::new(AtomicUsize::new(0)),
+            capacity,
             on_update: None,
             on_reject: None,
+        }
+    }
+
+    /// Register a new stream and get a memory permit.
+    /// The first `capacity` streams get privileged status automatically.
+    pub fn register_stream(&self) -> MemoryPermit {
+        // Try to claim a privileged slot
+        let is_privileged = self
+            .privileged_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                if count < self.capacity {
+                    Some(count + 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok();
+
+        MemoryPermit {
+            tracker: self.clone(),
+            is_privileged: AtomicBool::new(is_privileged),
         }
     }
 
@@ -487,43 +624,41 @@ impl QueryMemoryTracker {
 
     /// Get the current memory usage in bytes.
     pub fn current(&self) -> usize {
-        self.current.load(Ordering::Relaxed)
+        self.current.load(Ordering::Acquire)
     }
 
-    /// Track memory usage. Returns error if limit is exceeded.
+    /// Internal method to track additional memory usage.
     ///
-    /// # Arguments
-    /// * `size` - Memory size to track in bytes
-    /// * `is_initial` - True for first allocation of a stream, false for subsequent allocations
-    ///
-    /// # Soft Limit Behavior
-    /// When `is_initial` is true and soft limit is enabled:
-    /// - If current usage < soft limit: allow the allocation (checked against hard limit)
-    /// - If current usage >= soft limit: reject the allocation immediately
-    ///
-    /// This ensures that new queries are only accepted when memory pressure is low,
-    /// while existing queries can continue until hard limit is reached.
-    pub fn track(&self, size: usize, is_initial: bool) -> Result<()> {
+    /// Called by `MemoryPermit::track()`. Use `MemoryPermit::track()` instead of calling this directly.
+    fn track_internal(
+        &self,
+        additional: usize,
+        is_privileged: bool,
+        stream_tracked: usize,
+    ) -> Result<()> {
+        // Calculate effective global limit based on stream privilege
+        // Privileged streams: can push global usage up to full limit
+        // Non-privileged streams: can only push global usage up to discounted limit
+        let effective_limit = if is_privileged {
+            self.limit
+        } else {
+            (self.limit as f64 * self.non_privileged_ratio) as usize
+        };
+
         let mut new_total = 0;
         let result = self
             .current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                new_total = current.saturating_add(size);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                new_total = current.saturating_add(additional);
 
-                if self.hard_limit == 0 {
+                if self.limit == 0 {
                     // Unlimited mode
                     return Some(new_total);
                 }
 
-                if is_initial && self.soft_limit > 0 {
-                    // New query: check if current usage is below soft limit
-                    if current >= self.soft_limit {
-                        return None; // Reject immediately
-                    }
-                }
-
-                // Check against hard limit
-                if new_total <= self.hard_limit {
+                // Check if new global total exceeds effective limit
+                // The configured limit is absolute hard limit - no stream can exceed it
+                if new_total <= effective_limit {
                     Some(new_total)
                 } else {
                     None
@@ -541,16 +676,13 @@ impl QueryMemoryTracker {
                 if let Some(callback) = &self.on_reject {
                     callback();
                 }
-                // Distinguish soft vs hard limit rejection in error message
-                let limit = if is_initial && self.soft_limit > 0 && current >= self.soft_limit {
-                    self.soft_limit
-                } else {
-                    self.hard_limit
-                };
                 error::ExceedMemoryLimitSnafu {
-                    requested: size,
-                    used: current,
-                    limit,
+                    requested: additional,
+                    global_used: current,
+                    stream_used: stream_tracked,
+                    is_privileged,
+                    effective_limit,
+                    limit: self.limit,
                 }
                 .fail()
             }
@@ -558,15 +690,18 @@ impl QueryMemoryTracker {
     }
 
     /// Release tracked memory.
-    pub fn release(&self, size: usize) {
+    ///
+    /// # Arguments
+    /// * `amount` - Amount of memory to release in bytes
+    pub fn release(&self, amount: usize) {
         if let Ok(old_value) =
             self.current
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_sub(size))
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(current.saturating_sub(amount))
                 })
             && let Some(callback) = &self.on_update
         {
-            callback(old_value.saturating_sub(size));
+            callback(old_value.saturating_sub(amount));
         }
     }
 }
@@ -574,16 +709,16 @@ impl QueryMemoryTracker {
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
-    tracker: QueryMemoryTracker,
+    permit: MemoryPermit,
     // Total tracked size, released when stream drops.
     total_tracked: usize,
 }
 
 impl MemoryTrackedStream {
-    pub fn new(inner: SendableRecordBatchStream, tracker: QueryMemoryTracker) -> Self {
+    pub fn new(inner: SendableRecordBatchStream, permit: MemoryPermit) -> Self {
         Self {
             inner,
-            tracker,
+            permit,
             total_tracked: 0,
         }
     }
@@ -600,9 +735,8 @@ impl Stream for MemoryTrackedStream {
                     .iter()
                     .map(|vec_ref| vec_ref.memory_size())
                     .sum::<usize>();
-                let is_initial = self.total_tracked == 0;
 
-                if let Err(e) = self.tracker.track(size, is_initial) {
+                if let Err(e) = self.permit.track(size, self.total_tracked) {
                     return Poll::Ready(Some(Err(e)));
                 }
 
@@ -615,12 +749,16 @@ impl Stream for MemoryTrackedStream {
             Poll::Pending => Poll::Pending,
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
 }
 
 impl Drop for MemoryTrackedStream {
     fn drop(&mut self) {
         if self.total_tracked > 0 {
-            self.tracker.release(self.total_tracked);
+            self.permit.release(self.total_tracked);
         }
     }
 }
@@ -731,53 +869,155 @@ mod tests {
     }
 
     #[test]
-    fn test_query_memory_tracker_zero_soft_limit_ratio() {
-        // When soft_limit_ratio is 0, soft limit should be disabled
-        // and all queries should use hard limit
-        let tracker = QueryMemoryTracker::new(1000, 0.0);
+    fn test_query_memory_tracker_basic() {
+        let tracker = Arc::new(QueryMemoryTracker::new(1000));
 
-        // First allocation (is_initial=true) should succeed up to hard limit
-        assert!(tracker.track(500, true).is_ok());
+        // Register first stream - should get privileged status
+        let permit1 = tracker.register_stream();
+        assert!(permit1.is_privileged());
+
+        // Privileged stream can use up to limit
+        assert!(permit1.track(500, 0).is_ok());
         assert_eq!(tracker.current(), 500);
 
-        // Second allocation should also succeed
-        assert!(tracker.track(400, true).is_ok());
+        // Register second stream - also privileged
+        let permit2 = tracker.register_stream();
+        assert!(permit2.is_privileged());
+        // Can add more but cannot exceed hard limit (1000)
+        assert!(permit2.track(400, 0).is_ok());
         assert_eq!(tracker.current(), 900);
 
-        // Exceeding hard limit should fail
-        assert!(tracker.track(200, true).is_err());
-        assert_eq!(tracker.current(), 900);
-
-        tracker.release(900);
+        permit1.release(500);
+        permit2.release(400);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
-    fn test_query_memory_tracker_with_soft_limit() {
-        // With soft_limit_ratio = 0.5, soft limit is 500
-        let tracker = QueryMemoryTracker::new(1000, 0.5);
+    fn test_query_memory_tracker_top_k_limit() {
+        // Capacity = 2 for easy testing
+        // Limit: 1000, non-privileged ratio: 0.5
+        // Privileged can push global to 1000, non-privileged can push global to 500
+        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 2));
 
-        // First new query (is_initial=true): current=0 < soft_limit=500, allowed
-        assert!(tracker.track(400, true).is_ok());
+        // First 2 streams are privileged
+        let permit1 = tracker.register_stream();
+        let permit2 = tracker.register_stream();
+        assert!(permit1.is_privileged());
+        assert!(permit2.is_privileged());
+
+        // Third stream is not privileged
+        let permit3 = tracker.register_stream();
+        assert!(!permit3.is_privileged());
+
+        // Privileged stream uses some memory
+        assert!(permit1.track(300, 0).is_ok());
+        assert_eq!(tracker.current(), 300);
+
+        // Non-privileged can add up to 200 (total becomes 500, its effective limit)
+        assert!(permit3.track(200, 0).is_ok());
+        assert_eq!(tracker.current(), 500);
+
+        // Non-privileged stream cannot push global beyond 500
+        let err = permit3.track(100, 200).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("200 bytes used by this stream"));
+        assert!(err_msg.contains("effective limit: 500 bytes (50%)"));
+        assert!(err_msg.contains("500 bytes used globally (50%)"));
+        assert_eq!(tracker.current(), 500);
+
+        permit1.release(300);
+        permit3.release(200);
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[test]
+    fn test_query_memory_tracker_promotion() {
+        // Capacity = 1 for easy testing
+        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
+
+        // First stream is privileged
+        let permit1 = tracker.register_stream();
+        assert!(permit1.is_privileged());
+
+        // Second stream is not privileged (can only use 500)
+        let permit2 = tracker.register_stream();
+        assert!(!permit2.is_privileged());
+
+        // Non-privileged can only track 500
+        assert!(permit2.track(400, 0).is_ok());
         assert_eq!(tracker.current(), 400);
 
-        // Second new query: current=400 < soft_limit=500, can allocate up to hard limit
-        assert!(tracker.track(400, true).is_ok());
-        assert_eq!(tracker.current(), 800);
+        // Drop first permit to release privileged slot
+        drop(permit1);
 
-        // Third new query: current=800 >= soft_limit=500, rejected
-        assert!(tracker.track(100, true).is_err());
-        assert_eq!(tracker.current(), 800);
-
-        // Existing stream (is_initial=false) can still allocate up to hard limit
-        assert!(tracker.track(100, false).is_ok());
+        // Second stream can now be promoted and use more memory
+        assert!(permit2.track(500, 400).is_ok());
+        assert!(permit2.is_privileged());
         assert_eq!(tracker.current(), 900);
 
-        // Exceeding hard limit should fail even for existing stream
-        assert!(tracker.track(200, false).is_err());
+        permit2.release(900);
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[test]
+    fn test_query_memory_tracker_privileged_hard_limit() {
+        // Test that the configured limit is absolute hard limit for all streams
+        // Privileged: can use full limit (1000)
+        // Non-privileged: can use 0.5x limit (500)
+        let tracker = Arc::new(QueryMemoryTracker::new(1000));
+
+        let permit1 = tracker.register_stream();
+        assert!(permit1.is_privileged());
+
+        // Privileged can use up to full limit (1000)
+        assert!(permit1.track(900, 0).is_ok());
         assert_eq!(tracker.current(), 900);
 
-        tracker.release(900);
+        // Privileged cannot exceed hard limit (1000)
+        assert!(permit1.track(200, 900).is_err());
+        assert_eq!(tracker.current(), 900);
+
+        // Can add within hard limit
+        assert!(permit1.track(100, 900).is_ok());
+        assert_eq!(tracker.current(), 1000);
+
+        // Cannot exceed even by 1 byte
+        assert!(permit1.track(1, 1000).is_err());
+        assert_eq!(tracker.current(), 1000);
+
+        permit1.release(1000);
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[test]
+    fn test_query_memory_tracker_non_privileged_ratio() {
+        // Test non-privileged streams use discounted limit
+        // Limit: 1000, ratio: 0.5, so non-privileged can use 500
+        let tracker = Arc::new(QueryMemoryTracker::with_capacity(1000, 1));
+
+        let permit1 = tracker.register_stream();
+        assert!(permit1.is_privileged());
+
+        let permit2 = tracker.register_stream();
+        assert!(!permit2.is_privileged());
+
+        // Non-privileged can use up to 500 (1000 * 0.5)
+        assert!(permit2.track(400, 0).is_ok());
+        assert_eq!(tracker.current(), 400);
+
+        // Cannot exceed discounted limit (500)
+        assert!(permit2.track(200, 400).is_err());
+        assert_eq!(tracker.current(), 400);
+
+        // Can add within discounted limit
+        assert!(permit2.track(100, 400).is_ok());
+        assert_eq!(tracker.current(), 500);
+
+        // Cannot exceed discounted limit
+        assert!(permit2.track(1, 500).is_err());
+        assert_eq!(tracker.current(), 500);
+
+        permit2.release(500);
         assert_eq!(tracker.current(), 0);
     }
 }
