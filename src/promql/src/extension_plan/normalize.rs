@@ -58,6 +58,13 @@ pub struct SeriesNormalize {
     tag_columns: Vec<String>,
 
     input: LogicalPlan,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub tag_column_indices: Vec<u64>,
 }
 
 impl UserDefinedLogicalNodeCore for SeriesNormalize {
@@ -96,13 +103,52 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             ));
         }
 
-        Ok(Self {
-            offset: self.offset,
-            time_index_column_name: self.time_index_column_name.clone(),
-            need_filter_out_nan: self.need_filter_out_nan,
-            input: inputs.into_iter().next().unwrap(),
-            tag_columns: self.tag_columns.clone(),
-        })
+        let input: LogicalPlan = inputs.into_iter().next().unwrap();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let columns = input_schema.columns();
+            let time_index_column_name = columns
+                .get(unfix.time_index_idx as usize)
+                .ok_or_else(|| DataFusionError::Internal(format!(
+                    "Failed to get time index column at idx {} during unfixing SeriesNormalize with columns:{:?}",
+                    unfix.time_index_idx, columns
+                )))?
+                .flat_name();
+
+            let tag_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| {
+                    columns
+                        .get(*idx as usize)
+                        .ok_or_else(|| DataFusionError::Internal(format!(
+                            "Failed to get tag column at idx {} during unfixing SeriesNormalize with columns:{:?}",
+                            idx, columns
+                        )))
+                        .map(|field| field.flat_name())
+                })
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            Ok(Self {
+                offset: self.offset,
+                time_index_column_name,
+                need_filter_out_nan: self.need_filter_out_nan,
+                tag_columns,
+                input,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                offset: self.offset,
+                time_index_column_name: self.time_index_column_name.clone(),
+                need_filter_out_nan: self.need_filter_out_nan,
+                tag_columns: self.tag_columns.clone(),
+                input,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -120,6 +166,7 @@ impl SeriesNormalize {
             need_filter_out_nan,
             tag_columns,
             input,
+            unfix: None,
         }
     }
 
@@ -139,11 +186,31 @@ impl SeriesNormalize {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = self
+            .input
+            .schema()
+            .index_of_column_by_name(None, &self.time_index_column_name)
+            .map(|idx| idx as u64)
+            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+
+        let tag_column_indices = self
+            .tag_columns
+            .iter()
+            .map(|name| {
+                self.input
+                    .schema()
+                    .index_of_column_by_name(None, name)
+                    .map(|idx| idx as u64)
+                    .unwrap_or(u64::MAX)
+            })
+            .collect::<Vec<u64>>();
+
         pb::SeriesNormalize {
             offset: self.offset,
-            time_index: self.time_index_column_name.clone(),
+            time_index_idx,
             filter_nan: self.need_filter_out_nan,
-            tag_columns: self.tag_columns.clone(),
+            tag_column_indices,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -154,13 +221,20 @@ impl SeriesNormalize {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
-        Ok(Self::new(
-            pb_normalize.offset,
-            pb_normalize.time_index,
-            pb_normalize.filter_nan,
-            pb_normalize.tag_columns,
-            placeholder_plan,
-        ))
+
+        let unfix = UnfixIndices {
+            time_index_idx: pb_normalize.time_index_idx,
+            tag_column_indices: pb_normalize.tag_column_indices.clone(),
+        };
+
+        Ok(Self {
+            offset: pb_normalize.offset,
+            time_index_column_name: String::new(),
+            need_filter_out_nan: pb_normalize.filter_nan,
+            tag_columns: Vec::new(),
+            input: placeholder_plan,
+            unfix: Some(unfix),
+        })
     }
 }
 

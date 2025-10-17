@@ -1,0 +1,33 @@
+create table count_total (
+    ts timestamp time index,
+    tag_a string,
+    tag_b string,
+    val double,
+    primary key (tag_a, tag_b),
+);
+
+Affected Rows: 0
+
+-- if `RangeManipulate` can be encoded/decoded correctly in substrait, the following two queries should pass(for now it simply wouldn't push down)
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+tql explain (0, 100, '1s') 
+    increase(count_total{
+      tag_a="ffa",
+      tag_b="8c64"
+    }[1h])[12h:1h];
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named "prom_increase(ts_range,val,ts,Int64(3600000))". Did you mean 'prom_increase(ts_range,val,count_total.ts,Int64(3600000))'?.
+
+tql eval (0, 100, '1s') 
+    increase(count_total{
+      tag_a="ffa",
+      tag_b="8c64"
+    }[1h])[12h:1h];
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named "prom_increase(ts_range,val,ts,Int64(3600000))". Did you mean 'prom_increase(ts_range,val,count_total.ts,Int64(3600000))'?.
+
+drop table count_total;
+
+Affected Rows: 0
+
