@@ -12005,6 +12005,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-sql",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datafusion-common",

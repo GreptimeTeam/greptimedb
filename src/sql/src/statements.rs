@@ -679,6 +679,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
+                json_datatype_options: None,
             },
         };
 
