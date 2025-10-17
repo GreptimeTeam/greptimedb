@@ -67,6 +67,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::gc_scheduler::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -209,6 +210,8 @@ pub struct MetasrvOptions {
     pub event_recorder: EventRecorderOptions,
     /// The stats persistence options.
     pub stats_persistence: StatsPersistenceOptions,
+    /// The GC scheduler options.
+    pub gc: GcSchedulerOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -307,6 +310,7 @@ impl Default for MetasrvOptions {
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
+            gc: GcSchedulerOptions::default(),
         }
     }
 }
@@ -518,6 +522,7 @@ pub struct Metasrv {
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
     resource_spec: ResourceSpec,
+    gc_ticker: Option<GcTickerRef>,
 
     plugins: Plugins,
 }
@@ -577,6 +582,9 @@ impl Metasrv {
             }
             if let Some(region_flush_trigger) = &self.region_flush_ticker {
                 leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
+            }
+            if let Some(gc_ticker) = &self.gc_ticker {
+                leadership_change_notifier.add_listener(gc_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);

@@ -48,7 +48,24 @@ pub const MAX_REGION_SEQ: u32 = REGION_SEQ_MASK;
 ///                                         Region Number(32)
 /// ```
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RegionId(u64);
+pub struct RegionId(#[serde(deserialize_with = "str_or_u64")] u64);
+
+/// FIXME(discord9): workaround for serde issue: https://github.com/serde-rs/json/issues/1254
+fn str_or_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StrOrU64 {
+        U64(u64),
+        Str(String),
+    }
+    match StrOrU64::deserialize(deserializer)? {
+        StrOrU64::U64(v) => Ok(v),
+        StrOrU64::Str(s) => s.parse::<u64>().map_err(serde::de::Error::custom),
+    }
+}
 
 impl RegionId {
     /// Construct a new [RegionId] from table id and region number.

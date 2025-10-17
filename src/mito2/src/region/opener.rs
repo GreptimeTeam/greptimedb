@@ -61,7 +61,7 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
-use crate::sst::file_purger::create_local_file_purger;
+use crate::sst::file_purger::{create_file_purger, create_local_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -273,9 +273,8 @@ impl RegionOpener {
             metadata.clone(),
             flushed_entry_id,
             region_manifest_options,
-            self.stats.total_manifest_size.clone(),
-            self.stats.manifest_version.clone(),
             sst_format,
+            &self.stats,
         )
         .await?;
 
@@ -313,7 +312,7 @@ impl RegionOpener {
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
             )),
-            file_purger: create_local_file_purger(
+            file_purger: create_file_purger(
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
@@ -403,12 +402,8 @@ impl RegionOpener {
             &self.region_dir(),
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) = RegionManifestManager::open(
-            region_manifest_options,
-            self.stats.total_manifest_size.clone(),
-            self.stats.manifest_version.clone(),
-        )
-        .await?
+        let Some(manifest_manager) =
+            RegionManifestManager::open(region_manifest_options, &self.stats).await?
         else {
             return Ok(None);
         };
@@ -447,7 +442,7 @@ impl RegionOpener {
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
         ));
-        let file_purger = create_local_file_purger(
+        let file_purger = create_file_purger(
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
@@ -634,12 +629,8 @@ impl RegionMetadataLoader {
             region_dir,
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) = RegionManifestManager::open(
-            region_manifest_options,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-        )
-        .await?
+        let Some(manifest_manager) =
+            RegionManifestManager::open(region_manifest_options, &Default::default()).await?
         else {
             return Ok(None);
         };

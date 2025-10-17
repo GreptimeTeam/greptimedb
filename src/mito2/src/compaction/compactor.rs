@@ -175,16 +175,16 @@ pub async fn open_compaction_region(
             },
         };
 
-        RegionManifestManager::open(
-            region_manifest_options,
-            Default::default(),
-            Default::default(),
-        )
-        .await?
-        .context(EmptyRegionDirSnafu {
-            region_id: req.region_id,
-            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-        })?
+        RegionManifestManager::open(region_manifest_options, &Default::default())
+            .await?
+            .context(EmptyRegionDirSnafu {
+                region_id: req.region_id,
+                region_dir: &region_dir_from_table_dir(
+                    &req.table_dir,
+                    req.region_id,
+                    req.path_type,
+                ),
+            })?
     };
 
     let manifest = manifest_manager.manifest();
