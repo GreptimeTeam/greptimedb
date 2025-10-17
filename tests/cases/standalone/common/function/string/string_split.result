@@ -1,0 +1,213 @@
+-- Migrated from DuckDB test: test/sql/function/string/test_string_split.test
+-- String split function tests
+-- Test basic string_split functionality
+SELECT string_to_array(NULL, NULL);
+
++----------------------------+
+| string_to_array(NULL,NULL) |
++----------------------------+
+|                            |
++----------------------------+
+
+SELECT string_to_array('hello world', ' ');
+
++------------------------------------------------+
+| string_to_array(Utf8("hello world"),Utf8(" ")) |
++------------------------------------------------+
+| [hello, world]                                 |
++------------------------------------------------+
+
+SELECT string_to_array(NULL, ' ');
+
++---------------------------------+
+| string_to_array(NULL,Utf8(" ")) |
++---------------------------------+
+|                                 |
++---------------------------------+
+
+SELECT string_to_array('a b c', NULL);
+
++-------------------------------------+
+| string_to_array(Utf8("a b c"),NULL) |
++-------------------------------------+
+| [a,  , b,  , c]                     |
++-------------------------------------+
+
+SELECT string_to_array('a b c', ' ');
+
++------------------------------------------+
+| string_to_array(Utf8("a b c"),Utf8(" ")) |
++------------------------------------------+
+| [a, b, c]                                |
++------------------------------------------+
+
+-- Test with table data
+CREATE TABLE split_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO split_test VALUES
+    ('hello,world,test', 1000),
+    ('a|b|c|d', 2000),
+    ('no-separator', 3000),
+    ('', 4000),
+    (NULL, 5000);
+
+Affected Rows: 5
+
+-- Test splitting with different separators
+SELECT s, string_to_array(s, ',') FROM split_test ORDER BY ts;
+
++------------------+-----------------------------------------+
+| s                | string_to_array(split_test.s,Utf8(",")) |
++------------------+-----------------------------------------+
+| hello,world,test | [hello, world, test]                    |
+| a|b|c|d          | [a|b|c|d]                               |
+| no-separator     | [no-separator]                          |
+|                  | []                                      |
+|                  |                                         |
++------------------+-----------------------------------------+
+
+SELECT s, string_to_array(s, '|') FROM split_test ORDER BY ts;
+
++------------------+-----------------------------------------+
+| s                | string_to_array(split_test.s,Utf8("|")) |
++------------------+-----------------------------------------+
+| hello,world,test | [hello,world,test]                      |
+| a|b|c|d          | [a, b, c, d]                            |
+| no-separator     | [no-separator]                          |
+|                  | []                                      |
+|                  |                                         |
++------------------+-----------------------------------------+
+
+SELECT s, string_to_array(s, '-') FROM split_test ORDER BY ts;
+
++------------------+-----------------------------------------+
+| s                | string_to_array(split_test.s,Utf8("-")) |
++------------------+-----------------------------------------+
+| hello,world,test | [hello,world,test]                      |
+| a|b|c|d          | [a|b|c|d]                               |
+| no-separator     | [no, separator]                         |
+|                  | []                                      |
+|                  |                                         |
++------------------+-----------------------------------------+
+
+-- Test splitting with multi-character separator
+CREATE TABLE multi_sep_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO multi_sep_test VALUES
+    ('hello::world::test', 1000),
+    ('a---b---c', 2000),
+    ('single', 3000);
+
+Affected Rows: 3
+
+SELECT s, string_to_array(s, '::') FROM multi_sep_test ORDER BY ts;
+
++--------------------+----------------------------------------------+
+| s                  | string_to_array(multi_sep_test.s,Utf8("::")) |
++--------------------+----------------------------------------------+
+| hello::world::test | [hello, world, test]                         |
+| a---b---c          | [a---b---c]                                  |
+| single             | [single]                                     |
++--------------------+----------------------------------------------+
+
+SELECT s, string_to_array(s, '---') FROM multi_sep_test ORDER BY ts;
+
++--------------------+-----------------------------------------------+
+| s                  | string_to_array(multi_sep_test.s,Utf8("---")) |
++--------------------+-----------------------------------------------+
+| hello::world::test | [hello::world::test]                          |
+| a---b---c          | [a, b, c]                                     |
+| single             | [single]                                      |
++--------------------+-----------------------------------------------+
+
+-- Test with Unicode separators
+CREATE TABLE unicode_split_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO unicode_split_test VALUES
+    ('hello世world世test', 1000),
+    ('a🦆b🦆c', 2000);
+
+Affected Rows: 2
+
+SELECT s, string_to_array(s, '世') FROM unicode_split_test ORDER BY ts;
+
++--------------------+--------------------------------------------------+
+| s                  | string_to_array(unicode_split_test.s,Utf8("世")) |
++--------------------+--------------------------------------------------+
+| hello世world世test | [hello, world, test]                             |
+| a🦆b🦆c            | [a🦆b🦆c]                                        |
++--------------------+--------------------------------------------------+
+
+SELECT s, string_to_array(s, '🦆') FROM unicode_split_test ORDER BY ts;
+
++--------------------+--------------------------------------------------+
+| s                  | string_to_array(unicode_split_test.s,Utf8("🦆")) |
++--------------------+--------------------------------------------------+
+| hello世world世test | [hello世world世test]                             |
+| a🦆b🦆c            | [a, b, c]                                        |
++--------------------+--------------------------------------------------+
+
+-- Test edge cases
+-- Empty string
+SELECT string_to_array('', ',');
+
++-------------------------------------+
+| string_to_array(Utf8(""),Utf8(",")) |
++-------------------------------------+
+| []                                  |
++-------------------------------------+
+
+-- Empty separator
+SELECT string_to_array('hello', '');
+
++-----------------------------------------+
+| string_to_array(Utf8("hello"),Utf8("")) |
++-----------------------------------------+
+| [hello]                                 |
++-----------------------------------------+
+
+-- Multiple consecutive separators
+SELECT string_to_array(',,hello,,world,,', ',');
+
++-----------------------------------------------------+
+| string_to_array(Utf8(",,hello,,world,,"),Utf8(",")) |
++-----------------------------------------------------+
+| [, , hello, , world, , ]                            |
++-----------------------------------------------------+
+
+-- Trailing separator
+SELECT string_to_array('hello,', ',');
+
++-------------------------------------------+
+| string_to_array(Utf8("hello,"),Utf8(",")) |
++-------------------------------------------+
+| [hello, ]                                 |
++-------------------------------------------+
+
+-- Leading separator
+SELECT string_to_array(',hello', ',');
+
++-------------------------------------------+
+| string_to_array(Utf8(",hello"),Utf8(",")) |
++-------------------------------------------+
+| [, hello]                                 |
++-------------------------------------------+
+
+DROP TABLE split_test;
+
+Affected Rows: 0
+
+DROP TABLE multi_sep_test;
+
+Affected Rows: 0
+
+DROP TABLE unicode_split_test;
+
+Affected Rows: 0
+

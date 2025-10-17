@@ -1,0 +1,141 @@
+-- Migrated from DuckDB test: test/sql/order/test_nulls_first.test
+-- Test NULLS FIRST/NULLS LAST
+CREATE TABLE integers(i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (1, 1000), (NULL, 2000);
+
+Affected Rows: 2
+
+-- Default NULL ordering (usually NULLS LAST in most systems)
+SELECT i FROM integers ORDER BY i;
+
++---+
+| i |
++---+
+| 1 |
+|   |
++---+
+
+-- Explicit NULLS FIRST
+SELECT i FROM integers ORDER BY i NULLS FIRST;
+
++---+
+| i |
++---+
+|   |
+| 1 |
++---+
+
+-- Explicit NULLS LAST
+SELECT i FROM integers ORDER BY i NULLS LAST;
+
++---+
+| i |
++---+
+| 1 |
+|   |
++---+
+
+-- Multiple columns with mixed NULL handling
+CREATE TABLE test(i INTEGER, j INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1, 1000), (NULL, 1, 2000), (1, NULL, 3000);
+
+Affected Rows: 3
+
+SELECT i, j FROM test ORDER BY i NULLS FIRST, j NULLS LAST;
+
++---+---+
+| i | j |
++---+---+
+|   | 1 |
+| 1 | 1 |
+| 1 |   |
++---+---+
+
+SELECT i, j FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
+
++---+---+
+| i | j |
++---+---+
+|   | 1 |
+| 1 |   |
+| 1 | 1 |
++---+---+
+
+SELECT i, j FROM test ORDER BY i NULLS LAST, j NULLS FIRST;
+
++---+---+
+| i | j |
++---+---+
+| 1 |   |
+| 1 | 1 |
+|   | 1 |
++---+---+
+
+-- Test with DESC ordering
+SELECT i, j FROM test ORDER BY i DESC NULLS FIRST, j DESC NULLS LAST;
+
++---+---+
+| i | j |
++---+---+
+|   | 1 |
+| 1 | 1 |
+| 1 |   |
++---+---+
+
+SELECT i, j FROM test ORDER BY i DESC NULLS LAST, j DESC NULLS FIRST;
+
++---+---+
+| i | j |
++---+---+
+| 1 |   |
+| 1 | 1 |
+|   | 1 |
++---+---+
+
+-- Test with strings
+CREATE TABLE strings(s VARCHAR, i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO strings VALUES ('apple', 1, 1000), (NULL, 2, 2000), ('banana', NULL, 3000);
+
+Affected Rows: 3
+
+SELECT s, i FROM strings ORDER BY s NULLS FIRST, i NULLS LAST;
+
++--------+---+
+| s      | i |
++--------+---+
+|        | 2 |
+| apple  | 1 |
+| banana |   |
++--------+---+
+
+SELECT s, i FROM strings ORDER BY s NULLS LAST, i NULLS FIRST;
+
++--------+---+
+| s      | i |
++--------+---+
+| apple  | 1 |
+| banana |   |
+|        | 2 |
++--------+---+
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
+DROP TABLE test;
+
+Affected Rows: 0
+
+DROP TABLE strings;
+
+Affected Rows: 0
+

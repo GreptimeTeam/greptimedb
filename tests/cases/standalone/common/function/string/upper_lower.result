@@ -1,0 +1,291 @@
+-- String case conversion function tests
+-- Basic UPPER and LOWER functions
+SELECT UPPER('hello world');
+
++----------------------------+
+| upper(Utf8("hello world")) |
++----------------------------+
+| HELLO WORLD                |
++----------------------------+
+
+SELECT LOWER('HELLO WORLD');
+
++----------------------------+
+| lower(Utf8("HELLO WORLD")) |
++----------------------------+
+| hello world                |
++----------------------------+
+
+SELECT UPPER('MiXeD cAsE');
+
++---------------------------+
+| upper(Utf8("MiXeD cAsE")) |
++---------------------------+
+| MIXED CASE                |
++---------------------------+
+
+SELECT LOWER('MiXeD cAsE');
+
++---------------------------+
+| lower(Utf8("MiXeD cAsE")) |
++---------------------------+
+| mixed case                |
++---------------------------+
+
+-- INITCAP (capitalize first letter of each word)
+SELECT INITCAP('hello world');
+
++------------------------------+
+| initcap(Utf8("hello world")) |
++------------------------------+
+| Hello World                  |
++------------------------------+
+
+SELECT INITCAP('HELLO WORLD');
+
++------------------------------+
+| initcap(Utf8("HELLO WORLD")) |
++------------------------------+
+| Hello World                  |
++------------------------------+
+
+SELECT INITCAP('mIxEd CaSe TeSt');
+
++----------------------------------+
+| initcap(Utf8("mIxEd CaSe TeSt")) |
++----------------------------------+
+| Mixed Case Test                  |
++----------------------------------+
+
+-- Test with NULL
+SELECT UPPER(NULL);
+
++-------------+
+| upper(NULL) |
++-------------+
+|             |
++-------------+
+
+SELECT LOWER(NULL);
+
++-------------+
+| lower(NULL) |
++-------------+
+|             |
++-------------+
+
+SELECT INITCAP(NULL);
+
++---------------+
+| initcap(NULL) |
++---------------+
+|               |
++---------------+
+
+-- Test with numbers and special characters
+SELECT UPPER('hello123!@#');
+
++----------------------------+
+| upper(Utf8("hello123!@#")) |
++----------------------------+
+| HELLO123!@#                |
++----------------------------+
+
+SELECT LOWER('HELLO123!@#');
+
++----------------------------+
+| lower(Utf8("HELLO123!@#")) |
++----------------------------+
+| hello123!@#                |
++----------------------------+
+
+SELECT INITCAP('hello-world_test');
+
++-----------------------------------+
+| initcap(Utf8("hello-world_test")) |
++-----------------------------------+
+| Hello-World_Test                  |
++-----------------------------------+
+
+-- Test with table data
+CREATE TABLE case_test("name" VARCHAR, city VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO case_test VALUES
+    ('john doe', 'new york', 1000),
+    ('JANE SMITH', 'LOS ANGELES', 2000),
+    ('Bob Wilson', 'Chicago', 3000),
+    ('alice johnson', 'BOSTON', 4000);
+
+Affected Rows: 4
+
+-- Apply case functions to table data
+SELECT "name", UPPER("name"), LOWER("name"), INITCAP("name") FROM case_test ORDER BY ts;
+
++---------------+-----------------------+-----------------------+-------------------------+
+| name          | upper(case_test.name) | lower(case_test.name) | initcap(case_test.name) |
++---------------+-----------------------+-----------------------+-------------------------+
+| john doe      | JOHN DOE              | john doe              | John Doe                |
+| JANE SMITH    | JANE SMITH            | jane smith            | Jane Smith              |
+| Bob Wilson    | BOB WILSON            | bob wilson            | Bob Wilson              |
+| alice johnson | ALICE JOHNSON         | alice johnson         | Alice Johnson           |
++---------------+-----------------------+-----------------------+-------------------------+
+
+SELECT city, UPPER(city), LOWER(city), INITCAP(city) FROM case_test ORDER BY ts;
+
++-------------+-----------------------+-----------------------+-------------------------+
+| city        | upper(case_test.city) | lower(case_test.city) | initcap(case_test.city) |
++-------------+-----------------------+-----------------------+-------------------------+
+| new york    | NEW YORK              | new york              | New York                |
+| LOS ANGELES | LOS ANGELES           | los angeles           | Los Angeles             |
+| Chicago     | CHICAGO               | chicago               | Chicago                 |
+| BOSTON      | BOSTON                | boston                | Boston                  |
++-------------+-----------------------+-----------------------+-------------------------+
+
+-- Combined case operations
+SELECT INITCAP(LOWER("name")) as formatted_name FROM case_test ORDER BY ts;
+
++----------------+
+| formatted_name |
++----------------+
+| John Doe       |
+| Jane Smith     |
+| Bob Wilson     |
+| Alice Johnson  |
++----------------+
+
+-- Unicode case conversion
+SELECT UPPER('café');
+
++---------------------+
+| upper(Utf8("café")) |
++---------------------+
+| CAFÉ                |
++---------------------+
+
+SELECT LOWER('CAFÉ');
+
++---------------------+
+| lower(Utf8("CAFÉ")) |
++---------------------+
+| café                |
++---------------------+
+
+-- German characters
+SELECT UPPER('äöüß');
+
++---------------------+
+| upper(Utf8("äöüß")) |
++---------------------+
+| ÄÖÜSS               |
++---------------------+
+
+-- German uppercase
+SELECT LOWER('ÄÖÜ');
+
++--------------------+
+| lower(Utf8("ÄÖÜ")) |
++--------------------+
+| äöü                |
++--------------------+
+
+-- Greek letters
+SELECT UPPER('αβγ');
+
++--------------------+
+| upper(Utf8("αβγ")) |
++--------------------+
+| ΑΒΓ                |
++--------------------+
+
+SELECT LOWER('ΑΒΓ');
+
++--------------------+
+| lower(Utf8("ΑΒΓ")) |
++--------------------+
+| αβγ                |
++--------------------+
+
+-- Test with empty string
+SELECT UPPER('');
+
++-----------------+
+| upper(Utf8("")) |
++-----------------+
+|                 |
++-----------------+
+
+SELECT LOWER('');
+
++-----------------+
+| lower(Utf8("")) |
++-----------------+
+|                 |
++-----------------+
+
+SELECT INITCAP('');
+
++-------------------+
+| initcap(Utf8("")) |
++-------------------+
+|                   |
++-------------------+
+
+-- Test with single characters
+SELECT UPPER('a'), UPPER('A'), UPPER('1'), UPPER(' ');
+
++------------------+------------------+------------------+------------------+
+| upper(Utf8("a")) | upper(Utf8("A")) | upper(Utf8("1")) | upper(Utf8(" ")) |
++------------------+------------------+------------------+------------------+
+| A                | A                | 1                |                  |
++------------------+------------------+------------------+------------------+
+
+SELECT LOWER('a'), LOWER('A'), LOWER('1'), LOWER(' ');
+
++------------------+------------------+------------------+------------------+
+| lower(Utf8("a")) | lower(Utf8("A")) | lower(Utf8("1")) | lower(Utf8(" ")) |
++------------------+------------------+------------------+------------------+
+| a                | a                | 1                |                  |
++------------------+------------------+------------------+------------------+
+
+SELECT INITCAP('a'), INITCAP('A'), INITCAP('1');
+
++--------------------+--------------------+--------------------+
+| initcap(Utf8("a")) | initcap(Utf8("A")) | initcap(Utf8("1")) |
++--------------------+--------------------+--------------------+
+| A                  | A                  | 1                  |
++--------------------+--------------------+--------------------+
+
+-- Complex Unicode examples
+CREATE TABLE unicode_case(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO unicode_case VALUES
+    ('hello 世界', 1000),
+    ('HELLO 世界', 2000),
+    ('café à paris', 3000),
+    ('CAFÉ À PARIS', 4000);
+
+Affected Rows: 4
+
+SELECT s, UPPER(s), LOWER(s), INITCAP(s) FROM unicode_case ORDER BY ts;
+
++--------------+-----------------------+-----------------------+-------------------------+
+| s            | upper(unicode_case.s) | lower(unicode_case.s) | initcap(unicode_case.s) |
++--------------+-----------------------+-----------------------+-------------------------+
+| hello 世界   | HELLO 世界            | hello 世界            | Hello 世界              |
+| HELLO 世界   | HELLO 世界            | hello 世界            | Hello 世界              |
+| café à paris | CAFÉ À PARIS          | café à paris          | Café À Paris            |
+| CAFÉ À PARIS | CAFÉ À PARIS          | café à paris          | Café À Paris            |
++--------------+-----------------------+-----------------------+-------------------------+
+
+DROP TABLE case_test;
+
+Affected Rows: 0
+
+DROP TABLE unicode_case;
+
+Affected Rows: 0
+
