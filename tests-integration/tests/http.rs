@@ -1586,7 +1586,6 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "cache_capacity =",
         "memory_pool_size =",
         "scan_memory_limit =",
-        "scan_memory_soft_limit_ratio =",
         "sas_token =",
         "scope =",
         "num_workers =",
