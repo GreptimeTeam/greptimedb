@@ -3693,7 +3693,7 @@ dependencies = [
 [[package]]
 name = "datafusion-orc"
 version = "0.4.1"
-source = "git+https://github.com/GreptimeTeam/datafusion-orc?rev=2971b041ce1c94e315ac5b327589da6d61f449c0#2971b041ce1c94e315ac5b327589da6d61f449c0"
+source = "git+https://github.com/datafusion-contrib/datafusion-orc?tag=v0.5.0#ad8b804a783a8f1f6c1135dfb59f9ca97a1de18c"
 dependencies = [
  "arrow",
  "async-trait",
