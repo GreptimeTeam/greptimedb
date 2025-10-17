@@ -544,7 +544,7 @@ mod tests {
     use crate::parsers::alter_parser::trigger::{apply_label_change, apply_label_replacement};
     use crate::statements::OptionMap;
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
-    use crate::statements::create::trigger::TriggerOn;
+    use crate::statements::create::trigger::{DurationExpr, TriggerOn};
     use crate::statements::statement::Statement;
 
     #[test]
@@ -569,12 +569,12 @@ mod tests {
         };
         let TriggerOn {
             query,
-            interval,
-            raw_interval_expr,
+            query_interval,
         } = alter.operation.trigger_on.unwrap();
+        let DurationExpr { duration, raw_expr } = query_interval;
         assert_eq!(query.to_string(), "(SELECT * FROM test_table)");
-        assert_eq!(raw_interval_expr, "'5 minute'::INTERVAL");
-        assert_eq!(interval, Duration::from_secs(300));
+        assert_eq!(raw_expr, "'5 minute'::INTERVAL");
+        assert_eq!(duration, Duration::from_secs(300));
         assert!(alter.operation.rename.is_none());
         assert!(alter.operation.label_operations.is_none());
         assert!(alter.operation.annotation_operations.is_none());

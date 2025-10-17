@@ -6,10 +6,9 @@ use api::v1::{
 use session::context::QueryContextRef;
 use snafu::{ResultExt, ensure};
 use sql::ast::{ObjectName, ObjectNamePartExt};
-use sql::statements::create::trigger::{ChannelType, CreateTrigger, TriggerOn};
+use sql::statements::create::trigger::{ChannelType, CreateTrigger, DurationExpr, TriggerOn};
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{Result, TooLargeDurationSnafu};
 
 pub fn to_create_trigger_task_expr(
     create_trigger: CreateTrigger,
@@ -19,16 +18,12 @@ pub fn to_create_trigger_task_expr(
         trigger_name,
         if_not_exists,
         trigger_on,
+        r#for,
+        keep_firing_for,
         labels,
         annotations,
         channels,
     } = create_trigger;
-
-    let TriggerOn {
-        query,
-        interval,
-        raw_interval_expr,
-    } = trigger_on;
 
     let catalog_name = query_ctx.current_catalog().to_string();
     let trigger_name = sanitize_trigger_name(trigger_name)?;
@@ -49,11 +44,35 @@ pub fn to_create_trigger_task_expr(
         })
         .collect::<Vec<_>>();
 
+    let TriggerOn {
+        query,
+        query_interval,
+    } = trigger_on;
+
+    let DurationExpr {
+        duration,
+        raw_expr: raw_interval_expr,
+    } = query_interval;
+
+    let (r#for, for_raw_expr) = if let Some(f) = r#for {
+        let duration = f.duration.try_into().context(TooLargeDurationSnafu)?;
+        (Some(duration), f.raw_expr)
+    } else {
+        (None, String::new())
+    };
+
+    let (keep_firing_for, keep_firing_for_raw_expr) = if let Some(k) = keep_firing_for {
+        let duration = k.duration.try_into().context(TooLargeDurationSnafu)?;
+        (Some(duration), k.raw_expr)
+    } else {
+        (None, String::new())
+    };
+
     let sql = query.to_string();
     let labels = labels.into_map();
     let annotations = annotations.into_map();
 
-    let interval = interval.try_into().context(error::TooLargeDurationSnafu)?;
+    let interval = duration.try_into().context(TooLargeDurationSnafu)?;
 
     Ok(PbCreateTriggerExpr {
         catalog_name,
@@ -65,6 +84,10 @@ pub fn to_create_trigger_task_expr(
         annotations,
         interval: Some(interval),
         raw_interval_expr,
+        r#for,
+        for_raw_expr,
+        keep_firing_for,
+        keep_firing_for_raw_expr,
     })
 }
 
