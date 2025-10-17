@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -69,7 +70,7 @@ pub struct RangeManipulate {
     unfix: Option<UnfixIndices>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UnfixIndices {
     pub time_index_idx: u64,
     pub tag_column_indices: Vec<u64>,
@@ -206,6 +207,10 @@ impl RangeManipulate {
                     .unwrap_or(u64::MAX)
             })
             .collect::<Vec<u64>>();
+        debug!(
+            "RangeManipulate serialize time_index_idx: {}, tag_column_indices: {:?}",
+            time_index_idx, tag_column_indices
+        );
         pb::RangeManipulate {
             start: self.start,
             end: self.end,
@@ -230,6 +235,7 @@ impl RangeManipulate {
             time_index_idx: pb_range_manipulate.time_index_idx,
             tag_column_indices: pb_range_manipulate.tag_column_indices.clone(),
         };
+        debug!("RangeManipulate deserialize unfix: {:?}", unfix);
 
         // Unlike `Self::new()`, this method doesn't check the input schema as it will fail
         // because the input schema is empty.
@@ -318,8 +324,6 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
         let input: LogicalPlan = inputs.pop().unwrap();
         let input_schema = input.schema();
-        let output_schema =
-            Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
@@ -330,7 +334,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                     "Failed to get time index column at idx {} during unfixing RangeManipulate with columns:{:?}",
                     unfix.time_index_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
             let field_columns = unfix
                 .tag_column_indices
                 .iter()
@@ -341,9 +345,13 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                             "Failed to get tag column at idx {} during unfixing RangeManipulate with columns:{:?}",
                             idx, columns
                         )))
-                        .map(|field| field.flat_name())
+                        .map(|field| field.name().to_string())
                 })
                 .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &time_index, &field_columns)?;
+
             Ok(Self {
                 start: self.start,
                 end: self.end,
@@ -356,6 +364,9 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                 unfix: None,
             })
         } else {
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
+
             Ok(Self {
                 start: self.start,
                 end: self.end,

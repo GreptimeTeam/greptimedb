@@ -141,7 +141,7 @@ impl UserDefinedLogicalNodeCore for Absent {
                     "Failed to get time index column at idx {} during unfixing Absent with columns:{:?}",
                     unfix.time_index_column_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             let value_column = columns
                 .get(unfix.value_column_idx as usize)
@@ -149,7 +149,7 @@ impl UserDefinedLogicalNodeCore for Absent {
                     "Failed to get value column at idx {} during unfixing Absent with columns:{:?}",
                     unfix.value_column_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             // Recreate output schema with actual field names
             Self::try_new(
