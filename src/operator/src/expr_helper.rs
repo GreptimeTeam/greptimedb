@@ -979,11 +979,10 @@ pub fn to_create_flow_task_expr(
     query_ctx: &QueryContextRef,
 ) -> Result<CreateFlowExpr> {
     // retrieve sink table name
-    let sink_table_ref =
-        object_name_to_table_reference(create_flow.sink_table_name.clone().into(), true)
-            .with_context(|_| ConvertIdentifierSnafu {
-                ident: create_flow.sink_table_name.to_string(),
-            })?;
+    let sink_table_ref = object_name_to_table_reference(create_flow.sink_table_name.clone(), true)
+        .with_context(|_| ConvertIdentifierSnafu {
+            ident: create_flow.sink_table_name.to_string(),
+        })?;
     let catalog = sink_table_ref
         .catalog()
         .unwrap_or(query_ctx.current_catalog())
@@ -1001,9 +1000,11 @@ pub fn to_create_flow_task_expr(
 
     let source_table_names = extract_tables_from_query(&create_flow.query)
         .map(|name| {
-            let reference = object_name_to_table_reference(name.clone().into(), true)
-                .with_context(|_| ConvertIdentifierSnafu {
-                    ident: name.to_string(),
+            let reference =
+                object_name_to_table_reference(name.clone(), true).with_context(|_| {
+                    ConvertIdentifierSnafu {
+                        ident: name.to_string(),
+                    }
                 })?;
             let catalog = reference
                 .catalog()

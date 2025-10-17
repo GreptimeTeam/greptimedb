@@ -355,9 +355,9 @@ impl Function for H3CellCenterLatLng {
 
     fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
         Ok(DataType::List(Arc::new(Field::new(
-            "x",
+            "item",
             DataType::Float64,
-            false,
+            true,
         ))))
     }
 

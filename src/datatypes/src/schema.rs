@@ -368,8 +368,7 @@ impl TryFrom<DFSchemaRef> for Schema {
     type Error = Error;
 
     fn try_from(value: DFSchemaRef) -> Result<Self> {
-        let s: ArrowSchema = value.as_ref().into();
-        s.try_into()
+        value.inner().clone().try_into()
     }
 }
 

@@ -345,6 +345,20 @@ fn build_struct(
                 Ok(datafusion_expr::ColumnarValue::Array(result_vector.to_arrow_array()))
             }
         }
+
+        impl PartialEq for #name {
+            fn eq(&self, other: &Self) -> bool {
+                self.signature == other.signature
+            }
+        }
+
+        impl Eq for #name {}
+
+        impl std::hash::Hash for #name {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.signature.hash(state)
+            }
+        }
     }
     .into()
 }

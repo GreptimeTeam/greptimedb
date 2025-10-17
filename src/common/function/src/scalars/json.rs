@@ -18,6 +18,7 @@ mod json_path_exists;
 mod json_path_match;
 mod json_to_string;
 mod parse_json;
+mod to_json;
 
 use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString};
 use json_is::{
@@ -27,6 +28,7 @@ use json_to_string::JsonToStringFunction;
 use parse_json::ParseJsonFunction;
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::json::to_json::ToJsonFunction;
 
 pub(crate) struct JsonFunction;
 
@@ -47,6 +49,8 @@ impl JsonFunction {
         registry.register_scalar(JsonIsBool::default());
         registry.register_scalar(JsonIsArray::default());
         registry.register_scalar(JsonIsObject::default());
+
+        registry.register_scalar(ToJsonFunction::default());
 
         registry.register_scalar(json_path_exists::JsonPathExistsFunction::default());
         registry.register_scalar(json_path_match::JsonPathMatchFunction::default());

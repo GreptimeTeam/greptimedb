@@ -208,7 +208,7 @@ pub async fn sql_format(
 
     let mut parts: Vec<String> = Vec::with_capacity(stmts.len());
     for stmt in stmts {
-        let mut s = format!("{:#}", stmt);
+        let mut s = format!("{stmt}");
         if !s.trim_end().ends_with(';') {
             s.push(';');
         }

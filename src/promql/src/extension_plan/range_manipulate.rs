@@ -157,7 +157,7 @@ impl RangeManipulate {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
@@ -732,8 +732,8 @@ mod test {
                 &field_columns,
             )
             .unwrap()
-            .as_ref()
-            .into(),
+            .as_arrow()
+            .clone(),
         );
         let properties = PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),
