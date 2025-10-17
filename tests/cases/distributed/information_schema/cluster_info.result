@@ -32,7 +32,7 @@ DESC TABLE CLUSTER_INFO;
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO ORDER BY peer_type;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -43,7 +43,7 @@ Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethe
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'METASRV' ORDER BY peer_type;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -54,7 +54,7 @@ Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethe
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'FRONTEND' ORDER BY peer_type;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|1|FRONTEND|Address|Version|Hash|Start_time|Duration|Duration|+++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -65,7 +65,7 @@ Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethe
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE != 'FRONTEND' ORDER BY peer_type;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||1|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration||0|FLOWNODE|Address|Version|Hash|Start_time|Duration|Duration||1|METASRV|Address|Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\s\d+\.\d+(?:\.\d+)+\s) Version
@@ -76,16 +76,31 @@ Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethe
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID > 1 ORDER BY peer_type;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|2|DATANODE|Address|Version|Hash|Start_time|Duration|Duration|+++++++++
 
 -- SQLNESS REPLACE (:\s*(\".*?\"|\[.*?\]|\{.*?\}|[0-9]+|true|false|null)) PLACEHOLDER
 SELECT peer_id, node_status FROM CLUSTER_INFO WHERE PEER_TYPE = 'DATANODE' ORDER BY peer_id;
 
-ErrorPLACEHOLDER(EngineExecuteQuery), Invalid argument error: all columns in a record batch must have the same length
++---------+------------------------------------------------------------------+
+| peer_id | node_status                                                      |
++---------+------------------------------------------------------------------+
+| 0       | {"workloads"PLACEHOLDER,"leader_regions"PLACEHOLDER,"follower_regions"PLACEHOLDER} |
+| 1       | {"workloads"PLACEHOLDER,"leader_regions"PLACEHOLDER,"follower_regions"PLACEHOLDER} |
+| 2       | {"workloads"PLACEHOLDER,"leader_regions"PLACEHOLDER,"follower_regions"PLACEHOLDER} |
++---------+------------------------------------------------------------------+
 
 SELECT peer_type, total_cpu_millicores!=0, total_memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: all columns in a record batch must have the same length
++-----------+-----------------------------------------------+---------------------------------------------+
+| peer_type | cluster_info.total_cpu_millicores != Int64(0) | cluster_info.total_memory_bytes != Int64(0) |
++-----------+-----------------------------------------------+---------------------------------------------+
+| DATANODE  | true                                          | true                                        |
+| DATANODE  | true                                          | true                                        |
+| DATANODE  | true                                          | true                                        |
+| FLOWNODE  | true                                          | true                                        |
+| FRONTEND  | true                                          | true                                        |
+| METASRV   | true                                          | true                                        |
++-----------+-----------------------------------------------+---------------------------------------------+
 
 USE PUBLIC;
 

@@ -31,7 +31,7 @@ DESC TABLE CLUSTER_INFO;
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|STANDALONE||Version|Hash|Start_time|Duration||+++++++++
 
 -- SQLNESS REPLACE version node_version
 -- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)+) Version
@@ -41,7 +41,7 @@ Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethe
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE = 'STANDALONE';
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|STANDALONE||Version|Hash|Start_time|Duration||+++++++++
 
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
 
@@ -56,15 +56,20 @@ SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, a
 -- SQLNESS REPLACE [\s\-]+
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID = 0;
 
-Error:3001(EngineExecuteQuery),InvalidHasherror:allHashinarecordbatchmusthavethesamelength
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|STANDALONE||Version|Hash|Start_time|Duration||+++++++++
 
 SELECT peer_id, peer_type, peer_addr, version, git_commit, start_time, uptime, active_time FROM CLUSTER_INFO WHERE PEER_ID > 0;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: all columns in a record batch must have the same length
+++
+++
 
 SELECT peer_type, total_cpu_millicores!=0, total_memory_bytes!=0 FROM CLUSTER_INFO ORDER BY peer_type;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: all columns in a record batch must have the same length
++------------+-----------------------------------------------+---------------------------------------------+
+| peer_type  | cluster_info.total_cpu_millicores != Int64(0) | cluster_info.total_memory_bytes != Int64(0) |
++------------+-----------------------------------------------+---------------------------------------------+
+| STANDALONE | true                                          | true                                        |
++------------+-----------------------------------------------+---------------------------------------------+
 
 USE PUBLIC;
 

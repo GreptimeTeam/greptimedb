@@ -269,7 +269,6 @@ impl InformationSchemaClusterInfoBuilder {
             .push(Some(node_info.cpu_usage_millicores));
         self.memory_usage_bytes
             .push(Some(node_info.memory_usage_bytes));
-        self.peer_hostnames.push(Some(&node_info.hostname));
 
         if node_info.last_activity_ts > 0 {
             self.active_times.push(Some(
