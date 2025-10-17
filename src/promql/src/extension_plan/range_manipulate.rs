@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -62,11 +63,17 @@ pub struct RangeManipulate {
     end: Millisecond,
     interval: Millisecond,
     range: Millisecond,
-
     time_index: String,
     field_columns: Vec<String>,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UnfixIndices {
+    pub time_index_idx: u64,
+    pub tag_column_indices: Vec<u64>,
 }
 
 impl RangeManipulate {
@@ -90,6 +97,7 @@ impl RangeManipulate {
             field_columns,
             input,
             output_schema,
+            unfix: None,
         })
     }
 
@@ -181,13 +189,36 @@ impl RangeManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_idx = self
+            .input
+            .schema()
+            .index_of_column_by_name(None, &self.time_index)
+            .map(|idx| idx as u64)
+            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+
+        let tag_column_indices = self
+            .field_columns
+            .iter()
+            .map(|name| {
+                self.input
+                    .schema()
+                    .index_of_column_by_name(None, name)
+                    .map(|idx| idx as u64)
+                    .unwrap_or(u64::MAX)
+            })
+            .collect::<Vec<u64>>();
+        debug!(
+            "RangeManipulate serialize time_index_idx: {}, tag_column_indices: {:?}",
+            time_index_idx, tag_column_indices
+        );
         pb::RangeManipulate {
             start: self.start,
             end: self.end,
             interval: self.interval,
             range: self.range,
-            time_index: self.time_index.clone(),
-            tag_columns: self.field_columns.clone(),
+            time_index_idx,
+            tag_column_indices,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -200,6 +231,12 @@ impl RangeManipulate {
             schema: empty_schema.clone(),
         });
 
+        let unfix = UnfixIndices {
+            time_index_idx: pb_range_manipulate.time_index_idx,
+            tag_column_indices: pb_range_manipulate.tag_column_indices.clone(),
+        };
+        debug!("RangeManipulate deserialize unfix: {:?}", unfix);
+
         // Unlike `Self::new()`, this method doesn't check the input schema as it will fail
         // because the input schema is empty.
         // But this is Ok since datafusion guarantees to call `with_exprs_and_inputs` for the
@@ -209,10 +246,11 @@ impl RangeManipulate {
             end: pb_range_manipulate.end,
             interval: pb_range_manipulate.interval,
             range: pb_range_manipulate.range,
-            time_index: pb_range_manipulate.time_index,
-            field_columns: pb_range_manipulate.tag_columns,
             input: placeholder_plan,
             output_schema: empty_schema,
+            unfix: Some(unfix),
+            time_index: String::new(),
+            field_columns: Vec::new(),
         })
     }
 }
@@ -286,19 +324,61 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
         let input: LogicalPlan = inputs.pop().unwrap();
         let input_schema = input.schema();
-        let output_schema =
-            Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            interval: self.interval,
-            range: self.range,
-            time_index: self.time_index.clone(),
-            field_columns: self.field_columns.clone(),
-            input,
-            output_schema,
-        })
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let columns = input_schema.columns();
+            let time_index = columns
+                .get(unfix.time_index_idx as usize)
+                .ok_or_else(|| DataFusionError::Internal(format!(
+                    "Failed to get time index column at idx {} during unfixing RangeManipulate with columns:{:?}",
+                    unfix.time_index_idx, columns
+                )))?
+                .name().to_string();
+            let field_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| {
+                    columns
+                        .get(*idx as usize)
+                        .ok_or_else(|| DataFusionError::Internal(format!(
+                            "Failed to get tag column at idx {} during unfixing RangeManipulate with columns:{:?}",
+                            idx, columns
+                        )))
+                        .map(|field| field.name().to_string())
+                })
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &time_index, &field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index,
+                field_columns,
+                input,
+                output_schema,
+                unfix: None,
+            })
+        } else {
+            let output_schema =
+                Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
+
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                interval: self.interval,
+                range: self.range,
+                time_index: self.time_index.clone(),
+                field_columns: self.field_columns.clone(),
+                input,
+                output_schema,
+                unfix: None,
+            })
+        }
     }
 }
 
