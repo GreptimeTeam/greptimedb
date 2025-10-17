@@ -16,6 +16,7 @@
 #![feature(type_alias_impl_trait)]
 
 pub mod buffered_writer;
+pub mod compressed_writer;
 pub mod compression;
 pub mod error;
 pub mod file_format;
