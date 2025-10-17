@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::meta::RegionRole;
 use common_telemetry::{debug, error, warn};
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};

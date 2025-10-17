@@ -26,7 +26,6 @@ use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, info, warn};
-use datafusion::functions::core::version;
 use datatypes::arrow::record_batch::RecordBatch;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
@@ -46,13 +45,12 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
 use crate::region::options::IndexOptions;
-use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
+use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
     BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst;
 use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;

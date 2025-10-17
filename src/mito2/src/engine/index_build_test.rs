@@ -16,7 +16,6 @@
 //!
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::Rows;
 use store_api::region_engine::RegionEngine;
@@ -30,7 +29,7 @@ use crate::engine::listener::IndexBuildListener;
 use crate::read::scan_region::Scanner;
 use crate::sst::location;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 // wait listener receives enough success count.
