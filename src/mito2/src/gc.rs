@@ -22,14 +22,17 @@
 //!
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use common_meta::datanode::GcStat;
 use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt as _, ensure};
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
+use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
@@ -37,26 +40,64 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
     DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
-    Result, UnexpectedSnafu,
+    Result, TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::metrics::GC_FILE_CNT;
+use crate::metrics::GC_DEL_FILE_CNT;
 use crate::region::opener::new_manifest_dir;
 use crate::sst::file::delete_files;
-use crate::sst::file_ref::TableFileRefsManifest;
 use crate::sst::location::{self, region_dir_from_table_dir};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GcReport {
-    /// deleted files per region
-    pub deleted_files: HashMap<RegionId, Vec<FileId>>,
-    /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
-    pub need_retry_regions: HashSet<RegionId>,
+/// Limit the amount of concurrent GC jobs on the datanode
+pub struct GcLimiter {
+    pub gc_job_limit: Arc<tokio::sync::Semaphore>,
+    gc_concurrency: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FileGcOption {
+pub type GcLimiterRef = Arc<GcLimiter>;
+
+impl GcLimiter {
+    pub fn new(gc_concurrency: usize) -> Self {
+        Self {
+            gc_job_limit: Arc::new(tokio::sync::Semaphore::new(gc_concurrency)),
+            gc_concurrency,
+        }
+    }
+
+    pub fn running_gc_tasks(&self) -> u32 {
+        (self.gc_concurrency - self.gc_job_limit.available_permits()) as u32
+    }
+
+    pub fn gc_concurrency(&self) -> u32 {
+        self.gc_concurrency as u32
+    }
+
+    pub fn gc_stat(&self) -> GcStat {
+        GcStat::new(self.running_gc_tasks(), self.gc_concurrency())
+    }
+
+    /// Try to acquire a permit for a GC job.
+    ///
+    /// If no permit is available, returns an `TooManyGcJobs` error.
+    pub fn permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.gc_job_limit
+            .clone()
+            .try_acquire_owned()
+            .map_err(|e| match e {
+                TryAcquireError::Closed => UnexpectedSnafu {
+                    reason: format!("Failed to acquire gc permit: {e}"),
+                }
+                .build(),
+                TryAcquireError::NoPermits => TooManyGcJobsSnafu {}.build(),
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcConfig {
+    /// Whether GC is enabled.
+    pub enabled: bool,
     /// Lingering time before deleting files.
     /// Should be long enough to allow long running queries to finish.
     ///
@@ -73,16 +114,22 @@ pub struct FileGcOption {
     /// Maximum concurrent list operations per GC job.
     /// This is used to limit the number of concurrent listing operations and speed up listing.
     pub max_concurrent_lister_per_gc_job: usize,
+    /// Maximum concurrent GC jobs.
+    /// This is used to limit the number of concurrent GC jobs running on the datanode
+    /// to prevent too many concurrent GC jobs from overwhelming the datanode.
+    pub max_concurrent_gc_job: usize,
 }
 
-impl Default for FileGcOption {
+impl Default for GcConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             // expect long running queries to be finished within a reasonable time
             lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
             max_concurrent_lister_per_gc_job: 32,
+            max_concurrent_gc_job: 4,
         }
     }
 }
@@ -92,13 +139,14 @@ pub struct LocalGcWorker {
     pub(crate) cache_manager: Option<CacheManagerRef>,
     pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
     /// Lingering time before deleting files.
-    pub(crate) opt: FileGcOption,
+    pub(crate) opt: GcConfig,
     pub(crate) manifest_open_config: ManifestOpenConfig,
     /// Tmp ref files manifest, used to determine which files are still in use by ongoing queries.
     ///
     /// Also contains manifest versions of regions when the tmp ref files are generated.
     /// Used to determine whether the tmp ref files are outdated.
-    pub(crate) file_ref_manifest: TableFileRefsManifest,
+    pub(crate) file_ref_manifest: FileRefsManifest,
+    pub(crate) _permit: OwnedSemaphorePermit,
 }
 
 pub struct ManifestOpenConfig {
@@ -129,9 +177,10 @@ impl LocalGcWorker {
         access_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
         regions_to_gc: BTreeSet<RegionId>,
-        opt: FileGcOption,
+        opt: GcConfig,
         manifest_open_config: ManifestOpenConfig,
-        file_ref_manifest: TableFileRefsManifest,
+        file_ref_manifest: FileRefsManifest,
+        limiter: &GcLimiterRef,
     ) -> Result<Self> {
         let table_id = regions_to_gc
             .first()
@@ -139,6 +188,7 @@ impl LocalGcWorker {
                 reason: "Expect at least one region, found none",
             })?
             .table_id();
+        let permit = limiter.permit()?;
         let mut zelf = Self {
             access_layer,
             cache_manager,
@@ -146,6 +196,7 @@ impl LocalGcWorker {
             opt,
             manifest_open_config,
             file_ref_manifest,
+            _permit: permit,
         };
 
         // dedup just in case
@@ -329,7 +380,7 @@ impl LocalGcWorker {
         )
         .await?;
 
-        GC_FILE_CNT.add(file_ids.len() as i64);
+        GC_DEL_FILE_CNT.add(file_ids.len() as i64);
 
         Ok(())
     }
