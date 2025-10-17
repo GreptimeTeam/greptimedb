@@ -16,7 +16,7 @@ use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
 
 /// Query engine config
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct QueryOptions {
     /// Parallelism of query engine. Default to 0, which implies the number of logical CPUs.
