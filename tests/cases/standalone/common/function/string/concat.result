@@ -1,0 +1,211 @@
+-- String concatenation function tests
+-- Test CONCAT function
+-- Basic concatenation
+SELECT CONCAT('hello', 'world');
+
++-------------------------------------+
+| concat(Utf8("hello"),Utf8("world")) |
++-------------------------------------+
+| helloworld                          |
++-------------------------------------+
+
+SELECT CONCAT('hello', ' ', 'world');
+
++-----------------------------------------------+
+| concat(Utf8("hello"),Utf8(" "),Utf8("world")) |
++-----------------------------------------------+
+| hello world                                   |
++-----------------------------------------------+
+
+SELECT CONCAT('a', 'b', 'c', 'd');
+
++-------------------------------------------------+
+| concat(Utf8("a"),Utf8("b"),Utf8("c"),Utf8("d")) |
++-------------------------------------------------+
+| abcd                                            |
++-------------------------------------------------+
+
+-- Concatenation with NULL values
+SELECT CONCAT('hello', NULL);
+
++----------------------------+
+| concat(Utf8("hello"),NULL) |
++----------------------------+
+| hello                      |
++----------------------------+
+
+SELECT CONCAT(NULL, 'world');
+
++----------------------------+
+| concat(NULL,Utf8("world")) |
++----------------------------+
+| world                      |
++----------------------------+
+
+SELECT CONCAT(NULL, NULL);
+
++-------------------+
+| concat(NULL,NULL) |
++-------------------+
+|                   |
++-------------------+
+
+-- Concatenation with numbers (should convert to string)
+SELECT CONCAT('value: ', 42);
+
++-----------------------------------+
+| concat(Utf8("value: "),Int64(42)) |
++-----------------------------------+
+| value: 42                         |
++-----------------------------------+
+
+SELECT CONCAT(1, 2, 3);
+
++------------------------------------+
+| concat(Int64(1),Int64(2),Int64(3)) |
++------------------------------------+
+| 123                                |
++------------------------------------+
+
+-- Test with table data
+CREATE TABLE concat_test(first_name VARCHAR, last_name VARCHAR, age INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO concat_test VALUES
+    ('John', 'Doe', 30, 1000),
+    ('Jane', 'Smith', 25, 2000),
+    ('Bob', NULL, 35, 3000),
+    (NULL, 'Wilson', 40, 4000);
+
+Affected Rows: 4
+
+-- Concatenate table columns
+SELECT CONCAT(first_name, ' ', last_name) as full_name FROM concat_test ORDER BY ts;
+
++------------+
+| full_name  |
++------------+
+| John Doe   |
+| Jane Smith |
+| Bob        |
+|  Wilson    |
++------------+
+
+SELECT CONCAT(first_name, ' is ', age, ' years old') FROM concat_test ORDER BY ts;
+
++--------------------------------------------------------------------------------+
+| concat(concat_test.first_name,Utf8(" is "),concat_test.age,Utf8(" years old")) |
++--------------------------------------------------------------------------------+
+| John is 30 years old                                                           |
+| Jane is 25 years old                                                           |
+| Bob is 35 years old                                                            |
+|  is 40 years old                                                               |
++--------------------------------------------------------------------------------+
+
+-- Test CONCAT_WS (concat with separator)
+SELECT CONCAT_WS(' ', first_name, last_name) as full_name FROM concat_test ORDER BY ts;
+
++------------+
+| full_name  |
++------------+
+| John Doe   |
+| Jane Smith |
+| Bob        |
+| Wilson     |
++------------+
+
+SELECT CONCAT_WS('-', first_name, last_name, age) FROM concat_test ORDER BY ts;
+
++-----------------------------------------------------------------------------------+
+| concat_ws(Utf8("-"),concat_test.first_name,concat_test.last_name,concat_test.age) |
++-----------------------------------------------------------------------------------+
+| John-Doe-30                                                                       |
+| Jane-Smith-25                                                                     |
+| Bob-35                                                                            |
+| Wilson-40                                                                         |
++-----------------------------------------------------------------------------------+
+
+SELECT CONCAT_WS(',', 'a', 'b', 'c', 'd');
+
++--------------------------------------------------------------+
+| concat_ws(Utf8(","),Utf8("a"),Utf8("b"),Utf8("c"),Utf8("d")) |
++--------------------------------------------------------------+
+| a,b,c,d                                                      |
++--------------------------------------------------------------+
+
+-- CONCAT_WS with NULL values (should skip NULLs)
+SELECT CONCAT_WS(' ', 'hello', NULL, 'world');
+
++-------------------------------------------------------+
+| concat_ws(Utf8(" "),Utf8("hello"),NULL,Utf8("world")) |
++-------------------------------------------------------+
+| hello world                                           |
++-------------------------------------------------------+
+
+SELECT CONCAT_WS('|', first_name, last_name) FROM concat_test ORDER BY ts;
+
++-------------------------------------------------------------------+
+| concat_ws(Utf8("|"),concat_test.first_name,concat_test.last_name) |
++-------------------------------------------------------------------+
+| John|Doe                                                          |
+| Jane|Smith                                                        |
+| Bob                                                               |
+| Wilson                                                            |
++-------------------------------------------------------------------+
+
+-- Test pipe operator ||
+SELECT 'hello' || 'world';
+
++--------------------------------+
+| Utf8("hello") || Utf8("world") |
++--------------------------------+
+| helloworld                     |
++--------------------------------+
+
+SELECT 'hello' || ' ' || 'world';
+
++---------------------------------------------+
+| Utf8("hello") || Utf8(" ") || Utf8("world") |
++---------------------------------------------+
+| hello world                                 |
++---------------------------------------------+
+
+SELECT first_name || ' ' || last_name FROM concat_test WHERE first_name IS NOT NULL AND last_name IS NOT NULL ORDER BY ts;
+
++--------------------------------------------------------------+
+| concat_test.first_name || Utf8(" ") || concat_test.last_name |
++--------------------------------------------------------------+
+| John Doe                                                     |
+| Jane Smith                                                   |
++--------------------------------------------------------------+
+
+-- Unicode concatenation
+SELECT CONCAT('Hello ', '世界');
+
++-------------------------------------+
+| concat(Utf8("Hello "),Utf8("世界")) |
++-------------------------------------+
+| Hello 世界                          |
++-------------------------------------+
+
+SELECT CONCAT('🚀', ' ', '🌟');
+
++-----------------------------------------+
+| concat(Utf8("🚀"),Utf8(" "),Utf8("🌟")) |
++-----------------------------------------+
+| 🚀 🌟                                   |
++-----------------------------------------+
+
+SELECT '中文' || '🐄';
+
++----------------------------+
+| Utf8("中文") || Utf8("🐄") |
++----------------------------+
+| 中文🐄                     |
++----------------------------+
+
+DROP TABLE concat_test;
+
+Affected Rows: 0
+

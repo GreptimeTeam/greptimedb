@@ -1,0 +1,103 @@
+-- Migrated from DuckDB test: test/sql/types/string/test_unicode.test
+-- Test Unicode string handling
+-- Test basic Unicode strings
+CREATE TABLE unicode_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO unicode_test VALUES
+    ('Hello 世界', 1000),
+    ('Ññññ', 2000),
+    ('🚀🎉🌟', 3000),
+    ('Здравствуй мир', 4000),
+    ('مرحبا بالعالم', 5000),
+    ('こんにちは世界', 6000);
+
+Affected Rows: 6
+
+-- Test basic selection
+SELECT s FROM unicode_test ORDER BY ts;
+
++----------------+
+| s              |
++----------------+
+| Hello 世界     |
+| Ññññ           |
+| 🚀🎉🌟         |
+| Здравствуй мир |
+| مرحبا بالعالم  |
+| こんにちは世界 |
++----------------+
+
+-- Test length function with Unicode
+SELECT s, LENGTH(s) AS a, CHAR_LENGTH(s) AS b FROM unicode_test ORDER BY ts;
+
++----------------+----+----+
+| s              | a  | b  |
++----------------+----+----+
+| Hello 世界     | 8  | 8  |
+| Ññññ           | 4  | 4  |
+| 🚀🎉🌟         | 3  | 3  |
+| Здравствуй мир | 14 | 14 |
+| مرحبا بالعالم  | 13 | 13 |
+| こんにちは世界 | 7  | 7  |
++----------------+----+----+
+
+-- Test substring with Unicode
+SELECT s, SUBSTRING(s, 1, 5) FROM unicode_test ORDER BY ts;
+
++----------------+------------------------------------------+
+| s              | substr(unicode_test.s,Int64(1),Int64(5)) |
++----------------+------------------------------------------+
+| Hello 世界     | Hello                                    |
+| Ññññ           | Ññññ                                     |
+| 🚀🎉🌟         | 🚀🎉🌟                                   |
+| Здравствуй мир | Здрав                                    |
+| مرحبا بالعالم  | مرحبا                                    |
+| こんにちは世界 | こんにちは                               |
++----------------+------------------------------------------+
+
+-- Test UPPER/LOWER with Unicode
+SELECT s, UPPER(s), LOWER(s) FROM unicode_test WHERE s = 'Hello 世界';
+
++------------+-----------------------+-----------------------+
+| s          | upper(unicode_test.s) | lower(unicode_test.s) |
++------------+-----------------------+-----------------------+
+| Hello 世界 | HELLO 世界            | hello 世界            |
++------------+-----------------------+-----------------------+
+
+-- Test comparison with Unicode
+SELECT COUNT(*) FROM unicode_test WHERE s LIKE '%世界%';
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+SELECT COUNT(*) FROM unicode_test WHERE s LIKE '%🚀%';
+
++----------+
+| count(*) |
++----------+
+| 1        |
++----------+
+
+-- Test concatenation with Unicode
+SELECT CONCAT(s, ' - test') FROM unicode_test ORDER BY ts;
+
++----------------------------------------+
+| concat(unicode_test.s,Utf8(" - test")) |
++----------------------------------------+
+| Hello 世界 - test                      |
+| Ññññ - test                            |
+| 🚀🎉🌟 - test                          |
+| Здравствуй мир - test                  |
+| مرحبا بالعالم - test                   |
+| こんにちは世界 - test                  |
++----------------------------------------+
+
+DROP TABLE unicode_test;
+
+Affected Rows: 0
+

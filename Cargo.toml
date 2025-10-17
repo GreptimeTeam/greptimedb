@@ -191,7 +191,7 @@ prost-types = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
-regex = "1.8"
+regex = "1.12"
 regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",

@@ -1,0 +1,180 @@
+-- String REPLACE function tests
+-- Basic REPLACE function
+SELECT REPLACE('hello world', 'world', 'universe');
+
++-------------------------------------------------------------+
+| replace(Utf8("hello world"),Utf8("world"),Utf8("universe")) |
++-------------------------------------------------------------+
+| hello universe                                              |
++-------------------------------------------------------------+
+
+SELECT REPLACE('hello world', 'xyz', 'abc');
+
++------------------------------------------------------+
+| replace(Utf8("hello world"),Utf8("xyz"),Utf8("abc")) |
++------------------------------------------------------+
+| hello world                                          |
++------------------------------------------------------+
+
+SELECT REPLACE('hello hello hello', 'hello', 'hi');
+
++-------------------------------------------------------------+
+| replace(Utf8("hello hello hello"),Utf8("hello"),Utf8("hi")) |
++-------------------------------------------------------------+
+| hi hi hi                                                    |
++-------------------------------------------------------------+
+
+-- REPLACE with empty strings
+SELECT REPLACE('hello world', 'world', '');
+
++-----------------------------------------------------+
+| replace(Utf8("hello world"),Utf8("world"),Utf8("")) |
++-----------------------------------------------------+
+| hello                                               |
++-----------------------------------------------------+
+
+SELECT REPLACE('hello world', '', 'xyz');
+
++---------------------------------------------------+
+| replace(Utf8("hello world"),Utf8(""),Utf8("xyz")) |
++---------------------------------------------------+
+| xyzhxyzexyzlxyzlxyzoxyz xyzwxyzoxyzrxyzlxyzdxyz   |
++---------------------------------------------------+
+
+SELECT REPLACE('', 'xyz', 'abc');
+
++-------------------------------------------+
+| replace(Utf8(""),Utf8("xyz"),Utf8("abc")) |
++-------------------------------------------+
+|                                           |
++-------------------------------------------+
+
+-- Case sensitive replacement
+SELECT REPLACE('Hello World', 'hello', 'hi');
+
++-------------------------------------------------------+
+| replace(Utf8("Hello World"),Utf8("hello"),Utf8("hi")) |
++-------------------------------------------------------+
+| Hello World                                           |
++-------------------------------------------------------+
+
+SELECT REPLACE('Hello World', 'Hello', 'Hi');
+
++-------------------------------------------------------+
+| replace(Utf8("Hello World"),Utf8("Hello"),Utf8("Hi")) |
++-------------------------------------------------------+
+| Hi World                                              |
++-------------------------------------------------------+
+
+-- NULL handling
+SELECT REPLACE(NULL, 'world', 'universe');
+
++----------------------------------------------+
+| replace(NULL,Utf8("world"),Utf8("universe")) |
++----------------------------------------------+
+|                                              |
++----------------------------------------------+
+
+SELECT REPLACE('hello world', NULL, 'universe');
+
++----------------------------------------------------+
+| replace(Utf8("hello world"),NULL,Utf8("universe")) |
++----------------------------------------------------+
+|                                                    |
++----------------------------------------------------+
+
+SELECT REPLACE('hello world', 'world', NULL);
+
++-------------------------------------------------+
+| replace(Utf8("hello world"),Utf8("world"),NULL) |
++-------------------------------------------------+
+|                                                 |
++-------------------------------------------------+
+
+-- Test with table data
+CREATE TABLE replace_test(s VARCHAR, old_str VARCHAR, new_str VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO replace_test VALUES
+    ('hello world', 'world', 'universe', 1000),
+    ('programming language', 'language', 'paradigm', 2000),
+    ('test test test', 'test', 'exam', 3000),
+    ('no match here', 'xyz', 'abc', 4000);
+
+Affected Rows: 4
+
+SELECT s, old_str, new_str, REPLACE(s, old_str, new_str) FROM replace_test ORDER BY ts;
+
++----------------------+----------+----------+-------------------------------------------------------------------+
+| s                    | old_str  | new_str  | replace(replace_test.s,replace_test.old_str,replace_test.new_str) |
++----------------------+----------+----------+-------------------------------------------------------------------+
+| hello world          | world    | universe | hello universe                                                    |
+| programming language | language | paradigm | programming paradigm                                              |
+| test test test       | test     | exam     | exam exam exam                                                    |
+| no match here        | xyz      | abc      | no match here                                                     |
++----------------------+----------+----------+-------------------------------------------------------------------+
+
+-- Unicode replacement
+SELECT REPLACE('hello 世界', '世界', 'world');
+
++--------------------------------------------------------+
+| replace(Utf8("hello 世界"),Utf8("世界"),Utf8("world")) |
++--------------------------------------------------------+
+| hello world                                            |
++--------------------------------------------------------+
+
+SELECT REPLACE('café shop', 'é', 'e');
+
++------------------------------------------------+
+| replace(Utf8("café shop"),Utf8("é"),Utf8("e")) |
++------------------------------------------------+
+| cafe shop                                      |
++------------------------------------------------+
+
+SELECT REPLACE('🚀 rocket 🚀', '🚀', '✈️');
+
++-----------------------------------------------------+
+| replace(Utf8("🚀 rocket 🚀"),Utf8("🚀"),Utf8("✈️")) |
++-----------------------------------------------------+
+| ✈️ rocket ✈️                                        |
++-----------------------------------------------------+
+
+-- Multiple character replacement
+SELECT REPLACE('hello-world-test', '-', '_');
+
++-------------------------------------------------------+
+| replace(Utf8("hello-world-test"),Utf8("-"),Utf8("_")) |
++-------------------------------------------------------+
+| hello_world_test                                      |
++-------------------------------------------------------+
+
+SELECT REPLACE('abc::def::ghi', '::', '-->');
+
++-------------------------------------------------------+
+| replace(Utf8("abc::def::ghi"),Utf8("::"),Utf8("-->")) |
++-------------------------------------------------------+
+| abc-->def-->ghi                                       |
++-------------------------------------------------------+
+
+-- Overlapping patterns
+SELECT REPLACE('ababab', 'ab', 'xy');
+
++-----------------------------------------------+
+| replace(Utf8("ababab"),Utf8("ab"),Utf8("xy")) |
++-----------------------------------------------+
+| xyxyxy                                        |
++-----------------------------------------------+
+
+SELECT REPLACE('aaa', 'aa', 'b');
+
++-------------------------------------------+
+| replace(Utf8("aaa"),Utf8("aa"),Utf8("b")) |
++-------------------------------------------+
+| ba                                        |
++-------------------------------------------+
+
+DROP TABLE replace_test;
+
+Affected Rows: 0
+

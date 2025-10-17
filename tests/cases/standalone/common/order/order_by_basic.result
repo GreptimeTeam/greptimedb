@@ -1,0 +1,134 @@
+-- Migrated from DuckDB test: test/sql/order/test_order_by.test
+-- Test ORDER BY keyword
+CREATE TABLE test(a INTEGER, b INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (11, 22, 1000), (12, 21, 2000), (13, 22, 3000);
+
+Affected Rows: 3
+
+-- Simple ORDER BY
+SELECT b FROM test ORDER BY a DESC;
+
++----+
+| b  |
++----+
+| 22 |
+| 21 |
+| 22 |
++----+
+
+SELECT a, b FROM test ORDER BY a;
+
++----+----+
+| a  | b  |
++----+----+
+| 11 | 22 |
+| 12 | 21 |
+| 13 | 22 |
++----+----+
+
+SELECT a, b FROM test ORDER BY a DESC;
+
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
+| 12 | 21 |
+| 11 | 22 |
++----+----+
+
+-- ORDER BY on multiple columns
+SELECT a, b FROM test ORDER BY b, a;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
+| 13 | 22 |
++----+----+
+
+-- ORDER BY using select indices
+SELECT a, b FROM test ORDER BY 2, 1;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
+| 13 | 22 |
++----+----+
+
+SELECT a, b FROM test ORDER BY b DESC, a;
+
++----+----+
+| a  | b  |
++----+----+
+| 11 | 22 |
+| 13 | 22 |
+| 12 | 21 |
++----+----+
+
+SELECT a, b FROM test ORDER BY b, a DESC;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 13 | 22 |
+| 11 | 22 |
++----+----+
+
+-- TOP N queries with LIMIT
+SELECT a, b FROM test ORDER BY b, a DESC LIMIT 1;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
++----+----+
+
+-- OFFSET
+SELECT a, b FROM test ORDER BY b, a DESC LIMIT 1 OFFSET 1;
+
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
++----+----+
+
+-- OFFSET without limit
+SELECT a, b FROM test ORDER BY b, a DESC OFFSET 1;
+
++----+----+
+| a  | b  |
++----+----+
+| 13 | 22 |
+| 11 | 22 |
++----+----+
+
+-- ORDER BY with WHERE
+SELECT a, b FROM test WHERE a < 13 ORDER BY b;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
++----+----+
+
+SELECT a, b FROM test WHERE a < 13 ORDER BY 2;
+
++----+----+
+| a  | b  |
++----+----+
+| 12 | 21 |
+| 11 | 22 |
++----+----+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

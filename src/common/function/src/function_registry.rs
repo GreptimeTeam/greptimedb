@@ -34,6 +34,7 @@ use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
+use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
@@ -153,6 +154,9 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
 
     // Json related functions
     JsonFunction::register(&function_registry);
+
+    // String related functions
+    register_string_functions(&function_registry);
 
     // Vector related functions
     VectorScalarFunction::register(&function_registry);
