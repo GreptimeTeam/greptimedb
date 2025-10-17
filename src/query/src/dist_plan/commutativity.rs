@@ -216,13 +216,15 @@ impl Categorizer {
 
                 Commutativity::Commutative
             }
-            name if name == SeriesNormalize::name()
-                || name == InstantManipulate::name()
-                || name == RangeManipulate::name() =>
-            {
+            name if name == SeriesNormalize::name() || name == InstantManipulate::name() => {
                 // They should always follows Series Divide.
                 // Either all commutative or all non-commutative (which will be blocked by SeriesDivide).
                 Commutativity::Commutative
+            }
+            name if name == RangeManipulate::name() => {
+                // TODO(discord9): currently there is problem with encode/decode of RangeManipulate in substrait
+                // so we mark it as unsupported first. See more at https://github.com/GreptimeTeam/greptimedb/issues/7102
+                Commutativity::Unsupported
             }
             name if name == EmptyMetric::name()
                 || name == MergeScanLogicalPlan::name()
