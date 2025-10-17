@@ -359,7 +359,8 @@ impl SeqScan {
 
         Ok(
             if let Some(tracker) = &self.stream_ctx.query_memory_tracker {
-                Box::pin(MemoryTrackedStream::new(stream, tracker.clone()))
+                let permit = tracker.register_stream();
+                Box::pin(MemoryTrackedStream::new(stream, permit))
             } else {
                 stream
             },

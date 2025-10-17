@@ -56,7 +56,6 @@ log-store = { workspace = true }
 mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true
-ordered-float.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 pin-project.workspace = true

@@ -157,7 +157,6 @@
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
-| `region_engine.mito.scan_memory_soft_limit_ratio` | Float | `0.7` | Soft limit ratio for scan memory (0.0 to 1.0).<br/>When memory usage exceeds soft limit, new queries are rejected but existing queries continue.<br/>This prevents thundering herd in high concurrency scenarios. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
@@ -559,7 +558,6 @@
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
-| `region_engine.mito.scan_memory_soft_limit_ratio` | Float | `0.7` | Soft limit ratio for scan memory (0.0 to 1.0).<br/>When memory usage exceeds soft limit, new queries are rejected but existing queries continue.<br/>This prevents thundering herd in high concurrency scenarios. |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
