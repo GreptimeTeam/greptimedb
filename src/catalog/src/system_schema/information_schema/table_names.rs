@@ -50,3 +50,4 @@ pub const REGION_STATISTICS: &str = "region_statistics";
 pub const PROCESS_LIST: &str = "process_list";
 pub const SSTS_MANIFEST: &str = "ssts_manifest";
 pub const SSTS_STORAGE: &str = "ssts_storage";
+pub const SSTS_INDEX_META: &str = "ssts_index_meta";
