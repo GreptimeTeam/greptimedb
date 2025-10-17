@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CURRENT_SCHEMAS_FUNCTION_NAME","CURRENT_SCHEMA_FUNCTION_NAME","SESSION_USER_FUNCTION_NAME"],"mod":["version"],"struct":["CurrentSchemaFunction","CurrentSchemasFunction","PGCatalogFunction","SessionUserFunction"]};
