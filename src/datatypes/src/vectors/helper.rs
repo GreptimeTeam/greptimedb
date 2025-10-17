@@ -291,7 +291,8 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
+            ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -742,17 +743,17 @@ mod tests {
     #[test]
     fn test_large_string_array_into_vector() {
         let input_vec = vec!["a", "b"];
-        let assertion_array = StringArray::from(input_vec.clone());
+        let assertion_array = LargeStringArray::from(input_vec.clone());
 
         let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
         let vector = Helper::try_into_vector(large_string_array).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(0, vector.null_count());
 
-        let output_arrow_array: StringArray = vector
+        let output_arrow_array: LargeStringArray = vector
             .to_arrow_array()
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap()
             .clone();
         assert_eq!(&assertion_array, &output_arrow_array);

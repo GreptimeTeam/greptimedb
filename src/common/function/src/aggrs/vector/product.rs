@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, StringArray};
+use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, LargeStringArray, StringArray};
 use arrow_schema::{DataType, Field};
 use datafusion::logical_expr::{Signature, TypeSignature, Volatility};
 use datafusion_common::{Result, ScalarValue};
@@ -63,7 +63,7 @@ impl VectorProduct {
         }
 
         let t = args.schema.field(0).data_type();
-        if !matches!(t, DataType::Utf8 | DataType::Binary) {
+        if !matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary) {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "unexpected input datatype {t} when creating `VEC_PRODUCT`"
             )));
@@ -89,6 +89,13 @@ impl VectorProduct {
                 arr.iter()
                     .filter_map(|x| x.map(|s| parse_veclit_from_strlit(s).map_err(Into::into)))
                     .map(|x| x.map(Cow::Owned))
+                    .collect::<Result<Vec<_>>>()?
+            }
+            DataType::LargeUtf8 => {
+                let arr: &LargeStringArray = values[0].as_string();
+                arr.iter()
+                    .filter_map(|x| x.map(|s| parse_veclit_from_strlit(s).map_err(Into::into)))
+                    .map(|x: Result<Vec<f32>>| x.map(Cow::Owned))
                     .collect::<Result<Vec<_>>>()?
             }
             DataType::Binary => {

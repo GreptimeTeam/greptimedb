@@ -16,3 +16,5 @@ pub type BinaryArray = arrow::array::BinaryArray;
 pub type MutableBinaryArray = arrow::array::BinaryBuilder;
 pub type StringArray = arrow::array::StringArray;
 pub type MutableStringArray = arrow::array::StringBuilder;
+pub type LargeStringArray = arrow::array::LargeStringArray;
+pub type MutableLargeStringArray = arrow::array::LargeStringBuilder;

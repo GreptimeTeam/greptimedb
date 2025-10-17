@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, StringArray};
+use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, LargeStringArray, StringArray};
 use arrow_schema::{DataType, Field};
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{
@@ -63,7 +63,7 @@ impl VectorSum {
         }
 
         let t = args.schema.field(0).data_type();
-        if !matches!(t, DataType::Utf8 | DataType::Binary) {
+        if !matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary) {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "unexpected input datatype {t} when creating `VEC_SUM`"
             )));
@@ -85,6 +85,21 @@ impl VectorSum {
         match values[0].data_type() {
             DataType::Utf8 => {
                 let arr: &StringArray = values[0].as_string();
+                for s in arr.iter() {
+                    let Some(s) = s else {
+                        if is_update {
+                            self.has_null = true;
+                            self.sum = None;
+                        }
+                        return Ok(());
+                    };
+                    let values = parse_veclit_from_strlit(s)?;
+                    let vec_column = DVectorView::from_slice(&values, values.len());
+                    *self.inner(vec_column.len()) += vec_column;
+                }
+            }
+            DataType::LargeUtf8 => {
+                let arr: &LargeStringArray = values[0].as_string();
                 for s in arr.iter() {
                     let Some(s) = s else {
                         if is_update {
