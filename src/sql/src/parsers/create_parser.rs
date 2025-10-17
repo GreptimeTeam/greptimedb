@@ -1214,7 +1214,7 @@ mod tests {
         struct Test<'a> {
             sql: &'a str,
             expected_table_name: &'a str,
-            expected_options: HashMap<String, String>,
+            expected_options: HashMap<&'a str, &'a str>,
             expected_engine: &'a str,
             expected_if_not_exist: bool,
         }
@@ -1224,8 +1224,8 @@ mod tests {
                 sql: "CREATE EXTERNAL TABLE city with(location='/var/data/city.csv',format='csv');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
-                    ("location".to_string(), "/var/data/city.csv".to_string()),
-                    ("format".to_string(), "csv".to_string()),
+                    ("location", "/var/data/city.csv"),
+                    ("format", "csv"),
                 ]),
                 expected_engine: FILE_ENGINE,
                 expected_if_not_exist: false,
@@ -1234,8 +1234,8 @@ mod tests {
                 sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
-                    ("location".to_string(), "/var/data/city.csv".to_string()),
-                    ("format".to_string(), "csv".to_string()),
+                    ("location", "/var/data/city.csv"),
+                    ("format", "csv"),
                 ]),
                 expected_engine: "foo",
                 expected_if_not_exist: true,
@@ -1244,9 +1244,9 @@ mod tests {
                 sql: "CREATE EXTERNAL TABLE IF NOT EXISTS city ENGINE=foo with(location='/var/data/city.csv',format='csv','compaction.type'='bar');",
                 expected_table_name: "city",
                 expected_options: HashMap::from([
-                    ("location".to_string(), "/var/data/city.csv".to_string()),
-                    ("format".to_string(), "csv".to_string()),
-                    ("compaction.type".to_string(), "bar".to_string()),
+                    ("location", "/var/data/city.csv"),
+                    ("format", "csv"),
+                    ("compaction.type", "bar"),
                 ]),
                 expected_engine: "foo",
                 expected_if_not_exist: true,
@@ -1264,7 +1264,7 @@ mod tests {
             match &stmts[0] {
                 Statement::CreateExternalTable(c) => {
                     assert_eq!(c.name.to_string(), test.expected_table_name.to_string());
-                    assert_eq!(c.options, test.expected_options.into());
+                    assert_eq!(c.options.to_str_map(), test.expected_options);
                     assert_eq!(c.if_not_exists, test.expected_if_not_exist);
                     assert_eq!(c.engine, test.expected_engine);
                 }
@@ -1284,10 +1284,7 @@ mod tests {
             PRIMARY KEY(ts, host),
         ) with(location='/var/data/city.csv',format='csv');";
 
-        let options = HashMap::from([
-            ("location".to_string(), "/var/data/city.csv".to_string()),
-            ("format".to_string(), "csv".to_string()),
-        ]);
+        let options = HashMap::from([("location", "/var/data/city.csv"), ("format", "csv")]);
 
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -1296,7 +1293,7 @@ mod tests {
         match &stmts[0] {
             Statement::CreateExternalTable(c) => {
                 assert_eq!(c.name.to_string(), "city");
-                assert_eq!(c.options, options.into());
+                assert_eq!(c.options.to_str_map(), options);
 
                 let columns = &c.columns;
                 assert_column_def(&columns[0].column_def, "host", "STRING");

@@ -98,7 +98,7 @@ impl OptionMap {
         map.extend(
             self.options
                 .into_iter()
-                .filter_map(|(k, v)| v.into_string().map(|v| (k, v))),
+                .filter_map(|(k, v)| v.as_string().map(|v| (k, v.to_string()))),
         );
         map.extend(
             self.secrets

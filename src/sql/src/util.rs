@@ -81,6 +81,7 @@ impl OptionValue {
                 | Value::NationalStringLiteral(s)
                 | Value::HexStringLiteral(s) => Some(s),
                 Value::DollarQuotedString(s) => Some(&s.value),
+                Value::Number(s, _) => Some(s),
                 _ => None,
             },
             Expr::Identifier(ident) => Some(&ident.value),
@@ -90,14 +91,6 @@ impl OptionValue {
 
     pub fn as_string(&self) -> Option<&str> {
         Self::expr_as_string(&self.0)
-    }
-
-    pub fn into_string(self) -> Option<String> {
-        match self.0 {
-            Expr::Value(ValueWithSpan { value, .. }) => value.into_string(),
-            Expr::Identifier(ident) => Some(ident.value),
-            _ => None,
-        }
     }
 
     pub fn as_list(&self) -> Option<Vec<&str>> {

@@ -307,7 +307,7 @@ mod tests {
         struct Test<'a> {
             sql: &'a str,
             expected_pattern: Option<String>,
-            expected_connection: HashMap<String, String>,
+            expected_connection: HashMap<&'a str, &'a str>,
         }
 
         let tests = [
@@ -319,10 +319,7 @@ mod tests {
             Test {
                 sql: "COPY catalog0.schema0.tbl FROM 'tbl_file.parquet' WITH (PATTERN = 'demo.*') CONNECTION (FOO='Bar', ONE='two')",
                 expected_pattern: Some("demo.*".into()),
-                expected_connection: [("foo", "Bar"), ("one", "two")]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                expected_connection: HashMap::from([("foo", "Bar"), ("one", "two")]),
             },
         ];
 
@@ -344,10 +341,7 @@ mod tests {
                     if let Some(expected_pattern) = test.expected_pattern {
                         assert_eq!(copy_table.pattern().unwrap(), expected_pattern);
                     }
-                    assert_eq!(
-                        copy_table.connection.clone(),
-                        test.expected_connection.into()
-                    );
+                    assert_eq!(copy_table.connection.to_str_map(), test.expected_connection);
                 }
                 _ => unreachable!(),
             }
@@ -358,7 +352,7 @@ mod tests {
     fn test_parse_copy_table_to() {
         struct Test<'a> {
             sql: &'a str,
-            expected_connection: HashMap<String, String>,
+            expected_connection: HashMap<&'a str, &'a str>,
         }
 
         let tests = [
@@ -368,17 +362,11 @@ mod tests {
             },
             Test {
                 sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' CONNECTION (FOO='Bar', ONE='two')",
-                expected_connection: [("foo", "Bar"), ("one", "two")]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                expected_connection: HashMap::from([("foo", "Bar"), ("one", "two")]),
             },
             Test {
                 sql: "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')",
-                expected_connection: [("foo", "Bar"), ("one", "two")]
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
+                expected_connection: HashMap::from([("foo", "Bar"), ("one", "two")]),
             },
         ];
 
@@ -397,10 +385,7 @@ mod tests {
                 Statement::Copy(crate::statements::copy::Copy::CopyTable(CopyTable::To(
                     copy_table,
                 ))) => {
-                    assert_eq!(
-                        copy_table.connection.clone(),
-                        test.expected_connection.into()
-                    );
+                    assert_eq!(copy_table.connection.to_str_map(), test.expected_connection);
                 }
                 _ => unreachable!(),
             }
