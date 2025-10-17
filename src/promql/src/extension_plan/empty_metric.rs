@@ -123,7 +123,7 @@ impl EmptyMetric {
                 physical_planner.create_physical_expr(expr, &self.time_index_schema, session_state)
             })
             .transpose()?;
-        let result_schema: SchemaRef = Arc::new(self.result_schema.as_ref().into());
+        let result_schema: SchemaRef = self.result_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(result_schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -134,7 +134,7 @@ impl EmptyMetric {
             start: self.start,
             end: self.end,
             interval: self.interval,
-            time_index_schema: Arc::new(self.time_index_schema.as_ref().into()),
+            time_index_schema: self.time_index_schema.inner().clone(),
             result_schema,
             expr: physical_expr,
             properties,

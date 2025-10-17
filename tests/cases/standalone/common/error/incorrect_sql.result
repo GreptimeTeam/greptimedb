@@ -25,7 +25,7 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution err
 -- No matching function signature
 SELECT cos(0, 1, 2, 3);
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'cos' function: coercion from [Int64, Int64, Int64, Int64] to the signature Uniform(1, [Float64, Float32]) failed No function matches the given name and argument types 'cos(Int64, Int64, Int64, Int64)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'cos' function: coercion from Int64, Int64, Int64, Int64 to the signature Uniform(1, [Float64, Float32]) failed No function matches the given name and argument types 'cos(Int64, Int64, Int64, Int64)'. You might need to add explicit type casts.
 	Candidate functions:
 	cos(Float64/Float32)
 

@@ -20,7 +20,7 @@ impl ParserContext<'_> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        let trigger_name = Self::canonicalize_object_name(trigger_name);
+        let trigger_name = Self::canonicalize_object_name(trigger_name)?;
 
         ensure!(
             !trigger_name.0.is_empty(),

@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -116,9 +117,10 @@ impl DfLogicalPlanner {
 
             // default to configuration value
             let options = self.session_state.config().options();
-            let format = format.as_ref().unwrap_or(&options.explain.format);
-
-            let format: ExplainFormat = format.parse()?;
+            let format = format
+                .map(|x| ExplainFormat::from_str(&x))
+                .transpose()?
+                .unwrap_or_else(|| options.explain.format.clone());
 
             Ok(LogicalPlan::Explain(Explain {
                 verbose,
@@ -208,8 +210,7 @@ impl DfLogicalPlanner {
             let Statement::Query(query) = stmt.into_owned() else {
                 unreachable!("is_tql_cte should only be true for Query statements");
             };
-            let sqlparser_stmt =
-                datafusion::sql::sqlparser::ast::Statement::Query(Box::new(query.inner.into()));
+            let sqlparser_stmt = sqlparser::ast::Statement::Query(Box::new(query.inner));
             sql_to_rel
                 .sql_statement_to_plan_with_context(sqlparser_stmt, &mut planner_context)
                 .context(PlanSqlSnafu)?
@@ -261,7 +262,7 @@ impl DfLogicalPlanner {
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
 
-        Ok(sql_to_rel.sql_to_expr(sql.into(), schema, &mut PlannerContext::new())?)
+        Ok(sql_to_rel.sql_to_expr(sql, schema, &mut PlannerContext::new())?)
     }
 
     #[tracing::instrument(skip_all)]

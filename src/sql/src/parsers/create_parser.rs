@@ -196,7 +196,7 @@ impl<'a> ParserContext<'a> {
             expected: "a database name",
             actual: self.peek_token_as_string(),
         })?;
-        let database_name = Self::canonicalize_object_name(database_name);
+        let database_name = Self::canonicalize_object_name(database_name)?;
 
         let options = self
             .parser
@@ -2435,8 +2435,7 @@ non TIMESTAMP(6) TIME INDEX,
         let sql = "CREATE VIEW test AS DELETE from demo";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result.is_err());
-        assert_matches!(result, Err(crate::error::Error::Syntax { .. }));
+        assert!(result.is_ok_and(|x| x.len() == 1));
     }
 
     #[test]

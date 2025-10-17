@@ -662,7 +662,7 @@ pub async fn test_http_sql_slow_query(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;
 
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
     let encoded_slow_query = encode(slow_query);
 
     let query_params = format!("/v1/sql?sql={encoded_slow_query}");
@@ -1152,12 +1152,12 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
-        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, message string) with ('physical_metric_table' = 'true');")
+        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, `message` string) with ('physical_metric_table' = 'true');")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let res = client
-        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, message string) with ('on_physical_table' = 'physical_table');")
+        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, `message` string) with ('on_physical_table' = 'physical_table');")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
@@ -5295,7 +5295,7 @@ pub async fn test_log_query(store_type: StorageType) {
 
     // prepare data with SQL API
     let res = client
-        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, message string);")
+        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string);")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);

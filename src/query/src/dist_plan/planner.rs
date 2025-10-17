@@ -163,7 +163,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         };
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
-        let schema = optimized_plan.schema().as_ref().into();
+        let schema = optimized_plan.schema().as_arrow();
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -173,7 +173,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             table_name,
             regions,
             input_plan.clone(),
-            &schema,
+            schema,
             self.region_query_handler.clone(),
             query_ctx,
             session_state.config().target_partitions(),

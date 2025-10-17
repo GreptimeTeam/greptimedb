@@ -58,12 +58,12 @@ SELECT substr('🦤🦆f', 1, 2);
 -- length on emojis
 SELECT length(s) FROM emojis ORDER BY id;
 
-+----------------------------+
-| character_length(emojis.s) |
-+----------------------------+
-| 1                          |
-| 3                          |
-+----------------------------+
++------------------+
+| length(emojis.s) |
++------------------+
+| 1                |
+| 3                |
++------------------+
 
 DROP TABLE emojis;
 

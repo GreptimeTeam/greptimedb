@@ -75,7 +75,7 @@ pub fn parser_expr_to_scalar_value_literal(
     // 1. convert parser expr to logical expr
     let empty_df_schema = DFSchema::empty();
     let logical_expr = SqlToRel::new(&StubContextProvider::default())
-        .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
+        .sql_to_expr(expr, &empty_df_schema, &mut Default::default())
         .context(ConvertToLogicalExpressionSnafu)?;
 
     struct FindNow {

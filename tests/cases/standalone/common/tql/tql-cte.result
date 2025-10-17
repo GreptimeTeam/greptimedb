@@ -775,8 +775,8 @@ LIMIT 5;
 |               | SubqueryAlias: l                                                                                                                                                       |
 |               |   TableScan: labels                                                                                                                                                    |
 |               | ]]                                                                                                                                                                     |
-| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                             |
-|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                    |
+|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
 |               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                              |
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
 |               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@0, cpu@1, host@4] |
@@ -861,8 +861,8 @@ LIMIT 5;
 |               | SubqueryAlias: l                                                                                                                                                       |
 |               |   TableScan: labels                                                                                                                                                    |
 |               | ]]                                                                                                                                                                     |
-| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                             |
-|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                    |
+|               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
 |               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                              |
 |               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
 |               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
