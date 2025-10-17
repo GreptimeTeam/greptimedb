@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -49,7 +48,7 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if matches!(field.data_type(), ConcreteDataType::String(_)) {
+        if field.data_type().is_string() {
             let value = value
                 .try_into_string()
                 .context(FieldTypeMismatchSnafu)?

@@ -699,10 +699,20 @@ mod test {
             semantic_type,
             column_id: 5,
         };
-        let expected = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let old_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let new_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":{\"size_type\":\"Utf8\"}},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
         assert_eq!(
             MetadataRegion::serialize_column_metadata(&column_metadata),
-            expected
+            new_fmt
+        );
+        // Ensure both old and new formats can be deserialized.
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&old_fmt).unwrap(),
+            column_metadata
+        );
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&new_fmt).unwrap(),
+            column_metadata
         );
 
         let semantic_type = "\"Invalid Column Metadata\"";

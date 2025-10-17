@@ -53,7 +53,7 @@ pub use primitive_type::{
     Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, LogicalPrimitiveType,
     OrdPrimitive, UInt8Type, UInt16Type, UInt32Type, UInt64Type, WrapperType,
 };
-pub use string_type::StringType;
+pub use string_type::{StringSizeType, StringType};
 pub use struct_type::{StructField, StructType};
 pub use time_type::{
     TimeMicrosecondType, TimeMillisecondType, TimeNanosecondType, TimeSecondType, TimeType,

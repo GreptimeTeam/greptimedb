@@ -201,9 +201,14 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
         },
         ValueInner::NULL => value::to_null_scalar_value(t).context(error::ConvertScalarValueSnafu),
         ValueInner::Bytes(b) => match t {
-            ConcreteDataType::String(_) => Ok(ScalarValue::Utf8(Some(
-                String::from_utf8_lossy(b).to_string(),
-            ))),
+            ConcreteDataType::String(t) => {
+                let s = String::from_utf8_lossy(b).to_string();
+                if t.is_large() {
+                    Ok(ScalarValue::LargeUtf8(Some(s)))
+                } else {
+                    Ok(ScalarValue::Utf8(Some(s)))
+                }
+            }
             ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
             ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
             _ => error::PreparedStmtTypeMismatchSnafu {
