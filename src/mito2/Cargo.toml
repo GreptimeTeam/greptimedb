@@ -65,7 +65,7 @@ partition.workspace = true
 puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"
-regex = "1.5"
+regex.workspace = true
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
 rstest_reuse = { workspace = true, optional = true }

@@ -1,0 +1,135 @@
+-- Migrated from DuckDB test: test/sql/types/date/test_date.test
+-- Test basic DATE functionality
+-- Create and insert into table
+CREATE TABLE dates(i DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO dates VALUES ('1993-08-14', 1000), (NULL, 2000);
+
+Affected Rows: 2
+
+-- Check that we can select dates
+SELECT * FROM dates ORDER BY ts;
+
++------------+---------------------+
+| i          | ts                  |
++------------+---------------------+
+| 1993-08-14 | 1970-01-01T00:00:01 |
+|            | 1970-01-01T00:00:02 |
++------------+---------------------+
+
+-- extract function
+SELECT extract(year FROM i) FROM dates ORDER BY ts;
+
++---------------------------------+
+| date_part(Utf8("YEAR"),dates.i) |
++---------------------------------+
+| 1993                            |
+|                                 |
++---------------------------------+
+
+-- Check that we can convert dates to string
+SELECT CAST(i AS VARCHAR) FROM dates ORDER BY ts;
+
++------------+
+| dates.i    |
++------------+
+| 1993-08-14 |
+|            |
++------------+
+
+-- Check that we can add days to a date
+SELECT i + INTERVAL '5 days' FROM dates ORDER BY ts;
+
++-----------------------------------------------------------------------------------------------+
+| dates.i + IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 5, nanoseconds: 0 }") |
++-----------------------------------------------------------------------------------------------+
+| 1993-08-19                                                                                    |
+|                                                                                               |
++-----------------------------------------------------------------------------------------------+
+
+-- Check that we can subtract days from a date
+SELECT i - INTERVAL '5 days' FROM dates ORDER BY ts;
+
++-----------------------------------------------------------------------------------------------+
+| dates.i - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 5, nanoseconds: 0 }") |
++-----------------------------------------------------------------------------------------------+
+| 1993-08-09                                                                                    |
+|                                                                                               |
++-----------------------------------------------------------------------------------------------+
+
+-- Test date subtraction resulting in interval
+SELECT i - DATE '1993-08-14' FROM dates ORDER BY ts;
+
++------------------------------+
+| dates.i - Utf8("1993-08-14") |
++------------------------------+
+| P0D                          |
+|                              |
++------------------------------+
+
+-- Test various date formats
+CREATE TABLE date_formats(d DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO date_formats VALUES
+    ('2021-03-01', 1000),
+    ('2021-12-31', 2000),
+    ('2000-01-01', 3000),
+    ('1970-01-01', 4000);
+
+Affected Rows: 4
+
+SELECT d,  extract(year FROM d), extract(month FROM d), extract(day FROM d) FROM date_formats ORDER BY d;
+
++------------+----------------------------------------+-----------------------------------------+---------------------------------------+
+| d          | date_part(Utf8("YEAR"),date_formats.d) | date_part(Utf8("MONTH"),date_formats.d) | date_part(Utf8("DAY"),date_formats.d) |
++------------+----------------------------------------+-----------------------------------------+---------------------------------------+
+| 1970-01-01 | 1970                                   | 1                                       | 1                                     |
+| 2000-01-01 | 2000                                   | 1                                       | 1                                     |
+| 2021-03-01 | 2021                                   | 3                                       | 1                                     |
+| 2021-12-31 | 2021                                   | 12                                      | 31                                    |
++------------+----------------------------------------+-----------------------------------------+---------------------------------------+
+
+-- Test date comparison
+SELECT d FROM date_formats WHERE d > '2000-01-01' ORDER BY d;
+
++------------+
+| d          |
++------------+
+| 2021-03-01 |
+| 2021-12-31 |
++------------+
+
+SELECT d FROM date_formats WHERE d BETWEEN '2000-01-01' AND '2021-06-01' ORDER BY d;
+
++------------+
+| d          |
++------------+
+| 2000-01-01 |
+| 2021-03-01 |
++------------+
+
+-- Test NULL handling
+INSERT INTO date_formats VALUES (NULL, 5000);
+
+Affected Rows: 1
+
+SELECT COUNT(*), COUNT(d) FROM date_formats;
+
++----------+-----------------------+
+| count(*) | count(date_formats.d) |
++----------+-----------------------+
+| 5        | 4                     |
++----------+-----------------------+
+
+DROP TABLE dates;
+
+Affected Rows: 0
+
+DROP TABLE date_formats;
+
+Affected Rows: 0
+
