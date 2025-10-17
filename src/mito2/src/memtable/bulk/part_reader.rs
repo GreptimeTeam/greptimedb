@@ -184,6 +184,13 @@ fn apply_combined_filters(
     sequence: &Option<SequenceRange>,
     record_batch: RecordBatch,
 ) -> error::Result<Option<RecordBatch>> {
+    // Filters the batch by table id before converting.
+    // We filter this before converting the batch because it can reduce
+    // the number of rows to convert and filter later.
+    let Some(record_batch) = context.base.filter_sparse_table_id(record_batch)? else {
+        return Ok(None);
+    };
+
     // Converts the format to the flat format first.
     let format = context.read_format().as_flat().unwrap();
     let record_batch = format.convert_batch(record_batch, None)?;

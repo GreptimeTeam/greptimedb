@@ -229,6 +229,11 @@ impl FileRangeContext {
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
+        // Filters by the table id in the primary key column first.
+        let Some(input) = self.base.filter_sparse_table_id(input)? else {
+            return Ok(None);
+        };
+
         self.base.precise_filter_flat(input)
     }
 
@@ -360,6 +365,8 @@ impl RangeBase {
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    ///
+    /// It assumes all necessary tags are already decoded from the primary key.
     pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
@@ -404,8 +411,6 @@ impl RangeBase {
     }
 
     /// Filters the input RecordBatch by table id filters if the encoding is sparse.
-    ///
-    /// This process the RecordBatch before the format converts the batch.
     pub(crate) fn filter_sparse_table_id(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
         if self.codec.encoding() != PrimaryKeyEncoding::Sparse {
             return Ok(Some(input));

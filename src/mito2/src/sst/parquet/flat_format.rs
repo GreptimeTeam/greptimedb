@@ -127,7 +127,9 @@ pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
     num_columns - 1
 }
 
-// TODO(yingwen): Add an option to skip reading internal columns.
+// TODO(yingwen): Add an option to skip reading internal columns if the region is
+// append only and doesn't use sparse encoding (We need to check the table id under
+// sparse encoding).
 /// Helper for reading the flat SST format with projection.
 ///
 /// It only supports flat format that stores primary keys additionally.
