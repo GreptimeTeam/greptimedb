@@ -353,6 +353,13 @@ max_running_procedures = 128
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+memory_pool_size = "50%"
+
 ## The data storage options.
 [storage]
 ## The working home directory.
@@ -579,6 +586,11 @@ max_concurrent_scan_files = 384
 
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
+
+## Memory limit for table scans across all queries.
+## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit.
+scan_memory_limit = "50%"
 
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).

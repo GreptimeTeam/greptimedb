@@ -79,7 +79,8 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
+use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
@@ -115,7 +116,9 @@ use crate::error::{
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
-use crate::metrics::HANDLE_REQUEST_ELAPSED;
+use crate::metrics::{
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+};
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
@@ -197,10 +200,21 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
+            .with_update_callback(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_reject_callback(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
+
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
+            scan_memory_tracker,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -249,6 +263,10 @@ impl MitoEngine {
 
     pub fn mito_config(&self) -> &MitoConfig {
         &self.inner.config
+    }
+
+    pub fn scan_memory_tracker(&self) -> QueryMemoryTracker {
+        self.inner.scan_memory_tracker.clone()
     }
 
     pub fn cache_manager(&self) -> CacheManagerRef {
@@ -573,6 +591,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// Memory tracker for table scans.
+    scan_memory_tracker: QueryMemoryTracker,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -782,7 +802,8 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start)
-        .with_flat_format(self.config.default_experimental_flat_format);
+        .with_flat_format(self.config.default_experimental_flat_format)
+        .with_query_memory_tracker(self.scan_memory_tracker.clone());
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -1069,6 +1090,15 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
+        let total_memory = get_total_memory_bytes().max(0) as u64;
+        let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
+            .with_update_callback(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .with_reject_callback(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            });
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1085,6 +1115,7 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                scan_memory_tracker,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),

@@ -20,7 +20,10 @@ use std::time::Instant;
 
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
-use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_recordbatch::{
+    MemoryPermit, MemoryTrackedStream, QueryMemoryTracker, RecordBatchStreamWrapper,
+    SendableRecordBatchStream,
+};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -52,14 +55,19 @@ pub struct UnorderedScan {
     stream_ctx: Arc<StreamContext>,
     /// Metrics for each partition.
     metrics_list: PartitionMetricsList,
+    /// Memory permit for the entire query (shared across all partitions).
+    query_memory_permit: Option<Arc<MemoryPermit>>,
 }
 
 impl UnorderedScan {
     /// Creates a new [UnorderedScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
+    pub(crate) fn new(input: ScanInput, query_memory_tracker: Option<QueryMemoryTracker>) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
+        let query_memory_permit = query_memory_tracker
+            .as_ref()
+            .map(|t| Arc::new(t.register_permit()));
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
@@ -67,6 +75,7 @@ impl UnorderedScan {
             properties,
             stream_ctx,
             metrics_list: PartitionMetricsList::default(),
+            query_memory_permit,
         }
     }
 
@@ -246,10 +255,16 @@ impl UnorderedScan {
             metrics,
         );
 
-        Ok(Box::pin(RecordBatchStreamWrapper::new(
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
-        )))
+        ));
+
+        Ok(if let Some(permit) = &self.query_memory_permit {
+            Box::pin(MemoryTrackedStream::new(stream, permit.clone()))
+        } else {
+            stream
+        })
     }
 
     fn scan_batch_in_partition(
