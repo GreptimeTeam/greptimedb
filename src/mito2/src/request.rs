@@ -35,9 +35,9 @@ use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint}
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionBulkInsertsRequest, RegionCatchupRequest,
-    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionBuildIndexRequest, RegionBulkInsertsRequest,
+    RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -593,10 +593,6 @@ pub(crate) enum WorkerRequest {
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
-    /// Build indexes of a region.
-    #[allow(dead_code)]
-    BuildIndexRegion(RegionBuildIndexRequest),
-
     /// Bulk inserts request and region metadata.
     BulkInserts {
         metadata: Option<RegionMetadataRef>,
@@ -692,6 +688,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
+            RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::BuildIndex(v),
+            }),
             RegionRequest::Truncate(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -754,6 +755,7 @@ pub(crate) enum DdlRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
 }
@@ -919,6 +921,8 @@ pub(crate) struct RegionChangeResult {
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Used for index build in schema change.
+    pub(crate) need_index: bool,
 }
 
 /// Request to edit a region directly.
@@ -944,7 +948,7 @@ pub(crate) struct RegionEditResult {
 }
 
 #[derive(Debug)]
-pub(crate) struct RegionBuildIndexRequest {
+pub(crate) struct BuildIndexRequest {
     pub(crate) region_id: RegionId,
     pub(crate) build_type: IndexBuildType,
     /// files need to build index, empty means all.

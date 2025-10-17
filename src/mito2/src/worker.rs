@@ -67,6 +67,7 @@ use crate::request::{
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
+use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -931,9 +932,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
-                WorkerRequest::BuildIndexRegion(request) => {
-                    self.handle_rebuild_index(request).await;
-                }
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
@@ -1002,6 +1000,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 DdlRequest::Compact(req) => {
                     self.handle_compaction_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
+                DdlRequest::BuildIndex(req) => {
+                    self.handle_build_index_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;
                 }
@@ -1214,6 +1217,20 @@ impl WorkerListener {
             listener
                 .on_notify_region_change_result_begin(_region_id)
                 .await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_success(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_success(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_begin(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_begin(_region_file_id).await;
         }
     }
 }

@@ -146,6 +146,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
     BulkInserts(RegionBulkInsertsRequest),
@@ -1354,6 +1355,9 @@ impl Default for RegionCompactRequest {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RegionBuildIndexRequest {}
+
 /// Truncate region request.
 #[derive(Debug)]
 pub enum RegionTruncateRequest {
@@ -1413,6 +1417,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
             RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),

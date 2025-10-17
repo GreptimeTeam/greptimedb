@@ -40,6 +40,8 @@ mod edit_region_test;
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod index_build_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
