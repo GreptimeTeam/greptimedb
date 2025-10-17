@@ -14,7 +14,6 @@
 
 pub mod config;
 pub mod error;
-pub mod utils;
 
 use std::time::Duration;
 

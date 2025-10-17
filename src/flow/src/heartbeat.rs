@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::{HeartbeatRequest, Peer};
-use common_config::utils::ResourceSpec;
 use common_error::ext::BoxedError;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -26,6 +25,7 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_meta::key::flow::flow_state::FlowStat;
+use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
@@ -69,7 +69,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
 }
 
 impl HeartbeatTask {
@@ -77,11 +77,13 @@ impl HeartbeatTask {
         self.query_stat_size = Some(query_stat_size);
         self
     }
+
     pub fn new(
         opts: &FlownodeOptions,
         meta_client: Arc<MetaClient>,
         heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+        resource_stat: ResourceStatRef,
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
@@ -93,7 +95,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
-            resource_spec: Default::default(),
+            resource_stat,
         }
     }
 
@@ -146,6 +148,8 @@ impl HeartbeatTask {
         heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
         latest_report: &Option<FlowStat>,
+        cpu_usage: i64,
+        memory_usage: i64,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -170,21 +174,38 @@ impl HeartbeatTask {
                     .collect(),
             });
 
-        Some(HeartbeatRequest {
+        let mut heartbeat_request = HeartbeatRequest {
             mailbox_message,
             flow_stat,
             ..heartbeat_request.clone()
-        })
+        };
+
+        if let Some(info) = heartbeat_request.info.as_mut() {
+            info.cpu_usage_millicores = cpu_usage;
+            info.memory_usage_bytes = memory_usage;
+        }
+
+        Some(heartbeat_request)
     }
 
-    fn build_node_info(start_time_ms: u64, cpus: u32, memory_bytes: u64) -> Option<NodeInfo> {
+    #[allow(deprecated)]
+    fn build_node_info(
+        start_time_ms: u64,
+        total_cpu_millicores: i64,
+        total_memory_bytes: i64,
+    ) -> Option<NodeInfo> {
         let build_info = common_version::build_info();
         Some(NodeInfo {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
-            cpus,
-            memory_bytes,
+            total_cpu_millicores,
+            total_memory_bytes,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
+            // TODO(zyy17): Remove these deprecated fields when the deprecated fields are removed from the proto.
+            cpus: total_cpu_millicores as u32,
+            memory_bytes: total_memory_bytes as u64,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -203,9 +224,9 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
-        let cpus = self.resource_spec.cpus as u32;
-        let memory_bytes = self.resource_spec.memory.unwrap_or_default().as_bytes();
-
+        let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
+        let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
+        let resource_stat = self.resource_stat.clone();
         let query_stat_size = self.query_stat_size.clone();
 
         common_runtime::spawn_hb(async move {
@@ -218,7 +239,7 @@ impl HeartbeatTask {
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
                 node_epoch,
-                info: Self::build_node_info(node_epoch, cpus, memory_bytes),
+                info: Self::build_node_info(node_epoch, total_cpu_millicores, total_memory_bytes),
                 ..Default::default()
             };
 
@@ -226,7 +247,7 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report, 0, 0)
                         } else {
                             warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
@@ -234,7 +255,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = interval.tick() => {
-                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report)
+                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report, resource_stat.get_cpu_usage_millicores(), resource_stat.get_memory_usage_bytes())
                     }
                 };
 

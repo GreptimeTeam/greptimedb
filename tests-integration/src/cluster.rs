@@ -44,6 +44,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
@@ -411,11 +412,15 @@ impl GreptimeDbClusterBuilder {
 
         let fe_opts = self.build_frontend_options();
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
             &fe_opts,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
+            Arc::new(resource_stat),
         );
 
         let instance = FrontendBuilder::new(

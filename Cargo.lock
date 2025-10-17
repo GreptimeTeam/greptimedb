@@ -2031,7 +2031,6 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
- "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-wal",
@@ -2551,11 +2550,14 @@ name = "common-stat"
 version = "0.18.0"
 dependencies = [
  "common-base",
+ "common-runtime",
+ "common-telemetry",
  "lazy_static",
  "nix 0.30.1",
  "num_cpus",
  "prometheus",
  "sysinfo",
+ "tokio",
 ]
 
 [[package]]
@@ -3915,6 +3917,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -4912,6 +4915,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -5327,7 +5331,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=69a6089933daa573c96808ec4bbc48f447ec6e8c#69a6089933daa573c96808ec4bbc48f447ec6e8c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9f226478070fddffaa92deeb2c3a9971068816a#f9f226478070fddffaa92deeb2c3a9971068816a"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -7401,6 +7405,7 @@ dependencies = [
  "common-procedure",
  "common-procedure-test",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -13046,6 +13051,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",

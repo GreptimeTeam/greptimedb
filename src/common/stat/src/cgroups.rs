@@ -117,7 +117,10 @@ pub fn get_cpu_limit_from_cgroups() -> Option<i64> {
     None
 }
 
-fn get_cpu_usage() -> Option<i64> {
+/// Get the usage of cpu in millicores from cgroups filesystem.
+///
+/// - Return `None` if it's not in the cgroups v2 environment or fails to read the cpu usage.
+pub fn get_cpu_usage_from_cgroups() -> Option<i64> {
     // In certain bare-metal environments, the `/sys/fs/cgroup/cpu.stat` file may be present and reflect system-wide CPU usage rather than container-specific metrics.
     // To ensure accurate collection of container-level CPU usage, verify the existence of the `/sys/fs/cgroup/memory.current` file.
     // The presence of this file typically indicates execution within a containerized environment, thereby validating the relevance of the collected CPU usage data.
@@ -140,6 +143,22 @@ fn get_cpu_usage() -> Option<i64> {
     }
 
     fields[1].trim().parse::<i64>().ok()
+}
+
+// Calculate the cpu usage in millicores from cgroups filesystem.
+//
+// - Return `0` if the current cpu usage is equal to the last cpu usage or the interval is 0.
+pub(crate) fn calculate_cpu_usage(
+    current_cpu_usage_usecs: i64,
+    last_cpu_usage_usecs: i64,
+    interval_milliseconds: i64,
+) -> i64 {
+    let diff = current_cpu_usage_usecs - last_cpu_usage_usecs;
+    if diff > 0 && interval_milliseconds > 0 {
+        ((diff as f64 / interval_milliseconds as f64).round() as i64).max(1)
+    } else {
+        0
+    }
 }
 
 // Check whether the cgroup is v2.
@@ -230,7 +249,7 @@ impl Collector for CgroupsMetricsCollector {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        if let Some(cpu_usage) = get_cpu_usage() {
+        if let Some(cpu_usage) = get_cpu_usage_from_cgroups() {
             self.cpu_usage.set(cpu_usage);
         }
 

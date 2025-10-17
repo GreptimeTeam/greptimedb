@@ -11,8 +11,10 @@ DESC TABLE CLUSTER_INFO;
 | peer_type            | String               |     | NO   |         | FIELD         |
 | peer_addr            | String               |     | YES  |         | FIELD         |
 | peer_hostname        | String               |     | YES  |         | FIELD         |
-| total_cpu_millicores | UInt32               |     | NO   |         | FIELD         |
-| total_memory_bytes   | UInt64               |     | NO   |         | FIELD         |
+| total_cpu_millicores | Int64                |     | NO   |         | FIELD         |
+| total_memory_bytes   | Int64                |     | NO   |         | FIELD         |
+| cpu_usage_millicores | Int64                |     | NO   |         | FIELD         |
+| memory_usage_bytes   | Int64                |     | NO   |         | FIELD         |
 | version              | String               |     | NO   |         | FIELD         |
 | git_commit           | String               |     | NO   |         | FIELD         |
 | start_time           | TimestampMillisecond |     | YES  |         | FIELD         |

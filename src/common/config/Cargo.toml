@@ -11,7 +11,6 @@ workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
-common-stat.workspace = true
 config.workspace = true
 humantime-serde.workspace = true
 object-store.workspace = true
