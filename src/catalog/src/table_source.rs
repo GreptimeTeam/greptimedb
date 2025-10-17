@@ -201,7 +201,7 @@ impl DfTableSourceProvider {
 
         Ok(Arc::new(ViewTable::new(
             logical_plan,
-            Some(view_info.definition.to_string()),
+            Some(view_info.definition.clone()),
         )))
     }
 }

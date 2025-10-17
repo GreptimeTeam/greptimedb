@@ -18,7 +18,6 @@ use api::v1::meta::{
     RangeResponse as PbRangeResponse, cluster_server,
 };
 use common_stat::get_memory_usage_from_cgroups;
-use common_telemetry::warn;
 use snafu::ResultExt;
 use tonic::Request;
 

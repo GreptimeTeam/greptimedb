@@ -75,7 +75,7 @@ fn build_executor_from_alter_expr(alter_data: &AlterTableData) -> AlterTableExec
     let table_id = alter_data.table_id;
     let alter_kind = alter_data.task.alter_table.kind.as_ref().unwrap();
     let new_table_name = if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
-        Some(new_table_name.to_string())
+        Some(new_table_name.clone())
     } else {
         None
     };
@@ -418,7 +418,7 @@ impl AlterTableData {
         }
     }
 
-    fn table_ref(&self) -> TableReference {
+    fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
     }
 

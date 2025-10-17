@@ -249,7 +249,7 @@ impl MysqlInstanceShim {
         if params.len() != param_num - 1 {
             self.save_plan(
                 SqlPlan {
-                    query: query.to_string(),
+                    query: query.clone(),
                     statement: Some(statement),
                     plan: None,
                     schema: None,
@@ -263,7 +263,7 @@ impl MysqlInstanceShim {
         } else {
             self.save_plan(
                 SqlPlan {
-                    query: query.to_string(),
+                    query: query.clone(),
                     statement: Some(statement),
                     plan,
                     schema,
@@ -605,7 +605,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let (catalog_from_db, schema) = parse_optional_catalog_and_schema_from_db_string(database);
         let catalog = if let Some(catalog) = &catalog_from_db {
-            catalog.to_string()
+            catalog.clone()
         } else {
             self.session.catalog()
         };

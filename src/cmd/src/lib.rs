@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches, let_chains)]
+#![feature(assert_matches)]
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;

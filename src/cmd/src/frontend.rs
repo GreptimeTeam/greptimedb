@@ -252,10 +252,10 @@ impl StartCommand {
 
         if let Some(addr) = &self.internal_rpc_bind_addr {
             if let Some(internal_grpc) = &mut opts.internal_grpc {
-                internal_grpc.bind_addr = addr.to_string();
+                internal_grpc.bind_addr = addr.clone();
             } else {
                 let grpc_options = GrpcOptions {
-                    bind_addr: addr.to_string(),
+                    bind_addr: addr.clone(),
                     ..Default::default()
                 };
 
@@ -265,10 +265,10 @@ impl StartCommand {
 
         if let Some(addr) = &self.internal_rpc_server_addr {
             if let Some(internal_grpc) = &mut opts.internal_grpc {
-                internal_grpc.server_addr = addr.to_string();
+                internal_grpc.server_addr = addr.clone();
             } else {
                 let grpc_options = GrpcOptions {
-                    server_addr: addr.to_string(),
+                    server_addr: addr.clone(),
                     ..Default::default()
                 };
                 opts.internal_grpc = Some(grpc_options);

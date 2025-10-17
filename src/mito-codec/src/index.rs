@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -49,9 +48,9 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if matches!(field.data_type(), ConcreteDataType::String(_)) {
+        if field.data_type().is_string() {
             let value = value
-                .as_string()
+                .try_into_string()
                 .context(FieldTypeMismatchSnafu)?
                 .context(IndexEncodeNullSnafu)?;
             buffer.extend_from_slice(value.as_bytes());
@@ -160,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_decode_primary_key_basic() {
-        let tag_columns = vec![
+        let tag_columns = [
             ColumnMetadata {
                 column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
                 semantic_type: api::v1::SemanticType::Tag,

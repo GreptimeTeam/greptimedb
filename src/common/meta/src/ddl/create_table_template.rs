@@ -90,7 +90,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
                     default_constraint: c.default_constraint.clone(),
                     semantic_type: semantic_type as i32,
                     comment: String::new(),
-                    datatype_extension: c.datatype_extension,
+                    datatype_extension: c.datatype_extension.clone(),
                     options: c.options.clone(),
                 }),
                 column_id: i as u32,
@@ -119,7 +119,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
 
     let template = CreateRequest {
         region_id: 0,
-        engine: create_table_expr.engine.to_string(),
+        engine: create_table_expr.engine.clone(),
         column_defs,
         primary_key,
         path: String::new(),

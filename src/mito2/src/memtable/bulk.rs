@@ -30,7 +30,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
 use tokio::sync::Semaphore;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -323,7 +323,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        _sequence: Option<SequenceNumber>,
+        _sequence: Option<SequenceRange>,
     ) -> Result<crate::memtable::BoxedBatchIterator> {
         todo!()
     }
@@ -332,7 +332,7 @@ impl Memtable for BulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         for_flush: bool,
     ) -> Result<MemtableRanges> {
         let mut ranges = BTreeMap::new();
@@ -602,7 +602,7 @@ impl BulkMemtable {
 struct BulkRangeIterBuilder {
     part: BulkPart,
     context: Arc<BulkIterContext>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -641,7 +641,7 @@ struct EncodedBulkRangeIterBuilder {
     file_id: FileId,
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
@@ -1157,7 +1157,7 @@ mod tests {
         let memtable =
             BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
 
-        let test_data = vec![
+        let test_data = [
             (
                 "key_a",
                 1u32,
@@ -1191,7 +1191,7 @@ mod tests {
         assert_eq!(1000, min_ts.value());
         assert_eq!(3000, max_ts.value());
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1232,7 +1232,7 @@ mod tests {
         memtable.write_bulk(bulk_part).unwrap();
 
         let projection = vec![4u32];
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
             .ranges(Some(&projection), predicate_group, None, false)
             .unwrap();
@@ -1349,7 +1349,7 @@ mod tests {
             memtable.write_bulk(part).unwrap();
         }
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1380,8 +1380,8 @@ mod tests {
 
         memtable.write_bulk(part).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
-        let sequence_filter = Some(400u64); // Filters out rows with sequence > 400
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let sequence_filter = Some(SequenceRange::LtEq { max: 400 }); // Filters out rows with sequence > 400
         let ranges = memtable
             .ranges(None, predicate_group, sequence_filter, false)
             .unwrap();
@@ -1414,7 +1414,7 @@ mod tests {
 
         memtable.compact(false).unwrap();
 
-        let predicate_group = PredicateGroup::new(&metadata, &[]);
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
 
         // Should have ranges for both bulk parts and encoded parts

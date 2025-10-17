@@ -180,7 +180,7 @@ impl Vector for BinaryVector {
         vectors::impl_get_for_vector!(self.array, index)
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         vectors::impl_get_ref_for_vector!(self.array, index)
     }
 }
@@ -241,8 +241,8 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish_cloned())
     }
 
-    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        match value.as_binary()? {
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        match value.try_into_binary()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
         }
@@ -427,8 +427,8 @@ mod tests {
         let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
 
         let mut builder = BinaryType.create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Binary("hello".as_bytes()));
-        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.push_value_ref(&ValueRef::Binary("hello".as_bytes()));
+        assert!(builder.try_push_value_ref(&ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(
             builder
@@ -475,7 +475,7 @@ mod tests {
             .collect::<Vec<_>>();
         for i in 0..3 {
             assert_eq!(
-                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                json_vector.get_ref(i).try_into_binary().unwrap().unwrap(),
                 jsonbs.get(i).unwrap().as_slice()
             );
         }
@@ -486,7 +486,7 @@ mod tests {
             .unwrap();
         for i in 0..3 {
             assert_eq!(
-                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                json_vector.get_ref(i).try_into_binary().unwrap().unwrap(),
                 jsonbs.get(i).unwrap().as_slice()
             );
         }
@@ -551,8 +551,8 @@ mod tests {
         assert_eq!(converted.len(), expected.len());
         for i in 0..3 {
             assert_eq!(
-                converted.get_ref(i).as_binary().unwrap().unwrap(),
-                expected.get_ref(i).as_binary().unwrap().unwrap()
+                converted.get_ref(i).try_into_binary().unwrap().unwrap(),
+                expected.get_ref(i).try_into_binary().unwrap().unwrap()
             );
         }
     }

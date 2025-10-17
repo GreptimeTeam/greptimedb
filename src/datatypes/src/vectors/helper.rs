@@ -33,6 +33,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
+use crate::types::StructType;
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
@@ -237,8 +238,14 @@ impl Helper {
                 let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
                 ConstantVector::new(Arc::new(vector), length)
             }
+            ScalarValue::Struct(v) => {
+                let struct_type = StructType::try_from(v.fields())?;
+                ConstantVector::new(
+                    Arc::new(StructVector::try_new(struct_type, (*v).clone())?),
+                    length,
+                )
+            }
             ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
@@ -284,7 +291,8 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
+            ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -386,13 +394,16 @@ impl Helper {
                 }
             }
 
-            ArrowDataType::Struct(_fields) => {
+            ArrowDataType::Struct(fields) => {
                 let array = array
                     .as_ref()
                     .as_any()
                     .downcast_ref::<StructArray>()
                     .unwrap();
-                Arc::new(StructVector::new(array.clone())?)
+                Arc::new(StructVector::try_new(
+                    StructType::try_from(fields)?,
+                    array.clone(),
+                )?)
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
@@ -418,7 +429,7 @@ impl Helper {
     pub fn try_from_row_into_vector(row: &[Value], dt: &ConcreteDataType) -> Result<VectorRef> {
         let mut builder = dt.create_mutable_vector(row.len());
         for val in row {
-            builder.try_push_value_ref(val.as_value_ref())?;
+            builder.try_push_value_ref(&val.as_value_ref())?;
         }
         let vector = builder.to_vector();
         Ok(vector)
@@ -732,17 +743,17 @@ mod tests {
     #[test]
     fn test_large_string_array_into_vector() {
         let input_vec = vec!["a", "b"];
-        let assertion_array = StringArray::from(input_vec.clone());
+        let assertion_array = LargeStringArray::from(input_vec.clone());
 
         let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
         let vector = Helper::try_into_vector(large_string_array).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(0, vector.null_count());
 
-        let output_arrow_array: StringArray = vector
+        let output_arrow_array: LargeStringArray = vector
             .to_arrow_array()
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap()
             .clone();
         assert_eq!(&assertion_array, &output_arrow_array);

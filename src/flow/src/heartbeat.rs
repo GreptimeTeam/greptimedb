@@ -204,6 +204,8 @@ impl HeartbeatTask {
             total_memory_bytes,
             cpu_usage_millicores: 0,
             memory_usage_bytes: 0,
+            cpus: 0,
+            memory_bytes: 0,
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

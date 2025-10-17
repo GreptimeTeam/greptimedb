@@ -14,7 +14,6 @@
 
 //! Storage related APIs
 
-#![feature(let_chains)]
 #![feature(iterator_try_collect)]
 
 pub mod codec;

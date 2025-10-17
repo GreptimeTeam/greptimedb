@@ -43,6 +43,7 @@ pub struct ApplyOutput {
 pub trait IndexApplier: Send + Sync {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
+    #[allow(unused_parens)]
     async fn apply<'a>(
         &self,
         context: SearchContext,

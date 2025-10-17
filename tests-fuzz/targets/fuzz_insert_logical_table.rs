@@ -174,16 +174,14 @@ async fn validate_values(
         .iter()
         .map(|&i| insert_expr.columns[i].name.to_string())
         .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
+        .join(", ");
 
     let column_list = insert_expr
         .columns
         .iter()
         .map(|c| c.name.to_string())
         .collect::<Vec<_>>()
-        .join(", ")
-        .to_string();
+        .join(", ");
 
     let select_sql = format!(
         "SELECT {} FROM {} ORDER BY {}",

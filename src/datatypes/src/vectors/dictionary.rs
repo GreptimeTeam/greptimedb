@@ -154,7 +154,7 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
         self.item_vector.get(key.as_usize())
     }
 
-    fn get_ref(&self, index: usize) -> ValueRef {
+    fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if !self.array.is_valid(index) {
             return ValueRef::Null;
         }

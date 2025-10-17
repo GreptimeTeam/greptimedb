@@ -72,7 +72,7 @@ pub fn get_memory_limit_from_cgroups() -> Option<i64> {
 
 /// Get the usage of memory in bytes from cgroups filesystem.
 ///
-/// - Return `None` if it's not in the cgroups v2 environment or fails to read the memory usage.
+/// - Return `None` if it fails to read the memory usage or not on linux or cgroup is v1.
 pub fn get_memory_usage_from_cgroups() -> Option<i64> {
     #[cfg(target_os = "linux")]
     {

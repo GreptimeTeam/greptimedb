@@ -394,7 +394,7 @@ fn new_repeated_vector(
 ) -> common_recordbatch::error::Result<VectorRef> {
     let mut mutable_vector = data_type.create_mutable_vector(1);
     mutable_vector
-        .try_push_value_ref(value.as_value_ref())
+        .try_push_value_ref(&value.as_value_ref())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
     // This requires an additional allocation.

@@ -49,6 +49,7 @@ const PEER_TYPE_METASRV: &str = "METASRV";
 const PEER_ID: &str = "peer_id";
 const PEER_TYPE: &str = "peer_type";
 const PEER_ADDR: &str = "peer_addr";
+const PEER_HOSTNAME: &str = "peer_hostname";
 const TOTAL_CPU_MILLICORES: &str = "total_cpu_millicores";
 const TOTAL_MEMORY_BYTES: &str = "total_memory_bytes";
 const CPU_USAGE_MILLICORES: &str = "cpu_usage_millicores";
@@ -59,7 +60,6 @@ const START_TIME: &str = "start_time";
 const UPTIME: &str = "uptime";
 const ACTIVE_TIME: &str = "active_time";
 const NODE_STATUS: &str = "node_status";
-const HOSTNAME: &str = "hostname";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -68,6 +68,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `peer_id`: the peer server id.
 /// - `peer_type`: the peer type, such as `datanode`, `frontend`, `metasrv` etc.
 /// - `peer_addr`: the peer gRPC address.
+/// - `peer_hostname`: the hostname of the peer.
 /// - `total_cpu_millicores`: the total CPU millicores of the peer.
 /// - `total_memory_bytes`: the total memory bytes of the peer.
 /// - `cpu_usage_millicores`: the CPU usage millicores of the peer.
@@ -78,7 +79,6 @@ const INIT_CAPACITY: usize = 42;
 /// - `uptime`: the uptime of the peer.
 /// - `active_time`: the time since the last activity of the peer.
 /// - `node_status`: the status info of the peer.
-/// - `hostname`: the hostname of the peer.
 ///
 #[derive(Debug)]
 pub(super) struct InformationSchemaClusterInfo {
@@ -99,6 +99,7 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(PEER_ID, ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new(PEER_TYPE, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(PEER_HOSTNAME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(
                 TOTAL_CPU_MILLICORES,
                 ConcreteDataType::int64_datatype(),
@@ -129,7 +130,6 @@ impl InformationSchemaClusterInfo {
             ColumnSchema::new(UPTIME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(ACTIVE_TIME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(NODE_STATUS, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(HOSTNAME, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -179,6 +179,7 @@ struct InformationSchemaClusterInfoBuilder {
     peer_ids: Int64VectorBuilder,
     peer_types: StringVectorBuilder,
     peer_addrs: StringVectorBuilder,
+    peer_hostnames: StringVectorBuilder,
     total_cpu_millicores: Int64VectorBuilder,
     total_memory_bytes: Int64VectorBuilder,
     cpu_usage_millicores: Int64VectorBuilder,
@@ -189,7 +190,6 @@ struct InformationSchemaClusterInfoBuilder {
     uptimes: StringVectorBuilder,
     active_times: StringVectorBuilder,
     node_status: StringVectorBuilder,
-    hostnames: StringVectorBuilder,
 }
 
 impl InformationSchemaClusterInfoBuilder {
@@ -200,6 +200,7 @@ impl InformationSchemaClusterInfoBuilder {
             peer_ids: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_types: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            peer_hostnames: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             total_cpu_millicores: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             total_memory_bytes: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             cpu_usage_millicores: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
@@ -210,7 +211,6 @@ impl InformationSchemaClusterInfoBuilder {
             uptimes: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             active_times: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             node_status: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            hostnames: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -233,9 +233,10 @@ impl InformationSchemaClusterInfoBuilder {
             (PEER_ID, &Value::from(peer_id)),
             (PEER_TYPE, &Value::from(peer_type)),
             (PEER_ADDR, &Value::from(node_info.peer.addr.as_str())),
+            (PEER_HOSTNAME, &Value::from(node_info.hostname.as_str())),
             (VERSION, &Value::from(node_info.version.as_str())),
             (GIT_COMMIT, &Value::from(node_info.git_commit.as_str())),
-            (HOSTNAME, &Value::from(node_info.hostname.as_str())),
+            (PEER_HOSTNAME, &Value::from(node_info.hostname.as_str())),
         ];
 
         if !predicates.eval(&row) {
@@ -245,6 +246,7 @@ impl InformationSchemaClusterInfoBuilder {
         self.peer_ids.push(Some(peer_id));
         self.peer_types.push(Some(peer_type));
         self.peer_addrs.push(Some(&node_info.peer.addr));
+        self.peer_hostnames.push(Some(&node_info.hostname));
         self.versions.push(Some(&node_info.version));
         self.git_commits.push(Some(&node_info.git_commit));
         if node_info.start_time_ms > 0 {
@@ -267,7 +269,7 @@ impl InformationSchemaClusterInfoBuilder {
             .push(Some(node_info.cpu_usage_millicores));
         self.memory_usage_bytes
             .push(Some(node_info.memory_usage_bytes));
-        self.hostnames.push(Some(&node_info.hostname));
+        self.peer_hostnames.push(Some(&node_info.hostname));
 
         if node_info.last_activity_ts > 0 {
             self.active_times.push(Some(
@@ -291,6 +293,7 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.peer_ids.finish()),
             Arc::new(self.peer_types.finish()),
             Arc::new(self.peer_addrs.finish()),
+            Arc::new(self.peer_hostnames.finish()),
             Arc::new(self.total_cpu_millicores.finish()),
             Arc::new(self.total_memory_bytes.finish()),
             Arc::new(self.cpu_usage_millicores.finish()),
@@ -301,7 +304,6 @@ impl InformationSchemaClusterInfoBuilder {
             Arc::new(self.uptimes.finish()),
             Arc::new(self.active_times.finish()),
             Arc::new(self.node_status.finish()),
-            Arc::new(self.hostnames.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

@@ -747,7 +747,7 @@ impl PrimaryKeyReadFormat {
         for value_opt in values {
             match value_opt {
                 // Safety: We use the same data type to create the converter.
-                Some(v) => builder.push_value_ref(v.as_value_ref()),
+                Some(v) => builder.push_value_ref(&v.as_value_ref()),
                 None => builder.push_null(),
             }
         }
@@ -1740,7 +1740,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            column_ids.into_iter(),
+            column_ids.clone().into_iter(),
             None,
             "test",
             false,
@@ -1797,7 +1797,7 @@ mod tests {
         let record_batch = RecordBatch::try_new(old_schema, columns).unwrap();
 
         // Test conversion with sparse encoding
-        let result = format.convert_batch(record_batch, None).unwrap();
+        let result = format.convert_batch(record_batch.clone(), None).unwrap();
 
         // Construct expected RecordBatch in flat format with decoded primary key columns
         let tag0_array = Arc::new(DictionaryArray::new(
@@ -1826,5 +1826,12 @@ mod tests {
 
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
+
+        let format =
+            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test", true)
+                .unwrap();
+        // Test conversion with sparse encoding and skip convert.
+        let result = format.convert_batch(record_batch.clone(), None).unwrap();
+        assert_eq!(record_batch, result);
     }
 }

@@ -324,7 +324,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
         .flat_map(move |row_index| {
             let key = key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
                 .map(|s| s.to_string());
 
@@ -333,7 +333,7 @@ fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, Stri
                     k,
                     val_col
                         .get_ref(row_index)
-                        .as_string()
+                        .try_into_string()
                         .unwrap()
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
@@ -351,7 +351,7 @@ fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
         .flat_map(move |row_index| {
             key_col
                 .get_ref(row_index)
-                .as_string()
+                .try_into_string()
                 .unwrap()
                 .map(|s| s.to_string())
         })
@@ -431,7 +431,7 @@ impl MetadataRegion {
             if !k.starts_with(prefix) {
                 break;
             }
-            result.insert(k.to_string(), v.to_string());
+            result.insert(k.clone(), v.clone());
         }
         Ok(result)
     }
@@ -530,7 +530,7 @@ impl MetadataRegion {
             .map(|key| {
                 row(vec![
                     ValueData::TimestampMillisecondValue(0),
-                    ValueData::StringValue(key.to_string()),
+                    ValueData::StringValue(key.clone()),
                 ])
             })
             .collect();
@@ -614,7 +614,7 @@ impl MetadataRegion {
         let val = first_batch
             .column(0)
             .get_ref(0)
-            .as_string()
+            .try_into_string()
             .unwrap()
             .map(|s| s.to_string());
 
@@ -699,10 +699,20 @@ mod test {
             semantic_type,
             column_id: 5,
         };
-        let expected = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let old_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
+        let new_fmt = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":{\"size_type\":\"Utf8\"}},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
         assert_eq!(
             MetadataRegion::serialize_column_metadata(&column_metadata),
-            expected
+            new_fmt
+        );
+        // Ensure both old and new formats can be deserialized.
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&old_fmt).unwrap(),
+            column_metadata
+        );
+        assert_eq!(
+            MetadataRegion::deserialize_column_metadata(&new_fmt).unwrap(),
+            column_metadata
         );
 
         let semantic_type = "\"Invalid Column Metadata\"";

@@ -53,7 +53,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId, SequenceNumber};
+use store_api::storage::{FileId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -254,7 +254,7 @@ impl PrimaryKeyColumnBuilder {
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match self {
             PrimaryKeyColumnBuilder::StringDict(builder) => {
-                if let Some(s) = value.as_string().context(DataTypeMismatchSnafu)? {
+                if let Some(s) = value.try_into_string().context(DataTypeMismatchSnafu)? {
                     // We know the value is a string.
                     builder.append_value(s);
                 } else {
@@ -262,7 +262,7 @@ impl PrimaryKeyColumnBuilder {
                 }
             }
             PrimaryKeyColumnBuilder::Vector(builder) => {
-                builder.push_value_ref(value);
+                builder.push_value_ref(&value);
             }
         }
         Ok(())
@@ -365,7 +365,7 @@ impl BulkPartConverter {
                 .context(ColumnNotFoundSnafu {
                     column: PRIMARY_KEY_COLUMN_NAME,
                 })?
-                .as_binary()
+                .try_into_binary()
                 .context(DataTypeMismatchSnafu)?
             {
                 self.key_array_builder
@@ -408,7 +408,12 @@ impl BulkPartConverter {
 
         // Updates statistics
         // Safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         self.max_sequence = self.max_sequence.max(kv.sequence());
@@ -564,7 +569,7 @@ impl EncodedBulkPart {
     pub(crate) fn read(
         &self,
         context: BulkIterContextRef,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         // use predicate to find row groups to read.
         let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);
@@ -785,11 +790,11 @@ fn mutations_to_record_batch(
                 .encode_to_vec(row.primary_keys(), &mut pk_buffer)
                 .context(EncodeSnafu)?;
             pk_builder.append_value(pk_buffer.as_bytes());
-            ts_vector.push_value_ref(row.timestamp());
+            ts_vector.push_value_ref(&row.timestamp());
             sequence_builder.append_value(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);
             for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
-                builder.push_value_ref(field);
+                builder.push_value_ref(&field);
             }
         }
     }

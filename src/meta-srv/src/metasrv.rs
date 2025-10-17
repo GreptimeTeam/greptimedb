@@ -384,9 +384,12 @@ pub struct MetasrvNodeInfo {
     /// The node build memory usage bytes
     pub memory_usage_bytes: i64,
     // The node hostname
+    #[serde(default)]
     pub hostname: String,
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
+#[allow(deprecated)]
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
         Self {
@@ -394,6 +397,14 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
+            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
+            // New code should use the fields in `info.NodeInfo` instead.
+            version: node_info.version.clone(),
+            git_commit: node_info.git_commit.clone(),
+            start_time_ms: node_info.start_time_ms,
+            cpus: node_info.total_cpu_millicores as u32,
+            memory_bytes: node_info.total_memory_bytes as u64,
+            // The canonical location for node information.
             info: Some(api::v1::meta::NodeInfo {
                 version: node_info.version,
                 git_commit: node_info.git_commit,
@@ -402,6 +413,8 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 total_memory_bytes: node_info.total_memory_bytes,
                 cpu_usage_millicores: node_info.cpu_usage_millicores,
                 memory_usage_bytes: node_info.memory_usage_bytes,
+                cpus: node_info.total_cpu_millicores as u32,
+                memory_bytes: node_info.total_memory_bytes as u64,
                 hostname: node_info.hostname,
             }),
         }

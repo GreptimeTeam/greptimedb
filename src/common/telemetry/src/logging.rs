@@ -454,7 +454,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
         .as_ref()
         .map(|e| {
             if e.starts_with("http") {
-                e.to_string()
+                e.clone()
             } else {
                 format!("http://{}", e)
             }

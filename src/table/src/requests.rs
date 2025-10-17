@@ -401,6 +401,7 @@ pub struct CompactTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub compact_options: compact_request::Options,
+    pub parallelism: u32,
 }
 
 impl Default for CompactTableRequest {
@@ -410,6 +411,7 @@ impl Default for CompactTableRequest {
             schema_name: Default::default(),
             table_name: Default::default(),
             compact_options: compact_request::Options::Regular(Default::default()),
+            parallelism: 1,
         }
     }
 }
@@ -424,7 +426,7 @@ pub struct TruncateTableRequest {
 }
 
 impl TruncateTableRequest {
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference {
             catalog: &self.catalog_name,
             schema: &self.schema_name,

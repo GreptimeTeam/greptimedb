@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::warn;
-use datatypes::arrow::array::{Array, StringArray};
+use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
@@ -297,7 +297,7 @@ impl SingleCreator {
                 for i in 0..batch.num_rows() {
                     let data = data.get_ref(i);
                     let text = data
-                        .as_string()
+                        .try_into_string()
                         .context(DataTypeMismatchSnafu)?
                         .unwrap_or_default();
                     self.inner.push_text(text).await?;
@@ -321,12 +321,34 @@ impl SingleCreator {
         if let Some(column_array) = batch.column_by_name(&self.column_name) {
             // Convert Arrow array to string array.
             // TODO(yingwen): Use Utf8View later if possible.
-            let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
-                .context(ComputeArrowSnafu)?;
-            let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-            for text_opt in string_array.iter() {
-                let text = text_opt.unwrap_or_default();
-                self.inner.push_text(text).await?;
+            match column_array.data_type() {
+                DataType::Utf8 => {
+                    let string_array = column_array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                DataType::LargeUtf8 => {
+                    let large_string_array = column_array
+                        .as_any()
+                        .downcast_ref::<LargeStringArray>()
+                        .unwrap();
+                    for text_opt in large_string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                _ => {
+                    // For other types, cast to Utf8 as before
+                    let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
+                        .context(ComputeArrowSnafu)?;
+                    let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
             }
         } else {
             // If the column is not found in the batch, push empty text.
@@ -540,15 +562,15 @@ mod tests {
 
         for (text_english_case_sensitive, text_english_case_insensitive, text_chinese) in rows {
             match text_english_case_sensitive {
-                Some(s) => vec_english_sensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_sensitive.push_value_ref(&(*s).into()),
                 None => vec_english_sensitive.push_null(),
             }
             match text_english_case_insensitive {
-                Some(s) => vec_english_insensitive.push_value_ref((*s).into()),
+                Some(s) => vec_english_insensitive.push_value_ref(&(*s).into()),
                 None => vec_english_insensitive.push_null(),
             }
             match text_chinese {
-                Some(s) => vec_chinese.push_value_ref((*s).into()),
+                Some(s) => vec_chinese.push_value_ref(&(*s).into()),
                 None => vec_chinese.push_null(),
             }
         }

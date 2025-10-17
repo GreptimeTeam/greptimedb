@@ -192,7 +192,7 @@ impl DatafusionQueryEngine {
             .timestamp_column()
             .map(|x| &x.name)
             .with_context(|| MissingTimestampColumnSnafu {
-                table_name: table_name.to_string(),
+                table_name: table_name.clone(),
             })?;
 
         let table_info = table.table_info();

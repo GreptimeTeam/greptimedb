@@ -150,7 +150,7 @@ pub async fn test_http_auth(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd".to_string(),
+        "static_user_provider:cmd:greptime_user=greptime_pwd,readonly_user:ro=readonly_pwd,writeonly_user:wo=writeonly_pwd",
     )
     .unwrap();
 
@@ -1502,12 +1502,13 @@ parallel_scan_channel_size = 32
 max_concurrent_scan_files = 384
 allow_stale_entries = false
 min_compaction_interval = "0s"
-enable_experimental_flat_format = false
+default_experimental_flat_format = false
 
 [region_engine.mito.index]
 aux_path = ""
 staging_size = "2GiB"
 staging_ttl = "7days"
+build_mode = "sync"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -1591,6 +1592,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "result_cache_size =",
         "name =",
         "recovery_parallelism =",
+        "max_background_index_builds =",
         "max_background_flushes =",
         "max_background_compactions =",
         "max_background_purges =",
@@ -3589,7 +3591,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:37.217+0000"
+                "value": 1716668197217000000i64
             }
         ],
         [
@@ -3627,7 +3629,7 @@ transform:
                 "data_type": "TIMESTAMP_NANOSECOND",
                 "key": "time",
                 "semantic_type": "TIMESTAMP",
-                "value": "2024-05-25 20:16:38.217+0000"
+                "value": 1716668198217000000i64
             }
         ]
     ]);
@@ -6448,7 +6450,7 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     validate_data(
         "test_influxdb_write",
         &client,
-        "select * from test_alter order by ts;",
+        "select * from test_alter order by greptime_timestamp;",
         expected,
     )
     .await;

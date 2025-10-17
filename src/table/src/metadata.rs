@@ -26,7 +26,7 @@ use datatypes::schema::{
     SkippingIndexOptions,
 };
 use derive_builder::Builder;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
@@ -143,6 +143,8 @@ pub struct TableMeta {
     pub options: TableOptions,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
+    #[builder(default = "self.default_updated_on()")]
+    pub updated_on: DateTime<Utc>,
     #[builder(default = "Vec::new()")]
     pub partition_key_indices: Vec<usize>,
     #[builder(default = "Vec::new()")]
@@ -162,6 +164,7 @@ impl TableMetaBuilder {
             next_column_id: None,
             options: None,
             created_on: None,
+            updated_on: None,
             partition_key_indices: None,
             column_ids: None,
         }
@@ -181,6 +184,10 @@ impl TableMetaBuilder {
         }
     }
 
+    fn default_updated_on(&self) -> DateTime<Utc> {
+        self.created_on.unwrap_or_default()
+    }
+
     pub fn new_external_table() -> Self {
         Self {
             schema: None,
@@ -191,6 +198,7 @@ impl TableMetaBuilder {
             next_column_id: Some(0),
             options: None,
             created_on: None,
+            updated_on: None,
             partition_key_indices: None,
             column_ids: None,
         }
@@ -243,7 +251,7 @@ impl TableMeta {
         table_name: &str,
         alter_kind: &AlterKind,
     ) -> Result<TableMetaBuilder> {
-        match alter_kind {
+        let mut builder = match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
             AlterKind::ModifyColumnTypes { columns } => {
@@ -257,7 +265,9 @@ impl TableMeta {
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
             AlterKind::SetDefaults { defaults } => self.set_defaults(table_name, defaults),
-        }
+        }?;
+        let _ = builder.updated_on(Utc::now());
+        Ok(builder)
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
@@ -271,9 +281,7 @@ impl TableMeta {
                 }
                 SetRegionOption::Twsc(key, value) => {
                     if !value.is_empty() {
-                        new_options
-                            .extra_options
-                            .insert(key.to_string(), value.to_string());
+                        new_options.extra_options.insert(key.clone(), value.clone());
                         // Ensure node restart correctly.
                         new_options.extra_options.insert(
                             COMPACTION_TYPE.to_string(),
@@ -1147,7 +1155,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Default)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -1164,6 +1172,7 @@ pub struct RawTableMeta {
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
+    pub updated_on: DateTime<Utc>,
     /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
@@ -1171,6 +1180,47 @@ pub struct RawTableMeta {
     /// Note: This field may be empty for older versions that did not include this field.
     #[serde(default)]
     pub column_ids: Vec<ColumnId>,
+}
+
+impl<'de> Deserialize<'de> for RawTableMeta {
+    fn deserialize<D>(
+        deserializer: D,
+    ) -> std::result::Result<RawTableMeta, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            schema: RawSchema,
+            primary_key_indices: Vec<usize>,
+            value_indices: Vec<usize>,
+            engine: String,
+            next_column_id: u32,
+            region_numbers: Vec<u32>,
+            options: TableOptions,
+            created_on: DateTime<Utc>,
+            updated_on: Option<DateTime<Utc>>,
+            #[serde(default)]
+            partition_key_indices: Vec<usize>,
+            #[serde(default)]
+            column_ids: Vec<ColumnId>,
+        }
+
+        let h = Helper::deserialize(deserializer)?;
+        Ok(RawTableMeta {
+            schema: h.schema,
+            primary_key_indices: h.primary_key_indices,
+            value_indices: h.value_indices,
+            engine: h.engine,
+            next_column_id: h.next_column_id,
+            region_numbers: h.region_numbers,
+            options: h.options,
+            created_on: h.created_on,
+            updated_on: h.updated_on.unwrap_or(h.created_on),
+            partition_key_indices: h.partition_key_indices,
+            column_ids: h.column_ids,
+        })
+    }
 }
 
 impl From<TableMeta> for RawTableMeta {
@@ -1184,6 +1234,7 @@ impl From<TableMeta> for RawTableMeta {
             region_numbers: meta.region_numbers,
             options: meta.options,
             created_on: meta.created_on,
+            updated_on: meta.updated_on,
             partition_key_indices: meta.partition_key_indices,
             column_ids: meta.column_ids,
         }
@@ -1203,6 +1254,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             next_column_id: raw.next_column_id,
             options: raw.options,
             created_on: raw.created_on,
+            updated_on: raw.updated_on,
             partition_key_indices: raw.partition_key_indices,
             column_ids: raw.column_ids,
         })
@@ -1291,7 +1343,7 @@ impl RawTableInfo {
     }
 
     /// Returns the table reference.
-    pub fn table_ref(&self) -> TableReference {
+    pub fn table_ref(&self) -> TableReference<'_> {
         TableReference::full(
             self.catalog_name.as_str(),
             self.schema_name.as_str(),

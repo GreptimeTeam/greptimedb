@@ -208,7 +208,6 @@ impl KeyValPlan {
     ) -> Result<KeyValPlan, Error> {
         let group_expr_val = group_exprs
             .iter()
-            .cloned()
             .map(|expr| expr.expr.clone())
             .collect_vec();
         let output_arity = group_expr_val.len();

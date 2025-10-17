@@ -71,7 +71,7 @@ impl State for ReconcileRegions {
             .column_metadatas
             .iter()
             .filter(|c| c.semantic_type == SemanticType::Tag)
-            .map(|c| c.column_schema.name.to_string())
+            .map(|c| c.column_schema.name.clone())
             .collect::<HashSet<_>>();
         let column_defs = self
             .column_metadatas

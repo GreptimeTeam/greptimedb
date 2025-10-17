@@ -10,17 +10,26 @@ DESC TABLE CLUSTER_INFO;
 | peer_id              | Int64                |     | NO   |         | FIELD         |
 | peer_type            | String               |     | NO   |         | FIELD         |
 | peer_addr            | String               |     | YES  |         | FIELD         |
+<<<<<<< HEAD
 | total_cpu_millicores | Int64                |     | NO   |         | FIELD         |
 | total_memory_bytes   | Int64                |     | NO   |         | FIELD         |
 | cpu_usage_millicores | Int64                |     | NO   |         | FIELD         |
 | memory_usage_bytes   | Int64                |     | NO   |         | FIELD         |
+=======
+| peer_hostname        | String               |     | YES  |         | FIELD         |
+| total_cpu_millicores | UInt32               |     | NO   |         | FIELD         |
+| total_memory_bytes   | UInt64               |     | NO   |         | FIELD         |
+>>>>>>> main
 | version              | String               |     | NO   |         | FIELD         |
 | git_commit           | String               |     | NO   |         | FIELD         |
 | start_time           | TimestampMillisecond |     | YES  |         | FIELD         |
 | uptime               | String               |     | YES  |         | FIELD         |
 | active_time          | String               |     | YES  |         | FIELD         |
 | node_status          | String               |     | YES  |         | FIELD         |
+<<<<<<< HEAD
 | hostname             | String               |     | YES  |         | FIELD         |
+=======
+>>>>>>> main
 +----------------------+----------------------+-----+------+---------+---------------+
 
 -- SQLNESS REPLACE version node_version

@@ -27,7 +27,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -111,7 +111,12 @@ impl SimpleBulkMemtable {
         let size = series.push(ts, sequence, op_type, kv.fields());
         stats.value_bytes += size;
         // safety: timestamp of kv must be both present and a valid timestamp value.
-        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        let ts = kv
+            .timestamp()
+            .try_into_timestamp()
+            .unwrap()
+            .unwrap()
+            .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
     }
@@ -218,7 +223,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build(None)?;
 
@@ -234,7 +239,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> error::Result<MemtableRanges> {
         let start_time = Instant::now();
@@ -833,7 +838,9 @@ mod tests {
             .unwrap();
 
         // Filter with sequence 0 should only return first write
-        let mut iter = memtable.iter(None, None, Some(0)).unwrap();
+        let mut iter = memtable
+            .iter(None, None, Some(SequenceRange::LtEq { max: 0 }))
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
         assert_eq!(1.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap());
@@ -849,7 +856,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from_iter_values(
-                    ["a".repeat(string_len as usize).to_string()].into_iter(),
+                    ["a".repeat(string_len as usize).clone()].into_iter(),
                 )) as ArrayRef,
                 Arc::new(TimestampMillisecondArray::from_iter_values(
                     [ts].into_iter(),

@@ -229,10 +229,8 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
 }
 
 pub async fn test_grpc_auth(store_type: StorageType) {
-    let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-    )
-    .unwrap();
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
     let (_db, fe_grpc_server) =
         setup_grpc_server_with_user_provider(store_type, "auto_create_table", Some(user_provider))
             .await;
@@ -282,10 +280,8 @@ pub async fn test_grpc_auth(store_type: StorageType) {
 }
 
 pub async fn test_otel_arrow_auth(store_type: StorageType) {
-    let user_provider = user_provider_from_option(
-        &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-    )
-    .unwrap();
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
     let (_db, fe_grpc_server) = setup_grpc_server_with_user_provider(
         store_type,
         "test_otel_arrow_auth",

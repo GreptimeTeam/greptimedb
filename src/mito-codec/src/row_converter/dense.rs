@@ -124,7 +124,7 @@ impl SortField {
                     ConcreteDataType::$ty(_) => {
                         paste!{
                             value
-                            .[<as_ $f>]()
+                            .[<try_into_ $f>]()
                             .context(FieldTypeMismatchSnafu)?
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
@@ -132,26 +132,26 @@ impl SortField {
                     }
                 )*
                     ConcreteDataType::Timestamp(_) => {
-                        let timestamp = value.as_timestamp().context(FieldTypeMismatchSnafu)?;
+                        let timestamp = value.try_into_timestamp().context(FieldTypeMismatchSnafu)?;
                         timestamp
                             .map(|t|t.value())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::YearMonth(_)) => {
-                        let interval = value.as_interval_year_month().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_year_month().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i32())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::DayTime(_)) => {
-                        let interval = value.as_interval_day_time().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_day_time().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i64())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
-                        let interval = value.as_interval_month_day_nano().context(FieldTypeMismatchSnafu)?;
+                        let interval = value.try_into_interval_month_day_nano().context(FieldTypeMismatchSnafu)?;
                         interval.map(|i| i.to_i128())
                             .serialize($serializer)
                             .context(SerializeFieldSnafu)?;
@@ -516,7 +516,7 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        let iter = values.iter().map(|(_, v)| *v);
+        let iter = values.iter().map(|(_, v)| v.clone());
         self.encode_dense(iter, buffer)
     }
 

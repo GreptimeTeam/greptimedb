@@ -327,8 +327,8 @@ impl LogQueryPlanner {
                     .session_state
                     .aggregate_functions()
                     .get(fn_name)
-                    .context(UnknownAggregateFunctionSnafu {
-                        name: fn_name.to_string(),
+                    .with_context(|| UnknownAggregateFunctionSnafu {
+                        name: fn_name.clone(),
                     })?;
                 let args = args
                     .iter()
@@ -675,7 +675,7 @@ mod tests {
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
-                .name(table_name.to_string())
+                .name(table_name.clone())
                 .meta(table_meta)
                 .build()
                 .unwrap();
@@ -684,8 +684,8 @@ mod tests {
             catalog_list
                 .register_table_sync(RegisterTableRequest {
                     catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: schema_name.to_string(),
-                    table_name: table_name.to_string(),
+                    schema: schema_name.clone(),
+                    table_name: table_name.clone(),
                     table_id: 1024,
                     table,
                 })
