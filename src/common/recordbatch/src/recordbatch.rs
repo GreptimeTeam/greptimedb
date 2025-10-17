@@ -247,6 +247,15 @@ impl RecordBatch {
         let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
         RecordBatch::new(self.schema.clone(), columns)
     }
+
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.df_record_batch
+            .columns()
+            .iter()
+            // If can not get slice memory size, assume 0 here.
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum()
+    }
 }
 
 impl Serialize for RecordBatch {

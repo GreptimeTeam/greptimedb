@@ -524,9 +524,9 @@ impl fmt::Debug for QueryMemoryTracker {
 
 impl QueryMemoryTracker {
     /// Default capacity for Top-K privileged streams.
-    pub const DEFAULT_CAPACITY: usize = 10;
+    pub const DEFAULT_CAPACITY: usize = 15;
     /// Default memory ratio for non-privileged streams.
-    pub const DEFAULT_NON_PRIVILEGED_RATIO: f64 = 0.5;
+    pub const DEFAULT_NON_PRIVILEGED_RATIO: f64 = 0.7;
 
     /// Create a new memory tracker with the given limit (in bytes).
     ///
@@ -731,11 +731,7 @@ impl Stream for MemoryTrackedStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let size = batch
-                    .columns()
-                    .iter()
-                    .map(|vec_ref| vec_ref.memory_size())
-                    .sum::<usize>();
+                let size = batch.estimated_size();
 
                 if let Err(e) = self.permit.track(size, self.total_tracked) {
                     return Poll::Ready(Some(Err(e)));
