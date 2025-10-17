@@ -90,3 +90,27 @@ impl LogStore for NoopLogStore {
         Ok(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_append_batch() {
+        let log_store = NoopLogStore;
+        let entries = vec![Entry::Naive(NaiveEntry {
+            provider: Provider::noop_provider(),
+            region_id: RegionId::new(1, 1),
+            entry_id: 1,
+            data: vec![1],
+        })];
+
+        let last_entry_ids = log_store
+            .append_batch(entries)
+            .await
+            .unwrap()
+            .last_entry_ids;
+        assert_eq!(last_entry_ids.len(), 1);
+        assert_eq!(last_entry_ids[&(RegionId::new(1, 1))], 0);
+    }
+}
