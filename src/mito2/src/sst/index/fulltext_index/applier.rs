@@ -24,6 +24,7 @@ use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
 use index::fulltext_index::{Analyzer, Config};
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
@@ -171,7 +172,10 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         request: &FulltextRequest,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}");
+        let blob_key = format!(
+            "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+            IndexTarget::ColumnId(column_id)
+        );
         let dir = self
             .index_source
             .dir(file_id, &blob_key, file_size_hint)
@@ -283,7 +287,10 @@ impl FulltextIndexApplier {
         terms: &[FulltextTerm],
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> Result<bool> {
-        let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{column_id}");
+        let blob_key = format!(
+            "{INDEX_BLOB_TYPE_BLOOM}-{}",
+            IndexTarget::ColumnId(column_id)
+        );
         let Some(reader) = self
             .index_source
             .blob(file_id, &blob_key, file_size_hint)

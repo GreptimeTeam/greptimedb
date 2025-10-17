@@ -75,3 +75,12 @@ impl Config {
         Ok(Self::default())
     }
 }
+
+impl Analyzer {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Analyzer::English => "English",
+            Analyzer::Chinese => "Chinese",
+        }
+    }
+}
