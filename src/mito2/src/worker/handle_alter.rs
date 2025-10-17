@@ -158,9 +158,8 @@ impl<S> RegionWorkerLoop<S> {
         let change = RegionChange {
             metadata: new_meta,
             sst_format: region.sst_format(),
-            need_index,
         };
-        self.handle_manifest_region_change(region, change, sender)
+        self.handle_manifest_region_change(region, change, need_index, sender);
     }
 
     /// Handles requests that changes region options, like TTL. It only affects memory state

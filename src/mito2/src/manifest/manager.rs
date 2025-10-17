@@ -178,7 +178,6 @@ impl RegionManifestManager {
             RegionChange {
                 metadata: metadata.clone(),
                 sst_format,
-                need_index: true,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -192,7 +191,6 @@ impl RegionManifestManager {
         let mut actions = vec![RegionMetaAction::Change(RegionChange {
             metadata,
             sst_format,
-            need_index: true,
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
@@ -801,7 +799,6 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
-                need_index: false,
             }));
 
         let current_version = manager
@@ -871,7 +868,6 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
-                need_index: false,
             }));
 
         let current_version = manager

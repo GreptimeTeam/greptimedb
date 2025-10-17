@@ -53,13 +53,6 @@ pub struct RegionChange {
     /// Format of the SST.
     #[serde(default)]
     pub sst_format: FormatType,
-    /// A flag indicates whether the index has been changed.
-    ///
-    /// For backward compatibility, this field is default to `false` when
-    /// deserializing from old manifest.
-    /// Used for index build, to determine whether we need to build index files after schema change.
-    #[serde(default)]
-    pub need_index: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -964,7 +957,6 @@ mod tests {
         let region_change = RegionChange {
             metadata: region_change.metadata.clone(),
             sst_format: FormatType::Flat,
-            need_index: false,
         };
 
         let serialized = serde_json::to_string(&region_change).unwrap();

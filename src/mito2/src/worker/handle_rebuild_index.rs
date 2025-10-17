@@ -17,13 +17,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::meta::RegionRole;
 use common_telemetry::{debug, error, warn};
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::region::MitoRegionRef;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{
@@ -102,10 +103,10 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_rebuild_index(
         &mut self,
         request: BuildIndexRequest,
-        sender: OptionOutputTx,
+        mut sender: OptionOutputTx,
     ) {
         let region_id = request.region_id;
-        let Some(region) = self.regions.get_region(region_id) else {
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
@@ -152,6 +153,22 @@ impl<S> RegionWorkerLoop<S> {
                 region_id,
                 file_handle.meta_ref().file_id
             );
+
+            let should_abort = region.state()
+                == RegionRoleState::Leader(RegionLeaderState::Dropping)
+                || region.state() == RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                || region.state() == RegionRoleState::Leader(RegionLeaderState::Truncating);
+
+            if should_abort {
+                warn!(
+                    "Region {} is in state {:?}, abort index rebuild process for file_id {}",
+                    region_id,
+                    region.state(),
+                    file_handle.meta_ref().file_id
+                );
+                break;
+            }
+
             let task = self.new_index_build_task(
                 &region,
                 file_handle.clone(),

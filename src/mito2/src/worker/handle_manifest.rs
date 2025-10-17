@@ -359,6 +359,7 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: MitoRegionRef,
         change: RegionChange,
+        need_index: bool,
         sender: OptionOutputTx,
     ) {
         // Marks the region as altering.
@@ -371,7 +372,6 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
             let new_meta = change.metadata.clone();
-            let need_index = change.need_index;
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
 
             let result = region
