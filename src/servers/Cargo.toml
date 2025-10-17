@@ -35,6 +35,7 @@ catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
+common-decimal.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true
 common-grpc.workspace = true
