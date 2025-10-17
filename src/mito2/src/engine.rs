@@ -81,10 +81,10 @@ use std::time::Instant;
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
-use common_config::utils::get_sys_total_memory;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
+use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
@@ -207,7 +207,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         )
         .await?;
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
-        let total_memory = get_sys_total_memory().map(|s| s.as_bytes()).unwrap_or(0);
+        let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
             .with_update_callback(|usage| {
@@ -1270,7 +1270,7 @@ impl MitoEngine {
 
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
-        let total_memory = get_sys_total_memory().map(|s| s.as_bytes()).unwrap_or(0);
+        let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
             .with_update_callback(|usage| {
