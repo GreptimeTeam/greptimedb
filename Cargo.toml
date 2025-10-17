@@ -129,7 +129,7 @@ datafusion-expr = "50"
 datafusion-functions = "50"
 datafusion-functions-aggregate-common = "50"
 datafusion-optimizer = "50"
-datafusion-orc = { git = "https://github.com/GreptimeTeam/datafusion-orc", rev = "2971b041ce1c94e315ac5b327589da6d61f449c0" }
+datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc", tag = "v0.5.0" }
 datafusion-pg-catalog = "0.11"
 datafusion-physical-expr = "50"
 datafusion-physical-plan = "50"
