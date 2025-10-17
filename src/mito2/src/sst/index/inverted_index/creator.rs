@@ -24,6 +24,7 @@ use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
+use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
@@ -72,7 +73,7 @@ pub struct InvertedIndexer {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Ids of indexed columns and their names (`to_string` of the column id).
+    /// Ids of indexed columns and their encoded target keys.
     indexed_column_ids: Vec<(ColumnId, String)>,
 
     /// Region metadata for column lookups.
@@ -115,8 +116,8 @@ impl InvertedIndexer {
         let indexed_column_ids = indexed_column_ids
             .into_iter()
             .map(|col_id| {
-                let col_id_str = col_id.to_string();
-                (col_id, col_id_str)
+                let target_key = format!("{}", IndexTarget::ColumnId(col_id));
+                (col_id, target_key)
             })
             .collect();
         Self {
@@ -181,7 +182,7 @@ impl InvertedIndexer {
 
         let column_indices = self.column_index_cache.as_ref().unwrap();
 
-        for ((col_id, col_id_str), &column_index) in
+        for ((col_id, target_key), &column_index) in
             self.indexed_column_ids.iter().zip(column_indices.iter())
         {
             if let Some(index) = column_index {
@@ -197,7 +198,7 @@ impl InvertedIndexer {
 
                     if value_ref.is_null() {
                         self.index_creator
-                            .push_with_name(col_id_str, None)
+                            .push_with_name(target_key, None)
                             .await
                             .context(PushIndexValueSnafu)?;
                     } else {
@@ -208,7 +209,7 @@ impl InvertedIndexer {
                         )
                         .context(EncodeSnafu)?;
                         self.index_creator
-                            .push_with_name(col_id_str, Some(&self.value_buf))
+                            .push_with_name(target_key, Some(&self.value_buf))
                             .await
                             .context(PushIndexValueSnafu)?;
                     }
@@ -286,7 +287,7 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (col_id, col_id_str) in &self.indexed_column_ids {
+        for (col_id, target_key) in &self.indexed_column_ids {
             match self.codec.pk_col_info(*col_id) {
                 // pk
                 Some(col_info) => {
@@ -308,7 +309,7 @@ impl InvertedIndexer {
                         .transpose()?;
 
                     self.index_creator
-                        .push_with_name_n(col_id_str, value, n)
+                        .push_with_name_n(target_key, value, n)
                         .await
                         .context(PushIndexValueSnafu)?;
                 }
@@ -327,7 +328,7 @@ impl InvertedIndexer {
                         let value = values.data.get_ref(i);
                         if value.is_null() {
                             self.index_creator
-                                .push_with_name(col_id_str, None)
+                                .push_with_name(target_key, None)
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         } else {
@@ -338,7 +339,7 @@ impl InvertedIndexer {
                             )
                             .context(EncodeSnafu)?;
                             self.index_creator
-                                .push_with_name(col_id_str, Some(&self.value_buf))
+                                .push_with_name(target_key, Some(&self.value_buf))
                                 .await
                                 .context(PushIndexValueSnafu)?;
                         }
