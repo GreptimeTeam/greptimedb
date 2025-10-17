@@ -29,8 +29,18 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_scan_with_min_sst_sequence() {
+    test_scan_with_min_sst_sequence_with_format(false).await;
+    test_scan_with_min_sst_sequence_with_format(true).await;
+}
+
+async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -155,8 +165,14 @@ async fn test_scan_with_min_sst_sequence() {
 
 #[tokio::test]
 async fn test_max_concurrent_scan_files() {
+    test_max_concurrent_scan_files_with_format(false).await;
+    test_max_concurrent_scan_files_with_format(true).await;
+}
+
+async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
+        default_experimental_flat_format: flat_format,
         max_concurrent_scan_files: 2,
         ..Default::default()
     };
@@ -207,8 +223,18 @@ async fn test_max_concurrent_scan_files() {
 
 #[tokio::test]
 async fn test_series_scan() {
+    test_series_scan_with_format(false).await;
+    test_series_scan_with_format(true).await;
+}
+
+async fn test_series_scan_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_series_scan").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
