@@ -69,6 +69,7 @@ impl FulltextIndexer {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
+            // TODO(yingwen): Skip tags.
             let options = column
                 .column_schema
                 .fulltext_options()
@@ -352,6 +353,7 @@ impl SingleCreator {
                 }
             }
         } else {
+            // TODO(yingwen): handle sparse encoding.
             // If the column is not found in the batch, push empty text.
             // Ensure that the number of texts pushed is the same as the number of rows in the SST,
             // so that the texts are aligned with the row ids.

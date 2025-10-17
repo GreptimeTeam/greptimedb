@@ -219,6 +219,7 @@ impl InvertedIndexer {
                     "Column {} not found in the batch during building inverted index",
                     col_id
                 );
+                // TODO(yingwen): Support sparse encoding like bloom_filter creator.
             }
         }
 
