@@ -17,7 +17,6 @@ use api::v1::meta::{
     MetasrvPeersRequest, MetasrvPeersResponse, RangeRequest as PbRangeRequest,
     RangeResponse as PbRangeResponse, cluster_server,
 };
-use common_stat::get_memory_usage_from_cgroups;
 use snafu::ResultExt;
 use tonic::Request;
 
@@ -98,15 +97,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            total_cpu_millicores: self.resource_spec().total_cpu_millicores,
-            total_memory_bytes: self
-                .resource_spec()
-                .total_memory_bytes
-                .unwrap_or_default()
-                .as_bytes() as i64,
-            // FIXME(zyy17): How to get the accurate cpu usage? It need to be calculated periodically.
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: get_memory_usage_from_cgroups().unwrap_or_default(),
+            total_cpu_millicores: self.resource_stat().get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat().get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat().get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat().get_memory_usage_bytes(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

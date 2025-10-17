@@ -22,7 +22,6 @@ use std::time::Duration;
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
-use common_config::utils::ResourceSpec;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -47,7 +46,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
 use common_procedure::options::ProcedureConfig;
-use common_stat::get_memory_usage_from_cgroups;
+use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
 use common_wal::config::MetasrvWalConfig;
@@ -526,7 +525,7 @@ pub struct Metasrv {
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
 
     plugins: Plugins,
 }
@@ -708,8 +707,8 @@ impl Metasrv {
         self.start_time_ms
     }
 
-    pub fn resource_spec(&self) -> &ResourceSpec {
-        &self.resource_spec
+    pub fn resource_stat(&self) -> &ResourceStatRef {
+        &self.resource_stat
     }
 
     pub fn node_info(&self) -> MetasrvNodeInfo {
@@ -719,15 +718,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            total_cpu_millicores: self.resource_spec().total_cpu_millicores,
-            total_memory_bytes: self
-                .resource_spec()
-                .total_memory_bytes
-                .unwrap_or_default()
-                .as_bytes() as i64,
-            // FIXME(zyy17): How to get the accurate cpu usage? It need to be calculated periodically.
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: get_memory_usage_from_cgroups().unwrap_or_default(),
+            total_cpu_millicores: self.resource_stat.get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat.get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat.get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat.get_memory_usage_bytes(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

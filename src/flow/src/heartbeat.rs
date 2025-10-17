@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use api::v1::meta::{HeartbeatRequest, Peer};
-use common_config::utils::ResourceSpec;
 use common_error::ext::BoxedError;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -26,7 +25,7 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_stat::{calculate_cpu_usage, get_cpu_usage_from_cgroups, get_memory_usage_from_cgroups};
+use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
@@ -70,7 +69,7 @@ pub struct HeartbeatTask {
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
 }
 
 impl HeartbeatTask {
@@ -78,11 +77,13 @@ impl HeartbeatTask {
         self.query_stat_size = Some(query_stat_size);
         self
     }
+
     pub fn new(
         opts: &FlownodeOptions,
         meta_client: Arc<MetaClient>,
         heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+        resource_stat: ResourceStatRef,
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
@@ -94,7 +95,7 @@ impl HeartbeatTask {
             resp_handler_executor,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
-            resource_spec: Default::default(),
+            resource_stat,
         }
     }
 
@@ -147,8 +148,8 @@ impl HeartbeatTask {
         heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
         latest_report: &Option<FlowStat>,
-        cpu_usage: Option<i64>,
-        memory_usage: Option<i64>,
+        cpu_usage: i64,
+        memory_usage: i64,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -179,11 +180,8 @@ impl HeartbeatTask {
             ..heartbeat_request.clone()
         };
 
-        if let (Some(cpu_usage), Some(info)) = (cpu_usage, heartbeat_request.info.as_mut()) {
+        if let Some(info) = heartbeat_request.info.as_mut() {
             info.cpu_usage_millicores = cpu_usage;
-        }
-
-        if let (Some(memory_usage), Some(info)) = (memory_usage, heartbeat_request.info.as_mut()) {
             info.memory_usage_bytes = memory_usage;
         }
 
@@ -226,13 +224,9 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
-        let total_cpu_millicores = self.resource_spec.total_cpu_millicores;
-        let total_memory_bytes = self
-            .resource_spec
-            .total_memory_bytes
-            .unwrap_or_default()
-            .as_bytes() as i64;
-
+        let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
+        let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
+        let resource_stat = self.resource_stat.clone();
         let query_stat_size = self.query_stat_size.clone();
 
         common_runtime::spawn_hb(async move {
@@ -249,12 +243,11 @@ impl HeartbeatTask {
                 ..Default::default()
             };
 
-            let mut last_cpu_usage_usecs = get_cpu_usage_from_cgroups();
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report, None, None)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report, 0, 0)
                         } else {
                             warn!("Sender has been dropped, exiting the heartbeat loop");
                             // Receives None that means Sender was dropped, we need to break the current loop
@@ -262,14 +255,7 @@ impl HeartbeatTask {
                         }
                     }
                     _ = interval.tick() => {
-                        let mut cpu_usage = get_cpu_usage_from_cgroups();
-                        let memory_usage = get_memory_usage_from_cgroups();
-                        if let (Some(current), Some(last)) = (cpu_usage, last_cpu_usage_usecs) {
-                            cpu_usage = Some(calculate_cpu_usage(current, last, report_interval.as_millis() as i64));
-                            last_cpu_usage_usecs = Some(current);
-                        }
-
-                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report, cpu_usage, memory_usage)
+                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report, resource_stat.get_cpu_usage_millicores(), resource_stat.get_memory_usage_bytes())
                     }
                 };
 

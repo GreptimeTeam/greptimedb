@@ -2033,7 +2033,6 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
- "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-wal",
@@ -2553,11 +2552,14 @@ name = "common-stat"
 version = "0.18.0"
 dependencies = [
  "common-base",
+ "common-runtime",
+ "common-telemetry",
  "lazy_static",
  "nix 0.30.1",
  "num_cpus",
  "prometheus",
  "sysinfo",
+ "tokio",
 ]
 
 [[package]]
@@ -13051,6 +13053,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",

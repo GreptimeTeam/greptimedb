@@ -24,9 +24,7 @@ use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::peer::Peer;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_query::request::QueryRequest;
-use common_stat::{
-    get_memory_usage_from_cgroups, get_total_cpu_millicores, get_total_memory_bytes,
-};
+use common_stat::{ResourceStatImpl, ResourceStatRef};
 use datanode::region_server::RegionServer;
 use flow::StreamingEngine;
 use snafu::ResultExt;
@@ -38,15 +36,19 @@ pub struct StandaloneInformationExtension {
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
     flow_streaming_engine: RwLock<Option<Arc<StreamingEngine>>>,
+    resource_stat: ResourceStatRef,
 }
 
 impl StandaloneInformationExtension {
     pub fn new(region_server: RegionServer, procedure_manager: ProcedureManagerRef) -> Self {
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
         Self {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
             flow_streaming_engine: RwLock::new(None),
+            resource_stat: Arc::new(resource_stat),
         }
     }
 
@@ -78,11 +80,10 @@ impl InformationExtension for StandaloneInformationExtension {
             // Use `self.start_time_ms` instead.
             // It's not precise but enough.
             start_time_ms: self.start_time_ms,
-            total_cpu_millicores: get_total_cpu_millicores(),
-            total_memory_bytes: get_total_memory_bytes(),
-            // FIXME(zyy17): How to get the accurate cpu usage? It need to be calculated periodically.
-            cpu_usage_millicores: 0,
-            memory_usage_bytes: get_memory_usage_from_cgroups().unwrap_or_default(),
+            total_cpu_millicores: self.resource_stat.get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat.get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat.get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat.get_memory_usage_bytes(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

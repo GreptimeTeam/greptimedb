@@ -145,16 +145,16 @@ pub fn get_cpu_usage_from_cgroups() -> Option<i64> {
     fields[1].trim().parse::<i64>().ok()
 }
 
-/// Calculate the cpu usage in millicores from cgroups filesystem.
-///
-/// - Return `0` if the current cpu usage is equal to the last cpu usage or the interval is 0.
-pub fn calculate_cpu_usage(
+// Calculate the cpu usage in millicores from cgroups filesystem.
+//
+// - Return `0` if the current cpu usage is equal to the last cpu usage or the interval is 0.
+pub(crate) fn calculate_cpu_usage(
     current_cpu_usage_usecs: i64,
     last_cpu_usage_usecs: i64,
     interval_milliseconds: i64,
 ) -> i64 {
     let diff = current_cpu_usage_usecs - last_cpu_usage_usecs;
-    if diff != 0 && interval_milliseconds != 0 {
+    if diff > 0 && interval_milliseconds > 0 {
         ((diff as f64 / interval_milliseconds as f64).round() as i64).max(1)
     } else {
         0
