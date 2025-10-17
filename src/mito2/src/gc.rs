@@ -595,6 +595,7 @@ impl LocalGcWorker {
         recently_removed_files: BTreeMap<Timestamp, HashSet<FileId>>,
         concurrency: usize,
     ) -> Result<Vec<FileId>> {
+        let start = tokio::time::Instant::now();
         let now = chrono::Utc::now();
         let may_linger_until = now
             - chrono::Duration::from_std(self.opt.lingering_time).with_context(|_| {
@@ -640,6 +641,10 @@ impl LocalGcWorker {
                 unknown_file_may_linger_until,
             );
 
+        info!(
+            "gc: listing op cost {} secs.",
+            start.elapsed().as_secs_f64()
+        );
         info!("All in exist linger files: {:?}", all_in_exist_linger_files);
 
         Ok(all_unused_files_ready_for_delete)

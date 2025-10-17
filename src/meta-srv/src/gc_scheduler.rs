@@ -240,49 +240,6 @@ impl GcScheduler {
         Ok(table_to_region_stats)
     }
 
-    /// Get datanode GC statistics mapping from peer to GcStat
-    async fn get_datanode_gc_stats(&self) -> Result<HashMap<Peer, GcStat>> {
-        let dn_stats = self.meta_peer_client.get_all_dn_stat_kvs().await?;
-        let mut datanode_gc_stats: HashMap<Peer, GcStat> = HashMap::new();
-
-        for (_dn_key, stats) in dn_stats {
-            // Get the latest stat (most recent)
-            if let Some(latest_stat) = stats.stats.last() {
-                let peer = Peer {
-                    id: latest_stat.id,
-                    addr: latest_stat.addr.clone(),
-                };
-                datanode_gc_stats.insert(peer, latest_stat.gc_stat.clone());
-            }
-        }
-
-        Ok(datanode_gc_stats)
-    }
-
-    /// Select the best peer for GC based on load from GcStat
-    fn select_best_peer_for_gc(&self, datanode_gc_stats: &HashMap<Peer, GcStat>) -> Option<Peer> {
-        let mut best_peer = None;
-        let mut best_load_score = f64::MAX;
-
-        for (peer, gc_stat) in datanode_gc_stats {
-            // Calculate load score: ratio of running tasks to concurrency
-            // Lower score means lower load (better candidate)
-            let load_score = if gc_stat.gc_concurrency > 0 {
-                gc_stat.running_gc_tasks as f64 / gc_stat.gc_concurrency as f64
-            } else {
-                // If concurrency is 0, use a high score to avoid this peer
-                f64::MAX
-            };
-
-            if load_score < best_load_score {
-                best_load_score = load_score;
-                best_peer = Some(peer.clone());
-            }
-        }
-
-        best_peer
-    }
-
     /// Calculate GC priority score for a region based on various metrics.
     fn calculate_gc_score(&self, region_stat: &RegionStat) -> f64 {
         let sst_count_score = region_stat.sst_num as f64 * self.config.sst_count_weight;
@@ -676,22 +633,13 @@ impl GcScheduler {
                         .refresh_file_refs_for(&[region_id], region_to_peer)
                         .await?;
 
-                    // use a possibly different peer based on current load
-
-                    // Get GC stats for all datanodes to choose the best peer based on load
-                    let datanode_gc_stats = self.get_datanode_gc_stats().await?;
-
-                    // Select the best peer based on GC load, or fall back to region-specific peer
-                    peer = if let Some(best_peer) = self.select_best_peer_for_gc(&datanode_gc_stats)
-                    {
-                        best_peer
-                    } else {
-                        // Fall back to the original region-specific peer if no suitable peer found
-                        region_to_peer
-                            .get(&region_id)
-                            .with_context(|| RegionRouteNotFoundSnafu { region_id })?
-                            .clone()
-                    };
+                    // TODO(discord9): Select the best peer based on GC load
+                    // for now gc worker need to be run from datanode that hosts the region
+                    // this limit might be lifted in the future
+                    peer = region_to_peer
+                        .get(&region_id)
+                        .with_context(|| RegionRouteNotFoundSnafu { region_id })?
+                        .clone();
                 }
                 Err(e) => {
                     error!(
