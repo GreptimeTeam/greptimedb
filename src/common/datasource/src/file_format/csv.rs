@@ -157,19 +157,27 @@ pub async fn stream_to_csv(
     concurrency: usize,
     format: &CsvFormat,
 ) -> Result<usize> {
-    stream_to_file(stream, store, path, threshold, concurrency, |buffer| {
-        let mut builder = WriterBuilder::new();
-        if let Some(timestamp_format) = &format.timestamp_format {
-            builder = builder.with_timestamp_format(timestamp_format.to_owned())
-        }
-        if let Some(date_format) = &format.date_format {
-            builder = builder.with_date_format(date_format.to_owned())
-        }
-        if let Some(time_format) = &format.time_format {
-            builder = builder.with_time_format(time_format.to_owned())
-        }
-        builder.build(buffer)
-    })
+    stream_to_file(
+        stream,
+        store,
+        path,
+        threshold,
+        concurrency,
+        format.compression_type,
+        |buffer| {
+            let mut builder = WriterBuilder::new();
+            if let Some(timestamp_format) = &format.timestamp_format {
+                builder = builder.with_timestamp_format(timestamp_format.to_owned())
+            }
+            if let Some(date_format) = &format.date_format {
+                builder = builder.with_date_format(date_format.to_owned())
+            }
+            if let Some(time_format) = &format.time_format {
+                builder = builder.with_time_format(time_format.to_owned())
+            }
+            builder.build(buffer)
+        },
+    )
     .await
 }
 
@@ -296,5 +304,80 @@ mod tests {
                 date_format: None
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_compressed_csv_export() {
+        use std::sync::Arc;
+
+        use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+        use common_recordbatch::{RecordBatch, RecordBatches};
+        use datatypes::prelude::ConcreteDataType;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use datatypes::vectors::{Float64Vector, StringVector, UInt32Vector, VectorRef};
+
+        // Create test data
+        let column_schemas = vec![
+            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3])),
+            Arc::new(StringVector::from(vec!["Alice", "Bob", "Charlie"])),
+            Arc::new(Float64Vector::from_slice(vec![10.5, 20.3, 30.7])),
+        ];
+
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        // Test with different compression types
+        let compression_types = vec![
+            CompressionType::Gzip,
+            CompressionType::Bzip2,
+            CompressionType::Xz,
+            CompressionType::Zstd,
+            CompressionType::Uncompressed,
+        ];
+
+        for compression_type in compression_types {
+            let format = CsvFormat {
+                compression_type,
+                ..CsvFormat::default()
+            };
+
+            // Create a temporary file path
+            let temp_dir = std::env::temp_dir();
+            let file_name = format!("test_compressed_{:?}.csv", compression_type);
+            let file_path = temp_dir.join(&file_name);
+            let path_str = file_path.to_str().unwrap();
+
+            // Create a simple file store for testing
+            let store = test_store("/");
+
+            // Export CSV with compression
+            let rows = stream_to_csv(
+                Box::pin(DfRecordBatchStreamAdapter::new(recordbatches.as_stream())),
+                store,
+                path_str,
+                1024,
+                1,
+                &format,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(rows, 3);
+
+            // Verify file was created and has content
+            assert!(file_path.exists());
+            let file_size = std::fs::metadata(&file_path).unwrap().len();
+            assert!(file_size > 0);
+
+            // Clean up
+            let _ = std::fs::remove_file(&file_path);
+        }
     }
 }
