@@ -76,7 +76,6 @@ fn test_load_datanode_example_config() {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Percentage(0.5),
-                    scan_memory_soft_limit_ratio: ordered_float::OrderedFloat(0.7),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -299,7 +298,6 @@ fn test_load_standalone_example_config() {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Percentage(0.5),
-                    scan_memory_soft_limit_ratio: ordered_float::OrderedFloat(0.7),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),

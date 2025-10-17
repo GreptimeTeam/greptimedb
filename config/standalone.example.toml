@@ -604,11 +604,6 @@ allow_stale_entries = false
 ## Setting it to 0 disables the limit.
 scan_memory_limit = "50%"
 
-## Soft limit ratio for scan memory (0.0 to 1.0).
-## When memory usage exceeds soft limit, new queries are rejected but existing queries continue.
-## This prevents thundering herd in high concurrency scenarios.
-scan_memory_soft_limit_ratio = 0.7
-
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"

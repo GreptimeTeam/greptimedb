@@ -7658,7 +7658,6 @@ dependencies = [
  "mito-codec",
  "moka",
  "object-store",
- "ordered-float 4.6.0",
  "parquet",
  "partition",
  "paste",

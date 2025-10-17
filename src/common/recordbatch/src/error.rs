@@ -195,14 +195,22 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Exceeded memory limit: {} bytes requested, {} bytes used, {} bytes limit",
+        "Exceeded memory limit: {} bytes requested, {} bytes used globally ({}%), {} bytes used by this stream (privileged: {}), effective limit: {} bytes ({}%), hard limit: {} bytes",
         requested,
-        used,
+        global_used,
+        if *limit > 0 { global_used * 100 / limit } else { 0 },
+        stream_used,
+        is_privileged,
+        effective_limit,
+        if *limit > 0 { effective_limit * 100 / limit } else { 0 },
         limit
     ))]
     ExceedMemoryLimit {
         requested: usize,
-        used: usize,
+        global_used: usize,
+        stream_used: usize,
+        is_privileged: bool,
+        effective_limit: usize,
         limit: usize,
         #[snafu(implicit)]
         location: Location,
