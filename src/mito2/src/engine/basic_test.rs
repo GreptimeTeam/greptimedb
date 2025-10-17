@@ -48,8 +48,18 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_engine_new_stop() {
+    test_engine_new_stop_with_format(false).await;
+    test_engine_new_stop_with_format(true).await;
+}
+
+async fn test_engine_new_stop_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("engine-stop").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -75,8 +85,18 @@ async fn test_engine_new_stop() {
 
 #[tokio::test]
 async fn test_write_to_region() {
+    test_write_to_region_with_format(false).await;
+    test_write_to_region_with_format(true).await;
+}
+
+async fn test_write_to_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("write-to-region").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -97,8 +117,12 @@ async fn test_write_to_region() {
 }
 
 #[apply(multiple_log_store_factories)]
-
 async fn test_region_replay(factory: Option<LogStoreFactory>) {
+    test_region_replay_with_format(factory.clone(), false).await;
+    test_region_replay_with_format(factory, true).await;
+}
+
+async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     use common_wal::options::{KafkaWalOptions, WalOptions};
 
     common_telemetry::init_default_ut_logging();
@@ -108,7 +132,12 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("region-replay")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let topic = prepare_test_for_kafka_log_store(&factory).await;
@@ -136,7 +165,15 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
 
     let mut options = HashMap::new();
     if let Some(topic) = &topic {
@@ -189,8 +226,18 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_write_query_region() {
+    test_write_query_region_with_format(false).await;
+    test_write_query_region_with_format(true).await;
+}
+
+async fn test_write_query_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -223,8 +270,18 @@ async fn test_write_query_region() {
 
 #[tokio::test]
 async fn test_different_order() {
+    test_different_order_with_format(false).await;
+    test_different_order_with_format(true).await;
+}
+
+async fn test_different_order_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().tag_num(2).field_num(2).build();
@@ -274,8 +331,18 @@ async fn test_different_order() {
 
 #[tokio::test]
 async fn test_different_order_and_type() {
+    test_different_order_and_type_with_format(false).await;
+    test_different_order_and_type_with_format(true).await;
+}
+
+async fn test_different_order_and_type_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // tag_0, tag_1, field_0, field_1, ts,
@@ -326,10 +393,20 @@ async fn test_different_order_and_type() {
 
 #[tokio::test]
 async fn test_put_delete() {
+    test_put_delete_with_format(false).await;
+    test_put_delete_with_format(true).await;
+}
+
+async fn test_put_delete_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -380,8 +457,18 @@ async fn test_put_delete() {
 
 #[tokio::test]
 async fn test_delete_not_null_fields() {
+    test_delete_not_null_fields_with_format(false).await;
+    test_delete_not_null_fields_with_format(true).await;
+}
+
+async fn test_delete_not_null_fields_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().all_not_null(true).build();
@@ -429,8 +516,18 @@ async fn test_delete_not_null_fields() {
 
 #[tokio::test]
 async fn test_put_overwrite() {
+    test_put_overwrite_with_format(false).await;
+    test_put_overwrite_with_format(true).await;
+}
+
+async fn test_put_overwrite_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -489,8 +586,18 @@ async fn test_put_overwrite() {
 
 #[tokio::test]
 async fn test_absent_and_invalid_columns() {
+    test_absent_and_invalid_columns_with_format(false).await;
+    test_absent_and_invalid_columns_with_format(true).await;
+}
+
+async fn test_absent_and_invalid_columns_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     // tag_0, field_0, field_1, ts,
@@ -531,8 +638,18 @@ async fn test_absent_and_invalid_columns() {
 
 #[tokio::test]
 async fn test_region_usage() {
+    test_region_usage_with_format(false).await;
+    test_region_usage_with_format(true).await;
+}
+
+async fn test_region_usage_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("region_usage").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -583,11 +700,20 @@ async fn test_region_usage() {
 
 #[tokio::test]
 async fn test_engine_with_write_cache() {
+    test_engine_with_write_cache_with_format(false).await;
+    test_engine_with_write_cache_with_format(true).await;
+}
+
+async fn test_engine_with_write_cache_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
     let path = env.data_home().to_str().unwrap().to_string();
-    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
+    let mito_config = MitoConfig {
+        default_experimental_flat_format: flat_format,
+        ..Default::default()
+    }
+    .enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);
@@ -625,9 +751,15 @@ async fn test_engine_with_write_cache() {
 
 #[tokio::test]
 async fn test_cache_null_primary_key() {
+    test_cache_null_primary_key_with_format(false).await;
+    test_cache_null_primary_key_with_format(true).await;
+}
+
+async fn test_cache_null_primary_key_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
             vector_cache_size: ReadableSize::mb(32),
             ..Default::default()
         })
@@ -726,8 +858,18 @@ async fn test_cache_null_primary_key() {
 
 #[tokio::test]
 async fn test_list_ssts() {
+    test_list_ssts_with_format(false).await;
+    test_list_ssts_with_format(true).await;
+}
+
+async fn test_list_ssts_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // Create 3 regions and write some rows to each of them
     let region_ids = vec![
@@ -822,12 +964,22 @@ StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_s
 
 #[tokio::test]
 async fn test_all_index_metas_list_all_types() {
+    test_all_index_metas_list_all_types_with_format(false).await;
+    test_all_index_metas_list_all_types_with_format(true).await;
+}
+
+async fn test_all_index_metas_list_all_types_with_format(flat_format: bool) {
     use datatypes::schema::{
         FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
     };
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     // One region with both fulltext backends and inverted index enabled, plus bloom skipping index
     let region_id = RegionId::new(11, 1);
