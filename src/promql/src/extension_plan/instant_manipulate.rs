@@ -116,7 +116,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                     "Failed to get time index column at idx {} during unfixing InstantManipulate with columns:{:?}",
                     unfix.time_index_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             let field_column = if unfix.field_index_idx == u64::MAX {
                 None
@@ -127,7 +127,7 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
                         "Failed to get field column at idx {} during unfixing InstantManipulate with columns:{:?}",
                         unfix.field_index_idx, columns
                     )))?
-                    .flat_name())
+                    .name().to_string())
             };
 
             Ok(Self {

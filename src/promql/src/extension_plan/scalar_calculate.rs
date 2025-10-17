@@ -312,7 +312,7 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
                     "Failed to get time index column at idx {} during unfixing ScalarCalculate with columns:{:?}",
                     unfix.time_index_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             let tag_columns = unfix
                 .tag_column_indices
@@ -324,7 +324,7 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
                             "Failed to get tag column at idx {} during unfixing ScalarCalculate with columns:{:?}",
                             idx, columns
                         )))
-                        .map(|field| field.flat_name())
+                        .map(|field| field.name().to_string())
                 })
                 .collect::<DataFusionResult<Vec<String>>>()?;
 
@@ -334,7 +334,7 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
                     "Failed to get field column at idx {} during unfixing ScalarCalculate with columns:{:?}",
                     unfix.field_column_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             // Recreate output schema with actual field names
             let ts_field = Field::new(

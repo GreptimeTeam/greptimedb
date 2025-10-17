@@ -115,7 +115,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
                     "Failed to get time index column at idx {} during unfixing SeriesNormalize with columns:{:?}",
                     unfix.time_index_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             let tag_columns = unfix
                 .tag_column_indices
@@ -127,7 +127,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
                             "Failed to get tag column at idx {} during unfixing SeriesNormalize with columns:{:?}",
                             idx, columns
                         )))
-                        .map(|field| field.flat_name())
+                        .map(|field| field.name().to_string())
                 })
                 .collect::<DataFusionResult<Vec<String>>>()?;
 

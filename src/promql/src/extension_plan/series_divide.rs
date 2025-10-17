@@ -111,7 +111,7 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
                             "Failed to get tag column at idx {} during unfixing SeriesDivide with columns:{:?}",
                             idx, columns
                         )))
-                        .map(|field| field.flat_name())
+                        .map(|field| field.name().to_string())
                 })
                 .collect::<DataFusionResult<Vec<String>>>()?;
 
@@ -121,7 +121,7 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
                     "Failed to get time index column at idx {} during unfixing SeriesDivide with columns:{:?}",
                     unfix.time_index_column_idx, columns
                 )))?
-                .flat_name();
+                .name().to_string();
 
             Ok(Self {
                 tag_columns,

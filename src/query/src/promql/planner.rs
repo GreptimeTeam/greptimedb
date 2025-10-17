@@ -1969,7 +1969,7 @@ impl PromPlanner {
                 .map(|expr| {
                     let display_name = expr.schema_name().to_string();
                     new_field_columns.push(display_name.clone());
-                    Ok(expr)
+                    Ok(expr.alias(display_name))
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(DataFusionPlanningSnafu)?;
