@@ -91,7 +91,7 @@ macro_rules! handle_index_error {
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
     /// SST directory.
-    file_dir: String,
+    table_dir: String,
     /// Path type for generating file paths.
     path_type: PathType,
     file_handle: FileHandle,
@@ -122,13 +122,13 @@ pub struct ParquetReaderBuilder {
 impl ParquetReaderBuilder {
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
     pub fn new(
-        file_dir: String,
+        table_dir: String,
         path_type: PathType,
         file_handle: FileHandle,
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
-            file_dir,
+            table_dir,
             path_type,
             file_handle,
             object_store,
@@ -237,7 +237,7 @@ impl ParquetReaderBuilder {
     ) -> Result<(FileRangeContext, RowGroupSelection)> {
         let start = Instant::now();
 
-        let file_path = self.file_handle.file_path(&self.file_dir, self.path_type);
+        let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
@@ -1227,7 +1227,6 @@ impl ParquetReader {
         self.context.read_format().metadata()
     }
 
-    #[cfg(test)]
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
     }
