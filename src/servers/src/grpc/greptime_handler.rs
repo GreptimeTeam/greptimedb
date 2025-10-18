@@ -160,6 +160,7 @@ impl GreptimeRequestHandler {
                     table_name,
                     request_id,
                     data,
+                    _guard,
                 } = request;
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();

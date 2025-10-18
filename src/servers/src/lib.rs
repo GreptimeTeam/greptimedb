@@ -20,6 +20,9 @@
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
 use sql::statements::statement::Statement;
+// Re-export for use in add_service! macro
+#[doc(hidden)]
+pub use tower;
 
 pub mod addrs;
 pub mod configurator;
@@ -47,6 +50,7 @@ pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;
 pub mod repeated_field;
+pub mod request_limiter;
 mod row_writer;
 pub mod server;
 pub mod tls;
