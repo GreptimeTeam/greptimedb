@@ -502,11 +502,11 @@ mod tests {
             struct_type.clone(),
         );
         // level 3: struct
-        let root_type = StructType::new(vec![StructField::new(
+        let root_type = StructType::new(Arc::new(vec![StructField::new(
             "items".to_string(),
             list_type,
             false,
-        )]);
+        )]));
         let root_value = StructValue::new(vec![Value::List(list_value)], root_type.clone());
 
         let mut builder = StructVectorBuilder::with_type_and_capacity(root_type.clone(), 20);

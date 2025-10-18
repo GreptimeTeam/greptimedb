@@ -81,6 +81,7 @@ impl LogicalTypeId {
     #[cfg(any(test, feature = "test"))]
     pub fn data_type(&self) -> crate::data_type::ConcreteDataType {
         use crate::data_type::ConcreteDataType;
+        use crate::types::StructType;
 
         match self {
             LogicalTypeId::Null => ConcreteDataType::null_datatype(),
@@ -109,7 +110,9 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
-            LogicalTypeId::Struct => ConcreteDataType::struct_datatype(vec![].into()),
+            LogicalTypeId::Struct => {
+                ConcreteDataType::struct_datatype(StructType::new(std::sync::Arc::new(vec![])))
+            }
             LogicalTypeId::Dictionary => ConcreteDataType::dictionary_datatype(
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),

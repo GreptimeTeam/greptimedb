@@ -911,11 +911,14 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Struct(v) => {
                 let (items, struct_type) = v.into_parts();
                 let map = struct_type
-                    .take_fields()
-                    .into_iter()
+                    .fields()
+                    .iter()
                     .zip(items.into_iter())
                     .map(|(field, value)| {
-                        Ok((field.take_name(), serde_json::Value::try_from(value)?))
+                        Ok((
+                            field.name().to_string(),
+                            serde_json::Value::try_from(value)?,
+                        ))
                     })
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
@@ -1066,7 +1069,8 @@ impl StructValue {
         self.items
             .iter()
             .map(|x| x.as_value_ref().data_size())
-            .sum()
+            .sum::<usize>()
+            + std::mem::size_of::<StructType>()
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
@@ -1089,7 +1093,7 @@ impl StructValue {
 
 impl Default for StructValue {
     fn default() -> StructValue {
-        StructValue::try_new(vec![], StructType::new(vec![])).unwrap()
+        StructValue::try_new(vec![], StructType::new(Arc::new(vec![]))).unwrap()
     }
 }
 
@@ -1730,7 +1734,7 @@ pub(crate) mod tests {
     use crate::vectors::ListVectorBuilder;
 
     pub(crate) fn build_struct_type() -> StructType {
-        StructType::new(vec![
+        StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
             StructField::new(
                 "name".to_string(),
@@ -1748,7 +1752,7 @@ pub(crate) mod tests {
                 ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()),
                 true,
             ),
-        ])
+        ]))
     }
 
     pub(crate) fn build_struct_value() -> StructValue {
@@ -2387,7 +2391,7 @@ pub(crate) mod tests {
                 Value::String("tomcat".into()),
                 Value::Boolean(true),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new("num".to_string(), ConcreteDataType::int64_datatype(), true),
                 StructField::new(
                     "name".to_string(),
@@ -2399,7 +2403,7 @@ pub(crate) mod tests {
                     ConcreteDataType::boolean_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         )
         .unwrap();
         assert_eq!(
@@ -3142,14 +3146,14 @@ pub(crate) mod tests {
 
         check_value_ref_size_eq(
             &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
-            15,
+            23,
         );
 
         check_value_ref_size_eq(
             &ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
                 &build_struct_value(),
             )))),
-            15,
+            23,
         );
     }
 

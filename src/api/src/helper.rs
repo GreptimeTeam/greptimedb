@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use common_decimal::Decimal128;
 use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
@@ -208,7 +209,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                             StructField::new(f.name.clone(), field_type.into(), true)
                         })
                         .collect::<Vec<_>>();
-                    ConcreteDataType::struct_datatype(StructType::from(fields))
+                    ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields)))
                 } else {
                     // invalid state: type extension not found
                     ConcreteDataType::null_datatype()
@@ -445,7 +446,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ColumnDataType::Struct => {
                 if let Some(struct_type) = datatype.as_struct() {
                     let mut fields = Vec::with_capacity(struct_type.fields().len());
-                    for field in struct_type.fields() {
+                    for field in struct_type.fields().iter() {
                         let field_type =
                             ColumnDataTypeWrapper::try_from(field.data_type().clone())?;
                         let proto_field = crate::v1::StructField {
@@ -794,7 +795,7 @@ pub fn pb_value_to_value_ref<'a>(
 
             let struct_value_ref = StructValueRef::RefList {
                 val: items,
-                fields: StructType::new(struct_fields),
+                fields: StructType::new(Arc::new(struct_fields)),
             };
             ValueRef::Struct(struct_value_ref)
         }
@@ -1354,7 +1355,7 @@ mod tests {
             ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
             ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype()).into()
         );
-        let struct_type = StructType::new(vec![
+        let struct_type = StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
             StructField::new(
                 "name".to_string(),
@@ -1367,7 +1368,7 @@ mod tests {
                 ConcreteDataType::string_datatype(),
                 true,
             ),
-        ]);
+        ]));
         assert_eq!(
             ConcreteDataType::struct_datatype(struct_type.clone()),
             ColumnDataTypeWrapper::struct_datatype(vec![
@@ -1547,16 +1548,16 @@ mod tests {
                     ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype())
                 )
             ]),
-            ConcreteDataType::struct_datatype(StructType::new(vec![
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
                 StructField::new("a".to_string(), ConcreteDataType::int64_datatype(), true),
                 StructField::new(
                     "a.a".to_string(),
                     ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
                 )
-            ])).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
+            ]))).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
         );
 
-        let struct_type = StructType::new(vec![
+        let struct_type = StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
             StructField::new(
                 "name".to_string(),
@@ -1569,7 +1570,7 @@ mod tests {
                 ConcreteDataType::string_datatype(),
                 true,
             ),
-        ]);
+        ]));
         assert_eq!(
             ColumnDataTypeWrapper::new(
                 ColumnDataType::Json,
@@ -1756,14 +1757,14 @@ mod tests {
         let value = Value::Struct(
             StructValue::try_new(
                 items,
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "a.a".to_string(),
                         ConcreteDataType::boolean_datatype(),
                         true,
                     ),
                     StructField::new("a.b".to_string(), ConcreteDataType::string_datatype(), true),
-                ]),
+                ])),
             )
             .unwrap(),
         );
