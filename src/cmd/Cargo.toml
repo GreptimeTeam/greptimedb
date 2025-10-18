@@ -29,6 +29,7 @@ base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+either = "1.15"
 clap.workspace = true
 cli.workspace = true
 client.workspace = true

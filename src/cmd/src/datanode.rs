@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod builder;
+mod objbench;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,8 +24,10 @@ use common_config::Configurable;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
+use datanode::config::RegionEngineConfig;
 use datanode::datanode::Datanode;
 use meta_client::MetaClientOptions;
+use mito2::config::MitoConfig;
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
@@ -33,6 +36,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::App;
 use crate::datanode::builder::InstanceBuilder;
+use crate::datanode::objbench::ObjbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
@@ -92,7 +96,7 @@ impl App for Instance {
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    pub subcmd: SubCommand,
 }
 
 impl Command {
@@ -119,7 +123,7 @@ impl Command {
 }
 
 #[derive(Parser)]
-enum SubCommand {
+pub enum SubCommand {
     Start(StartCommand),
     /// Object storage benchmark tool
     Objbench(ObjbenchCommand),
@@ -133,43 +137,10 @@ impl SubCommand {
                 builder.build().await
             }
             SubCommand::Objbench(cmd) => {
-                cmd.execute().await?;
+                cmd.run().await?;
                 std::process::exit(0);
             }
         }
-    }
-}
-
-/// Object storage benchmark command
-#[derive(Debug, Parser)]
-pub struct ObjbenchCommand {
-    /// Path to the object-store config file (TOML). Must deserialize into object_store::config::ObjectStoreConfig.
-    #[clap(long, value_name = "FILE")]
-    pub config: PathBuf,
-
-    /// Source SST file path in object-store (e.g. "region_dir/<uuid>.parquet").
-    #[clap(long, value_name = "PATH")]
-    pub source: String,
-
-    /// Target SST file path in object-store; its parent directory is used as destination region dir.
-    #[clap(long, value_name = "PATH")]
-    pub target: String,
-
-    /// Verbose output
-    #[clap(short, long, default_value_t = false)]
-    pub verbose: bool,
-
-    /// Output file path for pprof flamegraph (enables profiling)
-    #[clap(long, value_name = "FILE")]
-    pub pprof_file: Option<PathBuf>,
-}
-
-impl ObjbenchCommand {
-    async fn execute(&self) -> Result<()> {
-        eprintln!("The objbench subcommand is not fully implemented in this build.");
-        eprintln!("It requires additional dependencies that may not be available.");
-
-        std::process::exit(1);
     }
 }
 
@@ -187,20 +158,11 @@ pub struct StorageConfig {
 #[serde(default)]
 struct StorageConfigWrapper {
     storage: StorageConfig,
-}
-
-// Minimal stub functions to satisfy compiler
-async fn build_object_store(_sc: &StorageConfig) -> Result<ObjectStore> {
-    use object_store::ObjectStore;
-    use object_store::services::Fs;
-
-    let builder = Fs::default().root("/");
-    let object_store = ObjectStore::new(builder).unwrap().finish();
-    Ok(object_store)
+    region_engine: Vec<RegionEngineConfig>,
 }
 
 #[derive(Debug, Parser, Default)]
-struct StartCommand {
+pub struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     /// The address to bind the gRPC server.
@@ -228,7 +190,7 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         let mut opts = DatanodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),

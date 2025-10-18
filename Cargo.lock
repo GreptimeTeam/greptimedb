@@ -1926,6 +1926,7 @@ dependencies = [
  "common-wal",
  "datanode",
  "datatypes",
+ "either",
  "etcd-client",
  "file-engine",
  "flow",
