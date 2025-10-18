@@ -169,8 +169,8 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-        write_type: WriteType,
-    ) -> Result<(SstInfoArray, Metrics)> {
+        metrics: &mut Metrics
+    ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
 
         let store = self.file_cache.local_store();
@@ -197,7 +197,7 @@ impl WriteCache {
             write_request.index_config,
             indexer,
             path_provider.clone(),
-            Metrics::new(write_type),
+            metrics,
         )
         .await
         .with_file_cleaner(cleaner);
@@ -210,11 +210,10 @@ impl WriteCache {
             }
             either::Right(flat_source) => writer.write_all_flat(flat_source, write_opts).await?,
         };
-        let mut metrics = writer.into_metrics();
 
         // Upload sst file to remote object store.
         if sst_info.is_empty() {
-            return Ok((sst_info, metrics));
+            return Ok(sst_info);
         }
 
         let mut upload_tracker = UploadTracker::new(region_id);
@@ -256,7 +255,7 @@ impl WriteCache {
             return Err(err);
         }
 
-        Ok((sst_info, metrics))
+        Ok(sst_info)
     }
 
     /// Removes a file from the cache by `index_key`.
@@ -559,8 +558,9 @@ mod tests {
         };
 
         // Write to cache and upload sst to mock remote store
-        let (mut sst_infos, _) = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
+        let mut metrics  = Metrics::new(WriteType::Flush);
+        let mut sst_infos = write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -655,8 +655,9 @@ mod tests {
             remote_store: mock_store.clone(),
         };
 
-        let (mut sst_infos, _) = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut sst_infos = write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -735,8 +736,9 @@ mod tests {
             remote_store: mock_store.clone(),
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap_err();
         let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);

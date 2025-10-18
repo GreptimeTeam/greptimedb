@@ -423,7 +423,7 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
         % num_workers
 }
 
-async fn write_cache_from_config(
+pub async fn write_cache_from_config(
     config: &MitoConfig,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,

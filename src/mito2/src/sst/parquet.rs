@@ -181,13 +181,14 @@ mod tests {
             ..Default::default()
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -243,6 +244,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -251,7 +253,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -329,6 +331,7 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -337,7 +340,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -378,6 +381,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -386,7 +390,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
         writer
@@ -437,6 +441,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -445,7 +450,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
         writer
@@ -481,6 +486,7 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
@@ -489,7 +495,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -639,13 +645,14 @@ mod tests {
             table_dir: "test".to_string(),
             path_type: PathType::Bare,
         };
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             path_provider,
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -716,13 +723,14 @@ mod tests {
             bloom_filter_index_config: Default::default(),
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -1092,13 +1100,14 @@ mod tests {
             bloom_filter_index_config: Default::default(),
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
@@ -1148,13 +1157,14 @@ mod tests {
             ..Default::default()
         };
 
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            Metrics::new(WriteType::Flush),
+            &mut metrics
         )
         .await;
 
