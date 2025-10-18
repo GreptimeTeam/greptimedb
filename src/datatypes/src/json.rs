@@ -20,6 +20,7 @@
 //!
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use common_base::bytes::StringBytes;
 use ordered_float::OrderedFloat;
@@ -28,7 +29,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error};
-use crate::types::{ListType, StructField, StructType};
+use crate::types::{StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
 /// The configuration of JSON encoding
@@ -146,11 +147,11 @@ pub fn encode_json_with_context<'a>(
         let json_string = json.to_string();
         let struct_value = StructValue::try_new(
             vec![Value::String(json_string.into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 JsonStructureSettings::RAW_FIELD.to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         )?;
         return Ok(Value::Struct(struct_value));
     }
@@ -217,7 +218,7 @@ fn encode_json_object_with_context<'a>(
     let mut struct_fields = Vec::with_capacity(total_json_keys);
     // First, process fields from the provided schema in their original order
     if let Some(fields) = fields {
-        for field in fields.fields() {
+        for field in fields.fields().iter() {
             let field_name = field.name();
 
             if let Some(value) = json_object.remove(field_name) {
@@ -252,7 +253,7 @@ fn encode_json_object_with_context<'a>(
         ));
     }
 
-    let struct_type = StructType::new(struct_fields);
+    let struct_type = StructType::new(Arc::new(struct_fields));
     StructValue::try_new(items, struct_type)
 }
 
@@ -291,9 +292,8 @@ fn encode_json_array_with_context<'a>(
     } else {
         element_type.unwrap_or_else(ConcreteDataType::string_datatype)
     };
-    let list_type = ListType::new(element_type);
 
-    Ok(ListValue::new(items, ConcreteDataType::List(list_type)))
+    Ok(ListValue::new(items, Arc::new(element_type)))
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
@@ -369,7 +369,7 @@ fn encode_json_value_with_context<'a>(
         Json::Array(arr) => {
             let list_value = encode_json_array_with_context(arr, expected_type, context)?;
             let data_type = list_value.datatype().clone();
-            Ok((Value::List(list_value), data_type))
+            Ok((Value::List(list_value), (*data_type).clone()))
         }
         Json::Object(obj) => {
             let struct_value = encode_json_object_with_context(obj, None, context)?;
@@ -593,7 +593,7 @@ fn decode_struct_with_settings<'a>(
         }
     }
 
-    let struct_type = StructType::new(struct_fields);
+    let struct_type = StructType::new(Arc::new(struct_fields));
     StructValue::try_new(items, struct_type)
 }
 
@@ -651,8 +651,11 @@ fn decode_unstructured_raw_struct(struct_value: StructValue) -> Result<StructVal
                 return Ok(decoded_struct);
             } else {
                 // If the decoded value is not a struct, wrap it in a struct
-                let struct_type =
-                    StructType::new(vec![StructField::new("value".to_string(), data_type, true)]);
+                let struct_type = StructType::new(Arc::new(vec![StructField::new(
+                    "value".to_string(),
+                    data_type,
+                    true,
+                )]));
                 return StructValue::try_new(vec![decoded_value], struct_type);
             }
         }
@@ -688,9 +691,11 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use serde_json::json;
 
     use super::*;
+    use crate::types::ListType;
 
     #[test]
     fn test_encode_json_null() {
@@ -798,7 +803,8 @@ mod tests {
         let struct_type = result.struct_type();
 
         // Check that we have the expected fields
-        let field_names: Vec<&str> = struct_type.fields().iter().map(|f| f.name()).collect();
+        let fields = struct_type.fields();
+        let field_names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(field_names.contains(&"name"));
         assert!(field_names.contains(&"age"));
         assert!(field_names.contains(&"active"));
@@ -855,12 +861,8 @@ mod tests {
             .unwrap();
         if let Value::Struct(person_struct) = &items[person_index] {
             assert_eq!(person_struct.items().len(), 2);
-            let person_fields: Vec<&str> = person_struct
-                .struct_type()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect();
+            let fields = person_struct.struct_type().fields();
+            let person_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
             assert!(person_fields.contains(&"name"));
             assert!(person_fields.contains(&"age"));
         } else {
@@ -920,7 +922,7 @@ mod tests {
             // In this case, it should be string since we can't find a common numeric type
             assert_eq!(
                 list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype()))
+                Arc::new(ConcreteDataType::int64_datatype())
             );
         } else {
             panic!("Expected List value");
@@ -942,7 +944,7 @@ mod tests {
             // Empty arrays default to string type
             assert_eq!(
                 list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::string_datatype()))
+                Arc::new(ConcreteDataType::string_datatype())
             );
         } else {
             panic!("Expected List value");
@@ -961,12 +963,8 @@ mod tests {
 
         if let Value::Struct(struct_value) = result {
             assert_eq!(struct_value.items().len(), 2);
-            let field_names: Vec<&str> = struct_value
-                .struct_type()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect();
+            let fields = struct_value.struct_type().fields();
+            let field_names: Vec<&str> = fields.iter().map(|f| f.name()).collect();
             assert!(field_names.contains(&"name"));
             assert!(field_names.contains(&"age"));
         } else {
@@ -990,7 +988,7 @@ mod tests {
             ),
             StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
         ];
-        let struct_type = StructType::new(fields);
+        let struct_type = StructType::new(Arc::new(fields));
         let concrete_type = ConcreteDataType::Struct(struct_type);
 
         let settings = JsonStructureSettings::Structured(None);
@@ -1044,7 +1042,7 @@ mod tests {
                 true,
             ),
         ];
-        let struct_type = StructType::new(fields);
+        let struct_type = StructType::new(Arc::new(fields));
 
         let result = encode_json_object_with_context(
             json.as_object().unwrap().clone(),
@@ -1086,7 +1084,7 @@ mod tests {
             ),
             StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
         ];
-        let struct_type = StructType::new(fields);
+        let struct_type = StructType::new(Arc::new(fields));
 
         let result = encode_json_object_with_context(
             json.as_object().unwrap().clone(),
@@ -1127,7 +1125,7 @@ mod tests {
             ),
             StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
         ];
-        let struct_type = StructType::new(fields);
+        let struct_type = StructType::new(Arc::new(fields));
 
         let result = encode_json_object_with_context(
             json.as_object().unwrap().clone(),
@@ -1170,7 +1168,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_with_item_type() {
         let json = json!([1, 2, 3]);
-        let list_type = ListType::new(ConcreteDataType::int8_datatype());
+        let item_type = Arc::new(ConcreteDataType::int8_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
@@ -1184,10 +1183,7 @@ mod tests {
             assert_eq!(list_value.items()[0], Value::Int8(1));
             assert_eq!(list_value.items()[1], Value::Int8(2));
             assert_eq!(list_value.items()[2], Value::Int8(3));
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int8_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
@@ -1196,7 +1192,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_empty_with_item_type() {
         let json = json!([]);
-        let list_type = ListType::new(ConcreteDataType::string_datatype());
+        let item_type = Arc::new(ConcreteDataType::string_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
@@ -1207,10 +1204,7 @@ mod tests {
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 0);
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::string_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
@@ -1257,7 +1251,7 @@ mod tests {
                     Value::Int64(25),
                     Value::Boolean(true),
                 ],
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "name".to_string(),
                         ConcreteDataType::string_datatype(),
@@ -1269,7 +1263,7 @@ mod tests {
                         ConcreteDataType::boolean_datatype(),
                         true,
                     ),
-                ]),
+                ])),
             );
 
             let result = settings.decode(Value::Struct(struct_value)).unwrap();
@@ -1287,7 +1281,7 @@ mod tests {
 
             let list_value = ListValue::new(
                 vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-                ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                Arc::new(ConcreteDataType::int64_datatype()),
             );
 
             let result = settings.decode(Value::List(list_value)).unwrap();
@@ -1301,28 +1295,29 @@ mod tests {
 
             let inner_struct = StructValue::new(
                 vec![Value::String("Alice".into()), Value::Int64(25)],
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "name".to_string(),
                         ConcreteDataType::string_datatype(),
                         true,
                     ),
                     StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
-                ]),
+                ])),
             );
 
+            let score_list_item_type = Arc::new(ConcreteDataType::int64_datatype());
             let outer_struct = StructValue::new(
                 vec![
                     Value::Struct(inner_struct),
                     Value::List(ListValue::new(
                         vec![Value::Int64(95), Value::Int64(87)],
-                        ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                        score_list_item_type.clone(),
                     )),
                 ],
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "user".to_string(),
-                        ConcreteDataType::Struct(StructType::new(vec![
+                        ConcreteDataType::Struct(StructType::new(Arc::new(vec![
                             StructField::new(
                                 "name".to_string(),
                                 ConcreteDataType::string_datatype(),
@@ -1333,15 +1328,15 @@ mod tests {
                                 ConcreteDataType::int64_datatype(),
                                 true,
                             ),
-                        ])),
+                        ]))),
                         true,
                     ),
                     StructField::new(
                         "scores".to_string(),
-                        ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                        ConcreteDataType::List(ListType::new(score_list_item_type.clone())),
                         true,
                     ),
-                ]),
+                ])),
             );
 
             let result = settings.decode(Value::Struct(outer_struct)).unwrap();
@@ -1374,11 +1369,11 @@ mod tests {
             let json_str = r#"{"name": "Bob", "age": 30}"#;
             let struct_value = StructValue::new(
                 vec![Value::String(json_str.into())],
-                StructType::new(vec![StructField::new(
+                StructType::new(Arc::new(vec![StructField::new(
                     JsonStructureSettings::RAW_FIELD.to_string(),
                     ConcreteDataType::string_datatype(),
                     true,
-                )]),
+                )])),
             );
             let value = Value::Struct(struct_value);
 
@@ -1404,7 +1399,7 @@ mod tests {
                     Value::String("Alice".into()),
                     Value::String(metadata_json.into()),
                 ],
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "name".to_string(),
                         ConcreteDataType::string_datatype(),
@@ -1415,7 +1410,7 @@ mod tests {
                         ConcreteDataType::string_datatype(),
                         true,
                     ),
-                ]),
+                ])),
             );
 
             let result = settings.decode(Value::Struct(struct_value)).unwrap();
@@ -1445,14 +1440,14 @@ mod tests {
                     Value::String("Bob".into()),
                     Value::Null, // missing age field
                 ],
-                StructType::new(vec![
+                StructType::new(Arc::new(vec![
                     StructField::new(
                         "name".to_string(),
                         ConcreteDataType::string_datatype(),
                         true,
                     ),
                     StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
-                ]),
+                ])),
             );
 
             let result = settings.decode(Value::Struct(struct_value)).unwrap();
@@ -1513,7 +1508,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_with_list_type() {
         let json = json!([1, 2, 3]);
-        let list_type = ListType::new(ConcreteDataType::int64_datatype());
+        let item_type = Arc::new(ConcreteDataType::int64_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
 
         let settings = JsonStructureSettings::Structured(None);
@@ -1528,10 +1524,7 @@ mod tests {
             assert_eq!(list_value.items()[0], Value::Int64(1));
             assert_eq!(list_value.items()[1], Value::Int64(2));
             assert_eq!(list_value.items()[2], Value::Int64(3));
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
@@ -1644,7 +1637,7 @@ mod tests {
         }
 
         // Test with encode_with_type (with type)
-        let struct_type = StructType::new(vec![
+        let struct_type = StructType::new(Arc::new(vec![
             StructField::new(
                 "name".to_string(),
                 ConcreteDataType::string_datatype(),
@@ -1656,7 +1649,7 @@ mod tests {
                 ConcreteDataType::boolean_datatype(),
                 true,
             ),
-        ]);
+        ]));
         let concrete_type = ConcreteDataType::Struct(struct_type);
 
         let result2 = settings
@@ -1759,12 +1752,8 @@ mod tests {
                 .unwrap();
             if let Value::Struct(user_struct) = &items[user_index] {
                 let user_items = user_struct.items();
-                let user_fields: Vec<&str> = user_struct
-                    .struct_type()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect();
+                let fields = user_struct.struct_type().fields();
+                let user_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                 // name should be structured
                 let name_index = user_fields.iter().position(|&f| f == "name").unwrap();
@@ -1798,7 +1787,7 @@ mod tests {
                 Value::Int64(25),
                 Value::Boolean(true),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new(
                     "name".to_string(),
                     ConcreteDataType::string_datatype(),
@@ -1810,7 +1799,7 @@ mod tests {
                     ConcreteDataType::boolean_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         );
 
         let decoded_struct = settings.decode_struct(original_struct.clone()).unwrap();
@@ -1834,7 +1823,7 @@ mod tests {
                 Value::Int64(25),
                 Value::Boolean(true),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new(
                     "name".to_string(),
                     ConcreteDataType::string_datatype(),
@@ -1846,7 +1835,7 @@ mod tests {
                     ConcreteDataType::boolean_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         );
 
         let decoded_struct = settings.decode_struct(original_struct.clone()).unwrap();
@@ -1863,7 +1852,28 @@ mod tests {
         unstructured_keys.insert("metadata".to_string());
 
         let settings = JsonStructureSettings::PartialUnstructuredByKey {
-            fields: Some(StructType::new(vec![
+            fields: Some(StructType::new(Arc::new(vec![
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "metadata".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            ]))),
+            unstructured_keys,
+        };
+
+        // Create a struct where metadata is stored as unstructured JSON string
+        let encoded_struct = StructValue::new(
+            vec![
+                Value::String("Alice".into()),
+                Value::String(r#"{"preferences":{"theme":"dark"},"history":[1,2,3]}"#.into()),
+            ],
+            StructType::new(Arc::new(vec![
                 StructField::new(
                     "name".to_string(),
                     ConcreteDataType::string_datatype(),
@@ -1875,27 +1885,6 @@ mod tests {
                     true,
                 ),
             ])),
-            unstructured_keys,
-        };
-
-        // Create a struct where metadata is stored as unstructured JSON string
-        let encoded_struct = StructValue::new(
-            vec![
-                Value::String("Alice".into()),
-                Value::String(r#"{"preferences":{"theme":"dark"},"history":[1,2,3]}"#.into()),
-            ],
-            StructType::new(vec![
-                StructField::new(
-                    "name".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                StructField::new(
-                    "metadata".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-            ]),
         );
 
         let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
@@ -1905,12 +1894,8 @@ mod tests {
 
         // Verify metadata field is now properly structured
         if let Value::Struct(metadata_struct) = &decoded_struct.items()[1] {
-            let metadata_fields: Vec<&str> = metadata_struct
-                .struct_type()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect();
+            let fields = metadata_struct.struct_type().fields();
+            let metadata_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
             assert!(metadata_fields.contains(&"preferences"));
             assert!(metadata_fields.contains(&"history"));
@@ -1936,7 +1921,7 @@ mod tests {
                 Value::String("Alice".into()),
                 Value::String(r#"{"preferences":{"theme":"dark"},"history":[1,2,3]}"#.into()),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new(
                     "name".to_string(),
                     ConcreteDataType::string_datatype(),
@@ -1947,16 +1932,16 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         );
 
         let encoded_struct = StructValue::new(
             vec![Value::Struct(user_struct)],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "user".to_string(),
-                ConcreteDataType::struct_datatype(StructType::new(vec![])),
+                ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![]))),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
@@ -1964,12 +1949,8 @@ mod tests {
         // Verify the nested structure is properly decoded
         if let Value::Struct(decoded_user) = &decoded_struct.items()[0] {
             if let Value::Struct(metadata_struct) = &decoded_user.items()[1] {
-                let metadata_fields: Vec<&str> = metadata_struct
-                    .struct_type()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect();
+                let fields = metadata_struct.struct_type().fields();
+                let metadata_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                 assert!(metadata_fields.contains(&"preferences"));
                 assert!(metadata_fields.contains(&"history"));
@@ -1987,12 +1968,8 @@ mod tests {
                 if let Value::Struct(preferences_struct) =
                     &metadata_struct.items()[preference_index]
                 {
-                    let pref_fields: Vec<&str> = preferences_struct
-                        .struct_type()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name())
-                        .collect();
+                    let fields = preferences_struct.struct_type().fields();
+                    let pref_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
                     assert!(pref_fields.contains(&"theme"));
                 } else {
                     panic!("Expected preferences to be decoded as structured value");
@@ -2022,22 +1999,18 @@ mod tests {
             vec![Value::String(
                 r#"{"name":"Alice","age":25,"active":true}"#.into(),
             )],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
         // With UnstructuredRaw, the entire struct should be reconstructed from _raw field
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
         assert!(decoded_fields.contains(&"name"));
         assert!(decoded_fields.contains(&"age"));
@@ -2064,14 +2037,14 @@ mod tests {
         // Create a struct that doesn't match the expected UnstructuredRaw format
         let invalid_struct = StructValue::new(
             vec![Value::String("Alice".into()), Value::Int64(25)],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new(
                     "name".to_string(),
                     ConcreteDataType::string_datatype(),
                     true,
                 ),
                 StructField::new("age".to_string(), ConcreteDataType::int64_datatype(), true),
-            ]),
+            ])),
         );
 
         // Should fail with error since it doesn't match expected UnstructuredRaw format
@@ -2093,20 +2066,16 @@ mod tests {
         // Test with a string primitive in _raw field
         let string_struct = StructValue::new(
             vec![Value::String("\"hello world\"".into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(string_struct).unwrap();
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(decoded_fields.contains(&"value"));
         assert_eq!(
             decoded_struct.items()[0],
@@ -2116,60 +2085,48 @@ mod tests {
         // Test with a number primitive in _raw field
         let number_struct = StructValue::new(
             vec![Value::String("42".into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(number_struct).unwrap();
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(decoded_fields.contains(&"value"));
         assert_eq!(decoded_struct.items()[0], Value::Int64(42));
 
         // Test with a boolean primitive in _raw field
         let bool_struct = StructValue::new(
             vec![Value::String("true".into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(bool_struct).unwrap();
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(decoded_fields.contains(&"value"));
         assert_eq!(decoded_struct.items()[0], Value::Boolean(true));
 
         // Test with a null primitive in _raw field
         let null_struct = StructValue::new(
             vec![Value::String("null".into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(null_struct).unwrap();
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(decoded_fields.contains(&"value"));
         assert_eq!(decoded_struct.items()[0], Value::Null);
     }
@@ -2182,20 +2139,16 @@ mod tests {
         // Test with an array in _raw field
         let array_struct = StructValue::new(
             vec![Value::String("[1, \"hello\", true, 3.15]".into())],
-            StructType::new(vec![StructField::new(
+            StructType::new(Arc::new(vec![StructField::new(
                 "_raw".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            )]),
+            )])),
         );
 
         let decoded_struct = settings.decode_struct(array_struct).unwrap();
-        let decoded_fields: Vec<&str> = decoded_struct
-            .struct_type()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect();
+        let fields = decoded_struct.struct_type().fields();
+        let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
         assert!(decoded_fields.contains(&"value"));
 
         if let Value::List(list_value) = &decoded_struct.items()[0] {
@@ -2254,12 +2207,8 @@ mod tests {
 
         // Verify encoding worked - metadata and user.profile.settings should be unstructured
         if let Value::Struct(encoded_struct) = encoded_value {
-            let fields: Vec<&str> = encoded_struct
-                .struct_type()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect();
+            let fields = encoded_struct.struct_type().fields();
+            let fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
             assert!(fields.contains(&"name"));
             assert!(fields.contains(&"age"));
@@ -2277,21 +2226,13 @@ mod tests {
             // Check that user.profile.settings is unstructured
             let user_index = fields.iter().position(|&f| f == "user").unwrap();
             if let Value::Struct(user_struct) = &encoded_struct.items()[user_index] {
-                let user_fields: Vec<&str> = user_struct
-                    .struct_type()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect();
+                let fields = user_struct.struct_type().fields();
+                let user_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                 let profile_index = user_fields.iter().position(|&f| f == "profile").unwrap();
                 if let Value::Struct(profile_struct) = &user_struct.items()[profile_index] {
-                    let profile_fields: Vec<&str> = profile_struct
-                        .struct_type()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name())
-                        .collect();
+                    let fields = profile_struct.struct_type().fields();
+                    let profile_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                     let settings_index = profile_fields
                         .iter()
@@ -2315,12 +2256,8 @@ mod tests {
             let decoded_struct = settings.decode_struct(encoded_struct).unwrap();
 
             // Verify the decoded struct has proper structure
-            let decoded_fields: Vec<&str> = decoded_struct
-                .struct_type()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect();
+            let fields = decoded_struct.struct_type().fields();
+            let decoded_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
             assert!(decoded_fields.contains(&"name"));
             assert!(decoded_fields.contains(&"age"));
@@ -2333,12 +2270,8 @@ mod tests {
                 .position(|&f| f == "metadata")
                 .unwrap();
             if let Value::Struct(metadata_struct) = &decoded_struct.items()[metadata_index] {
-                let metadata_fields: Vec<&str> = metadata_struct
-                    .struct_type()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect();
+                let fields = metadata_struct.struct_type().fields();
+                let metadata_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                 assert!(metadata_fields.contains(&"tags"));
                 assert!(metadata_fields.contains(&"preferences"));
@@ -2349,12 +2282,8 @@ mod tests {
                     .position(|&f| f == "preferences")
                     .unwrap();
                 if let Value::Struct(prefs_struct) = &metadata_struct.items()[preferences_index] {
-                    let prefs_fields: Vec<&str> = prefs_struct
-                        .struct_type()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name())
-                        .collect();
+                    let fields = prefs_struct.struct_type().fields();
+                    let prefs_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                     assert!(prefs_fields.contains(&"theme"));
                     assert!(prefs_fields.contains(&"notifications"));
@@ -2368,21 +2297,13 @@ mod tests {
             // Check that user.profile.settings is now properly structured
             let user_index = decoded_fields.iter().position(|&f| f == "user").unwrap();
             if let Value::Struct(user_struct) = &decoded_struct.items()[user_index] {
-                let user_fields: Vec<&str> = user_struct
-                    .struct_type()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect();
+                let fields = user_struct.struct_type().fields();
+                let user_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                 let profile_index = user_fields.iter().position(|&f| f == "profile").unwrap();
                 if let Value::Struct(profile_struct) = &user_struct.items()[profile_index] {
-                    let profile_fields: Vec<&str> = profile_struct
-                        .struct_type()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name())
-                        .collect();
+                    let fields = profile_struct.struct_type().fields();
+                    let profile_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                     let settings_index = profile_fields
                         .iter()
@@ -2390,12 +2311,8 @@ mod tests {
                         .unwrap();
                     if let Value::Struct(settings_struct) = &profile_struct.items()[settings_index]
                     {
-                        let settings_fields: Vec<&str> = settings_struct
-                            .struct_type()
-                            .fields()
-                            .iter()
-                            .map(|f| f.name())
-                            .collect();
+                        let fields = settings_struct.struct_type().fields();
+                        let settings_fields: Vec<&str> = fields.iter().map(|f| f.name()).collect();
 
                         assert!(settings_fields.contains(&"language"));
                         assert!(settings_fields.contains(&"timezone"));

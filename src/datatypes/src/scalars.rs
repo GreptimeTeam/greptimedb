@@ -380,6 +380,8 @@ impl<'a> ScalarRef<'a> for StructValueRef<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::data_type::ConcreteDataType;
     use crate::timestamp::TimestampSecond;
@@ -451,14 +453,13 @@ mod tests {
 
     #[test]
     fn test_list_value_scalar() {
-        let list_value =
-            ListValue::new(vec![Value::Int32(123)], ConcreteDataType::int32_datatype());
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let list_value = ListValue::new(vec![Value::Int32(123)], item_type.clone());
         let list_ref = ListValueRef::Ref { val: &list_value };
         assert_eq!(list_ref, list_value.as_scalar_ref());
         assert_eq!(list_value, list_ref.to_owned_scalar());
 
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1);
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
         builder.push(None);
         builder.push(Some(list_value.as_scalar_ref()));
         let vector = builder.finish();

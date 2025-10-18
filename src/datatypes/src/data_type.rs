@@ -456,9 +456,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             }
             ArrowDataType::Utf8 | ArrowDataType::Utf8View => Self::string_datatype(),
             ArrowDataType::LargeUtf8 => Self::large_string_datatype(),
-            ArrowDataType::List(field) => Self::List(ListType::new(
+            ArrowDataType::List(field) => Self::List(ListType::new(Arc::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
-            )),
+            ))),
             ArrowDataType::Dictionary(key_type, value_type) => {
                 let key_type = ConcreteDataType::from_arrow_type(key_type);
                 let value_type = ConcreteDataType::from_arrow_type(value_type);
@@ -641,7 +641,7 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
+    pub fn list_datatype(item_type: Arc<ConcreteDataType>) -> ConcreteDataType {
         ConcreteDataType::List(ListType::new(item_type))
     }
 
@@ -794,7 +794,7 @@ mod tests {
                 ArrowDataType::Int32,
                 true,
             )))),
-            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
+            ConcreteDataType::List(ListType::new(Arc::new(ConcreteDataType::int32_datatype())))
         );
         assert!(matches!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
@@ -985,9 +985,10 @@ mod tests {
 
     #[test]
     fn test_as_list() {
-        let list_type = ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype());
+        let list_type =
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()));
         assert_eq!(
-            ListType::new(ConcreteDataType::int32_datatype()),
+            ListType::new(Arc::new(ConcreteDataType::int32_datatype())),
             *list_type.as_list().unwrap()
         );
         assert!(ConcreteDataType::int32_datatype().as_list().is_none());
@@ -1032,21 +1033,24 @@ mod tests {
         );
         // Nested types
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()).to_string(),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()))
+                .to_string(),
             "List<Int32>"
         );
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::Dictionary(DictionaryType::new(
-                ConcreteDataType::int32_datatype(),
-                ConcreteDataType::string_datatype()
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::Dictionary(
+                DictionaryType::new(
+                    ConcreteDataType::int32_datatype(),
+                    ConcreteDataType::string_datatype()
+                )
             )))
             .to_string(),
             "List<Dictionary<Int32, String>>"
         );
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::list_datatype(
-                ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
-            ))
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::list_datatype(Arc::new(
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()))
+            ))))
             .to_string(),
             "List<List<List<Int32>>>"
         );

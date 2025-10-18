@@ -80,7 +80,10 @@ impl LogicalTypeId {
     /// Panics if data type is not supported.
     #[cfg(any(test, feature = "test"))]
     pub fn data_type(&self) -> crate::data_type::ConcreteDataType {
+        use std::sync::Arc;
+
         use crate::data_type::ConcreteDataType;
+        use crate::types::StructType;
 
         match self {
             LogicalTypeId::Null => ConcreteDataType::null_datatype(),
@@ -107,9 +110,11 @@ impl LogicalTypeId {
             }
             LogicalTypeId::TimestampNanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
             LogicalTypeId::List => {
-                ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::null_datatype()))
             }
-            LogicalTypeId::Struct => ConcreteDataType::struct_datatype(vec![].into()),
+            LogicalTypeId::Struct => {
+                ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![])))
+            }
             LogicalTypeId::Dictionary => ConcreteDataType::dictionary_datatype(
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),

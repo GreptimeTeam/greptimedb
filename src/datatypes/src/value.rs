@@ -911,11 +911,14 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Struct(v) => {
                 let (items, struct_type) = v.into_parts();
                 let map = struct_type
-                    .take_fields()
-                    .into_iter()
+                    .fields()
+                    .iter()
                     .zip(items.into_iter())
                     .map(|(field, value)| {
-                        Ok((field.take_name(), serde_json::Value::try_from(value)?))
+                        Ok((
+                            field.name().to_string(),
+                            serde_json::Value::try_from(value)?,
+                        ))
                     })
                     .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
                 serde_json::Value::Object(map)
@@ -934,13 +937,13 @@ pub struct ListValue {
     items: Vec<Value>,
     /// Inner values datatype, to distinguish empty lists of different datatypes.
     /// Restricted by DataFusion, cannot use null datatype for empty list.
-    datatype: ConcreteDataType,
+    datatype: Arc<ConcreteDataType>,
 }
 
 impl Eq for ListValue {}
 
 impl ListValue {
-    pub fn new(items: Vec<Value>, datatype: ConcreteDataType) -> Self {
+    pub fn new(items: Vec<Value>, datatype: Arc<ConcreteDataType>) -> Self {
         Self { items, datatype }
     }
 
@@ -952,12 +955,13 @@ impl ListValue {
         self.items
     }
 
-    pub fn into_parts(self) -> (Vec<Value>, ConcreteDataType) {
+    pub fn into_parts(self) -> (Vec<Value>, Arc<ConcreteDataType>) {
         (self.items, self.datatype)
     }
 
-    pub fn datatype(&self) -> &ConcreteDataType {
-        &self.datatype
+    /// List value's inner type data type
+    pub fn datatype(&self) -> Arc<ConcreteDataType> {
+        self.datatype.clone()
     }
 
     pub fn len(&self) -> usize {
@@ -988,12 +992,13 @@ impl ListValue {
             .first()
             .map(|x| x.as_value_ref().data_size() * self.items.len())
             .unwrap_or(0)
+            + std::mem::size_of::<Arc<ConcreteDataType>>()
     }
 }
 
 impl Default for ListValue {
     fn default() -> ListValue {
-        ListValue::new(vec![], ConcreteDataType::null_datatype())
+        ListValue::new(vec![], Arc::new(ConcreteDataType::null_datatype()))
     }
 }
 
@@ -1066,7 +1071,8 @@ impl StructValue {
         self.items
             .iter()
             .map(|x| x.as_value_ref().data_size())
-            .sum()
+            .sum::<usize>()
+            + std::mem::size_of::<StructType>()
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
@@ -1089,7 +1095,7 @@ impl StructValue {
 
 impl Default for StructValue {
     fn default() -> StructValue {
-        StructValue::try_new(vec![], StructType::new(vec![])).unwrap()
+        StructValue::try_new(vec![], StructType::new(Arc::new(vec![]))).unwrap()
     }
 }
 
@@ -1136,7 +1142,7 @@ impl TryFrom<ScalarValue> for Value {
                     .flatten()
                     .map(|x| x.try_into())
                     .collect::<Result<Vec<Value>>>()?;
-                Value::List(ListValue::new(items, datatype))
+                Value::List(ListValue::new(items, Arc::new(datatype)))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
             ScalarValue::TimestampSecond(t, _) => t
@@ -1547,7 +1553,7 @@ pub enum ListValueRef<'a> {
     },
     RefList {
         val: Vec<ValueRef<'a>>,
-        item_datatype: ConcreteDataType,
+        item_datatype: Arc<ConcreteDataType>,
     },
 }
 
@@ -1564,9 +1570,9 @@ impl ListValueRef<'_> {
         }
     }
     /// Returns the inner element's data type.
-    fn datatype(&self) -> ConcreteDataType {
+    fn datatype(&self) -> Arc<ConcreteDataType> {
         match self {
-            ListValueRef::Indexed { vector, .. } => vector.data_type(),
+            ListValueRef::Indexed { vector, .. } => vector.item_type(),
             ListValueRef::Ref { val } => val.datatype().clone(),
             ListValueRef::RefList { item_datatype, .. } => item_datatype.clone(),
         }
@@ -1707,12 +1713,18 @@ impl ValueRef<'_> {
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
-                ListValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
+                ListValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<Arc<ConcreteDataType>>()
+                }
             },
             ValueRef::Struct(val) => match val {
                 StructValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 StructValueRef::Ref(val) => val.estimated_size(),
-                StructValueRef::RefList { val, .. } => val.iter().map(|v| v.data_size()).sum(),
+                StructValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<StructType>()
+                }
             },
             ValueRef::Json(v) => v.data_size(),
         }
@@ -1730,7 +1742,7 @@ pub(crate) mod tests {
     use crate::vectors::ListVectorBuilder;
 
     pub(crate) fn build_struct_type() -> StructType {
-        StructType::new(vec![
+        StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
             StructField::new(
                 "name".to_string(),
@@ -1745,10 +1757,10 @@ pub(crate) mod tests {
             ),
             StructField::new(
                 "awards".to_string(),
-                ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()),
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype())),
                 true,
             ),
-        ])
+        ]))
     }
 
     pub(crate) fn build_struct_value() -> StructValue {
@@ -1778,12 +1790,12 @@ pub(crate) mod tests {
     }
 
     pub fn build_list_type() -> ConcreteDataType {
-        ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype())
+        ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype()))
     }
 
     pub(crate) fn build_list_value() -> ListValue {
         let items = vec![Value::Boolean(true), Value::Boolean(false)];
-        ListValue::new(items, ConcreteDataType::boolean_datatype())
+        ListValue::new(items, Arc::new(ConcreteDataType::boolean_datatype()))
     }
 
     pub(crate) fn build_scalar_list_value() -> ScalarValue {
@@ -1909,7 +1921,10 @@ pub(crate) mod tests {
             build_scalar_list_value().try_into().unwrap()
         );
         assert_eq!(
-            Value::List(ListValue::new(vec![], ConcreteDataType::uint32_datatype())),
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::uint32_datatype())
+            )),
             ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32, true))
                 .try_into()
                 .unwrap()
@@ -2176,15 +2191,13 @@ pub(crate) mod tests {
             &ConcreteDataType::binary_datatype(),
             &Value::Binary(Bytes::from(b"world".as_slice())),
         );
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
-            &Value::List(ListValue::new(
-                vec![Value::Int32(10)],
-                ConcreteDataType::int32_datatype(),
-            )),
+            &ConcreteDataType::list_datatype(item_type.clone()),
+            &Value::List(ListValue::new(vec![Value::Int32(10)], item_type.clone())),
         );
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            &ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::null_datatype())),
             &Value::List(ListValue::default()),
         );
         check_type_and_value(
@@ -2244,11 +2257,12 @@ pub(crate) mod tests {
             &Value::Decimal128(Decimal128::new(1, 38, 10)),
         );
 
+        let item_type = Arc::new(ConcreteDataType::boolean_datatype());
         check_type_and_value(
-            &ConcreteDataType::list_datatype(ConcreteDataType::boolean_datatype()),
+            &ConcreteDataType::list_datatype(item_type.clone()),
             &Value::List(ListValue::new(
                 vec![Value::Boolean(true)],
-                ConcreteDataType::boolean_datatype(),
+                item_type.clone(),
             )),
         );
 
@@ -2377,7 +2391,7 @@ pub(crate) mod tests {
             json_value,
             to_json(Value::List(ListValue {
                 items: vec![Value::Int32(123)],
-                datatype: ConcreteDataType::int32_datatype(),
+                datatype: Arc::new(ConcreteDataType::int32_datatype()),
             }))
         );
 
@@ -2387,7 +2401,7 @@ pub(crate) mod tests {
                 Value::String("tomcat".into()),
                 Value::Boolean(true),
             ],
-            StructType::new(vec![
+            StructType::new(Arc::new(vec![
                 StructField::new("num".to_string(), ConcreteDataType::int64_datatype(), true),
                 StructField::new(
                     "name".to_string(),
@@ -2399,7 +2413,7 @@ pub(crate) mod tests {
                     ConcreteDataType::boolean_datatype(),
                     true,
                 ),
-            ]),
+            ])),
         )
         .unwrap();
         assert_eq!(
@@ -2422,7 +2436,7 @@ pub(crate) mod tests {
         assert_eq!(
             serde_json::Value::try_from(Value::Json(Box::new(Value::List(ListValue::new(
                 vec![Value::Int32(1), Value::Int32(2), Value::Int32(3),],
-                ConcreteDataType::int32_datatype()
+                Arc::new(ConcreteDataType::int32_datatype())
             )))))
             .unwrap(),
             serde_json::json!([1, 2, 3])
@@ -2617,7 +2631,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_second_datatype(),
+                Arc::new(ConcreteDataType::timestamp_second_datatype()),
             ))
             .to_string(),
             "TimestampSecond[]"
@@ -2625,7 +2639,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_millisecond_datatype()),
             ))
             .to_string(),
             "TimestampMillisecond[]"
@@ -2633,7 +2647,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_microsecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_microsecond_datatype()),
             ))
             .to_string(),
             "TimestampMicrosecond[]"
@@ -2641,7 +2655,7 @@ pub(crate) mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 vec![],
-                ConcreteDataType::timestamp_nanosecond_datatype(),
+                Arc::new(ConcreteDataType::timestamp_nanosecond_datatype()),
             ))
             .to_string(),
             "TimestampNanosecond[]"
@@ -2765,9 +2779,9 @@ pub(crate) mod tests {
         assert_eq!(
             build_scalar_list_value(),
             Value::List(build_list_value())
-                .try_to_scalar_value(&ConcreteDataType::list_datatype(
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
                     ConcreteDataType::boolean_datatype()
-                ))
+                )))
                 .unwrap()
         );
     }
@@ -2912,9 +2926,9 @@ pub(crate) mod tests {
         assert_eq!(
             ScalarValue::new_null_list(ArrowDataType::Boolean, true, 1),
             Value::Null
-                .try_to_scalar_value(&ConcreteDataType::list_datatype(
-                    ConcreteDataType::boolean_datatype(),
-                ))
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
+                    ConcreteDataType::boolean_datatype()
+                )))
                 .unwrap()
         );
 
@@ -2929,11 +2943,10 @@ pub(crate) mod tests {
     #[test]
     fn test_list_value_to_scalar_value() {
         let items = vec![Value::Int32(-1), Value::Null];
-        let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let list = Value::List(ListValue::new(items, item_type.clone()));
         let df_list = list
-            .try_to_scalar_value(&ConcreteDataType::list_datatype(
-                ConcreteDataType::int32_datatype(),
-            ))
+            .try_to_scalar_value(&ConcreteDataType::list_datatype(item_type.clone()))
             .unwrap();
         assert!(matches!(df_list, ScalarValue::List(_)));
         match df_list {
@@ -3092,10 +3105,10 @@ pub(crate) mod tests {
                         Value::String("hello world".into()),
                         Value::String("greptimedb".into()),
                     ],
-                    datatype: ConcreteDataType::string_datatype(),
+                    datatype: Arc::new(ConcreteDataType::string_datatype()),
                 },
             }),
-            22,
+            30,
         );
 
         let data = vec![
@@ -3103,12 +3116,12 @@ pub(crate) mod tests {
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
-        let mut builder =
-            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 8);
         for vec_opt in &data {
             if let Some(vec) = vec_opt {
                 let values = vec.iter().map(|v| Value::from(*v)).collect();
-                let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
+                let list_value = ListValue::new(values, item_type.clone());
 
                 builder.push(Some(ListValueRef::Ref { val: &list_value }));
             } else {
@@ -3142,14 +3155,14 @@ pub(crate) mod tests {
 
         check_value_ref_size_eq(
             &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
-            15,
+            31,
         );
 
         check_value_ref_size_eq(
             &ValueRef::Json(Box::new(ValueRef::Struct(StructValueRef::Ref(
                 &build_struct_value(),
             )))),
-            15,
+            31,
         );
     }
 

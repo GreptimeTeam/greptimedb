@@ -1146,7 +1146,7 @@ fn from_accums_to_offsetted_accum(new_accums: Vec<Vec<Value>>) -> Vec<Value> {
         })
         .map(Value::from)
         .collect::<Vec<_>>();
-    let first = ListValue::new(offset, ConcreteDataType::uint64_datatype());
+    let first = ListValue::new(offset, Arc::new(ConcreteDataType::uint64_datatype()));
     let first = Value::List(first);
     // construct new_accums
 
