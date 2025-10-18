@@ -117,7 +117,7 @@ where
         indexer_builder: I,
         path_provider: P,
         metrics: &'a mut Metrics,
-    ) -> ParquetWriter<'a ,ObjectStoreWriterFactory, I, P> {
+    ) -> ParquetWriter<'a, ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
@@ -135,7 +135,7 @@ where
     }
 }
 
-impl<'a, F, I, P> ParquetWriter<'a , F, I, P>
+impl<'a, F, I, P> ParquetWriter<'a, F, I, P>
 where
     F: WriterFactory,
     I: IndexerBuilder,

@@ -13,9 +13,10 @@
 // limitations under the License.
 
 pub mod builder;
+#[allow(clippy::print_stdout)]
 mod objbench;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,11 +28,8 @@ use common_wal::config::DatanodeWalConfig;
 use datanode::config::RegionEngineConfig;
 use datanode::datanode::Datanode;
 use meta_client::MetaClientOptions;
-use mito2::config::MitoConfig;
-use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::App;

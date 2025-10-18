@@ -307,7 +307,7 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner);
-            let ssts = match request.source {
+            match request.source {
                 Either::Left(source) => {
                     writer
                         .write_all(source, request.max_sequence, write_opts)
@@ -316,8 +316,7 @@ impl AccessLayer {
                 Either::Right(flat_source) => {
                     writer.write_all_flat(flat_source, write_opts).await?
                 }
-            };
-            ssts
+            }
         };
 
         // Put parquet metadata to cache manager.
