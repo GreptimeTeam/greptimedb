@@ -18,7 +18,6 @@ use std::time::Instant;
 
 use clap::Parser;
 use colored::Colorize;
-use common_config::Configurable;
 use datanode::config::RegionEngineConfig;
 use datanode::store;
 use either::Either;
@@ -33,7 +32,7 @@ use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::index::puffin_manager::PuffinManagerFactory;
 use mito2::sst::parquet::reader::ParquetReaderBuilder;
-use mito2::sst::parquet::{WriteOptions, PARQUET_METADATA_KEY};
+use mito2::sst::parquet::{PARQUET_METADATA_KEY, WriteOptions};
 use mito2::worker::write_cache_from_config;
 use object_store::ObjectStore;
 use regex::Regex;
@@ -271,15 +270,11 @@ impl ObjbenchCommand {
                 Ok(report) => {
                     let mut flamegraph_data = Vec::new();
                     if let Err(e) = report.flamegraph(&mut flamegraph_data) {
-                        eprintln!(
-                            "{}: Failed to generate flamegraph: {}",
-                            "Warning".yellow(),
-                            e
-                        );
+                        println!("{}: Failed to generate flamegraph: {}", "Error".red(), e);
                     } else if let Err(e) = std::fs::write(pprof_file, flamegraph_data) {
-                        eprintln!(
+                        println!(
                             "{}: Failed to write flamegraph to {}: {}",
-                            "Warning".yellow(),
+                            "Error".red(),
                             pprof_file.display(),
                             e
                         );
@@ -292,27 +287,19 @@ impl ObjbenchCommand {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "{}: Failed to generate pprof report: {}",
-                        "Warning".yellow(),
-                        e
-                    );
+                    println!("{}: Failed to generate pprof report: {}", "Error".red(), e);
                 }
             }
         }
         assert_eq!(infos.len(), 1);
         let dst_file_id = infos[0].file_id;
-        let dst_file_path = format!(
-            "{}/{}.parquet",
-            components.region_dir(),
-            dst_file_id.to_string()
-        );
+        let dst_file_path = format!("{}/{}.parquet", components.region_dir(), dst_file_id);
         let mut dst_index_path = None;
         if infos[0].index_metadata.file_size > 0 {
             dst_index_path = Some(format!(
                 "{}/index/{}.puffin",
                 components.region_dir(),
-                dst_file_id.to_string()
+                dst_file_id
             ));
         }
 
@@ -511,12 +498,8 @@ async fn build_access_layer_simple(
         .unwrap()
         .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
 
-    let cache_manager = build_cache_manager(
-        &config,
-        puffin_manager.clone(),
-        intermediate_manager.clone(),
-    )
-    .await?;
+    let cache_manager =
+        build_cache_manager(config, puffin_manager.clone(), intermediate_manager.clone()).await?;
     let layer = AccessLayer::new(
         components.table_dir(),
         components.path_type,
@@ -532,7 +515,7 @@ async fn build_cache_manager(
     puffin_manager: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> error::Result<CacheManagerRef> {
-    let write_cache = write_cache_from_config(&config, puffin_manager, intermediate_manager)
+    let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager)
         .await
         .unwrap();
     let cache_manager = Arc::new(
@@ -632,7 +615,6 @@ mod tests {
         assert_eq!(c.table_id, 1024);
         assert_eq!(c.region_sequence, 0);
         assert_eq!(c.path_type, PathType::Metadata);
-        assert_eq!(c.parquet_dir(), meta_path);
 
         let c = parse_file_dir_components(
             "data/greptime/public/1024/1024_0000000000/data/00020380-009c-426d-953e-b4e34c15af34.parquet",

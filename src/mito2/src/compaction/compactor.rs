@@ -30,7 +30,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType};
+use crate::access_layer::{
+    AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
+};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
 use crate::compaction::{CompactionSstReaderBuilder, find_ttl};

@@ -188,7 +188,7 @@ mod tests {
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -253,7 +253,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -340,7 +340,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -390,7 +390,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            &mut metrics
+            &mut metrics,
         )
         .await;
         writer
@@ -450,7 +450,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            &mut metrics
+            &mut metrics,
         )
         .await;
         writer
@@ -495,7 +495,7 @@ mod tests {
             FixedPathProvider {
                 region_file_id: handle.file_id(),
             },
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -652,7 +652,7 @@ mod tests {
             IndexConfig::default(),
             NoopIndexBuilder,
             path_provider,
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -730,7 +730,7 @@ mod tests {
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -1107,7 +1107,7 @@ mod tests {
             IndexConfig::default(),
             indexer_builder,
             file_path.clone(),
-            &mut metrics
+            &mut metrics,
         )
         .await;
 
@@ -1164,7 +1164,7 @@ mod tests {
             IndexConfig::default(),
             NoopIndexBuilder,
             file_path,
-            &mut metrics
+            &mut metrics,
         )
         .await;
 

@@ -169,7 +169,7 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-        metrics: &mut Metrics
+        metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
 
@@ -558,7 +558,7 @@ mod tests {
         };
 
         // Write to cache and upload sst to mock remote store
-        let mut metrics  = Metrics::new(WriteType::Flush);
+        let mut metrics = Metrics::new(WriteType::Flush);
         let mut sst_infos = write_cache
             .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await

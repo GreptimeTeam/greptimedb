@@ -537,10 +537,7 @@ impl RegionFlushTask {
 
                 debug!(
                     "Region {} flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
-                    self.region_id,
-                    num_mem_ranges,
-                    num_mem_rows,
-                    metrics
+                    self.region_id, num_mem_ranges, num_mem_rows, metrics
                 );
 
                 flush_metrics = flush_metrics.merge(metrics);

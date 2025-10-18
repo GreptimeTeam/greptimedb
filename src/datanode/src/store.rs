@@ -88,19 +88,12 @@ async fn build_cache_layer(
         &cache_config.cache_path
     };
     let atomic_temp_dir = join_dir(cache_base_dir, ATOMIC_WRITE_DIR);
-    println!(
-        "cache path: {}, atomic_temp_dir: {}",
-        cache_config.cache_path, atomic_temp_dir
-    );
     clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
     let cache_store = Fs::default()
         .root(cache_base_dir)
         .atomic_write_dir(&atomic_temp_dir)
         .build()
-        .inspect_err(|e|{
-            eprintln!("failed to build cache layer: {}", e);
-        })
         .context(error::BuildCacheStoreSnafu)?;
 
     let cache_layer = LruCacheLayer::new(
@@ -116,16 +109,4 @@ async fn build_cache_layer(
     );
 
     Ok(Some(cache_layer))
-}
-
-#[cfg(test)]
-mod tests {
-    use object_store::ATOMIC_WRITE_DIR;
-    use object_store::util::join_dir;
-
-    #[test]
-    fn test_build_default_cache_path() {
-        let atomic_temp_dir = join_dir("", ATOMIC_WRITE_DIR);
-        println!("{}", atomic_temp_dir);
-    }
 }
