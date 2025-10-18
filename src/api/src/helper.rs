@@ -186,7 +186,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                         datatype: d.datatype(),
                         datatype_ext: d.datatype_extension.clone().map(|d| *d),
                     };
-                    ConcreteDataType::list_datatype(item_type.into())
+                    ConcreteDataType::list_datatype(Arc::new(item_type.into()))
                 } else {
                     // invalid state: type extension not found
                     ConcreteDataType::null_datatype()
@@ -756,7 +756,7 @@ pub fn pb_value_to_value_ref<'a>(
 
             let list_value = ListValueRef::RefList {
                 val: items,
-                item_datatype: item_type.clone(),
+                item_datatype: Arc::new(item_type.clone()),
             };
             ValueRef::List(list_value)
         }
@@ -1352,7 +1352,7 @@ mod tests {
             ColumnDataTypeWrapper::vector_datatype(3).into()
         );
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
             ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::string_datatype()).into()
         );
         let struct_type = StructType::new(Arc::new(vec![
@@ -1535,7 +1535,7 @@ mod tests {
 
         assert_eq!(
             ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int16_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::int16_datatype())
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int16_datatype()))
                 .try_into()
                 .expect("Failed to create column datatype from List(ListType { item_type: Int16(Int16Type) })")
         );
@@ -1552,7 +1552,7 @@ mod tests {
                 StructField::new("a".to_string(), ConcreteDataType::int64_datatype(), true),
                 StructField::new(
                     "a.a".to_string(),
-                    ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()), true
+                    ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())), true
                 )
             ]))).try_into().expect("Failed to create column datatype from Struct(StructType { fields: [StructField { name: \"a\", data_type: Int64(Int64Type) }, StructField { name: \"a.a\", data_type: List(ListType { item_type: String(StringType) }) }] })")
         );
@@ -1737,7 +1737,7 @@ mod tests {
     fn test_list_to_pb_value() {
         let value = Value::List(ListValue::new(
             vec![Value::Boolean(true)],
-            ConcreteDataType::boolean_datatype(),
+            Arc::new(ConcreteDataType::boolean_datatype()),
         ));
 
         let pb_value = to_proto_value(value);

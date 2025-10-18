@@ -19,6 +19,7 @@ mod interval;
 
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
@@ -90,7 +91,7 @@ fn encode_array(
     value_list: ListValue,
     builder: &mut DataRowEncoder,
 ) -> PgWireResult<()> {
-    match &value_list.datatype() {
+    match value_list.datatype().as_ref() {
         ConcreteDataType::Boolean(_) => {
             let array = value_list
                 .items()
@@ -551,21 +552,21 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
             common_time::timestamp::TimeUnit::Microsecond,
         )),
-        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int8_datatype(),
-        )),
-        &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(
+        ))),
+        &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int16_datatype(),
-        )),
-        &Type::INT4_ARRAY => Ok(ConcreteDataType::list_datatype(
+        ))),
+        &Type::INT4_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int32_datatype(),
-        )),
-        &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(
+        ))),
+        &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::int64_datatype(),
-        )),
-        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+        ))),
+        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
             ConcreteDataType::string_datatype(),
-        )),
+        ))),
         _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
@@ -1345,10 +1346,12 @@ mod test {
             ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
             ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
-            ConcreteDataType::list_datatype(ConcreteDataType::int64_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::float64_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::string_datatype()),
-            ConcreteDataType::list_datatype(ConcreteDataType::timestamp_second_datatype()),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int64_datatype())),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::float64_datatype())),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+            ConcreteDataType::list_datatype(
+                Arc::new(ConcreteDataType::timestamp_second_datatype()),
+            ),
         ];
         let values = vec![
             Value::Null,
@@ -1381,19 +1384,19 @@ mod test {
             Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 10)),
             Value::List(ListValue::new(
                 vec![Value::Int64(1i64)],
-                ConcreteDataType::int64_datatype(),
+                Arc::new(ConcreteDataType::int64_datatype()),
             )),
             Value::List(ListValue::new(
                 vec![Value::Float64(1.0f64.into())],
-                ConcreteDataType::float64_datatype(),
+                Arc::new(ConcreteDataType::float64_datatype()),
             )),
             Value::List(ListValue::new(
                 vec![Value::String("tom".into())],
-                ConcreteDataType::string_datatype(),
+                Arc::new(ConcreteDataType::string_datatype()),
             )),
             Value::List(ListValue::new(
                 vec![Value::Timestamp(Timestamp::new(1i64, TimeUnit::Second))],
-                ConcreteDataType::timestamp_second_datatype(),
+                Arc::new(ConcreteDataType::timestamp_second_datatype()),
             )),
         ];
         let query_context = QueryContextBuilder::default()

@@ -168,7 +168,7 @@ impl Helper {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
             ScalarValue::List(array) => {
-                let item_type = ConcreteDataType::try_from(&array.value_type())?;
+                let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
                     .context(ConvertArrowArrayToScalarsSnafu)?
@@ -560,7 +560,7 @@ mod tests {
         ));
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
             vector.data_type()
         );
         assert_eq!(3, vector.len());

@@ -493,13 +493,14 @@ mod tests {
         let struct_type = ConcreteDataType::struct_datatype(build_struct_type());
         let struct_value = build_struct_value();
         // level 2: list
-        let list_type = ConcreteDataType::list_datatype(struct_type.clone());
+        let struct_type_ref = Arc::new(struct_type);
+        let list_type = ConcreteDataType::list_datatype(struct_type_ref.clone());
         let list_value = ListValue::new(
             vec![
                 Value::Struct(struct_value.clone()),
                 Value::Struct(struct_value.clone()),
             ],
-            struct_type.clone(),
+            struct_type_ref.clone(),
         );
         // level 3: struct
         let root_type = StructType::new(Arc::new(vec![StructField::new(

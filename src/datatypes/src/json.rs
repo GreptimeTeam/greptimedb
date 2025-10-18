@@ -29,7 +29,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error};
-use crate::types::{ListType, StructField, StructType};
+use crate::types::{StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
 /// The configuration of JSON encoding
@@ -292,9 +292,8 @@ fn encode_json_array_with_context<'a>(
     } else {
         element_type.unwrap_or_else(ConcreteDataType::string_datatype)
     };
-    let list_type = ListType::new(element_type);
 
-    Ok(ListValue::new(items, ConcreteDataType::List(list_type)))
+    Ok(ListValue::new(items, Arc::new(element_type)))
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
@@ -370,7 +369,7 @@ fn encode_json_value_with_context<'a>(
         Json::Array(arr) => {
             let list_value = encode_json_array_with_context(arr, expected_type, context)?;
             let data_type = list_value.datatype().clone();
-            Ok((Value::List(list_value), data_type))
+            Ok((Value::List(list_value), (*data_type).clone()))
         }
         Json::Object(obj) => {
             let struct_value = encode_json_object_with_context(obj, None, context)?;
@@ -692,9 +691,11 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use serde_json::json;
 
     use super::*;
+    use crate::types::ListType;
 
     #[test]
     fn test_encode_json_null() {
@@ -921,7 +922,7 @@ mod tests {
             // In this case, it should be string since we can't find a common numeric type
             assert_eq!(
                 list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype()))
+                Arc::new(ConcreteDataType::int64_datatype())
             );
         } else {
             panic!("Expected List value");
@@ -943,7 +944,7 @@ mod tests {
             // Empty arrays default to string type
             assert_eq!(
                 list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::string_datatype()))
+                Arc::new(ConcreteDataType::string_datatype())
             );
         } else {
             panic!("Expected List value");
@@ -1167,7 +1168,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_with_item_type() {
         let json = json!([1, 2, 3]);
-        let list_type = ListType::new(ConcreteDataType::int8_datatype());
+        let item_type = Arc::new(ConcreteDataType::int8_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
@@ -1181,10 +1183,7 @@ mod tests {
             assert_eq!(list_value.items()[0], Value::Int8(1));
             assert_eq!(list_value.items()[1], Value::Int8(2));
             assert_eq!(list_value.items()[2], Value::Int8(3));
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int8_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
@@ -1193,7 +1192,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_empty_with_item_type() {
         let json = json!([]);
-        let list_type = ListType::new(ConcreteDataType::string_datatype());
+        let item_type = Arc::new(ConcreteDataType::string_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
         let settings = JsonStructureSettings::Structured(None);
         let result = settings
@@ -1204,10 +1204,7 @@ mod tests {
 
         if let Value::List(list_value) = result {
             assert_eq!(list_value.items().len(), 0);
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::string_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
@@ -1284,7 +1281,7 @@ mod tests {
 
             let list_value = ListValue::new(
                 vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-                ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                Arc::new(ConcreteDataType::int64_datatype()),
             );
 
             let result = settings.decode(Value::List(list_value)).unwrap();
@@ -1308,12 +1305,13 @@ mod tests {
                 ])),
             );
 
+            let score_list_item_type = Arc::new(ConcreteDataType::int64_datatype());
             let outer_struct = StructValue::new(
                 vec![
                     Value::Struct(inner_struct),
                     Value::List(ListValue::new(
                         vec![Value::Int64(95), Value::Int64(87)],
-                        ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                        score_list_item_type.clone(),
                     )),
                 ],
                 StructType::new(Arc::new(vec![
@@ -1335,7 +1333,7 @@ mod tests {
                     ),
                     StructField::new(
                         "scores".to_string(),
-                        ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+                        ConcreteDataType::List(ListType::new(score_list_item_type.clone())),
                         true,
                     ),
                 ])),
@@ -1510,7 +1508,8 @@ mod tests {
     #[test]
     fn test_encode_json_array_with_list_type() {
         let json = json!([1, 2, 3]);
-        let list_type = ListType::new(ConcreteDataType::int64_datatype());
+        let item_type = Arc::new(ConcreteDataType::int64_datatype());
+        let list_type = ListType::new(item_type.clone());
         let concrete_type = ConcreteDataType::List(list_type);
 
         let settings = JsonStructureSettings::Structured(None);
@@ -1525,10 +1524,7 @@ mod tests {
             assert_eq!(list_value.items()[0], Value::Int64(1));
             assert_eq!(list_value.items()[1], Value::Int64(2));
             assert_eq!(list_value.items()[2], Value::Int64(3));
-            assert_eq!(
-                list_value.datatype(),
-                &ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype()))
-            );
+            assert_eq!(list_value.datatype(), item_type);
         } else {
             panic!("Expected List value");
         }
