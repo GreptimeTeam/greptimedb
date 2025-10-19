@@ -36,6 +36,7 @@ use mito2::sst::parquet::{PARQUET_METADATA_KEY, WriteOptions};
 use mito2::worker::write_cache_from_config;
 use object_store::ObjectStore;
 use regex::Regex;
+use snafu::OptionExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
@@ -91,7 +92,9 @@ fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConf
             }
         })
         .next()
-        .unwrap();
+        .with_context(|| error::IllegalConfigSnafu {
+            msg: format!("Engine config not found in {:?}", config_path),
+        })?;
     Ok((storage_config, mito_engine_config))
 }
 
@@ -104,7 +107,7 @@ impl ObjbenchCommand {
         println!("{}", "Starting objbench with config:".cyan().bold());
 
         // Build object store from config
-        let (store_cfg, mut mito_engine_config) = parse_config(&self.config).unwrap();
+        let (store_cfg, mut mito_engine_config) = parse_config(&self.config)?;
 
         let object_store = build_object_store(&store_cfg).await?;
         println!("{} Object store initialized", "✓".green());
@@ -410,28 +413,33 @@ fn parse_file_dir_components(path: &str) -> error::Result<FileDirComponents> {
     } else {
         PathType::Bare
     };
-    let mut components = FileDirComponents {
-        catalog: "".to_string(),
-        schema: "".to_string(),
-        table_id: 0,
-        region_sequence: 0,
-        path_type,
-        file_id: FileId::default(),
-    };
-    // Try to match the path
-    if let Some(captures) = re.captures(path) {
-        // Extract the components
-        components.catalog = captures.get(1).unwrap().as_str().to_string();
-        components.schema = captures.get(2).unwrap().as_str().to_string();
-        components.table_id = captures[3].parse().unwrap();
-        components.region_sequence = captures[5].parse().unwrap();
-        let file_id_str = &captures[6];
-        components.file_id = FileId::parse_str(file_id_str).unwrap();
 
-        Ok(components)
-    } else {
-        panic!()
-    }
+    // Try to match the path
+    let components = (|| {
+        let captures = re.captures(path)?;
+        if captures.len() != 7 {
+            return None;
+        }
+        let mut components = FileDirComponents {
+            catalog: "".to_string(),
+            schema: "".to_string(),
+            table_id: 0,
+            region_sequence: 0,
+            path_type,
+            file_id: FileId::default(),
+        };
+        // Extract the components
+        components.catalog = captures.get(1)?.as_str().to_string();
+        components.schema = captures.get(2)?.as_str().to_string();
+        components.table_id = captures[3].parse().ok()?;
+        components.region_sequence = captures[5].parse().ok()?;
+        let file_id_str = &captures[6];
+        components.file_id = FileId::parse_str(file_id_str).ok()?;
+        Some(components)
+    })();
+    components.context(error::IllegalConfigSnafu {
+        msg: format!("Expect valid source file path, got: {}", path),
+    })
 }
 
 fn extract_region_metadata(
@@ -483,7 +491,6 @@ async fn build_access_layer_simple(
     data_home: &str,
 ) -> error::Result<(AccessLayerRef, CacheManagerRef)> {
     let _ = config.index.sanitize(data_home, &config.inverted_index);
-
     let puffin_manager = PuffinManagerFactory::new(
         &config.index.aux_path,
         config.index.staging_size.as_bytes(),
@@ -491,11 +498,21 @@ async fn build_access_layer_simple(
         config.index.staging_ttl,
     )
     .await
-    .unwrap();
+    .map_err(|e| {
+        error::IllegalConfigSnafu {
+            msg: format!("Failed to build access layer: {e:?}"),
+        }
+        .build()
+    })?;
 
     let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
         .await
-        .unwrap()
+        .map_err(|e| {
+            error::IllegalConfigSnafu {
+                msg: format!("Failed to build IntermediateManager: {e:?}"),
+            }
+            .build()
+        })?
         .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
 
     let cache_manager =
@@ -517,7 +534,12 @@ async fn build_cache_manager(
 ) -> error::Result<CacheManagerRef> {
     let write_cache = write_cache_from_config(config, puffin_manager, intermediate_manager)
         .await
-        .unwrap();
+        .map_err(|e| {
+            error::IllegalConfigSnafu {
+                msg: format!("Failed to build write cache: {e:?}"),
+            }
+            .build()
+        })?;
     let cache_manager = Arc::new(
         CacheManager::builder()
             .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
