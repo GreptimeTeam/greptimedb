@@ -63,6 +63,10 @@ impl StructVector {
     pub fn struct_type(&self) -> &StructType {
         &self.fields
     }
+
+    pub fn take_array(self) -> StructArray {
+        self.array
+    }
 }
 
 impl Vector for StructVector {
@@ -308,7 +312,7 @@ impl StructVectorBuilder {
         }
     }
 
-    fn push_struct_value(&mut self, struct_value: &StructValue) -> Result<()> {
+    pub fn push_struct_value(&mut self, struct_value: &StructValue) -> Result<()> {
         for (index, value) in struct_value.items().iter().enumerate() {
             self.value_builders[index].try_push_value_ref(&value.as_value_ref())?;
         }
@@ -317,7 +321,7 @@ impl StructVectorBuilder {
         Ok(())
     }
 
-    fn push_null_struct_value(&mut self) {
+    pub fn push_null_struct_value(&mut self) {
         for builder in &mut self.value_builders {
             builder.push_null();
         }

@@ -116,7 +116,6 @@ impl PartSortExec {
             input_stream,
             self.partition_ranges[partition].clone(),
             partition,
-            self.filter.clone(),
         )?) as _;
 
         Ok(df_stream)
@@ -235,7 +234,6 @@ struct PartSortStream {
     metrics: BaselineMetrics,
     context: Arc<TaskContext>,
     root_metrics: ExecutionPlanMetricsSet,
-    filter: Arc<RwLock<TopKDynamicFilters>>,
 }
 
 impl PartSortStream {
@@ -246,7 +244,6 @@ impl PartSortStream {
         input: DfSendableRecordBatchStream,
         partition_ranges: Vec<PartitionRange>,
         partition: usize,
-        filter: Arc<RwLock<TopKDynamicFilters>>,
     ) -> datafusion_common::Result<Self> {
         let buffer = if let Some(limit) = limit {
             let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
@@ -287,7 +284,6 @@ impl PartSortStream {
             metrics: BaselineMetrics::new(&sort.metrics, partition),
             context,
             root_metrics: sort.metrics.clone(),
-            filter,
         })
     }
 }
@@ -523,7 +519,7 @@ impl PartSortStream {
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
-            self.filter.clone(),
+            filter,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
