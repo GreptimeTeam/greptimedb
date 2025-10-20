@@ -18,7 +18,6 @@ use std::sync::atomic::AtomicUsize;
 
 use api::v1::SemanticType;
 use common_telemetry::{debug, warn};
-use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SkippingIndexType;
 use datatypes::vectors::Helper;
@@ -27,16 +26,15 @@ use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
 use mito_codec::row_converter::{CompositeValues, SortField};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, BloomFilterFinishSnafu, DecodeSnafu, EncodeSnafu, IndexOptionsSnafu,
-    InvalidRecordBatchSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
-    PushBloomFilterValueSnafu, Result,
+    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, IndexOptionsSnafu,
+    OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
@@ -46,8 +44,6 @@ use crate::sst::index::intermediate::{
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, decode_primary_keys_with_counts};
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
