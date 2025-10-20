@@ -692,8 +692,18 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_catchup_not_exist() {
+    test_catchup_not_exist_with_format(false).await;
+    test_catchup_not_exist_with_format(true).await;
+}
+
+async fn test_catchup_not_exist_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let non_exist_region_id = RegionId::new(1, 1);
 
