@@ -37,5 +37,5 @@ jobs:
         run: node pr-review-reminder.js
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SLACK_PR_REVIEW_WEBHOOK_URL: ${{ secrets.SLACK_PR_REVIEW_WEBHOOK_URL }}
-          GITHUBID_SLACKID_MAPPING: ${{ secrets.GITHUBID_SLACKID_MAPPING }}
+          SLACK_PR_REVIEW_WEBHOOK_URL: ${{ vars.SLACK_PR_REVIEW_WEBHOOK_URL }}
+          GITHUBID_SLACKID_MAPPING: ${{ vars.GITHUBID_SLACKID_MAPPING }}
