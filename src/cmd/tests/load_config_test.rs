@@ -218,6 +218,7 @@ fn test_load_flownode_example_config() {
     let expected = GreptimeOptions::<FlownodeOptions> {
         component: FlownodeOptions {
             node_id: Some(14),
+            default_timestamp_column_name: None,
             flow: Default::default(),
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:6800".to_string(),

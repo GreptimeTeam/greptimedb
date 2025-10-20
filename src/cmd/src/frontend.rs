@@ -30,6 +30,7 @@ use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_query::prelude::set_greptime_timestamp;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
@@ -332,6 +333,7 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
+        set_greptime_timestamp(opts.default_timestamp_column_name.as_deref());
 
         let meta_client_options = opts
             .meta_client

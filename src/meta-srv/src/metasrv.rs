@@ -123,6 +123,8 @@ impl Default for StatsPersistenceOptions {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
+    /// The default timestamp column name.
+    pub default_timestamp_column_name: Option<String>,
     /// The address the server listens on.
     #[deprecated(note = "Use grpc.bind_addr instead")]
     pub bind_addr: String,
@@ -215,6 +217,10 @@ impl fmt::Debug for MetasrvOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("MetasrvOptions");
         debug_struct
+            .field(
+                "default_timestamp_column_name",
+                &self.default_timestamp_column_name,
+            )
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
@@ -261,6 +267,7 @@ const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
+            default_timestamp_column_name: None,
             #[allow(deprecated)]
             bind_addr: String::new(),
             #[allow(deprecated)]

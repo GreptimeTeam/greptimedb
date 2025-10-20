@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 node_id = 42
 
+## The default timestamp column name.
+## @toml2docs:none-default
+default_timestamp_column_name = "greptime_timestamp"
+
 ## Start services after regions have obtained leases.
 ## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false

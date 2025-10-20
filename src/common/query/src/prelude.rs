@@ -13,10 +13,32 @@
 // limitations under the License.
 
 pub use datafusion_common::ScalarValue;
+use once_cell::sync::OnceCell;
 
 pub use crate::columnar_value::ColumnarValue;
 
-/// Default timestamp column name for Prometheus metrics.
+/// Default timestamp column name.
+static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
+
+/// Get the default timestamp column name.
+/// Returns the configured value, or "greptime_timestamp" if not set.
+pub fn greptime_timestamp() -> &'static str {
+    GREPTIME_TIMESTAMP_CELL.get_or_init(|| "greptime_timestamp".to_string())
+}
+
+/// Set the default timestamp column name.
+/// This should be called once during application startup.
+/// Returns Ok(()) if successful, or Err with the attempted value if already set.
+pub fn set_greptime_timestamp(name: Option<&str>) {
+    let ts = match name {
+        None | Some("") => GREPTIME_TIMESTAMP,
+        Some(ts) => ts,
+    };
+    GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
+}
+
+/// Default timestamp column name constant for backward compatibility.
+/// DEPRECATED: Use greptime_timestamp() function instead.
 pub const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name for Prometheus metrics.
 pub const GREPTIME_VALUE: &str = "greptime_value";

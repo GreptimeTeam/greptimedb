@@ -22,6 +22,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
+once_cell.workspace = true
 serde.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

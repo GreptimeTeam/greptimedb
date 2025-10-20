@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
+## The default timestamp column name.
+## @toml2docs:none-default
+default_timestamp_column_name = "greptime_timestamp"
+
 ## The maximum in-flight write bytes.
 ## @toml2docs:none-default
 #+ max_in_flight_write_bytes = "500MB"
