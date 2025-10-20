@@ -98,6 +98,14 @@
 
   // Send notification to Slack webhook
   async function sendSlackNotification(message) {
+    if (!SLACK_WEBHOOK_URL) {
+      console.log("⚠️  SLACK_PR_REVIEW_WEBHOOK_URL not configured. Message preview:");
+      console.log("=".repeat(60));
+      console.log(message);
+      console.log("=".repeat(60));
+      return;
+    }
+
     try {
       const response = await axios.post(SLACK_WEBHOOK_URL, {
         text: message
