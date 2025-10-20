@@ -17,6 +17,7 @@ use std::time::Duration;
 use cmd::options::GreptimeOptions;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
+use common_query::prelude::greptime_timestamp;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -48,6 +49,7 @@ fn test_load_datanode_example_config() {
     let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
+            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -113,6 +115,7 @@ fn test_load_frontend_example_config() {
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
+            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -168,6 +171,7 @@ fn test_load_metasrv_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
+            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             selector: SelectorType::default(),
             data_home: DEFAULT_DATA_HOME.to_string(),
             grpc: GrpcOptions {
@@ -218,7 +222,7 @@ fn test_load_flownode_example_config() {
     let expected = GreptimeOptions::<FlownodeOptions> {
         component: FlownodeOptions {
             node_id: Some(14),
-            default_timestamp_column_name: None,
+            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             flow: Default::default(),
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:6800".to_string(),
@@ -274,6 +278,7 @@ fn test_load_standalone_example_config() {
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
+            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
