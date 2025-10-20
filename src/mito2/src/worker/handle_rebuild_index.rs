@@ -153,12 +153,7 @@ impl<S> RegionWorkerLoop<S> {
                 file_handle.meta_ref().file_id
             );
 
-            let should_abort = region.state()
-                == RegionRoleState::Leader(RegionLeaderState::Dropping)
-                || region.state() == RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                || region.state() == RegionRoleState::Leader(RegionLeaderState::Truncating);
-
-            if should_abort {
+            if region.should_abort_index() {
                 warn!(
                     "Region {} is in state {:?}, abort index rebuild process for file_id {}",
                     region_id,
