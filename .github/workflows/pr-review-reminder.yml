@@ -5,11 +5,6 @@ on:
     # Run at 9:00 AM UTC+8 (01:00 AM UTC) every day
     - cron: '0 1 * * *'
   workflow_dispatch:
-  pull_request:  # Temporary: for testing, remove before merge
-    paths:
-      - '.github/workflows/pr-review-reminder.yml'
-      - '.github/scripts/pr-review-reminder.js'
-      - '.github/scripts/package.json'
 
 jobs:
   pr-review-reminder:
@@ -18,8 +13,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # Temporary: comment out for testing in fork
-    # if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
