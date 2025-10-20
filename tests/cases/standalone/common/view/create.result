@@ -9,7 +9,7 @@ Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: AS, 
 
 CREATE VIEW test_view as DELETE FROM public.numbers;
 
-Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Query DELETE FROM public.numbers not implemented yet,
+Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Query DELETE FROM public.numbers not implemented yet
 
 --- Table already exists ---
 CREATE VIEW test_table as SELECT * FROM public.numbers;
