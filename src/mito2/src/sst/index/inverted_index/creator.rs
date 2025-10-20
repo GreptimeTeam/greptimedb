@@ -17,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
@@ -26,9 +27,10 @@ use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
-use mito_codec::row_converter::SortField;
+use mito_codec::row_converter::{CompositeValues, SortField};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId};
 use tokio::io::duplex;
@@ -39,13 +41,13 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_INVERTED_INDEX;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{TYPE_INVERTED_INDEX, decode_primary_keys_with_counts};
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -78,9 +80,6 @@ pub struct InvertedIndexer {
 
     /// Region metadata for column lookups.
     metadata: RegionMetadataRef,
-    /// Cache for mapping indexed column positions to their indices in the RecordBatch.
-    /// Aligns with indexed_column_ids. Initialized lazily when first batch is processed.
-    column_index_cache: Option<Vec<Option<usize>>>,
 }
 
 impl InvertedIndexer {
@@ -130,7 +129,6 @@ impl InvertedIndexer {
             memory_usage,
             indexed_column_ids,
             metadata: metadata.clone(),
-            column_index_cache: None,
         }
     }
 
@@ -170,29 +168,29 @@ impl InvertedIndexer {
     }
 
     async fn do_update_flat(&mut self, batch: &RecordBatch) -> Result<()> {
-        // Initialize column index cache if not already done
-        if self.column_index_cache.is_none() {
-            self.initialize_column_index_cache(batch);
-        }
-
         let mut guard = self.stats.record_update();
 
-        let n = batch.num_rows();
-        guard.inc_row_count(n);
+        guard.inc_row_count(batch.num_rows());
 
-        let column_indices = self.column_index_cache.as_ref().unwrap();
+        let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
+        let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
-        for ((col_id, target_key), &column_index) in
-            self.indexed_column_ids.iter().zip(column_indices.iter())
-        {
-            if let Some(index) = column_index {
-                let column_array = batch.column(index);
+        for (col_id, target_key) in &self.indexed_column_ids {
+            let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
+                debug!(
+                    "Column {} not found in the metadata during building inverted index",
+                    col_id
+                );
+                continue;
+            };
+            let column_name = &column_meta.column_schema.name;
+            if let Some(column_array) = batch.column_by_name(column_name) {
                 // Convert Arrow array to VectorRef using Helper
                 let vector = Helper::try_into_vector(column_array.clone())
                     .context(crate::error::ConvertVectorSnafu)?;
                 let sort_field = SortField::new(vector.data_type());
 
-                for row in 0..n {
+                for row in 0..batch.num_rows() {
                     self.value_buf.clear();
                     let value_ref = vector.get_ref(row);
 
@@ -214,36 +212,56 @@ impl InvertedIndexer {
                             .context(PushIndexValueSnafu)?;
                     }
                 }
+            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
+                // Column not found in batch, tries to decode from primary keys for sparse encoding.
+                if decoded_pks.is_none() {
+                    decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
+                }
+
+                let pk_values_with_counts = decoded_pks.as_ref().unwrap();
+                let Some(col_info) = self.codec.pk_col_info(*col_id) else {
+                    debug!(
+                        "Column {} not found in primary key during building bloom filter index",
+                        column_name
+                    );
+                    continue;
+                };
+                let pk_index = col_info.idx;
+                let field = &col_info.field;
+                for (decoded, count) in pk_values_with_counts {
+                    let value = match decoded {
+                        CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
+                        CompositeValues::Sparse(sparse) => sparse.get(col_id),
+                    };
+
+                    let elem = value
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            self.value_buf.clear();
+                            IndexValueCodec::encode_nonnull_value(
+                                v.as_value_ref(),
+                                field,
+                                &mut self.value_buf,
+                            )
+                            .context(EncodeSnafu)?;
+                            Ok(self.value_buf.as_slice())
+                        })
+                        .transpose()?;
+
+                    self.index_creator
+                        .push_with_name_n(target_key, elem, *count)
+                        .await
+                        .context(PushIndexValueSnafu)?;
+                }
             } else {
                 debug!(
                     "Column {} not found in the batch during building inverted index",
                     col_id
                 );
-                // TODO(yingwen): Support sparse encoding like bloom_filter creator.
             }
         }
 
         Ok(())
-    }
-
-    /// Initializes the column index cache by mapping indexed column ids to their positions in the RecordBatch.
-    fn initialize_column_index_cache(&mut self, batch: &RecordBatch) {
-        let mut column_indices = Vec::with_capacity(self.indexed_column_ids.len());
-
-        for (col_id, _) in &self.indexed_column_ids {
-            let column_index = if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
-                let column_name = &column_meta.column_schema.name;
-                batch
-                    .schema()
-                    .column_with_name(column_name)
-                    .map(|(index, _)| index)
-            } else {
-                None
-            };
-            column_indices.push(column_index);
-        }
-
-        self.column_index_cache = Some(column_indices);
     }
 
     /// Finishes index creation and cleans up garbage.

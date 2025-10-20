@@ -39,13 +39,13 @@ use crate::error::{
     PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, decode_primary_keys_with_counts};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -296,15 +296,11 @@ impl BloomFilterIndexer {
         guard.inc_row_count(n);
 
         let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
-        // Lazily decodes primary keys only when needed
         let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
 
         for (col_id, creator) in &mut self.creators {
-            // Get the column metadata
             if let Some(column_meta) = self.metadata.column_by_id(*col_id) {
                 let column_name = &column_meta.column_schema.name;
-
-                // First try to find the column in the RecordBatch by name
                 if let Some(column_array) = batch.column_by_name(column_name) {
                     // Convert Arrow array to VectorRef
                     let vector = Helper::try_into_vector(column_array.clone())
@@ -330,8 +326,7 @@ impl BloomFilterIndexer {
                 } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
                     // Column not found in batch, tries to decode from primary keys for sparse encoding.
                     if decoded_pks.is_none() {
-                        decoded_pks =
-                            Some(Self::decode_primary_keys_with_counts(batch, &self.codec)?);
+                        decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
                     }
 
                     let pk_values_with_counts = decoded_pks.as_ref().unwrap();
@@ -376,59 +371,10 @@ impl BloomFilterIndexer {
                     );
                 }
             }
+            // `creators` are created from the metadata so it won't be None.
         }
 
         Ok(())
-    }
-
-    /// Decodes primary keys from a flat format RecordBatch.
-    /// Returns a list of (decoded_pk_value, count) tuples where count is the number of occurrences.
-    fn decode_primary_keys_with_counts(
-        batch: &RecordBatch,
-        codec: &IndexValuesCodec,
-    ) -> Result<Vec<(CompositeValues, usize)>> {
-        let primary_key_index = primary_key_column_index(batch.num_columns());
-        let pk_dict_array = batch
-            .column(primary_key_index)
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .context(InvalidRecordBatchSnafu {
-                reason: "Primary key column is not a dictionary array",
-            })?;
-        let pk_values_array = pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .context(InvalidRecordBatchSnafu {
-                reason: "Primary key values are not binary array",
-            })?;
-        let keys = pk_dict_array.keys();
-
-        // Decodes primary keys and count consecutive occurrences
-        let mut result: Vec<(CompositeValues, usize)> = Vec::new();
-        let mut prev_key: Option<u32> = None;
-
-        for i in 0..keys.len() {
-            let current_key = keys.value(i);
-
-            // Checks if current key is the same as previous key
-            if let Some(prev) = prev_key
-                && prev == current_key
-            {
-                // Safety: We already have a key in the result vector.
-                result.last_mut().unwrap().1 += 1;
-                continue;
-            }
-
-            // New key, decodes it.
-            let pk_bytes = pk_values_array.value(current_key as usize);
-            let decoded_value = codec.decoder().decode(pk_bytes).context(DecodeSnafu)?;
-
-            result.push((decoded_value, 1));
-            prev_key = Some(current_key);
-        }
-
-        Ok(result)
     }
 
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
