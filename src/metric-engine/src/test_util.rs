@@ -17,6 +17,7 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use common_meta::ddl::utils::parse_column_metadatas;
+use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -132,7 +133,7 @@ impl TestEnv {
                     column_id: 0,
                     semantic_type: SemanticType::Timestamp,
                     column_schema: ColumnSchema::new(
-                        "greptime_timestamp",
+                        GREPTIME_TIMESTAMP,
                         ConcreteDataType::timestamp_millisecond_datatype(),
                         false,
                     ),
@@ -204,7 +205,7 @@ impl TestEnv {
         assert_eq!(
             column_names,
             vec![
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value",
                 "__table_id",
                 "__tsid",
@@ -300,7 +301,7 @@ pub fn create_logical_region_request(
             column_id: 0,
             semantic_type: SemanticType::Timestamp,
             column_schema: ColumnSchema::new(
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
@@ -372,7 +373,7 @@ pub fn alter_logical_region_request(tags: &[&str]) -> RegionAlterRequest {
 pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
     let mut schema = vec![
         PbColumnSchema {
-            column_name: "greptime_timestamp".to_string(),
+            column_name: GREPTIME_TIMESTAMP.to_string(),
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
             datatype_extension: None,

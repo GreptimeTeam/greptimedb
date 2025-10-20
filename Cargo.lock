@@ -7573,6 +7573,7 @@ dependencies = [
  "common-decimal",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "common-time",

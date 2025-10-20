@@ -1494,7 +1494,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );
@@ -1544,7 +1544,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );
@@ -1594,7 +1594,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "quantile",
                 "greptime_value"
             ]
@@ -1612,7 +1612,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );
@@ -1629,7 +1629,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );
@@ -1681,7 +1681,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "le",
                 "greptime_value",
             ]
@@ -1699,7 +1699,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );
@@ -1716,7 +1716,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                "greptime_timestamp",
+                GREPTIME_TIMESTAMP,
                 "greptime_value"
             ]
         );

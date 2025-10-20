@@ -702,7 +702,7 @@ mod tests {
             SemanticType::Field,
         ));
         kts_iter.push((
-            "greptime_timestamp",
+            GREPTIME_TIMESTAMP,
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
         ));

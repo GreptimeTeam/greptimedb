@@ -48,7 +48,6 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::{PipelineContext, truthy, unwrap_or_continue_if_err};
 
-const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
@@ -138,10 +137,7 @@ impl GreptimeTransformer {
         let default = None;
 
         let transform = Transform {
-            fields: Fields::one(Field::new(
-                DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                None,
-            )),
+            fields: Fields::one(Field::new(GREPTIME_TIMESTAMP.to_string(), None)),
             type_,
             default,
             index: Some(Index::Time),
@@ -395,7 +391,7 @@ pub(crate) fn values_to_row(
     // skip ts column
     let ts_column_name = custom_ts
         .as_ref()
-        .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+        .map_or(GREPTIME_TIMESTAMP, |ts| ts.get_column_name());
 
     let values = values.into_object().context(ValueMustBeMapSnafu)?;
 
@@ -563,7 +559,7 @@ fn identity_pipeline_inner(
     schema_info.schema.push(ColumnSchema {
         column_name: custom_ts
             .map(|ts| ts.get_column_name().to_string())
-            .unwrap_or_else(|| DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string()),
+            .unwrap_or_else(|| GREPTIME_TIMESTAMP.to_string()),
         datatype: custom_ts.map(|c| c.get_datatype()).unwrap_or_else(|| {
             if pipeline_ctx.channel == Channel::Prometheus {
                 ColumnDataType::TimestampMillisecond

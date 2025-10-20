@@ -117,6 +117,7 @@ fn unwrap_or_default_precision(precision: Option<Precision>) -> Precision {
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, RowInsertRequests, Rows, SemanticType};
+    use common_query::prelude::GREPTIME_TIMESTAMP;
 
     use crate::influxdb::InfluxdbRequest;
 
@@ -193,7 +194,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "greptime_timestamp" => {
+                GREPTIME_TIMESTAMP => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
@@ -268,7 +269,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                         }
                     }
                 }
-                "greptime_timestamp" => {
+                GREPTIME_TIMESTAMP => {
                     assert_eq!(
                         ColumnDataType::TimestampNanosecond as i32,
                         column_schema.datatype
