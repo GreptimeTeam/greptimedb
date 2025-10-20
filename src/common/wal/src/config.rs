@@ -25,6 +25,7 @@ use crate::config::kafka::common::{
 };
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
+use crate::error::{Error, UnsupportedWalProviderSnafu};
 
 /// Wal configurations for metasrv.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -43,6 +44,7 @@ pub enum MetasrvWalConfig {
 pub enum DatanodeWalConfig {
     RaftEngine(RaftEngineConfig),
     Kafka(DatanodeKafkaConfig),
+    Noop,
 }
 
 impl Default for DatanodeWalConfig {
@@ -51,11 +53,13 @@ impl Default for DatanodeWalConfig {
     }
 }
 
-impl From<DatanodeWalConfig> for MetasrvWalConfig {
-    fn from(config: DatanodeWalConfig) -> Self {
+impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
+    type Error = Error;
+
+    fn try_from(config: DatanodeWalConfig) -> Result<Self, Self::Error> {
         match config {
-            DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
-            DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
+            DatanodeWalConfig::RaftEngine(_) => Ok(Self::RaftEngine),
+            DatanodeWalConfig::Kafka(config) => Ok(Self::Kafka(MetasrvKafkaConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
@@ -67,7 +71,11 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
                 // This field won't be used in standalone mode
                 checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
-            }),
+            })),
+            DatanodeWalConfig::Noop => UnsupportedWalProviderSnafu {
+                provider: "noop".to_string(),
+            }
+            .fail(),
         }
     }
 }

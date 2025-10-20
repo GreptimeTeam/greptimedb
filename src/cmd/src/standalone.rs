@@ -476,7 +476,11 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts.wal.clone().into();
+        let kafka_options = opts
+            .wal
+            .clone()
+            .try_into()
+            .context(error::InvalidWalProviderSnafu)?;
         let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
             .await
             .context(error::BuildWalOptionsAllocatorSnafu)?;

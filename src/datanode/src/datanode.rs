@@ -34,6 +34,7 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{GlobalIndexCollector, default_index_file};
+use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
@@ -553,6 +554,27 @@ impl DatanodeBuilder {
                     schema_metadata_manager,
                     file_ref_manager,
                     partition_expr_fetcher,
+                    plugins,
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
+            DatanodeWalConfig::Noop => {
+                let log_store = Arc::new(NoopLogStore);
+
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher.clone(),
                     plugins,
                 );
 

@@ -316,6 +316,13 @@ pub enum Error {
         location: Location,
         source: standalone::error::Error,
     },
+
+    #[snafu(display("Invalid WAL provider"))]
+    InvalidWalProvider {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_wal::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -373,6 +380,7 @@ impl ErrorExt for Error {
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
+            Error::InvalidWalProvider { .. } => StatusCode::InvalidArguments,
         }
     }
 
