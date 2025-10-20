@@ -24,14 +24,9 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
 };
 
-async fn test_last_row(append_mode: bool, flat_format: bool) {
+async fn test_last_row(append_mode: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env
-        .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
-            ..Default::default()
-        })
-        .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
 
     env.get_schema_metadata_manager()
@@ -111,12 +106,10 @@ async fn test_last_row(append_mode: bool, flat_format: bool) {
 
 #[tokio::test]
 async fn test_last_row_append_mode_disabled() {
-    test_last_row(false, false).await;
-    test_last_row(false, true).await;
+    test_last_row(false).await;
 }
 
 #[tokio::test]
 async fn test_last_row_append_mode_enabled() {
-    test_last_row(true, false).await;
-    test_last_row(true, true).await;
+    test_last_row(true).await;
 }

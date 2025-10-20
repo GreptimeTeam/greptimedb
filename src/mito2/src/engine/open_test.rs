@@ -371,7 +371,15 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     // Skip the WAL replay .
     engine
         .handle_request(
@@ -402,7 +410,15 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 
     // Replay the WAL.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     // Open the region again with options.
     engine
         .handle_request(
