@@ -23,7 +23,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::MitoRegionRef;
 use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{
