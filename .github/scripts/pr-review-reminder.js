@@ -35,7 +35,7 @@
         sort: "created",
         direction: "asc"
       });
-      return prs.data;
+      return prs.data.filter((pr) => !pr.draft);
     } catch (error) {
       console.error("Error fetching PRs:", error);
       return [];
