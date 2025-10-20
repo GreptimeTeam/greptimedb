@@ -33,7 +33,6 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion_common::DataFusionError;
 use datatypes::arrow::compute;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt, ready};
@@ -42,7 +41,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::METRIC_NUM_SERIES;
+use crate::extension_plan::{METRIC_NUM_SERIES, resolve_column_name, serialize_column_index};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -100,28 +99,18 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
-            let columns = input_schema.columns();
             let tag_columns = unfix
                 .tag_column_indices
                 .iter()
-                .map(|idx| {
-                    columns
-                        .get(*idx as usize)
-                        .ok_or_else(|| DataFusionError::Internal(format!(
-                            "Failed to get tag column at idx {} during unfixing SeriesDivide with columns:{:?}",
-                            idx, columns
-                        )))
-                        .map(|field| field.name().to_string())
-                })
+                .map(|idx| resolve_column_name(*idx, input_schema, "SeriesDivide", "tag"))
                 .collect::<DataFusionResult<Vec<String>>>()?;
 
-            let time_index_column = columns
-                .get(unfix.time_index_column_idx as usize)
-                .ok_or_else(|| DataFusionError::Internal(format!(
-                    "Failed to get time index column at idx {} during unfixing SeriesDivide with columns:{:?}",
-                    unfix.time_index_column_idx, columns
-                )))?
-                .name().to_string();
+            let time_index_column = resolve_column_name(
+                unfix.time_index_column_idx,
+                input_schema,
+                "SeriesDivide",
+                "time index",
+            )?;
 
             Ok(Self {
                 tag_columns,
@@ -171,21 +160,11 @@ impl SeriesDivide {
         let tag_column_indices = self
             .tag_columns
             .iter()
-            .map(|name| {
-                self.input
-                    .schema()
-                    .index_of_column_by_name(None, name)
-                    .map(|idx| idx as u64)
-                    .unwrap_or(u64::MAX)
-            })
+            .map(|name| serialize_column_index(self.input.schema(), name))
             .collect::<Vec<u64>>();
 
-        let time_index_column_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.time_index_column)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX);
+        let time_index_column_idx =
+            serialize_column_index(self.input.schema(), &self.time_index_column);
 
         pb::SeriesDivide {
             tag_column_indices,

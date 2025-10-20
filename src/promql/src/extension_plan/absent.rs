@@ -47,7 +47,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::DeserializeSnafu;
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, resolve_column_name, serialize_column_index};
 
 /// Maximum number of rows per output batch
 const ABSENT_BATCH_SIZE: usize = 8192;
@@ -134,22 +134,15 @@ impl UserDefinedLogicalNodeCore for Absent {
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
-            let columns = input_schema.columns();
-            let time_index_column = columns
-                .get(unfix.time_index_column_idx as usize)
-                .ok_or_else(|| datafusion::error::DataFusionError::Internal(format!(
-                    "Failed to get time index column at idx {} during unfixing Absent with columns:{:?}",
-                    unfix.time_index_column_idx, columns
-                )))?
-                .name().to_string();
+            let time_index_column = resolve_column_name(
+                unfix.time_index_column_idx,
+                input_schema,
+                "Absent",
+                "time index",
+            )?;
 
-            let value_column = columns
-                .get(unfix.value_column_idx as usize)
-                .ok_or_else(|| datafusion::error::DataFusionError::Internal(format!(
-                    "Failed to get value column at idx {} during unfixing Absent with columns:{:?}",
-                    unfix.value_column_idx, columns
-                )))?
-                .name().to_string();
+            let value_column =
+                resolve_column_name(unfix.value_column_idx, input_schema, "Absent", "value")?;
 
             // Recreate output schema with actual field names
             Self::try_new(
@@ -252,19 +245,10 @@ impl Absent {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let time_index_column_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.time_index_column)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+        let time_index_column_idx =
+            serialize_column_index(self.input.schema(), &self.time_index_column);
 
-        let value_column_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.value_column)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX);
+        let value_column_idx = serialize_column_index(self.input.schema(), &self.value_column);
 
         pb::Absent {
             start: self.start,

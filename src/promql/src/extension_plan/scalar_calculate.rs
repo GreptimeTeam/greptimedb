@@ -41,7 +41,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, resolve_column_name, serialize_column_index};
 
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)
@@ -158,31 +158,15 @@ impl ScalarCalculate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let time_index_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.time_index)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index);
 
         let tag_column_indices = self
             .tag_columns
             .iter()
-            .map(|name| {
-                self.input
-                    .schema()
-                    .index_of_column_by_name(None, name)
-                    .map(|idx| idx as u64)
-                    .unwrap_or(u64::MAX)
-            })
+            .map(|name| serialize_column_index(self.input.schema(), name))
             .collect::<Vec<u64>>();
 
-        let field_column_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.field_column)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX);
+        let field_column_idx = serialize_column_index(self.input.schema(), &self.field_column);
 
         pb::ScalarCalculate {
             start: self.start,
@@ -305,36 +289,25 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
-            let columns = input_schema.columns();
-            let time_index = columns
-                .get(unfix.time_index_idx as usize)
-                .ok_or_else(|| DataFusionError::Internal(format!(
-                    "Failed to get time index column at idx {} during unfixing ScalarCalculate with columns:{:?}",
-                    unfix.time_index_idx, columns
-                )))?
-                .name().to_string();
+            let time_index = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "ScalarCalculate",
+                "time index",
+            )?;
 
             let tag_columns = unfix
                 .tag_column_indices
                 .iter()
-                .map(|idx| {
-                    columns
-                        .get(*idx as usize)
-                        .ok_or_else(|| DataFusionError::Internal(format!(
-                            "Failed to get tag column at idx {} during unfixing ScalarCalculate with columns:{:?}",
-                            idx, columns
-                        )))
-                        .map(|field| field.name().to_string())
-                })
+                .map(|idx| resolve_column_name(*idx, input_schema, "ScalarCalculate", "tag"))
                 .collect::<DataFusionResult<Vec<String>>>()?;
 
-            let field_column = columns
-                .get(unfix.field_column_idx as usize)
-                .ok_or_else(|| DataFusionError::Internal(format!(
-                    "Failed to get field column at idx {} during unfixing ScalarCalculate with columns:{:?}",
-                    unfix.field_column_idx, columns
-                )))?
-                .name().to_string();
+            let field_column = resolve_column_name(
+                unfix.field_column_idx,
+                input_schema,
+                "ScalarCalculate",
+                "field",
+            )?;
 
             // Recreate output schema with actual field names
             let ts_field = Field::new(

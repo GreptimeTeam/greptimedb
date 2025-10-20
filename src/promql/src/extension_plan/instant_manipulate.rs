@@ -41,7 +41,9 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
@@ -109,25 +111,22 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
-            let columns = input_schema.columns();
-            let time_index_column = columns
-                .get(unfix.time_index_idx as usize)
-                .ok_or_else(|| DataFusionError::Internal(format!(
-                    "Failed to get time index column at idx {} during unfixing InstantManipulate with columns:{:?}",
-                    unfix.time_index_idx, columns
-                )))?
-                .name().to_string();
+            let time_index_column = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "InstantManipulate",
+                "time index",
+            )?;
 
             let field_column = if unfix.field_index_idx == u64::MAX {
                 None
             } else {
-                Some(columns
-                    .get(unfix.field_index_idx as usize)
-                    .ok_or_else(|| DataFusionError::Internal(format!(
-                        "Failed to get field column at idx {} during unfixing InstantManipulate with columns:{:?}",
-                        unfix.field_index_idx, columns
-                    )))?
-                    .name().to_string())
+                Some(resolve_column_name(
+                    unfix.field_index_idx,
+                    input_schema,
+                    "InstantManipulate",
+                    "field",
+                )?)
             };
 
             Ok(Self {
@@ -195,22 +194,12 @@ impl InstantManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let time_index_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.time_index_column)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index_column);
 
         let field_index_idx = self
             .field_column
             .as_ref()
-            .and_then(|name| {
-                self.input
-                    .schema()
-                    .index_of_column_by_name(None, name)
-                    .map(|idx| idx as u64)
-            })
+            .map(|name| serialize_column_index(self.input.schema(), name))
             .unwrap_or(u64::MAX);
 
         pb::InstantManipulate {

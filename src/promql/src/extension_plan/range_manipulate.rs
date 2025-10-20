@@ -44,7 +44,9 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{METRIC_NUM_SERIES, Millisecond};
+use crate::extension_plan::{
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+};
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
@@ -189,23 +191,12 @@ impl RangeManipulate {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let time_index_idx = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.time_index)
-            .map(|idx| idx as u64)
-            .unwrap_or(u64::MAX); // make sure if not found, it will report error in deserialization
+        let time_index_idx = serialize_column_index(self.input.schema(), &self.time_index);
 
         let tag_column_indices = self
             .field_columns
             .iter()
-            .map(|name| {
-                self.input
-                    .schema()
-                    .index_of_column_by_name(None, name)
-                    .map(|idx| idx as u64)
-                    .unwrap_or(u64::MAX)
-            })
+            .map(|name| serialize_column_index(self.input.schema(), name))
             .collect::<Vec<u64>>();
         debug!(
             "RangeManipulate serialize time_index_idx: {}, tag_column_indices: {:?}",
@@ -327,26 +318,17 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
 
         if let Some(unfix) = &self.unfix {
             // transform indices to names
-            let columns = input_schema.columns();
-            let time_index = columns
-                .get(unfix.time_index_idx as usize)
-                .ok_or_else(|| DataFusionError::Internal(format!(
-                    "Failed to get time index column at idx {} during unfixing RangeManipulate with columns:{:?}",
-                    unfix.time_index_idx, columns
-                )))?
-                .name().to_string();
+            let time_index = resolve_column_name(
+                unfix.time_index_idx,
+                input_schema,
+                "RangeManipulate",
+                "time index",
+            )?;
+
             let field_columns = unfix
                 .tag_column_indices
                 .iter()
-                .map(|idx| {
-                    columns
-                        .get(*idx as usize)
-                        .ok_or_else(|| DataFusionError::Internal(format!(
-                            "Failed to get tag column at idx {} during unfixing RangeManipulate with columns:{:?}",
-                            idx, columns
-                        )))
-                        .map(|field| field.name().to_string())
-                })
+                .map(|idx| resolve_column_name(*idx, input_schema, "RangeManipulate", "tag"))
                 .collect::<DataFusionResult<Vec<String>>>()?;
 
             let output_schema =
