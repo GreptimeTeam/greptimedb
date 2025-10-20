@@ -163,6 +163,10 @@ impl FileGroup {
         self.files.push(file);
     }
 
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn files(&self) -> &[FileHandle] {
         &self.files[..]
