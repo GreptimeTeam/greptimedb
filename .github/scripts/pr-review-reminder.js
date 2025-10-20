@@ -13,6 +13,13 @@
   const REPO_NAME = "greptimedb";
   const GITHUB_TO_SLACK = JSON.parse(process.env.GITHUBID_SLACKID_MAPPING || '{}');
 
+  // Debug: Print environment variable status
+  console.log("=== Environment Variables Debug ===");
+  console.log(`GITHUB_TOKEN: ${GITHUB_TOKEN ? 'Set ✓' : 'NOT SET ✗'}`);
+  console.log(`SLACK_PR_REVIEW_WEBHOOK_URL: ${SLACK_WEBHOOK_URL ? 'Set ✓' : 'NOT SET ✗'}`);
+  console.log(`GITHUBID_SLACKID_MAPPING: ${process.env.GITHUBID_SLACKID_MAPPING ? `Set ✓ (${Object.keys(GITHUB_TO_SLACK).length} mappings)` : 'NOT SET ✗'}`);
+  console.log("===================================\n");
+
   const octokit = new Octokit({
     auth: GITHUB_TOKEN
   });
