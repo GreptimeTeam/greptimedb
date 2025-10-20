@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use greptime_proto::v1::value::ValueData::{U8Value, U16Value};
 use greptime_proto::v1::{ColumnDataType, SemanticType};
 
@@ -47,7 +47,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -88,7 +88,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -124,7 +124,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -176,7 +176,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),

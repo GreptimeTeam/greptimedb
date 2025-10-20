@@ -15,7 +15,7 @@
 use ahash::{HashMap, HashSet};
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{GREPTIME_COUNT, GREPTIME_VALUE, greptime_timestamp};
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -481,7 +481,7 @@ fn write_timestamp(
     if legacy_mode {
         row_writer::write_ts_to_nanos(
             table,
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             Some(time_nano),
             Precision::Nanosecond,
             row,
@@ -489,7 +489,7 @@ fn write_timestamp(
     } else {
         row_writer::write_ts_to_millis(
             table,
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             Some(time_nano / 1000000),
             Precision::Millisecond,
             row,
@@ -1494,7 +1494,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );
@@ -1544,7 +1544,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );
@@ -1594,7 +1594,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "quantile",
                 "greptime_value"
             ]
@@ -1612,7 +1612,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );
@@ -1629,7 +1629,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );
@@ -1681,7 +1681,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "le",
                 "greptime_value",
             ]
@@ -1699,7 +1699,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );
@@ -1716,7 +1716,7 @@ mod tests {
             vec![
                 "otel_scope_scope",
                 "host",
-                GREPTIME_TIMESTAMP,
+                greptime_timestamp(),
                 "greptime_value"
             ]
         );

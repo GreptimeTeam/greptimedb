@@ -16,7 +16,7 @@ pub mod codec;
 
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{GREPTIME_VALUE, greptime_timestamp};
 
 use self::codec::DataPoint;
 use crate::error::Result;
@@ -46,7 +46,7 @@ pub fn data_point_to_grpc_row_insert_requests(
         // timestamp
         row_writer::write_ts_to_millis(
             table_data,
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             Some(timestamp),
             Precision::Millisecond,
             &mut one_row,

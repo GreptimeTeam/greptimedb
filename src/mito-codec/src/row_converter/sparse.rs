@@ -385,7 +385,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_query::prelude::GREPTIME_TIMESTAMP;
+    use common_query::prelude::greptime_timestamp;
     use common_time::Timestamp;
     use common_time::timestamp::TimeUnit;
     use datatypes::schema::ColumnSchema;
@@ -471,7 +471,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    GREPTIME_TIMESTAMP,
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_nanosecond_datatype(),
                     false,
                 ),

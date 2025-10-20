@@ -21,9 +21,9 @@ pub use crate::columnar_value::ColumnarValue;
 static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
 
 /// Get the default timestamp column name.
-/// Returns the configured value, or "greptime_timestamp" if not set.
+/// Returns the configured value, or `greptime_timestamp` if not set.
 pub fn greptime_timestamp() -> &'static str {
-    GREPTIME_TIMESTAMP_CELL.get_or_init(|| "greptime_timestamp".to_string())
+    GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string())
 }
 
 /// Set the default timestamp column name.
@@ -38,8 +38,7 @@ pub fn set_greptime_timestamp(name: Option<&str>) {
 }
 
 /// Default timestamp column name constant for backward compatibility.
-/// DEPRECATED: Use greptime_timestamp() function instead.
-pub const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
+const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name for Prometheus metrics.
 pub const GREPTIME_VALUE: &str = "greptime_value";
 /// Default counter column name for OTLP metrics.

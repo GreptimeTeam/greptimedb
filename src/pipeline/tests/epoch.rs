@@ -15,7 +15,7 @@
 mod common;
 
 use api::v1::ColumnSchema;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
 
@@ -129,7 +129,7 @@ transform:
         make_time_field("input_nanosecond", ColumnDataType::TimestampNanosecond),
         make_time_field("input_nano", ColumnDataType::TimestampNanosecond),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -188,7 +188,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -239,7 +239,7 @@ transform:
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),

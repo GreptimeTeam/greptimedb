@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType, column};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{GREPTIME_VALUE, greptime_timestamp};
 
 use crate::error::{self, Result};
 
@@ -129,7 +129,7 @@ impl DataPoint {
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
-            column_name: GREPTIME_TIMESTAMP.to_string(),
+            column_name: greptime_timestamp().to_string(),
             values: Some(column::Values {
                 timestamp_millisecond_values: vec![self.ts_millis],
                 ..Default::default()
@@ -267,7 +267,7 @@ mod test {
         assert_eq!(row_count, 1);
         assert_eq!(columns.len(), 4);
 
-        assert_eq!(columns[0].column_name, GREPTIME_TIMESTAMP);
+        assert_eq!(columns[0].column_name, greptime_timestamp());
         assert_eq!(
             columns[0]
                 .values

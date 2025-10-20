@@ -240,7 +240,7 @@ impl DataRegion {
 
 #[cfg(test)]
 mod test {
-    use common_query::prelude::GREPTIME_TIMESTAMP;
+    use common_query::prelude::greptime_timestamp;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
 
@@ -301,7 +301,7 @@ mod test {
             .map(|c| &c.column_schema.name)
             .collect::<Vec<_>>();
         let expected = vec![
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             "greptime_value",
             "__table_id",
             "__tsid",

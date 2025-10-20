@@ -16,7 +16,7 @@ mod common;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -27,7 +27,7 @@ lazy_static! {
             SemanticType::Field,
         ),
         common::make_column_schema(
-            GREPTIME_TIMESTAMP.to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),

@@ -3433,7 +3433,7 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::prelude::GREPTIME_TIMESTAMP;
+    use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -3544,7 +3544,7 @@ mod test {
             }
             columns.push(
                 ColumnSchema::new(
-                    GREPTIME_TIMESTAMP.to_string(),
+                    greptime_timestamp().to_string(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 )
