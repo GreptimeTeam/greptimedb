@@ -19,6 +19,7 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -36,6 +37,9 @@ use crate::sst::file::{overlaps, FileHandle, Level};
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
+
+/// Default value for max compaction input file num.
+const DEFAULT_MAX_INPUT_FILE_NUM: usize = 32;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
@@ -61,7 +65,14 @@ impl TwcsPicker {
     ) -> Vec<CompactionOutput> {
         let max_input_file_num = std::env::var("TWCS_MAX_INPUT_FILE_NUM")
             .ok()
-            .and_then(|v| usize::from_str(&v).ok());
+            .and_then(|v| {
+                usize::from_str(&v)
+                    .inspect_err(|_| {
+                        warn!("Cannot recognize value for TWCS_MAX_INPUT_FILE_NUM: `{v}`");
+                    })
+                    .ok()
+            })
+            .unwrap_or(DEFAULT_MAX_INPUT_FILE_NUM);
         debug!("Max compaction file num from env: {:?}", max_input_file_num);
         let mut output = vec![];
         for (window, files) in time_windows {
@@ -107,12 +118,8 @@ impl TwcsPicker {
                 // no overlapping files, try merge small files
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
-
             let total_input_files: usize = inputs.iter().map(|g| g.num_files()).sum();
-
-            if let Some(max_input_file_num) = max_input_file_num
-                && total_input_files > max_input_file_num
-            {
+            if total_input_files > max_input_file_num {
                 let mut num_picked_files = 0;
                 inputs = inputs
                     .into_iter()
@@ -127,8 +134,8 @@ impl TwcsPicker {
                     })
                     .collect::<Vec<_>>();
                 info!(
-                    "Compaction for region {} enforces max input file num limit: {}, input: {:?}",
-                    region_id, max_input_file_num, inputs
+                    "Compaction for region {} enforces max input file num limit: {}, current total: {}, input: {:?}",
+                    region_id, max_input_file_num, total_input_files, inputs
                 );
             }
             if inputs.len() > 1 {
