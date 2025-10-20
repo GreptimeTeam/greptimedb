@@ -56,6 +56,7 @@ SHOW TABLES;
 | schema_privileges                     |
 | schemata                              |
 | session_status                        |
+| ssts_index_meta                       |
 | ssts_manifest                         |
 | ssts_storage                          |
 | table_constraints                     |
@@ -107,6 +108,7 @@ SHOW FULL TABLES;
 | schema_privileges                     | LOCAL TEMPORARY |
 | schemata                              | LOCAL TEMPORARY |
 | session_status                        | LOCAL TEMPORARY |
+| ssts_index_meta                       | LOCAL TEMPORARY |
 | ssts_manifest                         | LOCAL TEMPORARY |
 | ssts_storage                          | LOCAL TEMPORARY |
 | table_constraints                     | LOCAL TEMPORARY |
@@ -152,6 +154,7 @@ SHOW TABLE STATUS;
 |schema_privileges||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |schemata||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |session_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|ssts_index_meta||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |ssts_manifest||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |ssts_storage||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |table_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||

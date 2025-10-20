@@ -356,6 +356,15 @@ impl PuffinIndexMetaEntry {
     pub fn reserved_table_name_for_inspection() -> &'static str {
         "__inspect/__mito/__puffin_index_meta"
     }
+
+    /// Builds a logical plan for scanning puffin index metadata entries.
+    pub fn build_plan(scan_request: ScanRequest) -> Result<LogicalPlan, DataFusionError> {
+        build_plan_helper(
+            scan_request,
+            Self::reserved_table_name_for_inspection(),
+            Self::schema(),
+        )
+    }
 }
 
 fn build_plan_helper(
