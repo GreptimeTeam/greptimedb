@@ -334,6 +334,15 @@ impl ExecutionPlan for RegionScanExec {
         if partition.is_some() {
             return Ok(Statistics::new_unknown(self.schema().as_ref()));
         }
+        {
+            let scanner = self.scanner.lock().unwrap();
+            common_telemetry::error!(
+                "Append mode: {}, scanner: {:?}, has_predicate: {}",
+                self.append_mode,
+                scanner,
+                scanner.has_predicate()
+            );
+        }
 
         let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
             let column_statistics = self

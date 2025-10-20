@@ -429,7 +429,17 @@ impl RegionScanner for UnorderedScan {
 
     fn has_predicate(&self) -> bool {
         let predicate = self.stream_ctx.input.predicate();
-        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+        predicate
+            .map(|p| {
+                if self.metadata().partition_expr.is_some() {
+                    // If there's partition expression, there must be at least one more expression to be a real predicate. As partition expr is always included in predicate.
+                    // TODO(discord9): better way to check for partition expr?
+                    p.exprs().len() > 1
+                } else {
+                    !p.exprs().is_empty()
+                }
+            })
+            .unwrap_or(false)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {
