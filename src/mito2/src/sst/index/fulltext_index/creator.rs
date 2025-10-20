@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::warn;
 use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
@@ -69,7 +70,17 @@ impl FulltextIndexer {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
-            // TODO(yingwen): Skip tags.
+            // Tag columns don't support fulltext index now.
+            // If we need to support fulltext index for tag columns, we also need to parse
+            // the codec and handle sparse encoding for flat format specially.
+            if column.semantic_type == SemanticType::Tag {
+                common_telemetry::debug!(
+                    "Skip creating fulltext index for tag column {}",
+                    column.column_schema.name
+                );
+                continue;
+            }
+
             let options = column
                 .column_schema
                 .fulltext_options()
@@ -353,7 +364,6 @@ impl SingleCreator {
                 }
             }
         } else {
-            // TODO(yingwen): handle sparse encoding.
             // If the column is not found in the batch, push empty text.
             // Ensure that the number of texts pushed is the same as the number of rows in the SST,
             // so that the texts are aligned with the row ids.
