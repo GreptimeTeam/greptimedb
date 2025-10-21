@@ -37,7 +37,7 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
 
-async fn put_and_flush(
+pub(crate) async fn put_and_flush(
     engine: &MitoEngine,
     region_id: RegionId,
     column_schemas: &[ColumnSchema],
@@ -74,7 +74,7 @@ async fn flush(engine: &MitoEngine, region_id: RegionId) {
     assert_eq!(0, result.affected_rows);
 }
 
-async fn compact(engine: &MitoEngine, region_id: RegionId) {
+pub(crate) async fn compact(engine: &MitoEngine, region_id: RegionId) {
     let result = engine
         .handle_request(
             region_id,
@@ -85,7 +85,7 @@ async fn compact(engine: &MitoEngine, region_id: RegionId) {
     assert_eq!(result.affected_rows, 0);
 }
 
-async fn delete_and_flush(
+pub(crate) async fn delete_and_flush(
     engine: &MitoEngine,
     region_id: RegionId,
     column_schemas: &[ColumnSchema],

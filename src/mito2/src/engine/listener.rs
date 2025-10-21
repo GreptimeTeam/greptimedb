@@ -23,6 +23,8 @@ use common_telemetry::info;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::Notify;
 
+use crate::sst::file::RegionFileId;
+
 /// Mito engine background event listener.
 #[async_trait]
 pub trait EventListener: Send + Sync {
@@ -71,6 +73,12 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener that the index build task is executed successfully.
+    async fn on_index_build_success(&self, _region_file_id: RegionFileId) {}
+
+    /// Notifies the listener that the index build task is started.
+    async fn on_index_build_begin(&self, _region_file_id: RegionFileId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -296,5 +304,50 @@ impl EventListener for NotifyRegionChangeResultListener {
             region_id
         );
         self.notify.notified().await;
+    }
+}
+
+#[derive(Default)]
+pub struct IndexBuildListener {
+    notify: Notify,
+    success_count: AtomicUsize,
+    start_count: AtomicUsize,
+}
+
+impl IndexBuildListener {
+    /// Wait until index build is done for `times` times.
+    pub async fn wait_finish(&self, times: usize) {
+        while self.success_count.load(Ordering::Relaxed) < times {
+            self.notify.notified().await;
+        }
+    }
+
+    /// Clears the success count.
+    pub fn clear_success_count(&self) {
+        self.success_count.store(0, Ordering::Relaxed);
+    }
+
+    /// Returns the success count.
+    pub fn success_count(&self) -> usize {
+        self.success_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the start count.
+    pub fn begin_count(&self) -> usize {
+        self.start_count.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl EventListener for IndexBuildListener {
+    async fn on_index_build_success(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build successfully", region_file_id);
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+
+    async fn on_index_build_begin(&self, region_file_id: RegionFileId) {
+        info!("Region {} index build begin", region_file_id);
+        self.start_count.fetch_add(1, Ordering::Relaxed);
     }
 }
