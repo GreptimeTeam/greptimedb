@@ -400,10 +400,14 @@ pub enum Instruction {
     ///
     /// - Returns true if a specified region exists.
     OpenRegion(OpenRegion),
+    /// Opens regions.
+    OpenRegions(Vec<OpenRegion>),
     /// Closes a region.
     ///
     /// - Returns true if a specified region does not exist.
     CloseRegion(RegionIdent),
+    /// Closes regions
+    CloseRegions(Vec<RegionIdent>),
     /// Upgrades a region.
     UpgradeRegion(UpgradeRegion),
     /// Downgrades a region.
@@ -439,7 +443,9 @@ impl Display for UpgradeRegionReply {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     OpenRegion(SimpleReply),
+    OpenRegions(SimpleReply),
     CloseRegion(SimpleReply),
+    CloseRegions(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
     FlushRegions(FlushRegionReply),
@@ -449,12 +455,31 @@ impl Display for InstructionReply {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
+            Self::OpenRegions(reply) => write!(f, "InstructionReply::OpenRegions({})", reply),
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
+            Self::CloseRegions(reply) => write!(f, "InstructionReply::CloseRegions({})", reply),
             Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl InstructionReply {
+    pub fn into_close_regions_reply(self) -> SimpleReply {
+        match self {
+            Self::CloseRegions(reply) => reply,
+            _ => panic!("Expected CloseRegions reply"),
+        }
+    }
+
+    pub fn into_open_regions_reply(self) -> SimpleReply {
+        match self {
+            Self::OpenRegions(reply) => reply,
+            _ => panic!("Expected OpenRegions reply"),
         }
     }
 }

@@ -87,8 +87,14 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(open_region) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_open_region_instruction(open_region)
             })),
+            Instruction::OpenRegions(open_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_open_regions_instruction(open_regions)
+            })),
             Instruction::CloseRegion(close_region) => Ok(Box::new(|handler_context| {
                 handler_context.handle_close_region_instruction(close_region)
+            })),
+            Instruction::CloseRegions(close_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_close_regions_instruction(close_regions)
             })),
             Instruction::DowngradeRegion(downgrade_region) => {
                 Ok(Box::new(move |handler_context| {
@@ -116,6 +122,8 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
+                | Some((_, Instruction::OpenRegions { .. }))
+                | Some((_, Instruction::CloseRegions { .. }))
         )
     }
 
@@ -176,8 +184,8 @@ mod tests {
     use crate::tests::mock_region_server;
 
     pub struct HeartbeatResponseTestEnv {
-        mailbox: MailboxRef,
-        receiver: Receiver<(MessageMeta, InstructionReply)>,
+        pub(crate) mailbox: MailboxRef,
+        pub(crate) receiver: Receiver<(MessageMeta, InstructionReply)>,
     }
 
     impl HeartbeatResponseTestEnv {
