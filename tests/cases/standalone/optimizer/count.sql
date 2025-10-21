@@ -48,6 +48,8 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -86,6 +88,8 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
@@ -131,7 +135,7 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
         ('b', '2024-09-06T06:00:04Z', 4),
         ('b', '2024-09-06T06:00:05Z', 5);
 
--- This should use statistics, but unordered scan currently also carries this region's partition expression, so optimizer thinks there's a predicate and won't use statistics.
+-- This should use statistics
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -139,6 +143,8 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -173,6 +179,8 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 

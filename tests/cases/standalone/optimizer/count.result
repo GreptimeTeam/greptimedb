@@ -87,6 +87,8 @@ Affected Rows: 5
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -133,8 +135,11 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[5 as count(Int64(1))] REDACTED
-|_|_|_PlaceholderRowExec REDACTED
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -144,7 +149,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 +-----------------+
 | count(Int64(1)) |
 +-----------------+
-| 5               |
+| 2               |
 +-----------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -161,6 +166,8 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
@@ -170,8 +177,11 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[5 as count(Int64(1))] REDACTED
-|_|_|_PlaceholderRowExec REDACTED
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -181,7 +191,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 +-----------------+
 | count(Int64(1)) |
 +-----------------+
-| 5               |
+| 1               |
 +-----------------+
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -253,7 +263,7 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 
 Affected Rows: 5
 
--- This should use statistics, but unordered scan currently also carries this region's partition expression, so optimizer thinks there's a predicate and won't use statistics.
+-- This should use statistics
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -261,6 +271,8 @@ Affected Rows: 5
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -273,10 +285,10 @@ select count(1) from count_where_bug;
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[{count[count]:2} as __count_state(count_where_bug.ts)] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[{count[count]:REDACTED} as __count_state(count_where_bug.ts)] REDACTED
 |_|_|_PlaceholderRowExec REDACTED
 |_|_|_|
-| 1_| 1_|_ProjectionExec: expr=[{count[count]:3} as __count_state(count_where_bug.ts)] REDACTED
+| 1_| 1_|_ProjectionExec: expr=[{count[count]:REDACTED} as __count_state(count_where_bug.ts)] REDACTED
 |_|_|_PlaceholderRowExec REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -361,6 +373,8 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (\{count\[count]:)\d+(\}) {count[count]:REDACTED}
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
@@ -377,13 +391,13 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
