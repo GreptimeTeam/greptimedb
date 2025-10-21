@@ -615,12 +615,12 @@ impl FlatConvertFormat {
             let current_key = keys.value(i);
 
             // Check if current key is the same as previous key
-            if let Some(prev) = prev_key {
-                if prev == current_key {
-                    // Reuse the last decoded index
-                    key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
-                    continue;
-                }
+            if let Some(prev) = prev_key
+                && prev == current_key
+            {
+                // Reuse the last decoded index
+                key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+                continue;
             }
 
             // New key, decodes the value
