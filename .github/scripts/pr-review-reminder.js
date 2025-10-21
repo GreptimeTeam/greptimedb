@@ -71,33 +71,47 @@
       return "*🎉 Great job! No pending PRs for review.*";
     }
 
-    const lines = [
-      `*🔍 Daily PR Review Reminder 🔍*`,
-      `Found *${prs.length}* open PR(s) waiting for review:\n`
-    ];
+    // Separate PRs by age threshold (14 days)
+    const criticalPRs = [];
+    const recentPRs = [];
 
-    prs.forEach((pr, index) => {
-      const owner = toSlackMention(pr.user.login);
-      const reviewers = pr.requested_reviewers || [];
-      const reviewerMentions = reviewers.map(r => toSlackMention(r.login)).join(", ");
+    prs.forEach(pr => {
       const daysOpen = getDaysOpen(pr.created_at);
-      const ageEmoji = getAgeEmoji(daysOpen);
-
-      const prInfo = `${index + 1}. <${pr.html_url}|#${pr.number}: ${pr.title}>`;
-      const ageInfo = `   ${ageEmoji} Opened *${daysOpen}* day(s) ago`;
-      const ownerInfo = `   👤 Owner: ${owner}`;
-      const reviewerInfo = reviewers.length > 0
-        ? `   👁️ Reviewers: ${reviewerMentions}`
-        : `   👁️ Reviewers: _Not assigned yet_`;
-
-      lines.push(prInfo);
-      lines.push(ageInfo);
-      lines.push(ownerInfo);
-      lines.push(reviewerInfo);
-      lines.push(""); // Empty line between PRs
+      if (daysOpen >= 14) {
+        criticalPRs.push(pr);
+      } else {
+        recentPRs.push(pr);
+      }
     });
 
-    lines.push("_🟢 < 3 days | 🟡 3-6 days | 🟠 7-13 days | 🔴 14+ days_");
+    const lines = [
+      `*🔍 Daily PR Review Reminder 🔍*`,
+      `Found *${criticalPRs.length}* critical PR(s) (14+ days old)\n`
+    ];
+
+    // Show critical PRs (14+ days) in detail
+    if (criticalPRs.length > 0) {
+      criticalPRs.forEach((pr, index) => {
+        const owner = toSlackMention(pr.user.login);
+        const reviewers = pr.requested_reviewers || [];
+        const reviewerMentions = reviewers.map(r => toSlackMention(r.login)).join(", ");
+        const daysOpen = getDaysOpen(pr.created_at);
+
+        const prInfo = `${index + 1}. <${pr.html_url}|#${pr.number}: ${pr.title}>`;
+        const ageInfo = `   🔴 Opened *${daysOpen}* day(s) ago`;
+        const ownerInfo = `   👤 Owner: ${owner}`;
+        const reviewerInfo = reviewers.length > 0
+          ? `   👁️ Reviewers: ${reviewerMentions}`
+          : `   👁️ Reviewers: _Not assigned yet_`;
+
+        lines.push(prInfo);
+        lines.push(ageInfo);
+        lines.push(ownerInfo);
+        lines.push(reviewerInfo);
+        lines.push(""); // Empty line between PRs
+      });
+    }
+
     lines.push("_Let's keep the code review process moving! 🚀_");
 
     return lines.join("\n");
