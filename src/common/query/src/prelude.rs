@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::regex_pattern::NAME_PATTERN_REG;
 pub use datafusion_common::ScalarValue;
 use once_cell::sync::OnceCell;
+use snafu::ensure;
 
 pub use crate::columnar_value::ColumnarValue;
+use crate::error::{DefaultTSColNameSnafu, Result};
 
 /// Default timestamp column name.
 static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
@@ -29,12 +32,31 @@ pub fn greptime_timestamp() -> &'static str {
 /// Set the default timestamp column name.
 /// This should be called once during application startup.
 /// Returns Ok(()) if successful, or Err with the attempted value if already set.
-pub fn set_greptime_timestamp(name: Option<&str>) {
+pub fn set_greptime_timestamp(name: Option<&str>) -> Result<()> {
     let ts = match name {
         None | Some("") => GREPTIME_TIMESTAMP,
         Some(ts) => ts,
     };
-    GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
+
+    ensure!(
+        NAME_PATTERN_REG.is_match(ts),
+        DefaultTSColNameSnafu {
+            name: ts,
+            message: format!("Invalid character in timestamp column name: {}", ts)
+        }
+    );
+
+    #[cfg(any(test, feature = "testing"))]
+    {
+        GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
+        Ok(())
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        GREPTIME_TIMESTAMP_CELL
+            .set(ts.to_string())
+            .map_err(|message| DefaultTSColNameSnafu { name: ts, message }.build())
+    }
 }
 
 /// Default timestamp column name constant for backward compatibility.

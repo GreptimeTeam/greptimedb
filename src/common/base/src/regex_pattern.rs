@@ -12,18 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bit_vec;
-pub mod bytes;
-pub mod cancellation;
-pub mod plugins;
-pub mod range_read;
-#[allow(clippy::all)]
-pub mod readable_size;
-pub mod regex_pattern;
-pub mod secrets;
-pub mod serde;
+use lazy_static::lazy_static;
+use regex::Regex;
 
-pub type AffectedRows = usize;
+pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
 
-pub use bit_vec::BitVec;
-pub use plugins::Plugins;
+lazy_static! {
+    pub static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
+}

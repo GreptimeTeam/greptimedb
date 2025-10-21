@@ -59,9 +59,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
-    MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
+    GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -220,7 +220,9 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        set_greptime_timestamp(self.opts.default_timestamp_column_name.as_deref());
+        set_greptime_timestamp(self.opts.default_timestamp_column_name.as_deref())
+            .map_err(BoxedError::new)
+            .context(BuildDatanodeSnafu)?;
 
         let meta_client = self.meta_client.take();
 

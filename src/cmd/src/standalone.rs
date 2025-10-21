@@ -356,7 +356,9 @@ impl StartCommand {
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        set_greptime_timestamp(opts.default_timestamp_column_name.as_deref());
+        set_greptime_timestamp(opts.default_timestamp_column_name.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
 
         opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();

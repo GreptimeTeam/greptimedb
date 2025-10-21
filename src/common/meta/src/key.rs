@@ -121,6 +121,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_base::regex_pattern::NAME_PATTERN;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
 };
@@ -164,7 +165,6 @@ use crate::rpc::router::{LeaderState, RegionRoute, region_distribution};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::state_store::PoisonValue;
 
-pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const TOPIC_NAME_PATTERN: &str = r"[a-zA-Z0-9_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
 pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
@@ -268,10 +268,6 @@ pub type RegionDistribution = BTreeMap<DatanodeId, RegionRoleSet>;
 pub type FlowId = u32;
 /// The partition of flow.
 pub type FlowPartitionId = u32;
-
-lazy_static! {
-    pub static ref NAME_PATTERN_REGEX: Regex = Regex::new(NAME_PATTERN).unwrap();
-}
 
 lazy_static! {
     pub static ref TOPIC_NAME_PATTERN_REGEX: Regex = Regex::new(TOPIC_NAME_PATTERN).unwrap();
