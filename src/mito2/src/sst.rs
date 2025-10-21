@@ -23,8 +23,8 @@ use datatypes::arrow::datatypes::{
 };
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use serde::{Deserialize, Serialize};
 use datatypes::timestamp::timestamp_array_to_primitive;
+use serde::{Deserialize, Serialize};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
