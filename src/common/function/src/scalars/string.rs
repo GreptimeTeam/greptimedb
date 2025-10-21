@@ -14,16 +14,13 @@
 
 //! String scalar functions
 
-mod format;
 mod regexp_extract;
 
-pub(crate) use format::FormatFunction;
 pub(crate) use regexp_extract::RegexpExtractFunction;
 
 use crate::function_registry::FunctionRegistry;
 
 /// Register all string functions
 pub fn register_string_functions(registry: &FunctionRegistry) {
-    FormatFunction::register(registry);
     RegexpExtractFunction::register(registry);
 }
