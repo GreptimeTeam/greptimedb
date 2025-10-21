@@ -14,7 +14,7 @@
 
 use common_meta::RegionIdent;
 use common_meta::instruction::{InstructionReply, SimpleReply};
-use common_telemetry::{tracing, warn};
+use common_telemetry::warn;
 use futures::future::join_all;
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
@@ -23,38 +23,6 @@ use crate::error;
 use crate::heartbeat::handler::HandlerContext;
 
 impl HandlerContext {
-    #[tracing::instrument(skip_all)]
-    pub(crate) fn handle_close_region_instruction(
-        self,
-        region_ident: RegionIdent,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let region_id = Self::region_ident_to_region_id(&region_ident);
-            let request = RegionRequest::Close(RegionCloseRequest {});
-            let result = self.region_server.handle_request(region_id, request).await;
-
-            match result {
-                Ok(_) => Some(InstructionReply::CloseRegion(SimpleReply {
-                    result: true,
-                    error: None,
-                })),
-                Err(error::Error::RegionNotFound { .. }) => {
-                    warn!(
-                        "Received a close region instruction from meta, but target region:{region_id} is not found."
-                    );
-                    Some(InstructionReply::CloseRegion(SimpleReply {
-                        result: true,
-                        error: None,
-                    }))
-                }
-                Err(err) => Some(InstructionReply::CloseRegion(SimpleReply {
-                    result: false,
-                    error: Some(format!("{err:?}")),
-                })),
-            }
-        })
-    }
-
     pub(crate) fn handle_close_regions_instruction(
         self,
         region_idents: Vec<RegionIdent>,

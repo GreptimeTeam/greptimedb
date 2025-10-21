@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
@@ -394,19 +394,32 @@ impl From<RegionId> for FlushRegions {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SingleOrMultiple<T> {
+    Single(T),
+    Multiple(Vec<T>),
+}
+
+fn single_or_multiple_from<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let helper = SingleOrMultiple::<T>::deserialize(deserializer)?;
+    Ok(match helper {
+        SingleOrMultiple::Single(x) => vec![x],
+        SingleOrMultiple::Multiple(xs) => xs,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
-    /// Opens a region.
-    ///
-    /// - Returns true if a specified region exists.
-    OpenRegion(OpenRegion),
     /// Opens regions.
+    #[serde(deserialize_with = "single_or_multiple_from", alias = "OpenRegion")]
     OpenRegions(Vec<OpenRegion>),
-    /// Closes a region.
-    ///
-    /// - Returns true if a specified region does not exist.
-    CloseRegion(RegionIdent),
     /// Closes regions.
+    #[serde(deserialize_with = "single_or_multiple_from", alias = "CloseRegion")]
     CloseRegions(Vec<RegionIdent>),
     /// Upgrades a region.
     UpgradeRegion(UpgradeRegion),
@@ -442,9 +455,9 @@ impl Display for UpgradeRegionReply {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
-    OpenRegion(SimpleReply),
+    #[serde(alias = "open_region")]
     OpenRegions(SimpleReply),
-    CloseRegion(SimpleReply),
+    #[serde(alias = "close_region")]
     CloseRegions(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
@@ -454,9 +467,7 @@ pub enum InstructionReply {
 impl Display for InstructionReply {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
             Self::OpenRegions(reply) => write!(f, "InstructionReply::OpenRegions({})", reply),
-            Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
             Self::CloseRegions(reply) => write!(f, "InstructionReply::CloseRegions({})", reply),
             Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
             Self::DowngradeRegion(reply) => {
@@ -490,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_serialize_instruction() {
-        let open_region = Instruction::OpenRegion(OpenRegion::new(
+        let open_region = Instruction::OpenRegions(vec![OpenRegion::new(
             RegionIdent {
                 datanode_id: 2,
                 table_id: 1024,
@@ -501,28 +512,76 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-        ));
+        )]);
 
         let serialized = serde_json::to_string(&open_region).unwrap();
-
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#,
+            r#"{"OpenRegions":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}]}"#,
             serialized
         );
 
-        let close_region = Instruction::CloseRegion(RegionIdent {
+        let close_region = Instruction::CloseRegions(vec![RegionIdent {
             datanode_id: 2,
             table_id: 1024,
             region_number: 1,
             engine: "mito2".to_string(),
-        });
+        }]);
 
         let serialized = serde_json::to_string(&close_region).unwrap();
-
         assert_eq!(
-            r#"{"CloseRegion":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
+            r#"{"CloseRegions":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#,
             serialized
         );
+    }
+
+    #[test]
+    fn test_deserialize_instruction() {
+        let open_region_instruction = r#"{"OpenRegion":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}]}"#;
+        let open_region_instruction: Instruction =
+            serde_json::from_str(open_region_instruction).unwrap();
+        let open_region = Instruction::OpenRegions(vec![OpenRegion::new(
+            RegionIdent {
+                datanode_id: 2,
+                table_id: 1024,
+                region_number: 1,
+                engine: "mito2".to_string(),
+            },
+            "test/foo",
+            HashMap::new(),
+            HashMap::new(),
+            false,
+        )]);
+        assert_eq!(open_region_instruction, open_region);
+
+        let close_region_instruction = r#"{"CloseRegion":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#;
+        let close_region_instruction: Instruction =
+            serde_json::from_str(close_region_instruction).unwrap();
+        let close_region = Instruction::CloseRegions(vec![RegionIdent {
+            datanode_id: 2,
+            table_id: 1024,
+            region_number: 1,
+            engine: "mito2".to_string(),
+        }]);
+        assert_eq!(close_region_instruction, close_region);
+
+        let close_region_instruction_reply =
+            r#"{"result":true,"error":null,"type":"close_region"}"#;
+        let close_region_instruction_reply: InstructionReply =
+            serde_json::from_str(close_region_instruction_reply).unwrap();
+        let close_region_reply = InstructionReply::CloseRegions(SimpleReply {
+            result: true,
+            error: None,
+        });
+        assert_eq!(close_region_instruction_reply, close_region_reply);
+
+        let open_region_instruction_reply = r#"{"result":true,"error":null,"type":"open_region"}"#;
+        let open_region_instruction_reply: InstructionReply =
+            serde_json::from_str(open_region_instruction_reply).unwrap();
+        let open_region_reply = InstructionReply::OpenRegions(SimpleReply {
+            result: true,
+            error: None,
+        });
+        assert_eq!(open_region_instruction_reply, open_region_reply);
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
