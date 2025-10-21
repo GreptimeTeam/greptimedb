@@ -181,7 +181,7 @@ mod tests {
         assert_matches!(control, HandleControl::Continue);
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-        let reply = reply.into_open_regions_reply();
+        let reply = reply.expect_open_regions_reply();
         assert!(reply.result);
         assert!(reply.error.is_none());
 

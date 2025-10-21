@@ -168,7 +168,7 @@ mod tests {
         assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
-        let reply = reply.into_close_regions_reply();
+        let reply = reply.expect_close_regions_reply();
         assert!(reply.result);
         assert!(reply.error.is_none());
         assert!(!engine.is_region_exists(region_id));

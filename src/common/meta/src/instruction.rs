@@ -406,7 +406,7 @@ pub enum Instruction {
     ///
     /// - Returns true if a specified region does not exist.
     CloseRegion(RegionIdent),
-    /// Closes regions
+    /// Closes regions.
     CloseRegions(Vec<RegionIdent>),
     /// Upgrades a region.
     UpgradeRegion(UpgradeRegion),
@@ -469,14 +469,14 @@ impl Display for InstructionReply {
 
 #[cfg(any(test, feature = "testing"))]
 impl InstructionReply {
-    pub fn into_close_regions_reply(self) -> SimpleReply {
+    pub fn expect_close_regions_reply(self) -> SimpleReply {
         match self {
             Self::CloseRegions(reply) => reply,
             _ => panic!("Expected CloseRegions reply"),
         }
     }
 
-    pub fn into_open_regions_reply(self) -> SimpleReply {
+    pub fn expect_open_regions_reply(self) -> SimpleReply {
         match self {
             Self::OpenRegions(reply) => reply,
             _ => panic!("Expected OpenRegions reply"),
