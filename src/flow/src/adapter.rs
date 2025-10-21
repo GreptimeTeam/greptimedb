@@ -104,7 +104,6 @@ impl Default for FlowConfig {
 #[serde(default)]
 pub struct FlownodeOptions {
     pub node_id: Option<u64>,
-    pub default_timestamp_column_name: Option<String>,
     pub flow: FlowConfig,
     pub grpc: GrpcOptions,
     pub http: HttpOptions,
@@ -121,7 +120,6 @@ impl Default for FlownodeOptions {
     fn default() -> Self {
         Self {
             node_id: None,
-            default_timestamp_column_name: None,
             flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3004"),
             http: HttpOptions::default(),

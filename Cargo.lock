@@ -7398,7 +7398,6 @@ dependencies = [
  "common-options",
  "common-procedure",
  "common-procedure-test",
- "common-query",
  "common-runtime",
  "common-telemetry",
  "common-time",

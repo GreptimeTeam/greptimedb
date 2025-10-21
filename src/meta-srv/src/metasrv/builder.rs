@@ -46,7 +46,6 @@ use common_meta::stats::topic::TopicStatsRegistry;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
-use common_query::prelude::set_greptime_timestamp;
 use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
@@ -188,8 +187,6 @@ impl MetasrvBuilder {
         } = self;
 
         let options = options.unwrap_or_default();
-
-        set_greptime_timestamp(options.default_timestamp_column_name.as_deref());
 
         let kv_backend = kv_backend.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));

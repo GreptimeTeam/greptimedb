@@ -171,7 +171,6 @@ fn test_load_metasrv_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
-            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             selector: SelectorType::default(),
             data_home: DEFAULT_DATA_HOME.to_string(),
             grpc: GrpcOptions {
@@ -222,7 +221,6 @@ fn test_load_flownode_example_config() {
     let expected = GreptimeOptions::<FlownodeOptions> {
         component: FlownodeOptions {
             node_id: Some(14),
-            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
             flow: Default::default(),
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:6800".to_string(),

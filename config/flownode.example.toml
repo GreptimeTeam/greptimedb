@@ -2,10 +2,6 @@
 ## @toml2docs:none-default
 node_id = 14
 
-## The default timestamp column name.
-## @toml2docs:none-default
-default_timestamp_column_name = "greptime_timestamp"
-
 ## flow engine options.
 [flow]
 ## The number of flow worker in flownode.

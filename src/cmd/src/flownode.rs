@@ -30,7 +30,6 @@ use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHand
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
-use common_query::prelude::set_greptime_timestamp;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
@@ -289,7 +288,6 @@ impl StartCommand {
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        set_greptime_timestamp(opts.default_timestamp_column_name.as_deref());
         opts.grpc.detect_server_addr();
 
         let mut plugins = Plugins::new();
