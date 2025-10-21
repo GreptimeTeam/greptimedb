@@ -273,10 +273,10 @@ impl SeriesEstimator {
         if let Some(prev_last_ts) = self.last_timestamp {
             // If the first timestamp of this batch is less than the last timestamp
             // we've seen, it indicates a new series
-            if let Some(first_ts) = batch.first_timestamp() {
-                if first_ts.value() <= prev_last_ts {
-                    self.series_count += 1;
-                }
+            if let Some(first_ts) = batch.first_timestamp()
+                && first_ts.value() <= prev_last_ts
+            {
+                self.series_count += 1;
             }
         } else {
             // First batch, counts as first series

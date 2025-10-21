@@ -706,7 +706,7 @@ impl BulkPartEncoder {
 
         let buf = Bytes::from(buf);
         let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
-        let num_series = series_estimator.finish() as u64;
+        let num_series = series_estimator.finish();
 
         Ok(Some(EncodedBulkPart {
             data: buf,
