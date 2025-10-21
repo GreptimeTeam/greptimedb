@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_schema::Fields;
 use serde::{Deserialize, Serialize};
@@ -22,7 +24,7 @@ use crate::vectors::StructVectorBuilder;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StructType {
-    fields: Vec<StructField>,
+    fields: Arc<Vec<StructField>>,
 }
 
 impl TryFrom<&Fields> for StructType {
@@ -38,13 +40,9 @@ impl TryFrom<&Fields> for StructType {
                 ))
             })
             .collect::<Result<Vec<StructField>, Self::Error>>()?;
-        Ok(StructType { fields })
-    }
-}
-
-impl From<Vec<StructField>> for StructType {
-    fn from(fields: Vec<StructField>) -> Self {
-        StructType { fields }
+        Ok(StructType {
+            fields: Arc::new(fields),
+        })
     }
 }
 
@@ -87,16 +85,14 @@ impl DataType for StructType {
 }
 
 impl StructType {
-    pub fn new(fields: Vec<StructField>) -> Self {
-        StructType { fields }
+    pub fn new(fields: Arc<Vec<StructField>>) -> Self {
+        StructType {
+            fields: fields.clone(),
+        }
     }
 
-    pub fn fields(&self) -> &[StructField] {
-        &self.fields
-    }
-
-    pub fn take_fields(self) -> Vec<StructField> {
-        self.fields
+    pub fn fields(&self) -> Arc<Vec<StructField>> {
+        self.fields.clone()
     }
 
     pub fn as_arrow_fields(&self) -> Fields {
