@@ -198,10 +198,7 @@ impl RangeManipulate {
             .iter()
             .map(|name| serialize_column_index(self.input.schema(), name))
             .collect::<Vec<u64>>();
-        debug!(
-            "RangeManipulate serialize time_index_idx: {}, tag_column_indices: {:?}",
-            time_index_idx, tag_column_indices
-        );
+
         pb::RangeManipulate {
             start: self.start,
             end: self.end,
@@ -237,11 +234,11 @@ impl RangeManipulate {
             end: pb_range_manipulate.end,
             interval: pb_range_manipulate.interval,
             range: pb_range_manipulate.range,
+            time_index: String::new(),
+            field_columns: Vec::new(),
             input: placeholder_plan,
             output_schema: empty_schema,
             unfix: Some(unfix),
-            time_index: String::new(),
-            field_columns: Vec::new(),
         })
     }
 }

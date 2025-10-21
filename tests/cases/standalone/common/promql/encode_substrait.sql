@@ -6,7 +6,7 @@ create table count_total (
     primary key (tag_a, tag_b),
 );
 
--- if `RangeManipulate` can be encoded/decoded correctly in substrait, the following queries should pass(for now it simply wouldn't push down)
+-- if `RangeManipulate` can be encoded/decoded correctly in substrait, the following queries should pass
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 tql explain (0, 100, '1s') 
