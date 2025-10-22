@@ -20,6 +20,7 @@ use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use base64::DecodeError;
+use common_base::readable_size::ReadableSize;
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -165,9 +166,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Too many concurrent large requests, limit: {}, request size: {} bytes",
-        limit,
-        request_size
+        "Too many concurrent large requests, limit: {}, request size: {}",
+        ReadableSize(*limit as u64),
+        ReadableSize(*request_size as u64)
     ))]
     TooManyConcurrentRequests {
         limit: usize,
