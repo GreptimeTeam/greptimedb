@@ -17,38 +17,23 @@ use std::sync::Arc;
 
 use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
-use serde::{Deserialize, Serialize};
-use store_api::ManifestVersion;
-use store_api::storage::{FileId, RegionId, TableId};
+use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
-use crate::region::RegionMapRef;
+use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct FileRef {
-    pub region_id: RegionId,
-    pub file_id: FileId,
-}
-
-impl FileRef {
-    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
-        Self { region_id, file_id }
-    }
-}
-
-/// File references for a table.
-/// It contains all files referenced by the table.
+/// File references for a region.
+/// It contains all files referenced by the region.
 #[derive(Debug, Clone, Default)]
-pub struct TableFileRefs {
+pub struct RegionFileRefs {
     /// (FileRef, Ref Count) meaning how many FileHandleInner is opened for this file.
     pub files: HashMap<FileRef, usize>,
 }
 
 /// Manages all file references in one datanode.
 /// It keeps track of which files are referenced and group by table ids.
-/// And periodically update the references to tmp file in object storage.
 /// This is useful for ensuring that files are not deleted while they are still in use by any
 /// query.
 #[derive(Debug)]
@@ -56,33 +41,24 @@ pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
     node_id: Option<u64>,
     /// TODO(discord9): use no hash hasher since table id is sequential.
-    files_per_table: DashMap<TableId, TableFileRefs>,
+    files_per_region: DashMap<RegionId, RegionFileRefs>,
 }
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
-
-/// The tmp file uploaded to object storage to record one table's file references.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableFileRefsManifest {
-    pub file_refs: HashSet<FileRef>,
-    /// Manifest version when this manifest is read for it's files
-    pub manifest_version: HashMap<RegionId, ManifestVersion>,
-}
 
 impl FileReferenceManager {
     pub fn new(node_id: Option<u64>) -> Self {
         Self {
             node_id,
-            files_per_table: Default::default(),
+            files_per_region: Default::default(),
         }
     }
 
-    fn ref_file_set(&self, table_id: TableId) -> Option<HashSet<FileRef>> {
-        let file_refs = if let Some(file_refs) = self.files_per_table.get(&table_id) {
+    fn ref_file_set(&self, region_id: RegionId) -> Option<HashSet<FileRef>> {
+        let file_refs = if let Some(file_refs) = self.files_per_region.get(&region_id) {
             file_refs.clone()
         } else {
-            // still return an empty manifest to indicate no files are referenced.
-            // and differentiate from error case where table_id not found.
+            // region id not found.
             return None;
         };
 
@@ -95,8 +71,8 @@ impl FileReferenceManager {
         let ref_file_set: HashSet<FileRef> = file_refs.files.keys().cloned().collect();
 
         debug!(
-            "Get file refs for table {}, node {:?}, {} files",
-            table_id,
+            "Get file refs for region {}, node {:?}, {} files",
+            region_id,
             self.node_id,
             ref_file_set.len(),
         );
@@ -120,22 +96,19 @@ impl FileReferenceManager {
     #[allow(unused)]
     pub(crate) async fn get_snapshot_of_unmanifested_refs(
         &self,
-        table_id: TableId,
-        region_map: &RegionMapRef,
-    ) -> Result<TableFileRefsManifest> {
-        let Some(ref_files) = self.ref_file_set(table_id) else {
-            return Ok(Default::default());
-        };
-        let region_list = region_map.list_regions();
-        let table_regions = region_list
-            .iter()
-            .filter(|r| r.region_id().table_id() == table_id)
-            .collect::<Vec<_>>();
+        regions: Vec<MitoRegionRef>,
+    ) -> Result<FileRefsManifest> {
+        let mut ref_files = HashMap::new();
+        for region_id in regions.iter().map(|r| r.region_id()) {
+            if let Some(files) = self.ref_file_set(region_id) {
+                ref_files.insert(region_id, files);
+            }
+        }
 
         let mut in_manifest_files = HashSet::new();
         let mut manifest_version = HashMap::new();
 
-        for r in &table_regions {
+        for r in &regions {
             let manifest = r.manifest_ctx.manifest().await;
             let files = manifest.files.keys().cloned().collect::<Vec<_>>();
             in_manifest_files.extend(files);
@@ -144,11 +117,18 @@ impl FileReferenceManager {
 
         let ref_files_excluding_in_manifest = ref_files
             .iter()
-            .filter(|f| !in_manifest_files.contains(&f.file_id))
-            .cloned()
-            .collect::<HashSet<_>>();
-
-        Ok(TableFileRefsManifest {
+            .map(|(r, f)| {
+                (
+                    *r,
+                    f.iter()
+                        .filter_map(|f| {
+                            (!in_manifest_files.contains(&f.file_id)).then_some(f.file_id)
+                        })
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect();
+        Ok(FileRefsManifest {
             file_refs: ref_files_excluding_in_manifest,
             manifest_version,
         })
@@ -158,12 +138,12 @@ impl FileReferenceManager {
     /// Also records the access layer for the table if not exists.
     /// The access layer will be used to upload ref file to object storage.
     pub fn add_file(&self, file_meta: &FileMeta) {
-        let table_id = file_meta.region_id.table_id();
+        let region_id = file_meta.region_id;
         let mut is_new = false;
         {
             let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
-            self.files_per_table
-                .entry(table_id)
+            self.files_per_region
+                .entry(region_id)
                 .and_modify(|refs| {
                     refs.files
                         .entry(file_ref.clone())
@@ -173,7 +153,7 @@ impl FileReferenceManager {
                             1
                         });
                 })
-                .or_insert_with(|| TableFileRefs {
+                .or_insert_with(|| RegionFileRefs {
                     files: HashMap::from_iter([(file_ref, 1)]),
                 });
         }
@@ -185,14 +165,14 @@ impl FileReferenceManager {
     /// Removes a file reference.
     /// If the reference count reaches zero, the file reference will be removed from the manager.
     pub fn remove_file(&self, file_meta: &FileMeta) {
-        let table_id = file_meta.region_id.table_id();
+        let region_id = file_meta.region_id;
         let file_ref = FileRef::new(file_meta.region_id, file_meta.file_id);
 
         let mut remove_table_entry = false;
         let mut remove_file_ref = false;
         let mut file_cnt = 0;
 
-        let table_ref = self.files_per_table.entry(table_id).and_modify(|refs| {
+        let region_ref = self.files_per_region.entry(region_id).and_modify(|refs| {
             let entry = refs.files.entry(file_ref.clone()).and_modify(|count| {
                 if *count > 0 {
                     *count -= 1;
@@ -214,7 +194,7 @@ impl FileReferenceManager {
             }
         });
 
-        if let Entry::Occupied(o) = table_ref
+        if let Entry::Occupied(o) = region_ref
             && remove_table_entry
         {
             o.remove_entry();
@@ -234,7 +214,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use smallvec::SmallVec;
-    use store_api::storage::RegionId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::sst::file::{FileMeta, FileTimeRange, IndexType, RegionFileId};
@@ -265,54 +245,69 @@ mod tests {
         file_ref_mgr.add_file(&file_meta);
 
         assert_eq!(
-            file_ref_mgr.files_per_table.get(&0).unwrap().files,
+            file_ref_mgr
+                .files_per_region
+                .get(&file_meta.region_id)
+                .unwrap()
+                .files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
         );
 
         file_ref_mgr.add_file(&file_meta);
 
-        let expected_table_ref_manifest =
+        let expected_region_ref_manifest =
             HashSet::from_iter([FileRef::new(file_meta.region_id, file_meta.file_id)]);
 
         assert_eq!(
-            file_ref_mgr.ref_file_set(0).unwrap(),
-            expected_table_ref_manifest
+            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
+            expected_region_ref_manifest
         );
 
         assert_eq!(
-            file_ref_mgr.files_per_table.get(&0).unwrap().files,
+            file_ref_mgr
+                .files_per_region
+                .get(&file_meta.region_id)
+                .unwrap()
+                .files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 2)])
         );
 
         assert_eq!(
-            file_ref_mgr.ref_file_set(0).unwrap(),
-            expected_table_ref_manifest
+            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
+            expected_region_ref_manifest
         );
 
         file_ref_mgr.remove_file(&file_meta);
 
         assert_eq!(
-            file_ref_mgr.files_per_table.get(&0).unwrap().files,
+            file_ref_mgr
+                .files_per_region
+                .get(&file_meta.region_id)
+                .unwrap()
+                .files,
             HashMap::from_iter([(FileRef::new(file_meta.region_id, file_meta.file_id), 1)])
         );
 
         assert_eq!(
-            file_ref_mgr.ref_file_set(0).unwrap(),
-            expected_table_ref_manifest
+            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
+            expected_region_ref_manifest
         );
 
         file_ref_mgr.remove_file(&file_meta);
 
         assert!(
-            file_ref_mgr.files_per_table.get(&0).is_none(),
+            file_ref_mgr
+                .files_per_region
+                .get(&file_meta.region_id)
+                .is_none(),
             "{:?}",
-            file_ref_mgr.files_per_table
+            file_ref_mgr.files_per_region
         );
 
         assert!(
-            file_ref_mgr.ref_file_set(0).is_none(),
+            file_ref_mgr.ref_file_set(file_meta.region_id).is_none(),
             "{:?}",
-            file_ref_mgr.files_per_table
+            file_ref_mgr.files_per_region
         );
     }
 }

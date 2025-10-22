@@ -20,16 +20,21 @@ use common_meta::heartbeat::handler::{
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::error;
 use snafu::OptionExt;
+use store_api::storage::GcReport;
 
 mod close_region;
 mod downgrade_region;
+mod file_ref;
 mod flush_region;
+mod gc_worker;
 mod open_region;
 mod upgrade_region;
 
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
+use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
 use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
@@ -43,6 +48,7 @@ pub struct RegionHeartbeatResponseHandler {
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
     open_region_parallelism: usize,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
 #[async_trait::async_trait]
@@ -61,6 +67,7 @@ pub struct HandlerContext {
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    gc_tasks: TaskTracker<GcReport>,
 }
 
 impl HandlerContext {
@@ -71,6 +78,7 @@ impl HandlerContext {
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            gc_tasks: TaskTracker::new(),
         }
     }
 }
@@ -85,6 +93,7 @@ impl RegionHeartbeatResponseHandler {
             flush_tasks: TaskTracker::new(),
             // Default to half of the number of CPUs.
             open_region_parallelism: (num_cpus::get() / 2).max(1),
+            gc_tasks: TaskTracker::new(),
         }
     }
 
@@ -106,6 +115,8 @@ impl RegionHeartbeatResponseHandler {
             Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
             Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
             Instruction::UpgradeRegion(_) => Ok(Box::new(UpgradeRegionsHandler.into())),
+            Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
+            Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
         }
     }
@@ -118,6 +129,8 @@ pub enum InstructionHandlers {
     FlushRegions(FlushRegionsHandler),
     DowngradeRegions(DowngradeRegionsHandler),
     UpgradeRegions(UpgradeRegionsHandler),
+    GetFileRefs(GetFileRefsHandler),
+    GcRegions(GcRegionsHandler),
 }
 
 macro_rules! impl_from_handler {
@@ -137,7 +150,9 @@ impl_from_handler!(
     OpenRegionsHandler => OpenRegions,
     FlushRegionsHandler => FlushRegions,
     DowngradeRegionsHandler => DowngradeRegions,
-    UpgradeRegionsHandler => UpgradeRegions
+    UpgradeRegionsHandler => UpgradeRegions,
+    GetFileRefsHandler => GetFileRefs,
+    GcRegionsHandler => GcRegions
 );
 
 macro_rules! dispatch_instr {
@@ -180,6 +195,8 @@ dispatch_instr!(
     FlushRegions => FlushRegions,
     DowngradeRegions => DowngradeRegions,
     UpgradeRegion => UpgradeRegions,
+    GetFileRefs => GetFileRefs,
+    GcRegions => GcRegions,
 );
 
 #[async_trait]
@@ -202,6 +219,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
+        let gc_tasks = self.gc_tasks.clone();
         let handler = self.build_handler(&instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler
@@ -211,6 +229,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                         catchup_tasks,
                         downgrade_tasks,
                         flush_tasks,
+                        gc_tasks,
                     },
                     instruction,
                 )

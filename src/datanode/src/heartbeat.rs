@@ -36,14 +36,14 @@ use common_workload::DatanodeWorkloadType;
 use meta_client::MetaClientRef;
 use meta_client::client::{HeartbeatSender, MetaClient};
 use servers::addrs;
-use snafu::ResultExt;
+use snafu::{OptionExt as _, ResultExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::{CountdownTaskHandlerExtRef, RegionAliveKeeper};
 use crate::config::DatanodeOptions;
-use crate::error::{self, MetaClientInitSnafu, Result};
+use crate::error::{self, MetaClientInitSnafu, RegionEngineNotFoundSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
 use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 use crate::region_server::RegionServer;
@@ -242,12 +242,18 @@ impl HeartbeatTask {
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
+        let gc_limiter = self
+            .region_server
+            .mito_engine()
+            .context(RegionEngineNotFoundSnafu { name: "mito" })?
+            .gc_limiter();
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
             let build_info = common_version::build_info();
+
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
                 node_epoch,
@@ -283,8 +289,13 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
+                                    let mut extensions = heartbeat_request.extensions.clone();
+                                    let gc_stat = gc_limiter.gc_stat();
+                                    gc_stat.into_extensions(&mut extensions);
+
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
+                                        extensions,
                                         ..heartbeat_request.clone()
                                     };
                                     HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
@@ -305,10 +316,16 @@ impl HeartbeatTask {
                         let topic_stats = region_server_clone.topic_stats();
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
+
+                        let mut extensions = heartbeat_request.extensions.clone();
+                        let gc_stat = gc_limiter.gc_stat();
+                        gc_stat.into_extensions(&mut extensions);
+
                         let mut req = HeartbeatRequest {
                             region_stats,
                             topic_stats,
                             duration_since_epoch,
+                            extensions,
                             ..heartbeat_request.clone()
                         };
 

@@ -58,6 +58,7 @@ use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
@@ -138,6 +139,8 @@ pub(crate) struct WorkerGroup {
     cache_manager: CacheManagerRef,
     /// File reference manager.
     file_ref_manager: FileReferenceManagerRef,
+    /// Gc limiter to limit concurrent gc jobs.
+    gc_limiter: GcLimiterRef,
 }
 
 impl WorkerGroup {
@@ -196,6 +199,7 @@ impl WorkerGroup {
                 .build(),
         );
         let time_provider = Arc::new(StdTimeProvider);
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -234,6 +238,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 
@@ -289,6 +294,10 @@ impl WorkerGroup {
 
     pub(crate) fn file_ref_manager(&self) -> FileReferenceManagerRef {
         self.file_ref_manager.clone()
+    }
+
+    pub(crate) fn gc_limiter(&self) -> GcLimiterRef {
+        self.gc_limiter.clone()
     }
 
     /// Get worker for specific `region_id`.
@@ -361,6 +370,7 @@ impl WorkerGroup {
                 .write_cache(write_cache)
                 .build(),
         );
+        let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -398,6 +408,7 @@ impl WorkerGroup {
             purge_scheduler,
             cache_manager,
             file_ref_manager,
+            gc_limiter,
         })
     }
 

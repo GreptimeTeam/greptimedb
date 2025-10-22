@@ -158,6 +158,27 @@ impl RegionServer {
         }
     }
 
+    /// Gets the MitoEngine if it's registered.
+    pub fn mito_engine(&self) -> Option<MitoEngine> {
+        if let Some(mito) = self.inner.mito_engine.read().unwrap().clone() {
+            Some(mito)
+        } else {
+            self.inner
+                .engines
+                .read()
+                .unwrap()
+                .get(MITO_ENGINE_NAME)
+                .cloned()
+                .and_then(|e| {
+                    let mito = e.as_any().downcast_ref::<MitoEngine>().cloned();
+                    if mito.is_none() {
+                        warn!("Mito engine not found in region server engines");
+                    }
+                    mito
+                })
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_batch_open_requests(
         &self,
@@ -676,14 +697,14 @@ struct RegionServerInner {
     runtime: Runtime,
     event_listener: RegionServerEventListenerRef,
     table_provider_factory: TableProviderFactoryRef,
-    // The number of queries allowed to be executed at the same time.
-    // Act as last line of defense on datanode to prevent query overloading.
+    /// The number of queries allowed to be executed at the same time.
+    /// Act as last line of defense on datanode to prevent query overloading.
     parallelism: Option<RegionServerParallelism>,
-    // The topic stats reporter.
+    /// The topic stats reporter.
     topic_stats_reporter: RwLock<Option<Box<dyn TopicStatsReporter>>>,
-    // HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
-    // server with a concrete engine; acceptable for now to fetch Mito-specific
-    // info (e.g., list SSTs). Consider a diagnostics trait later.
+    /// HACK(zhongzc): Direct MitoEngine handle for diagnostics. This couples the
+    /// server with a concrete engine; acceptable for now to fetch Mito-specific
+    /// info (e.g., list SSTs). Consider a diagnostics trait later.
     mito_engine: RwLock<Option<MitoEngine>>,
 }
 
