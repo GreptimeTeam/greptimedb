@@ -80,12 +80,12 @@ impl CloseDowngradedRegion {
 
         let RegionInfo { engine, .. } = datanode_table_value.region_info.clone();
 
-        Ok(Instruction::CloseRegion(RegionIdent {
+        Ok(Instruction::CloseRegions(vec![RegionIdent {
             datanode_id: downgrade_leader_datanode_id,
             table_id,
             region_number,
             engine,
-        }))
+        }]))
     }
 
     /// Closes the downgraded leader region.
@@ -121,7 +121,7 @@ impl CloseDowngradedRegion {
                     "Received close downgraded leade region reply: {:?}, region: {}",
                     reply, region_id
                 );
-                let InstructionReply::CloseRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::CloseRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect close region reply",
