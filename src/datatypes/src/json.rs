@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use common_base::bytes::StringBytes;
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
 use snafu::{ResultExt, ensure};
 
@@ -45,7 +46,7 @@ use crate::value::{ListValue, StructValue, Value};
 /// convert them to fully structured StructValue for user-facing APIs: the UI protocol and the UDF interface.
 ///
 /// **Important**: This settings only controls the internal form of JSON encoding.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JsonStructureSettings {
     // TODO(sunng87): provide a limit
     Structured(Option<StructType>),
@@ -108,6 +109,12 @@ impl JsonStructureSettings {
             settings: self,
         };
         encode_json_with_context(json, data_type, &context).map(|v| Value::Json(Box::new(v)))
+    }
+}
+
+impl Default for JsonStructureSettings {
+    fn default() -> Self {
+        Self::Structured(None)
     }
 }
 

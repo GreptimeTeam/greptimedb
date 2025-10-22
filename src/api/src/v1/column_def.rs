@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use datatypes::schema::column_schema::JSON_STRUCTURE_SETTINGS_KEY;
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
     FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
@@ -67,6 +68,9 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         }
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
             metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
+        }
+        if let Some(settings) = options.options.get(JSON_STRUCTURE_SETTINGS_KEY) {
+            metadata.insert(JSON_STRUCTURE_SETTINGS_KEY.to_string(), settings.clone());
         }
     }
 
@@ -138,6 +142,11 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
         options
             .options
             .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
+    }
+    if let Some(settings) = column_schema.metadata().get(JSON_STRUCTURE_SETTINGS_KEY) {
+        options
+            .options
+            .insert(JSON_STRUCTURE_SETTINGS_KEY.to_string(), settings.clone());
     }
 
     (!options.options.is_empty()).then_some(options)
