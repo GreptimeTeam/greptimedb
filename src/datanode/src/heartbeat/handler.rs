@@ -13,16 +13,13 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::RegionIdent;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_telemetry::error;
-use futures::future::BoxFuture;
 use snafu::OptionExt;
-use store_api::storage::RegionId;
 
 mod close_region;
 mod downgrade_region;
@@ -30,10 +27,15 @@ mod flush_region;
 mod open_region;
 mod upgrade_region;
 
+use crate::heartbeat::handler::close_region::CloseRegionsHandler;
+use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
+use crate::heartbeat::handler::open_region::OpenRegionsHandler;
+use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
 
-/// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
+/// The handler for [`Instruction`]s.
 #[derive(Clone)]
 pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
@@ -43,9 +45,14 @@ pub struct RegionHeartbeatResponseHandler {
     open_region_parallelism: usize,
 }
 
-/// Handler of the instruction.
-pub type InstructionHandler =
-    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, Option<InstructionReply>> + Send>;
+#[async_trait::async_trait]
+pub trait InstructionHandler: Send + Sync {
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Instruction,
+    ) -> Option<InstructionReply>;
+}
 
 #[derive(Clone)]
 pub struct HandlerContext {
@@ -56,10 +63,6 @@ pub struct HandlerContext {
 }
 
 impl HandlerContext {
-    fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
-        RegionId::new(region_ident.table_id, region_ident.region_number)
-    }
-
     #[cfg(test)]
     pub fn new_for_test(region_server: RegionServer) -> Self {
         Self {
@@ -90,31 +93,16 @@ impl RegionHeartbeatResponseHandler {
         self
     }
 
-    /// Builds the [InstructionHandler].
-    fn build_handler(&self, instruction: Instruction) -> MetaResult<InstructionHandler> {
+    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<dyn InstructionHandler>> {
         match instruction {
-            Instruction::OpenRegions(open_regions) => {
-                let open_region_parallelism = self.open_region_parallelism;
-                Ok(Box::new(move |handler_context| {
-                    handler_context
-                        .handle_open_regions_instruction(open_regions, open_region_parallelism)
-                }))
-            }
-            Instruction::CloseRegions(close_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_close_regions_instruction(close_regions)
+            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler)),
+            Instruction::OpenRegions(_) => Ok(Box::new(OpenRegionsHandler {
+                open_region_parallelism: self.open_region_parallelism,
             })),
-            Instruction::DowngradeRegion(downgrade_region) => {
-                Ok(Box::new(move |handler_context| {
-                    handler_context.handle_downgrade_region_instruction(downgrade_region)
-                }))
-            }
-            Instruction::UpgradeRegion(upgrade_region) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_upgrade_region_instruction(upgrade_region)
-            })),
+            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler)),
+            Instruction::DowngradeRegion(_) => Ok(Box::new(DowngradeRegionsHandler)),
+            Instruction::UpgradeRegion(_) => Ok(Box::new(UpgradeRegionsHandler)),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
-            Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_regions_instruction(flush_regions)
-            })),
         }
     }
 }
@@ -151,15 +139,19 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
-        let handler = self.build_handler(instruction)?;
+        let handler = self.build_handler(&instruction)?;
         let _handle = common_runtime::spawn_global(async move {
-            let reply = handler(HandlerContext {
-                region_server,
-                catchup_tasks,
-                downgrade_tasks,
-                flush_tasks,
-            })
-            .await;
+            let reply = handler
+                .handle(
+                    &HandlerContext {
+                        region_server,
+                        catchup_tasks,
+                        downgrade_tasks,
+                        flush_tasks,
+                    },
+                    instruction,
+                )
+                .await;
 
             if let Some(reply) = reply
                 && let Err(e) = mailbox.send((meta, reply)).await
@@ -179,6 +171,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_meta::RegionIdent;
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };

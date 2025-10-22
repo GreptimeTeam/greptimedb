@@ -12,16 +12,146 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, InstructionReply};
+use common_meta::instruction::{
+    DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
+};
 use common_telemetry::tracing::info;
 use common_telemetry::{error, warn};
-use futures_util::future::BoxFuture;
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::heartbeat::handler::HandlerContext;
+use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 use crate::heartbeat::task_tracker::WaitResult;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DowngradeRegionsHandler;
+
+#[async_trait::async_trait]
+impl InstructionHandler for DowngradeRegionsHandler {
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Instruction,
+    ) -> Option<InstructionReply> {
+        // Safety: must be `Instruction::DowngradeRegion` instruction.
+        let DowngradeRegion {
+            region_id,
+            flush_timeout,
+        } = instruction.into_downgrade_regions().unwrap();
+        let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
+            warn!("Region: {region_id} is not found");
+            return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: false,
+                error: None,
+            }));
+        };
+
+        let region_server_moved = ctx.region_server.clone();
+
+        // Ignores flush request
+        if !writable {
+            warn!(
+                "Region: {region_id} is not writable, flush_timeout: {:?}",
+                flush_timeout
+            );
+            return ctx.downgrade_to_follower_gracefully(region_id).await;
+        }
+
+        // If flush_timeout is not set, directly convert region to follower.
+        let Some(flush_timeout) = flush_timeout else {
+            return ctx.downgrade_to_follower_gracefully(region_id).await;
+        };
+
+        // Sets region to downgrading,
+        // the downgrading region will reject all write requests.
+        // However, the downgrading region will still accept read, flush requests.
+        match ctx
+            .region_server
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+        {
+            Ok(SetRegionRoleStateResponse::Success { .. }) => {}
+            Ok(SetRegionRoleStateResponse::NotFound) => {
+                warn!("Region: {region_id} is not found");
+                return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: false,
+                    error: None,
+                }));
+            }
+            Ok(SetRegionRoleStateResponse::InvalidTransition(err)) => {
+                error!(err; "Failed to convert region to downgrading leader - invalid transition");
+                return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("{err:?}")),
+                }));
+            }
+            Err(err) => {
+                error!(err; "Failed to convert region to downgrading leader");
+                return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("{err:?}")),
+                }));
+            }
+        }
+
+        let register_result = ctx
+            .downgrade_tasks
+            .try_register(
+                region_id,
+                Box::pin(async move {
+                    info!("Flush region: {region_id} before converting region to follower");
+                    region_server_moved
+                        .handle_request(
+                            region_id,
+                            RegionRequest::Flush(RegionFlushRequest {
+                                row_group_size: None,
+                            }),
+                        )
+                        .await?;
+
+                    Ok(())
+                }),
+            )
+            .await;
+
+        if register_result.is_busy() {
+            warn!("Another flush task is running for the region: {region_id}");
+        }
+
+        let mut watcher = register_result.into_watcher();
+        let result = ctx.downgrade_tasks.wait(&mut watcher, flush_timeout).await;
+
+        match result {
+            WaitResult::Timeout => Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: true,
+                error: Some(format!(
+                    "Flush region timeout, region: {region_id}, timeout: {:?}",
+                    flush_timeout
+                )),
+            })),
+            WaitResult::Finish(Ok(_)) => ctx.downgrade_to_follower_gracefully(region_id).await,
+            WaitResult::Finish(Err(err)) => {
+                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("{err:?}")),
+                }))
+            }
+        }
+    }
+}
 
 impl HandlerContext {
     async fn downgrade_to_follower_gracefully(
@@ -70,141 +200,13 @@ impl HandlerContext {
             }
         }
     }
-
-    pub(crate) fn handle_downgrade_region_instruction(
-        self,
-        DowngradeRegion {
-            region_id,
-            flush_timeout,
-        }: DowngradeRegion,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let Some(writable) = self.region_server.is_region_leader(region_id) else {
-                warn!("Region: {region_id} is not found");
-                return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id: None,
-                    metadata_last_entry_id: None,
-                    exists: false,
-                    error: None,
-                }));
-            };
-
-            let region_server_moved = self.region_server.clone();
-
-            // Ignores flush request
-            if !writable {
-                warn!(
-                    "Region: {region_id} is not writable, flush_timeout: {:?}",
-                    flush_timeout
-                );
-                return self.downgrade_to_follower_gracefully(region_id).await;
-            }
-
-            // If flush_timeout is not set, directly convert region to follower.
-            let Some(flush_timeout) = flush_timeout else {
-                return self.downgrade_to_follower_gracefully(region_id).await;
-            };
-
-            // Sets region to downgrading,
-            // the downgrading region will reject all write requests.
-            // However, the downgrading region will still accept read, flush requests.
-            match self
-                .region_server
-                .set_region_role_state_gracefully(
-                    region_id,
-                    SettableRegionRoleState::DowngradingLeader,
-                )
-                .await
-            {
-                Ok(SetRegionRoleStateResponse::Success { .. }) => {}
-                Ok(SetRegionRoleStateResponse::NotFound) => {
-                    warn!("Region: {region_id} is not found");
-                    return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                        last_entry_id: None,
-                        metadata_last_entry_id: None,
-                        exists: false,
-                        error: None,
-                    }));
-                }
-                Ok(SetRegionRoleStateResponse::InvalidTransition(err)) => {
-                    error!(err; "Failed to convert region to downgrading leader - invalid transition");
-                    return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                        last_entry_id: None,
-                        metadata_last_entry_id: None,
-                        exists: true,
-                        error: Some(format!("{err:?}")),
-                    }));
-                }
-                Err(err) => {
-                    error!(err; "Failed to convert region to downgrading leader");
-                    return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                        last_entry_id: None,
-                        metadata_last_entry_id: None,
-                        exists: true,
-                        error: Some(format!("{err:?}")),
-                    }));
-                }
-            }
-
-            let register_result = self
-                .downgrade_tasks
-                .try_register(
-                    region_id,
-                    Box::pin(async move {
-                        info!("Flush region: {region_id} before converting region to follower");
-                        region_server_moved
-                            .handle_request(
-                                region_id,
-                                RegionRequest::Flush(RegionFlushRequest {
-                                    row_group_size: None,
-                                }),
-                            )
-                            .await?;
-
-                        Ok(())
-                    }),
-                )
-                .await;
-
-            if register_result.is_busy() {
-                warn!("Another flush task is running for the region: {region_id}");
-            }
-
-            let mut watcher = register_result.into_watcher();
-            let result = self.downgrade_tasks.wait(&mut watcher, flush_timeout).await;
-
-            match result {
-                WaitResult::Timeout => {
-                    Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                        last_entry_id: None,
-                        metadata_last_entry_id: None,
-                        exists: true,
-                        error: Some(format!(
-                            "Flush region timeout, region: {region_id}, timeout: {:?}",
-                            flush_timeout
-                        )),
-                    }))
-                }
-                WaitResult::Finish(Ok(_)) => self.downgrade_to_follower_gracefully(region_id).await,
-                WaitResult::Finish(Err(err)) => {
-                    Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                        last_entry_id: None,
-                        metadata_last_entry_id: None,
-                        exists: true,
-                        error: Some(format!("{err:?}")),
-                    }))
-                }
-            }
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::time::Duration;
 
-    use common_meta::instruction::{DowngradeRegion, InstructionReply};
+    use common_meta::instruction::{DowngradeRegion, Instruction};
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::{
         RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
@@ -214,7 +216,8 @@ mod tests {
     use tokio::time::Instant;
 
     use crate::error;
-    use crate::heartbeat::handler::HandlerContext;
+    use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
+    use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
@@ -227,20 +230,20 @@ mod tests {
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
         for flush_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_downgrade_region_instruction(DowngradeRegion {
-                    region_id,
-                    flush_timeout,
-                })
+            let reply = DowngradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::DowngradeRegion(DowngradeRegion {
+                        region_id,
+                        flush_timeout,
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-                assert!(!reply.exists);
-                assert!(reply.error.is_none());
-                assert!(reply.last_entry_id.is_none());
-            }
+            let reply = reply.unwrap().expect_downgrade_region_reply();
+            assert!(!reply.exists);
+            assert!(reply.error.is_none());
+            assert!(reply.last_entry_id.is_none());
         }
     }
 
@@ -270,20 +273,20 @@ mod tests {
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
         for flush_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_downgrade_region_instruction(DowngradeRegion {
-                    region_id,
-                    flush_timeout,
-                })
+            let reply = DowngradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::DowngradeRegion(DowngradeRegion {
+                        region_id,
+                        flush_timeout,
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-                assert!(reply.exists);
-                assert!(reply.error.is_none());
-                assert_eq!(reply.last_entry_id.unwrap(), 1024);
-            }
+            let reply = reply.unwrap().expect_downgrade_region_reply();
+            assert!(reply.exists);
+            assert!(reply.error.is_none());
+            assert_eq!(reply.last_entry_id.unwrap(), 1024);
         }
     }
 
@@ -305,20 +308,20 @@ mod tests {
         let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let flush_timeout = Duration::from_millis(100);
-        let reply = handler_context
-            .clone()
-            .handle_downgrade_region_instruction(DowngradeRegion {
-                region_id,
-                flush_timeout: Some(flush_timeout),
-            })
+        let reply = DowngradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::DowngradeRegion(DowngradeRegion {
+                    region_id,
+                    flush_timeout: Some(flush_timeout),
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-            assert!(reply.exists);
-            assert!(reply.error.unwrap().contains("timeout"));
-            assert!(reply.last_entry_id.is_none());
-        }
+        let reply = reply.unwrap().expect_downgrade_region_reply();
+        assert!(reply.exists);
+        assert!(reply.error.unwrap().contains("timeout"));
+        assert!(reply.last_entry_id.is_none());
     }
 
     #[tokio::test]
@@ -344,36 +347,38 @@ mod tests {
         ];
 
         for flush_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_downgrade_region_instruction(DowngradeRegion {
-                    region_id,
-                    flush_timeout,
-                })
+            let reply = DowngradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::DowngradeRegion(DowngradeRegion {
+                        region_id,
+                        flush_timeout,
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
-            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-                assert!(reply.exists);
-                assert!(reply.error.unwrap().contains("timeout"));
-                assert!(reply.last_entry_id.is_none());
-            }
+
+            let reply = reply.unwrap().expect_downgrade_region_reply();
+            assert!(reply.exists);
+            assert!(reply.error.unwrap().contains("timeout"));
+            assert!(reply.last_entry_id.is_none());
         }
         let timer = Instant::now();
-        let reply = handler_context
-            .handle_downgrade_region_instruction(DowngradeRegion {
-                region_id,
-                flush_timeout: Some(Duration::from_millis(500)),
-            })
+        let reply = DowngradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::DowngradeRegion(DowngradeRegion {
+                    region_id,
+                    flush_timeout: Some(Duration::from_millis(500)),
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-            assert!(reply.exists);
-            assert!(reply.error.is_none());
-            assert_eq!(reply.last_entry_id.unwrap(), 1024);
-        }
+        let reply = reply.unwrap().expect_downgrade_region_reply();
+        assert!(reply.exists);
+        assert!(reply.error.is_none());
+        assert_eq!(reply.last_entry_id.unwrap(), 1024);
     }
 
     #[tokio::test]
@@ -405,36 +410,36 @@ mod tests {
         ];
 
         for flush_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_downgrade_region_instruction(DowngradeRegion {
-                    region_id,
-                    flush_timeout,
-                })
+            let reply = DowngradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::DowngradeRegion(DowngradeRegion {
+                        region_id,
+                        flush_timeout,
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
-            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-                assert!(reply.exists);
-                assert!(reply.error.unwrap().contains("timeout"));
-                assert!(reply.last_entry_id.is_none());
-            }
-        }
-        let timer = Instant::now();
-        let reply = handler_context
-            .handle_downgrade_region_instruction(DowngradeRegion {
-                region_id,
-                flush_timeout: Some(Duration::from_millis(500)),
-            })
-            .await;
-        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
-        // Must less than 300 ms.
-        assert!(timer.elapsed().as_millis() < 300);
-
-        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
+            let reply = reply.unwrap().expect_downgrade_region_reply();
             assert!(reply.exists);
-            assert!(reply.error.unwrap().contains("flush failed"));
+            assert!(reply.error.unwrap().contains("timeout"));
             assert!(reply.last_entry_id.is_none());
         }
+        let timer = Instant::now();
+        let reply = DowngradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::DowngradeRegion(DowngradeRegion {
+                    region_id,
+                    flush_timeout: Some(Duration::from_millis(500)),
+                }),
+            )
+            .await;
+        // Must less than 300 ms.
+        assert!(timer.elapsed().as_millis() < 300);
+        let reply = reply.unwrap().expect_downgrade_region_reply();
+        assert!(reply.exists);
+        assert!(reply.error.unwrap().contains("flush failed"));
+        assert!(reply.last_entry_id.is_none());
     }
 
     #[tokio::test]
@@ -449,19 +454,19 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
-        let reply = handler_context
-            .clone()
-            .handle_downgrade_region_instruction(DowngradeRegion {
-                region_id,
-                flush_timeout: None,
-            })
+        let reply = DowngradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::DowngradeRegion(DowngradeRegion {
+                    region_id,
+                    flush_timeout: None,
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
-        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-            assert!(!reply.exists);
-            assert!(reply.error.is_none());
-            assert!(reply.last_entry_id.is_none());
-        }
+        let reply = reply.unwrap().expect_downgrade_region_reply();
+        assert!(!reply.exists);
+        assert!(reply.error.is_none());
+        assert!(reply.last_entry_id.is_none());
     }
 
     #[tokio::test]
@@ -480,23 +485,23 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let handler_context = HandlerContext::new_for_test(mock_region_server);
-        let reply = handler_context
-            .clone()
-            .handle_downgrade_region_instruction(DowngradeRegion {
-                region_id,
-                flush_timeout: None,
-            })
+        let reply = DowngradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::DowngradeRegion(DowngradeRegion {
+                    region_id,
+                    flush_timeout: None,
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
-        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
-            assert!(reply.exists);
-            assert!(
-                reply
-                    .error
-                    .unwrap()
-                    .contains("Failed to set region to readonly")
-            );
-            assert!(reply.last_entry_id.is_none());
-        }
+        let reply = reply.unwrap().expect_downgrade_region_reply();
+        assert!(reply.exists);
+        assert!(
+            reply
+                .error
+                .unwrap()
+                .contains("Failed to set region to readonly")
+        );
+        assert!(reply.last_entry_id.is_none());
     }
 }

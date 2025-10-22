@@ -431,6 +431,48 @@ pub enum Instruction {
     FlushRegions(FlushRegions),
 }
 
+impl Instruction {
+    /// Converts the instruction into a vector of [OpenRegion].
+    pub fn into_open_regions(self) -> Option<Vec<OpenRegion>> {
+        match self {
+            Self::OpenRegions(open_regions) => Some(open_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a vector of [RegionIdent].
+    pub fn into_close_regions(self) -> Option<Vec<RegionIdent>> {
+        match self {
+            Self::CloseRegions(close_regions) => Some(close_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [FlushRegions].
+    pub fn into_flush_regions(self) -> Option<FlushRegions> {
+        match self {
+            Self::FlushRegions(flush_regions) => Some(flush_regions),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [DowngradeRegion].
+    pub fn into_downgrade_regions(self) -> Option<DowngradeRegion> {
+        match self {
+            Self::DowngradeRegion(downgrade_region) => Some(downgrade_region),
+            _ => None,
+        }
+    }
+
+    /// Converts the instruction into a [UpgradeRegion].
+    pub fn into_upgrade_regions(self) -> Option<UpgradeRegion> {
+        match self {
+            Self::UpgradeRegion(upgrade_region) => Some(upgrade_region),
+            _ => None,
+        }
+    }
+}
+
 /// The reply of [UpgradeRegion].
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct UpgradeRegionReply {
@@ -491,6 +533,27 @@ impl InstructionReply {
         match self {
             Self::OpenRegions(reply) => reply,
             _ => panic!("Expected OpenRegions reply"),
+        }
+    }
+
+    pub fn expect_upgrade_region_reply(self) -> UpgradeRegionReply {
+        match self {
+            Self::UpgradeRegion(reply) => reply,
+            _ => panic!("Expected UpgradeRegion reply"),
+        }
+    }
+
+    pub fn expect_downgrade_region_reply(self) -> DowngradeRegionReply {
+        match self {
+            Self::DowngradeRegion(reply) => reply,
+            _ => panic!("Expected DowngradeRegion reply"),
+        }
+    }
+
+    pub fn expect_flush_regions_reply(self) -> FlushRegionReply {
+        match self {
+            Self::FlushRegions(reply) => reply,
+            _ => panic!("Expected FlushRegions reply"),
         }
     }
 }
