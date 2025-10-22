@@ -18,23 +18,38 @@ mod error;
 mod interval;
 
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::Arc;
 
+use arrow::array::{Array, ArrayRef, AsArray};
+use arrow::datatypes::{
+    Date32Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
+    DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+    Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
+    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
+use arrow_schema::{DataType, IntervalUnit, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
-use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
+use common_decimal::Decimal128;
+use common_recordbatch::RecordBatch;
+use common_time::time::Time;
+use common_time::{
+    Date, Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
+};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
-use datatypes::schema::Schema;
-use datatypes::types::{IntervalType, JsonFormat, TimestampType, jsonb_to_string};
-use datatypes::value::{ListValue, StructValue};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
+use datatypes::value::StructValue;
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::messages::data::DataRow;
 use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 use snafu::ResultExt;
@@ -88,182 +103,134 @@ fn encode_struct(
 
 fn encode_array(
     query_ctx: &QueryContextRef,
-    value_list: ListValue,
+    array: ArrayRef,
     builder: &mut DataRowEncoder,
 ) -> PgWireResult<()> {
-    match value_list.datatype().as_ref() {
-        ConcreteDataType::Boolean(_) => {
-            let array = value_list
-                .items()
+    macro_rules! encode_primitive_array {
+        ($array: ident, $data_type: ty, $lower_type: ty, $upper_type: ty) => {{
+            let array = $array.iter().collect::<Vec<Option<$data_type>>>();
+            if array
                 .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Boolean(v) => Ok(Some(*v)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected bool",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<bool>>>>()?;
+                .all(|x| x.is_none_or(|i| i <= <$lower_type>::MAX as $data_type))
+            {
+                builder.encode_field(
+                    &array
+                        .into_iter()
+                        .map(|x| x.map(|i| i as $lower_type))
+                        .collect::<Vec<Option<$lower_type>>>(),
+                )
+            } else {
+                builder.encode_field(
+                    &array
+                        .into_iter()
+                        .map(|x| x.map(|i| i as $upper_type))
+                        .collect::<Vec<Option<$upper_type>>>(),
+                )
+            }
+        }};
+    }
+
+    match array.data_type() {
+        DataType::Boolean => {
+            let array = array.as_boolean();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Int8(v) => Ok(Some(*v)),
-                    Value::UInt8(v) => Ok(Some(*v as i8)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!(
-                            "Invalid list item type, find {v:?}, expected int8 or uint8",
-                        ),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<i8>>>>()?;
+        DataType::Int8 => {
+            let array = array.as_primitive::<Int8Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Int16(v) => Ok(Some(*v)),
-                    Value::UInt16(v) => Ok(Some(*v as i16)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!(
-                            "Invalid list item type, find {v:?}, expected int16 or uint16",
-                        ),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<i16>>>>()?;
+        DataType::Int16 => {
+            let array = array.as_primitive::<Int16Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Int32(v) => Ok(Some(*v)),
-                    Value::UInt32(v) => Ok(Some(*v as i32)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!(
-                            "Invalid list item type, find {v:?}, expected int32 or uint32",
-                        ),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<i32>>>>()?;
+        DataType::Int32 => {
+            let array = array.as_primitive::<Int32Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Int64(v) => Ok(Some(*v)),
-                    Value::UInt64(v) => Ok(Some(*v as i64)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!(
-                            "Invalid list item type, find {v:?}, expected int64 or uint64",
-                        ),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<i64>>>>()?;
+        DataType::Int64 => {
+            let array = array.as_primitive::<Int64Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Float32(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Float32(v) => Ok(Some(v.0)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected float32",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<f32>>>>()?;
+        DataType::UInt8 => {
+            let array = array.as_primitive::<UInt8Type>();
+            encode_primitive_array!(array, u8, i8, i16)
+        }
+        DataType::UInt16 => {
+            let array = array.as_primitive::<UInt16Type>();
+            encode_primitive_array!(array, u16, i16, i32)
+        }
+        DataType::UInt32 => {
+            let array = array.as_primitive::<UInt32Type>();
+            encode_primitive_array!(array, u32, i32, i64)
+        }
+        DataType::UInt64 => {
+            let array = array.as_primitive::<UInt64Type>();
+            let array = array.iter().collect::<Vec<_>>();
+            if array.iter().all(|x| x.is_none_or(|i| i <= i64::MAX as u64)) {
+                builder.encode_field(
+                    &array
+                        .into_iter()
+                        .map(|x| x.map(|i| i as i64))
+                        .collect::<Vec<Option<i64>>>(),
+                )
+            } else {
+                builder.encode_field(
+                    &array
+                        .into_iter()
+                        .map(|x| x.map(|i| i.to_string()))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        }
+        DataType::Float32 => {
+            let array = array.as_primitive::<Float32Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Float64(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Float64(v) => Ok(Some(v.0)),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected float64",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<f64>>>>()?;
+        DataType::Float64 => {
+            let array = array.as_primitive::<Float64Type>();
+            let array = array.iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Binary(_) | ConcreteDataType::Vector(_) => {
+        DataType::Binary => {
             let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
 
+            let array = array.as_binary::<i32>();
             match *bytea_output {
                 PGByteaOutputValue::ESCAPE => {
-                    let array = value_list
-                        .items()
+                    let array = array
                         .iter()
-                        .map(|v| match v {
-                            Value::Null => Ok(None),
-                            Value::Binary(v) => Ok(Some(EscapeOutputBytea(v.deref()))),
-
-                            _ => Err(convert_err(Error::Internal {
-                                err_msg: format!(
-                                    "Invalid list item type, find {v:?}, expected binary",
-                                ),
-                            })),
-                        })
-                        .collect::<PgWireResult<Vec<Option<EscapeOutputBytea>>>>()?;
+                        .map(|v| v.map(EscapeOutputBytea))
+                        .collect::<Vec<_>>();
                     builder.encode_field(&array)
                 }
                 PGByteaOutputValue::HEX => {
-                    let array = value_list
-                        .items()
+                    let array = array
                         .iter()
-                        .map(|v| match v {
-                            Value::Null => Ok(None),
-                            Value::Binary(v) => Ok(Some(HexOutputBytea(v.deref()))),
-
-                            _ => Err(convert_err(Error::Internal {
-                                err_msg: format!(
-                                    "Invalid list item type, find {v:?}, expected binary",
-                                ),
-                            })),
-                        })
-                        .collect::<PgWireResult<Vec<Option<HexOutputBytea>>>>()?;
+                        .map(|v| v.map(HexOutputBytea))
+                        .collect::<Vec<_>>();
                     builder.encode_field(&array)
                 }
             }
         }
-        &ConcreteDataType::String(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::String(v) => Ok(Some(v.as_utf8())),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected string",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<&str>>>>()?;
+        DataType::Utf8 => {
+            let array = array.as_string::<i32>();
+            let array = array.into_iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Date(_) => {
-            let array = value_list
-                .items()
-                .iter()
+        DataType::Date32 => {
+            let array = array.as_primitive::<Date32Type>();
+            let array = array
+                .into_iter()
                 .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Date(v) => {
-                        if let Some(date) = v.to_chrono_date() {
+                    None => Ok(None),
+                    Some(v) => {
+                        if let Some(date) = Date::new(v).to_chrono_date() {
                             let (style, order) =
                                 *query_ctx.configuration_parameter().pg_datetime_style();
                             Ok(Some(StylingDate(date, style, order)))
@@ -273,20 +240,36 @@ fn encode_array(
                             }))
                         }
                     }
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
-                    })),
                 })
                 .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
             builder.encode_field(&array)
         }
-        ConcreteDataType::Timestamp(_) => {
-            let array = value_list
-                .items()
-                .iter()
+        DataType::Timestamp(time_unit, _) => {
+            let array = match time_unit {
+                TimeUnit::Second => {
+                    let array = array.as_primitive::<TimestampSecondType>();
+                    array.into_iter().collect::<Vec<_>>()
+                }
+                TimeUnit::Millisecond => {
+                    let array = array.as_primitive::<TimestampMillisecondType>();
+                    array.into_iter().collect::<Vec<_>>()
+                }
+                TimeUnit::Microsecond => {
+                    let array = array.as_primitive::<TimestampMicrosecondType>();
+                    array.into_iter().collect::<Vec<_>>()
+                }
+                TimeUnit::Nanosecond => {
+                    let array = array.as_primitive::<TimestampNanosecondType>();
+                    array.into_iter().collect::<Vec<_>>()
+                }
+            };
+            let time_unit = time_unit.into();
+            let array = array
+                .into_iter()
                 .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Timestamp(v) => {
+                    None => Ok(None),
+                    Some(v) => {
+                        let v = Timestamp::new(v, time_unit);
                         if let Some(datetime) =
                             v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
                         {
@@ -299,183 +282,397 @@ fn encode_array(
                             }))
                         }
                     }
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected timestamp",),
-                    })),
                 })
                 .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
             builder.encode_field(&array)
         }
-        ConcreteDataType::Time(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Time(v) => Ok(v.to_chrono_time()),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected time",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<NaiveTime>>>>()?;
+        DataType::Time32(time_unit) => {
+            let array = match time_unit {
+                TimeUnit::Second => {
+                    let array = array.as_primitive::<Time32SecondType>();
+                    array
+                        .into_iter()
+                        .map(|v| v.map(|i| Time::new_second(i as i64)))
+                        .collect::<Vec<_>>()
+                }
+                TimeUnit::Millisecond => {
+                    let array = array.as_primitive::<Time32MillisecondType>();
+                    array
+                        .into_iter()
+                        .map(|v| v.map(|i| Time::new_millisecond(i as i64)))
+                        .collect::<Vec<_>>()
+                }
+                _ => unreachable!("`DataType::Time32` has only second and millisecond time units"),
+            };
+            let array = array
+                .into_iter()
+                .map(|v| v.and_then(|v| v.to_chrono_time()))
+                .collect::<Vec<Option<NaiveTime>>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Interval(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::IntervalYearMonth(v) => Ok(Some(PgInterval::from(*v))),
-                    Value::IntervalDayTime(v) => Ok(Some(PgInterval::from(*v))),
-                    Value::IntervalMonthDayNano(v) => Ok(Some(PgInterval::from(*v))),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected interval",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<PgInterval>>>>()?;
+        DataType::Interval(interval_unit) => {
+            let array = match interval_unit {
+                IntervalUnit::YearMonth => {
+                    let array = array.as_primitive::<IntervalYearMonthType>();
+                    array
+                        .into_iter()
+                        .map(|v| v.map(|i| PgInterval::from(IntervalYearMonth::from(i))))
+                        .collect::<Vec<_>>()
+                }
+                IntervalUnit::DayTime => {
+                    let array = array.as_primitive::<IntervalDayTimeType>();
+                    array
+                        .into_iter()
+                        .map(|v| v.map(|i| PgInterval::from(IntervalDayTime::from(i))))
+                        .collect::<Vec<_>>()
+                }
+                IntervalUnit::MonthDayNano => {
+                    let array = array.as_primitive::<IntervalMonthDayNanoType>();
+                    array
+                        .into_iter()
+                        .map(|v| v.map(|i| PgInterval::from(IntervalMonthDayNano::from(i))))
+                        .collect::<Vec<_>>()
+                }
+            };
             builder.encode_field(&array)
         }
-        ConcreteDataType::Decimal128(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Decimal128(v) => Ok(Some(v.to_string())),
-                    _ => Err(convert_err(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected decimal",),
-                    })),
-                })
-                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+        DataType::Decimal128(precision, scale) => {
+            let array = array.as_primitive::<Decimal128Type>();
+            let array = array
+                .into_iter()
+                .map(|v| v.map(|i| Decimal128::new(i, *precision, *scale).to_string()))
+                .collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        ConcreteDataType::Json(j) => match &j.format {
-            JsonFormat::Jsonb => {
-                let array = value_list
-                    .take_items()
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::Null => Ok(None),
-                        Value::Binary(v) => {
-                            let s = jsonb_to_string(&v).map_err(convert_err)?;
-                            Ok(Some(s))
-                        }
-
-                        _ => Err(convert_err(Error::Internal {
-                            err_msg: format!("Invalid list item type, find {v:?}, expected json",),
-                        })),
-                    })
-                    .collect::<PgWireResult<Vec<Option<String>>>>()?;
-                builder.encode_field(&array)
-            }
-            JsonFormat::Native(_) => {
-                let array = value_list
-                    .take_items()
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::Null => Ok(None),
-                        Value::Json(inner) => serde_json::Value::try_from(*inner)
-                            .map(Some)
-                            .map_err(|e| PgWireError::ApiError(Box::new(e))),
-                        _ => Err(convert_err(Error::Internal {
-                            err_msg: format!("Invalid list item type, find {v:?}, expected json",),
-                        })),
-                    })
-                    .collect::<PgWireResult<Vec<Option<serde_json::Value>>>>()?;
-                builder.encode_field(&array)
-            }
-        },
         _ => Err(convert_err(Error::Internal {
             err_msg: format!(
                 "cannot write array type {:?} in postgres protocol: unimplemented",
-                value_list.datatype()
+                array.data_type()
             ),
         })),
     }
 }
 
-pub(super) fn encode_value(
-    query_ctx: &QueryContextRef,
-    value: Value,
-    builder: &mut DataRowEncoder,
-    datatype: &ConcreteDataType,
-) -> PgWireResult<()> {
-    match value {
-        Value::Null => builder.encode_field(&None::<&i8>),
-        Value::Boolean(v) => builder.encode_field(&v),
-        Value::UInt8(v) => builder.encode_field(&(v as i8)),
-        Value::UInt16(v) => builder.encode_field(&(v as i16)),
-        Value::UInt32(v) => builder.encode_field(&v),
-        Value::UInt64(v) => builder.encode_field(&(v as i64)),
-        Value::Int8(v) => builder.encode_field(&v),
-        Value::Int16(v) => builder.encode_field(&v),
-        Value::Int32(v) => builder.encode_field(&v),
-        Value::Int64(v) => builder.encode_field(&v),
-        Value::Float32(v) => builder.encode_field(&v.0),
-        Value::Float64(v) => builder.encode_field(&v.0),
-        Value::String(v) => builder.encode_field(&v.as_utf8()),
-        Value::Binary(v) => match datatype {
-            ConcreteDataType::Json(_j) => {
-                let s = jsonb_to_string(v.as_ref()).map_err(convert_err)?;
-                builder.encode_field(&s)
+pub(crate) struct RecordBatchRowIterator {
+    query_ctx: QueryContextRef,
+    pg_schema: Arc<Vec<FieldInfo>>,
+    schema: SchemaRef,
+    record_batch: arrow::record_batch::RecordBatch,
+    i: usize,
+}
+
+impl Iterator for RecordBatchRowIterator {
+    type Item = PgWireResult<DataRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < self.record_batch.num_rows() {
+            let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
+            if let Err(e) = self.encode_row(self.i, &mut encoder) {
+                return Some(Err(e));
             }
-            _ => {
-                let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
-                match *bytea_output {
-                    PGByteaOutputValue::ESCAPE => {
-                        builder.encode_field(&EscapeOutputBytea(v.deref()))
+            self.i += 1;
+            Some(encoder.finish())
+        } else {
+            None
+        }
+    }
+}
+
+impl RecordBatchRowIterator {
+    pub(crate) fn new(
+        query_ctx: QueryContextRef,
+        pg_schema: Arc<Vec<FieldInfo>>,
+        record_batch: RecordBatch,
+    ) -> Self {
+        let schema = record_batch.schema.clone();
+        let record_batch = record_batch.into_df_record_batch();
+        Self {
+            query_ctx,
+            pg_schema,
+            schema,
+            record_batch,
+            i: 0,
+        }
+    }
+
+    fn encode_row(&mut self, i: usize, encoder: &mut DataRowEncoder) -> PgWireResult<()> {
+        for (j, column) in self.record_batch.columns().iter().enumerate() {
+            if column.is_null(i) {
+                encoder.encode_field(&None::<&i8>)?;
+                continue;
+            }
+
+            match column.data_type() {
+                DataType::Null => {
+                    encoder.encode_field(&None::<&i8>)?;
+                }
+                DataType::Boolean => {
+                    let array = column.as_boolean();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::UInt8 => {
+                    let array = column.as_primitive::<UInt8Type>();
+                    let value = array.value(i);
+                    if value <= i8::MAX as u8 {
+                        encoder.encode_field(&(value as i8))?;
+                    } else {
+                        encoder.encode_field(&(value as i16))?;
                     }
-                    PGByteaOutputValue::HEX => builder.encode_field(&HexOutputBytea(v.deref())),
+                }
+                DataType::UInt16 => {
+                    let array = column.as_primitive::<UInt16Type>();
+                    let value = array.value(i);
+                    if value <= i16::MAX as u16 {
+                        encoder.encode_field(&(value as i16))?;
+                    } else {
+                        encoder.encode_field(&(value as i32))?;
+                    }
+                }
+                DataType::UInt32 => {
+                    let array = column.as_primitive::<UInt32Type>();
+                    let value = array.value(i);
+                    if value <= i32::MAX as u32 {
+                        encoder.encode_field(&(value as i32))?;
+                    } else {
+                        encoder.encode_field(&(value as i64))?;
+                    }
+                }
+                DataType::UInt64 => {
+                    let array = column.as_primitive::<UInt64Type>();
+                    let value = array.value(i);
+                    if value <= i64::MAX as u64 {
+                        encoder.encode_field(&(value as i64))?;
+                    } else {
+                        encoder.encode_field(&value.to_string())?;
+                    }
+                }
+                DataType::Int8 => {
+                    let array = column.as_primitive::<Int8Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Int16 => {
+                    let array = column.as_primitive::<Int16Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Int32 => {
+                    let array = column.as_primitive::<Int32Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Int64 => {
+                    let array = column.as_primitive::<Int64Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Float32 => {
+                    let array = column.as_primitive::<Float32Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Float64 => {
+                    let array = column.as_primitive::<Float64Type>();
+                    encoder.encode_field(&array.value(i))?;
+                }
+                DataType::Utf8 => {
+                    let array = column.as_string::<i32>();
+                    let value = array.value(i);
+                    encoder.encode_field(&value)?;
+                }
+                DataType::Utf8View => {
+                    let array = column.as_string_view();
+                    let value = array.value(i);
+                    encoder.encode_field(&value)?;
+                }
+                DataType::LargeUtf8 => {
+                    let array = column.as_string::<i64>();
+                    let value = array.value(i);
+                    encoder.encode_field(&value)?;
+                }
+                DataType::Binary => {
+                    let array = column.as_binary::<i32>();
+                    let v = array.value(i);
+                    encode_bytes(
+                        &self.schema.column_schemas()[j],
+                        v,
+                        encoder,
+                        &self.query_ctx,
+                    )?;
+                }
+                DataType::BinaryView => {
+                    let array = column.as_binary_view();
+                    let v = array.value(i);
+                    encode_bytes(
+                        &self.schema.column_schemas()[j],
+                        v,
+                        encoder,
+                        &self.query_ctx,
+                    )?;
+                }
+                DataType::LargeBinary => {
+                    let array = column.as_binary::<i64>();
+                    let v = array.value(i);
+                    encode_bytes(
+                        &self.schema.column_schemas()[j],
+                        v,
+                        encoder,
+                        &self.query_ctx,
+                    )?;
+                }
+                DataType::Date32 => {
+                    let array = column.as_primitive::<Date32Type>();
+                    let v = Date::new(array.value(i));
+                    let date = v.to_chrono_date().map(|v| {
+                        let (style, order) =
+                            *self.query_ctx.configuration_parameter().pg_datetime_style();
+                        StylingDate(v, style, order)
+                    });
+                    encoder.encode_field(&date)?;
+                }
+                DataType::Timestamp(time_unit, _) => {
+                    let v = match time_unit {
+                        TimeUnit::Second => {
+                            let array = column.as_primitive::<TimestampSecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Millisecond => {
+                            let array = column.as_primitive::<TimestampMillisecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Microsecond => {
+                            let array = column.as_primitive::<TimestampMicrosecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Nanosecond => {
+                            let array = column.as_primitive::<TimestampNanosecondType>();
+                            array.value(i)
+                        }
+                    };
+                    let v = Timestamp::new(v, time_unit.into());
+                    let datetime = v
+                        .to_chrono_datetime_with_timezone(Some(&self.query_ctx.timezone()))
+                        .map(|v| {
+                            let (style, order) =
+                                *self.query_ctx.configuration_parameter().pg_datetime_style();
+                            StylingDateTime(v, style, order)
+                        });
+                    encoder.encode_field(&datetime)?;
+                }
+                DataType::Interval(interval_unit) => match interval_unit {
+                    IntervalUnit::YearMonth => {
+                        let array = column.as_primitive::<IntervalYearMonthType>();
+                        let v: IntervalYearMonth = array.value(i).into();
+                        encoder.encode_field(&PgInterval::from(v))?;
+                    }
+                    IntervalUnit::DayTime => {
+                        let array = column.as_primitive::<IntervalDayTimeType>();
+                        let v: IntervalDayTime = array.value(i).into();
+                        encoder.encode_field(&PgInterval::from(v))?;
+                    }
+                    IntervalUnit::MonthDayNano => {
+                        let array = column.as_primitive::<IntervalMonthDayNanoType>();
+                        let v: IntervalMonthDayNano = array.value(i).into();
+                        encoder.encode_field(&PgInterval::from(v))?;
+                    }
+                },
+                DataType::Duration(time_unit) => {
+                    let v = match time_unit {
+                        TimeUnit::Second => {
+                            let array = column.as_primitive::<DurationSecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Millisecond => {
+                            let array = column.as_primitive::<DurationMillisecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Microsecond => {
+                            let array = column.as_primitive::<DurationMicrosecondType>();
+                            array.value(i)
+                        }
+                        TimeUnit::Nanosecond => {
+                            let array = column.as_primitive::<DurationNanosecondType>();
+                            array.value(i)
+                        }
+                    };
+                    let d = Duration::new(v, time_unit.into());
+                    match PgInterval::try_from(d) {
+                        Ok(i) => encoder.encode_field(&i)?,
+                        Err(e) => {
+                            return Err(convert_err(Error::Internal {
+                                err_msg: e.to_string(),
+                            }));
+                        }
+                    }
+                }
+                DataType::List(_) => {
+                    let array = column.as_list::<i32>();
+                    let items = array.value(i);
+                    encode_array(&self.query_ctx, items, encoder)?;
+                }
+                DataType::Struct(_) => {
+                    encode_struct(&self.query_ctx, Default::default(), encoder)?;
+                }
+                DataType::Time32(time_unit) => {
+                    let v = match time_unit {
+                        TimeUnit::Second => {
+                            let array = column.as_primitive::<Time32SecondType>();
+                            Time::new_second(array.value(i) as i64)
+                        }
+                        TimeUnit::Millisecond => {
+                            let array = column.as_primitive::<Time32MillisecondType>();
+                            Time::new_millisecond(array.value(i) as i64)
+                        }
+                        _ => unreachable!(
+                            "`DataType::Time32` has only second and millisecond time units"
+                        ),
+                    };
+                    encoder.encode_field(&v.to_chrono_time())?;
+                }
+                DataType::Time64(time_unit) => {
+                    let v = match time_unit {
+                        TimeUnit::Microsecond => {
+                            let array = column.as_primitive::<Time64MicrosecondType>();
+                            Time::new_microsecond(array.value(i))
+                        }
+                        TimeUnit::Nanosecond => {
+                            let array = column.as_primitive::<Time64NanosecondType>();
+                            Time::new_nanosecond(array.value(i))
+                        }
+                        _ => unreachable!(
+                            "`DataType::Time64` has only microsecond and nanosecond time units"
+                        ),
+                    };
+                    encoder.encode_field(&v.to_chrono_time())?;
+                }
+                DataType::Decimal128(precision, scale) => {
+                    let array = column.as_primitive::<Decimal128Type>();
+                    let v = Decimal128::new(array.value(i), *precision, *scale);
+                    encoder.encode_field(&v.to_string())?;
+                }
+                _ => {
+                    return Err(convert_err(Error::Internal {
+                        err_msg: format!(
+                            "cannot convert datatype {} to postgres",
+                            column.data_type()
+                        ),
+                    }));
                 }
             }
-        },
-        Value::Date(v) => {
-            if let Some(date) = v.to_chrono_date() {
-                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDate(date, style, order))
-            } else {
-                Err(convert_err(Error::Internal {
-                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                }))
-            }
         }
-        Value::Timestamp(v) => {
-            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
-            {
-                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(datetime, style, order))
-            } else {
-                Err(convert_err(Error::Internal {
-                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                }))
-            }
-        }
-        Value::Time(v) => {
-            if let Some(time) = v.to_chrono_time() {
-                builder.encode_field(&time)
-            } else {
-                Err(convert_err(Error::Internal {
-                    err_msg: format!("Failed to convert time to postgres type {v:?}",),
-                }))
-            }
-        }
-        Value::IntervalYearMonth(v) => builder.encode_field(&PgInterval::from(v)),
-        Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(v)),
-        Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(v)),
-        Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::Duration(d) => match PgInterval::try_from(d) {
-            Ok(i) => builder.encode_field(&i),
-            Err(e) => Err(convert_err(Error::Internal {
-                err_msg: e.to_string(),
-            })),
-        },
-        Value::List(values) => encode_array(query_ctx, values, builder),
-        Value::Struct(values) => encode_struct(query_ctx, values, builder),
-        Value::Json(inner) => {
-            let json_value = serde_json::Value::try_from(*inner)
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            builder.encode_field(&json_value)
+        Ok(())
+    }
+}
+
+fn encode_bytes(
+    schema: &ColumnSchema,
+    v: &[u8],
+    encoder: &mut DataRowEncoder,
+    query_ctx: &QueryContextRef,
+) -> PgWireResult<()> {
+    if let ConcreteDataType::Json(_) = &schema.data_type {
+        let s = jsonb_to_string(v).map_err(convert_err)?;
+        encoder.encode_field(&s)
+    } else {
+        let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
+        match *bytea_output {
+            PGByteaOutputValue::ESCAPE => encoder.encode_field(&EscapeOutputBytea(v)),
+            PGByteaOutputValue::HEX => encoder.encode_field(&HexOutputBytea(v)),
         }
     }
 }
@@ -1082,11 +1279,17 @@ pub(super) fn param_types_to_pg_types(
 mod test {
     use std::sync::Arc;
 
-    use common_time::Timestamp;
-    use common_time::interval::IntervalUnit;
-    use common_time::timestamp::TimeUnit;
+    use arrow::array::{
+        Float64Builder, Int64Builder, ListBuilder, StringBuilder, TimestampSecondBuilder,
+    };
+    use arrow_schema::Field;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::value::ListValue;
+    use datatypes::vectors::{
+        BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,
+        Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
+        IntervalYearMonthVector, ListVector, NullVector, StringVector, TimeSecondVector,
+        TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+    };
     use pgwire::api::Type;
     use pgwire::api::results::{FieldFormat, FieldInfo};
     use session::context::QueryContextBuilder;
@@ -1194,46 +1397,14 @@ mod test {
             FieldInfo::new("uint32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("uint64s".into(), None, None, Type::INT8, FieldFormat::Text),
             FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
-            FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
-            FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
-            FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
             FieldInfo::new(
                 "float32s".into(),
                 None,
                 None,
                 Type::FLOAT4,
-                FieldFormat::Text,
-            ),
-            FieldInfo::new(
-                "float32s".into(),
-                None,
-                None,
-                Type::FLOAT4,
-                FieldFormat::Text,
-            ),
-            FieldInfo::new(
-                "float32s".into(),
-                None,
-                None,
-                Type::FLOAT4,
-                FieldFormat::Text,
-            ),
-            FieldInfo::new(
-                "float64s".into(),
-                None,
-                None,
-                Type::FLOAT8,
-                FieldFormat::Text,
-            ),
-            FieldInfo::new(
-                "float64s".into(),
-                None,
-                None,
-                Type::FLOAT8,
                 FieldFormat::Text,
             ),
             FieldInfo::new(
@@ -1317,95 +1488,170 @@ mod test {
             ),
         ];
 
-        let datatypes = vec![
-            ConcreteDataType::null_datatype(),
-            ConcreteDataType::boolean_datatype(),
-            ConcreteDataType::uint8_datatype(),
-            ConcreteDataType::uint16_datatype(),
-            ConcreteDataType::uint32_datatype(),
-            ConcreteDataType::uint64_datatype(),
-            ConcreteDataType::int8_datatype(),
-            ConcreteDataType::int8_datatype(),
-            ConcreteDataType::int16_datatype(),
-            ConcreteDataType::int16_datatype(),
-            ConcreteDataType::int32_datatype(),
-            ConcreteDataType::int32_datatype(),
-            ConcreteDataType::int64_datatype(),
-            ConcreteDataType::int64_datatype(),
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float32_datatype(),
-            ConcreteDataType::float64_datatype(),
-            ConcreteDataType::float64_datatype(),
-            ConcreteDataType::float64_datatype(),
-            ConcreteDataType::string_datatype(),
-            ConcreteDataType::binary_datatype(),
-            ConcreteDataType::date_datatype(),
-            ConcreteDataType::time_datatype(TimeUnit::Second),
-            ConcreteDataType::timestamp_datatype(TimeUnit::Second),
-            ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
-            ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
-            ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int64_datatype())),
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::float64_datatype())),
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
-            ConcreteDataType::list_datatype(
-                Arc::new(ConcreteDataType::timestamp_second_datatype()),
+        let arrow_schema = arrow_schema::Schema::new(vec![
+            Field::new("x", DataType::Null, true),
+            Field::new("x", DataType::Boolean, true),
+            Field::new("x", DataType::UInt8, true),
+            Field::new("x", DataType::UInt16, true),
+            Field::new("x", DataType::UInt32, true),
+            Field::new("x", DataType::UInt64, true),
+            Field::new("x", DataType::Int8, true),
+            Field::new("x", DataType::Int16, true),
+            Field::new("x", DataType::Int32, true),
+            Field::new("x", DataType::Int64, true),
+            Field::new("x", DataType::Float32, true),
+            Field::new("x", DataType::Float64, true),
+            Field::new("x", DataType::Utf8, true),
+            Field::new("x", DataType::Binary, true),
+            Field::new("x", DataType::Date32, true),
+            Field::new("x", DataType::Time32(TimeUnit::Second), true),
+            Field::new("x", DataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new("x", DataType::Interval(IntervalUnit::YearMonth), true),
+            Field::new("x", DataType::Interval(IntervalUnit::DayTime), true),
+            Field::new("x", DataType::Interval(IntervalUnit::MonthDayNano), true),
+            Field::new(
+                "x",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true,
             ),
-        ];
+            Field::new(
+                "x",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                true,
+            ),
+            Field::new(
+                "x",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new(
+                "x",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    true,
+                ))),
+                true,
+            ),
+        ]);
+
+        let mut builder = ListBuilder::new(Int64Builder::new());
+        builder.append_value([Some(1i64), None, Some(2)]);
+        builder.append_null();
+        builder.append_value([Some(-1i64), None, Some(-2)]);
+        let i64_list_array = builder.finish();
+
+        let mut builder = ListBuilder::new(Float64Builder::new());
+        builder.append_value([Some(1.0f64), None, Some(2.0)]);
+        builder.append_null();
+        builder.append_value([Some(-1.0f64), None, Some(-2.0)]);
+        let f64_list_array = builder.finish();
+
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.append_value([Some("a"), None, Some("b")]);
+        builder.append_null();
+        builder.append_value([Some("c"), None, Some("d")]);
+        let string_list_array = builder.finish();
+
+        let mut builder = ListBuilder::new(TimestampSecondBuilder::new());
+        builder.append_value([Some(1i64), None, Some(2)]);
+        builder.append_null();
+        builder.append_value([Some(3i64), None, Some(4)]);
+        let timestamp_list_array = builder.finish();
+
         let values = vec![
-            Value::Null,
-            Value::Boolean(true),
-            Value::UInt8(u8::MAX),
-            Value::UInt16(u16::MAX),
-            Value::UInt32(u32::MAX),
-            Value::UInt64(u64::MAX),
-            Value::Int8(i8::MAX),
-            Value::Int8(i8::MIN),
-            Value::Int16(i16::MAX),
-            Value::Int16(i16::MIN),
-            Value::Int32(i32::MAX),
-            Value::Int32(i32::MIN),
-            Value::Int64(i64::MAX),
-            Value::Int64(i64::MIN),
-            Value::Float32(f32::MAX.into()),
-            Value::Float32(f32::MIN.into()),
-            Value::Float32(0f32.into()),
-            Value::Float64(f64::MAX.into()),
-            Value::Float64(f64::MIN.into()),
-            Value::Float64(0f64.into()),
-            Value::String("greptime".into()),
-            Value::Binary("greptime".as_bytes().into()),
-            Value::Date(1001i32.into()),
-            Value::Time(1001i64.into()),
-            Value::Timestamp(1000001i64.into()),
-            Value::IntervalYearMonth(IntervalYearMonth::new(1)),
-            Value::IntervalDayTime(IntervalDayTime::new(1, 10)),
-            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 10)),
-            Value::List(ListValue::new(
-                vec![Value::Int64(1i64)],
-                Arc::new(ConcreteDataType::int64_datatype()),
-            )),
-            Value::List(ListValue::new(
-                vec![Value::Float64(1.0f64.into())],
-                Arc::new(ConcreteDataType::float64_datatype()),
-            )),
-            Value::List(ListValue::new(
-                vec![Value::String("tom".into())],
-                Arc::new(ConcreteDataType::string_datatype()),
-            )),
-            Value::List(ListValue::new(
-                vec![Value::Timestamp(Timestamp::new(1i64, TimeUnit::Second))],
-                Arc::new(ConcreteDataType::timestamp_second_datatype()),
-            )),
+            Arc::new(NullVector::new(3)) as VectorRef,
+            Arc::new(BooleanVector::from(vec![Some(true), Some(false), None])),
+            Arc::new(UInt8Vector::from(vec![Some(u8::MAX), Some(u8::MIN), None])),
+            Arc::new(UInt16Vector::from(vec![
+                Some(u16::MAX),
+                Some(u16::MIN),
+                None,
+            ])),
+            Arc::new(UInt32Vector::from(vec![
+                Some(u32::MAX),
+                Some(u32::MIN),
+                None,
+            ])),
+            Arc::new(UInt64Vector::from(vec![
+                Some(u64::MAX),
+                Some(u64::MIN),
+                None,
+            ])),
+            Arc::new(Int8Vector::from(vec![Some(i8::MAX), Some(i8::MIN), None])),
+            Arc::new(Int16Vector::from(vec![
+                Some(i16::MAX),
+                Some(i16::MIN),
+                None,
+            ])),
+            Arc::new(Int32Vector::from(vec![
+                Some(i32::MAX),
+                Some(i32::MIN),
+                None,
+            ])),
+            Arc::new(Int64Vector::from(vec![
+                Some(i64::MAX),
+                Some(i64::MIN),
+                None,
+            ])),
+            Arc::new(Float32Vector::from(vec![
+                None,
+                Some(f32::MAX),
+                Some(f32::MIN),
+            ])),
+            Arc::new(Float64Vector::from(vec![
+                None,
+                Some(f64::MAX),
+                Some(f64::MIN),
+            ])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+            ])),
+            Arc::new(BinaryVector::from(vec![
+                None,
+                Some("hello".as_bytes().to_vec()),
+                Some("world".as_bytes().to_vec()),
+            ])),
+            Arc::new(DateVector::from(vec![Some(1001), None, Some(1)])),
+            Arc::new(TimeSecondVector::from(vec![Some(1001), None, Some(1)])),
+            Arc::new(TimestampSecondVector::from(vec![
+                Some(1000001),
+                None,
+                Some(1),
+            ])),
+            Arc::new(IntervalYearMonthVector::from(vec![Some(1), None, Some(2)])),
+            Arc::new(IntervalDayTimeVector::from(vec![
+                Some(arrow::datatypes::IntervalDayTime::new(1, 1)),
+                None,
+                Some(arrow::datatypes::IntervalDayTime::new(2, 2)),
+            ])),
+            Arc::new(IntervalMonthDayNanoVector::from(vec![
+                Some(arrow::datatypes::IntervalMonthDayNano::new(1, 1, 10)),
+                None,
+                Some(arrow::datatypes::IntervalMonthDayNano::new(2, 2, 20)),
+            ])),
+            Arc::new(ListVector::from(i64_list_array)),
+            Arc::new(ListVector::from(f64_list_array)),
+            Arc::new(ListVector::from(string_list_array)),
+            Arc::new(ListVector::from(timestamp_list_array)),
         ];
+        let record_batch =
+            RecordBatch::new(Arc::new(arrow_schema.try_into().unwrap()), values).unwrap();
+
         let query_context = QueryContextBuilder::default()
             .configuration_parameter(Default::default())
             .build()
             .into();
-        let mut builder = DataRowEncoder::new(Arc::new(schema));
-        for (value, datatype) in values.into_iter().zip(datatypes) {
-            encode_value(&query_context, value, &mut builder, &datatype).unwrap();
+        let schema = Arc::new(schema);
+
+        let rows = RecordBatchRowIterator::new(query_context, schema.clone(), record_batch)
+            .filter_map(|x| x.ok())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert_eq!(row.field_count, schema.len() as i16);
         }
     }
 
