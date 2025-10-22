@@ -40,6 +40,7 @@ pub struct RegionHeartbeatResponseHandler {
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    open_region_parallelism: usize,
 }
 
 /// Handler of the instruction.
@@ -78,15 +79,27 @@ impl RegionHeartbeatResponseHandler {
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            // Default to half of the number of CPUs.
+            open_region_parallelism: (num_cpus::get() / 2).max(1),
         }
     }
 
+    /// Sets the parallelism for opening regions.
+    pub fn with_open_region_parallelism(mut self, parallelism: usize) -> Self {
+        self.open_region_parallelism = parallelism;
+        self
+    }
+
     /// Builds the [InstructionHandler].
-    fn build_handler(instruction: Instruction) -> MetaResult<InstructionHandler> {
+    fn build_handler(&self, instruction: Instruction) -> MetaResult<InstructionHandler> {
         match instruction {
-            Instruction::OpenRegions(open_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_open_regions_instruction(open_regions)
-            })),
+            Instruction::OpenRegions(open_regions) => {
+                let open_region_parallelism = self.open_region_parallelism;
+                Ok(Box::new(move |handler_context| {
+                    handler_context
+                        .handle_open_regions_instruction(open_regions, open_region_parallelism)
+                }))
+            }
             Instruction::CloseRegions(close_regions) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_close_regions_instruction(close_regions)
             })),
@@ -138,7 +151,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
-        let handler = Self::build_handler(instruction)?;
+        let handler = self.build_handler(instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler(HandlerContext {
                 region_server,

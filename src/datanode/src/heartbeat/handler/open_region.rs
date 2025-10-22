@@ -24,6 +24,7 @@ impl HandlerContext {
     pub(crate) fn handle_open_regions_instruction(
         self,
         open_regions: Vec<OpenRegion>,
+        open_region_parallelism: usize,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let requests = open_regions
@@ -52,7 +53,7 @@ impl HandlerContext {
 
             let result = self
                 .region_server
-                .handle_batch_open_requests(8, requests, false)
+                .handle_batch_open_requests(open_region_parallelism, requests, false)
                 .await;
             let success = result.is_ok();
             let error = result.as_ref().map_err(|e| format!("{e:?}")).err();
