@@ -530,6 +530,125 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
     id_to_index
 }
 
+/// Decodes primary keys from a batch and returns decoded primary key information.
+///
+/// The batch must contain a primary key column at the expected index.
+pub(crate) fn decode_primary_keys(
+    codec: &dyn PrimaryKeyCodec,
+    batch: &RecordBatch,
+) -> Result<DecodedPrimaryKeys> {
+    let primary_key_index = primary_key_column_index(batch.num_columns());
+    let pk_dict_array = batch
+        .column(primary_key_index)
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: "Primary key column is not a dictionary array".to_string(),
+        })?;
+    let pk_values_array = pk_dict_array
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: "Primary key values are not binary array".to_string(),
+        })?;
+
+    let keys = pk_dict_array.keys();
+
+    // Decodes primary key values by iterating through keys, reusing decoded values for duplicate keys.
+    // Maps original key index -> new decoded value index
+    let mut key_to_decoded_index = Vec::with_capacity(keys.len());
+    let mut decoded_pk_values = Vec::new();
+    let mut prev_key: Option<u32> = None;
+
+    // The parquet reader may read the whole dictionary page into the dictionary values, so
+    // we may decode many primary keys not in this batch if we decode the values array directly.
+    for i in 0..keys.len() {
+        let current_key = keys.value(i);
+
+        // Check if current key is the same as previous key
+        if let Some(prev) = prev_key
+            && prev == current_key
+        {
+            // Reuse the last decoded index
+            key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+            continue;
+        }
+
+        // New key, decodes the value
+        let pk_bytes = pk_values_array.value(current_key as usize);
+        let decoded_value = codec.decode(pk_bytes).context(DecodeSnafu)?;
+
+        decoded_pk_values.push(decoded_value);
+        key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+        prev_key = Some(current_key);
+    }
+
+    // Create the keys array from key_to_decoded_index
+    let keys_array = UInt32Array::from(key_to_decoded_index);
+
+    Ok(DecodedPrimaryKeys {
+        decoded_pk_values,
+        keys_array,
+    })
+}
+
+/// Holds decoded primary key values and their indices.
+pub(crate) struct DecodedPrimaryKeys {
+    /// Decoded primary key values for unique keys in the dictionary.
+    decoded_pk_values: Vec<CompositeValues>,
+    /// Prebuilt keys array for creating dictionary arrays.
+    keys_array: UInt32Array,
+}
+
+impl DecodedPrimaryKeys {
+    /// Gets a tag column array by column id and data type.
+    ///
+    /// For sparse encoding, uses column_id to lookup values.
+    /// For dense encoding, uses pk_index to get values.
+    pub(crate) fn get_tag_column(
+        &self,
+        column_id: ColumnId,
+        pk_index: Option<usize>,
+        column_type: &ConcreteDataType,
+    ) -> Result<ArrayRef> {
+        // Gets values from the primary key.
+        let mut builder = column_type.create_mutable_vector(self.decoded_pk_values.len());
+        for decoded in &self.decoded_pk_values {
+            match decoded {
+                CompositeValues::Dense(dense) => {
+                    let pk_idx = pk_index.expect("pk_index required for dense encoding");
+                    if pk_idx < dense.len() {
+                        builder.push_value_ref(&dense[pk_idx].1.as_value_ref());
+                    } else {
+                        builder.push_null();
+                    }
+                }
+                CompositeValues::Sparse(sparse) => {
+                    let value = sparse.get_or_null(column_id);
+                    builder.push_value_ref(&value.as_value_ref());
+                }
+            };
+        }
+
+        let values_vector = builder.to_vector();
+        let values_array = values_vector.to_arrow_array();
+
+        // Only creates dictionary array for string types, otherwise take values by keys
+        if column_type.is_string() {
+            // Creates dictionary array using the same keys for string types
+            // Note that the dictionary values may have nulls.
+            let dict_array = DictionaryArray::new(self.keys_array.clone(), values_array);
+            Ok(Arc::new(dict_array))
+        } else {
+            // For non-string types, takes values by keys indices to create a regular array
+            let taken_array =
+                take(&values_array, &self.keys_array, None).context(ComputeArrowSnafu)?;
+            Ok(taken_array)
+        }
+    }
+}
+
 /// Converts a batch that doesn't have decoded primary key columns into a batch that has decoded
 /// primary key columns in flat format.
 pub(crate) struct FlatConvertFormat {
@@ -585,66 +704,16 @@ impl FlatConvertFormat {
             return Ok(batch);
         }
 
-        let primary_key_index = primary_key_column_index(batch.num_columns());
-        let pk_dict_array = batch
-            .column(primary_key_index)
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .with_context(|| InvalidRecordBatchSnafu {
-                reason: "Primary key column is not a dictionary array".to_string(),
-            })?;
-        let pk_values_array = pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .with_context(|| InvalidRecordBatchSnafu {
-                reason: "Primary key values are not binary array".to_string(),
-            })?;
-
-        let keys = pk_dict_array.keys();
-
-        // Decodes primary key values by iterating through keys, reusing decoded values for duplicate keys.
-        // Maps original key index -> new decoded value index
-        let mut key_to_decoded_index = Vec::with_capacity(keys.len());
-        let mut decoded_pk_values = Vec::new();
-        let mut prev_key: Option<u32> = None;
-
-        // The parquet reader may read the whole dictionary page into the dictionary values, so
-        // we may decode many primary keys not in this batch if we decode the values array directly.
-        for i in 0..keys.len() {
-            let current_key = keys.value(i);
-
-            // Check if current key is the same as previous key
-            if let Some(prev) = prev_key
-                && prev == current_key
-            {
-                // Reuse the last decoded index
-                key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
-                continue;
-            }
-
-            // New key, decodes the value
-            let pk_bytes = pk_values_array.value(current_key as usize);
-            let decoded_value = self.codec.decode(pk_bytes).context(DecodeSnafu)?;
-
-            decoded_pk_values.push(decoded_value);
-            key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
-            prev_key = Some(current_key);
-        }
-
-        // Create the new keys array from key_to_decoded_index
-        let keys_array = UInt32Array::from(key_to_decoded_index);
+        let decoded_pks = decode_primary_keys(self.codec.as_ref(), &batch)?;
 
         // Builds decoded tag column arrays.
         let mut decoded_columns = Vec::new();
         for (column_id, pk_index, column_index) in &self.projected_primary_keys {
             let column_metadata = &self.metadata.column_metadatas[*column_index];
-            let tag_column = self.build_primary_key_column(
+            let tag_column = decoded_pks.get_tag_column(
                 *column_id,
-                *pk_index,
+                Some(*pk_index),
                 &column_metadata.column_schema.data_type,
-                &keys_array,
-                &decoded_pk_values,
             )?;
             decoded_columns.push(tag_column);
         }
@@ -668,52 +737,6 @@ impl FlatConvertFormat {
 
         let new_schema = Arc::new(Schema::new(new_fields));
         RecordBatch::try_new(new_schema, new_columns).context(NewRecordBatchSnafu)
-    }
-
-    /// Builds an array for a specific tag column.
-    ///
-    /// It may build a dictionary array if the type is string. Note that the dictionary
-    /// array may have null values, although keys are not null.
-    fn build_primary_key_column(
-        &self,
-        column_id: ColumnId,
-        pk_index: usize,
-        column_type: &ConcreteDataType,
-        keys: &UInt32Array,
-        decoded_pk_values: &[CompositeValues],
-    ) -> Result<ArrayRef> {
-        // Gets values from the primary key.
-        let mut builder = column_type.create_mutable_vector(decoded_pk_values.len());
-        for decoded in decoded_pk_values {
-            match decoded {
-                CompositeValues::Dense(dense) => {
-                    if pk_index < dense.len() {
-                        builder.push_value_ref(&dense[pk_index].1.as_value_ref());
-                    } else {
-                        builder.push_null();
-                    }
-                }
-                CompositeValues::Sparse(sparse) => {
-                    let value = sparse.get_or_null(column_id);
-                    builder.push_value_ref(&value.as_value_ref());
-                }
-            };
-        }
-
-        let values_vector = builder.to_vector();
-        let values_array = values_vector.to_arrow_array();
-
-        // Only creates dictionary array for string types, otherwise take values by keys
-        if column_type.is_string() {
-            // Creates dictionary array using the same keys for string types
-            // Note that the dictionary values may have nulls.
-            let dict_array = DictionaryArray::new(keys.clone(), values_array);
-            Ok(Arc::new(dict_array))
-        } else {
-            // For non-string types, takes values by keys indices to create a regular array
-            let taken_array = take(&values_array, keys, None).context(ComputeArrowSnafu)?;
-            Ok(taken_array)
-        }
     }
 }
 
