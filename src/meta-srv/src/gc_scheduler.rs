@@ -566,7 +566,7 @@ impl GcScheduler {
                 .process_region_gc_with_retry(candidate, &file_refs_manifest, &region_to_peer)
                 .await
             {
-                Ok((report, used_full_listing)) => {
+                Ok((_report, used_full_listing)) => {
                     successful_regions += 1;
                     // Update GC tracker
                     let mut gc_tracker = self.region_gc_tracker.lock().await;
