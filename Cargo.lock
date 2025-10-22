@@ -1811,7 +1811,6 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.18.0",
  "table",
  "tempfile",
  "tokio",
@@ -1956,7 +1955,6 @@ dependencies = [
  "snafu 0.8.6",
  "standalone",
  "store-api",
- "substrait 0.18.0",
  "table",
  "temp-env",
  "tempfile",
@@ -2479,6 +2477,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "criterion 0.7.0",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -3953,7 +3952,6 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.18.0",
  "table",
  "tokio",
  "toml 0.8.23",
@@ -4955,7 +4953,6 @@ dependencies = [
  "sqlparser 0.55.0-greptime",
  "store-api",
  "strfmt",
- "substrait 0.18.0",
  "table",
  "tokio",
  "tokio-util",
@@ -5335,7 +5332,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f9f226478070fddffaa92deeb2c3a9971068816a#f9f226478070fddffaa92deeb2c3a9971068816a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dd2d16dddfa273e607c60137cbe2d8597eb51cf5#dd2d16dddfa273e607c60137cbe2d8597eb51cf5"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -6129,6 +6126,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
+ "store-api",
  "tantivy",
  "tantivy-jieba",
  "tempfile",
@@ -7637,6 +7635,7 @@ dependencies = [
  "dotenv",
  "either",
  "futures",
+ "greptime-proto",
  "humantime-serde",
  "index",
  "itertools 0.14.0",
@@ -9196,8 +9195,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.33.0"
-source = "git+https://github.com/sunng87/pgwire.git?rev=658e37936da5039dfb8495af9cac7c511dbfaf90#658e37936da5039dfb8495af9cac7c511dbfaf90"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c748793f2a9267fa2aa409d9375a5e26e4f1504ea96e34f8cab3e2fc32042d69"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -11564,6 +11564,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-decimal",
  "common-error",
  "common-frontend",
  "common-grpc",

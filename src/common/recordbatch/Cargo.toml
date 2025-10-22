@@ -27,4 +27,9 @@ snafu.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+criterion = "0.7.0"
 tokio.workspace = true
+
+[[bench]]
+name = "iter_record_batch_rows"
+harness = false

@@ -22,6 +22,7 @@ use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
@@ -263,12 +264,14 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
+        let blob_name = Self::column_blob_name(column_id);
+
         let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()
@@ -279,7 +282,7 @@ impl BloomFilterIndexApplier {
 
     // TODO(ruihang): use the same util with the code in creator
     fn column_blob_name(column_id: ColumnId) -> String {
-        format!("{INDEX_BLOB_TYPE}-{column_id}")
+        format!("{INDEX_BLOB_TYPE}-{}", IndexTarget::ColumnId(column_id))
     }
 
     /// Creates a blob reader from the remote index file
@@ -297,12 +300,14 @@ impl BloomFilterIndexApplier {
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
+        let blob_name = Self::column_blob_name(column_id);
+
         puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
+            .blob(&blob_name)
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()

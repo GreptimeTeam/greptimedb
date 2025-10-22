@@ -35,6 +35,11 @@ use crate::test_util::{
 
 #[apply(multiple_log_store_factories)]
 async fn test_batch_open(factory: Option<LogStoreFactory>) {
+    test_batch_open_with_format(factory.clone(), false).await;
+    test_batch_open_with_format(factory, true).await;
+}
+
+async fn test_batch_open_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -42,7 +47,12 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("open-batch-regions")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
 
     let num_regions = 3u32;
@@ -143,7 +153,15 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     ));
 
     // Reopen engine.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     let mut results = engine
         .handle_batch_open_requests(4, requests)
         .await
@@ -161,6 +179,11 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
 
 #[apply(multiple_log_store_factories)]
 async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
+    test_batch_open_err_with_format(factory.clone(), false).await;
+    test_batch_open_err_with_format(factory, true).await;
+}
+
+async fn test_batch_open_err_with_format(factory: Option<LogStoreFactory>, flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -168,7 +191,12 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
     let mut env = TestEnv::with_prefix("open-batch-regions-err")
         .await
         .with_log_store_factory(factory.clone());
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let mut options = HashMap::new();
     if let Some(topic) = &topic {

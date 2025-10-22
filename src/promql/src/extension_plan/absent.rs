@@ -47,7 +47,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::DeserializeSnafu;
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, resolve_column_name, serialize_column_index};
 
 /// Maximum number of rows per output batch
 const ABSENT_BATCH_SIZE: usize = 8192;
@@ -62,6 +62,13 @@ pub struct Absent {
     fake_labels: Vec<(String, String)>,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub time_index_column_idx: u64,
+    pub value_column_idx: u64,
 }
 
 impl PartialOrd for Absent {
@@ -122,16 +129,44 @@ impl UserDefinedLogicalNodeCore for Absent {
             ));
         }
 
-        Ok(Self {
-            start: self.start,
-            end: self.end,
-            step: self.step,
-            time_index_column: self.time_index_column.clone(),
-            value_column: self.value_column.clone(),
-            fake_labels: self.fake_labels.clone(),
-            input: inputs[0].clone(),
-            output_schema: self.output_schema.clone(),
-        })
+        let input: LogicalPlan = inputs[0].clone();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let time_index_column = resolve_column_name(
+                unfix.time_index_column_idx,
+                input_schema,
+                "Absent",
+                "time index",
+            )?;
+
+            let value_column =
+                resolve_column_name(unfix.value_column_idx, input_schema, "Absent", "value")?;
+
+            // Recreate output schema with actual field names
+            Self::try_new(
+                self.start,
+                self.end,
+                self.step,
+                time_index_column,
+                value_column,
+                self.fake_labels.clone(),
+                input,
+            )
+        } else {
+            Ok(Self {
+                start: self.start,
+                end: self.end,
+                step: self.step,
+                time_index_column: self.time_index_column.clone(),
+                value_column: self.value_column.clone(),
+                fake_labels: self.fake_labels.clone(),
+                input,
+                output_schema: self.output_schema.clone(),
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -179,6 +214,7 @@ impl Absent {
             fake_labels,
             input,
             output_schema,
+            unfix: None,
         })
     }
 
@@ -209,12 +245,17 @@ impl Absent {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let time_index_column_idx =
+            serialize_column_index(self.input.schema(), &self.time_index_column);
+
+        let value_column_idx = serialize_column_index(self.input.schema(), &self.value_column);
+
         pb::Absent {
             start: self.start,
             end: self.end,
             step: self.step,
-            time_index_column: self.time_index_column.clone(),
-            value_column: self.value_column.clone(),
+            time_index_column_idx,
+            value_column_idx,
             fake_labels: self
                 .fake_labels
                 .iter()
@@ -223,6 +264,7 @@ impl Absent {
                     value: value.clone(),
                 })
                 .collect(),
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -233,19 +275,27 @@ impl Absent {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
-        Self::try_new(
-            pb_absent.start,
-            pb_absent.end,
-            pb_absent.step,
-            pb_absent.time_index_column,
-            pb_absent.value_column,
-            pb_absent
+
+        let unfix = UnfixIndices {
+            time_index_column_idx: pb_absent.time_index_column_idx,
+            value_column_idx: pb_absent.value_column_idx,
+        };
+
+        Ok(Self {
+            start: pb_absent.start,
+            end: pb_absent.end,
+            step: pb_absent.step,
+            time_index_column: String::new(),
+            value_column: String::new(),
+            fake_labels: pb_absent
                 .fake_labels
                 .iter()
                 .map(|label| (label.key.clone(), label.value.clone()))
                 .collect(),
-            placeholder_plan,
-        )
+            input: placeholder_plan,
+            output_schema: Arc::new(DFSchema::empty()),
+            unfix: Some(unfix),
+        })
     }
 }
 

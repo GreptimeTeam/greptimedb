@@ -146,6 +146,7 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
+        let need_index = need_change_index(&request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -158,7 +159,7 @@ impl<S> RegionWorkerLoop<S> {
             metadata: new_meta,
             sst_format: region.sst_format(),
         };
-        self.handle_manifest_region_change(region, change, sender)
+        self.handle_manifest_region_change(region, change, need_index, sender);
     }
 
     /// Handles requests that changes region options, like TTL. It only affects memory state
@@ -279,4 +280,17 @@ fn log_option_update<T: std::fmt::Debug>(
         "Update region {}: {}, previous: {:?}, new: {:?}",
         option_name, region_id, prev_value, cur_value
     );
+}
+
+/// Used to determine whether we can build index directly after schema change.
+fn need_change_index(kind: &AlterKind) -> bool {
+    match kind {
+        // `SetIndexes` is a fast-path operation because it can build indexes for existing SSTs
+        // in the background, without needing to wait for a flush or compaction cycle.
+        AlterKind::SetIndexes { options: _ } => true,
+        // For AddColumns, DropColumns, UnsetIndexes and ModifyColumnTypes, we don't treat them as index changes.
+        // Index files still need to be rebuilt after schema changes,
+        // but this will happen automatically during flush or compaction.
+        _ => false,
+    }
 }

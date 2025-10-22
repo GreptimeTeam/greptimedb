@@ -234,6 +234,18 @@ impl MitoRegion {
         )
     }
 
+    /// Returns whether the region should abort index building.
+    pub(crate) fn should_abort_index(&self) -> bool {
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Follower
+                | RegionRoleState::Leader(RegionLeaderState::Dropping)
+                | RegionRoleState::Leader(RegionLeaderState::Truncating)
+                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                | RegionRoleState::Leader(RegionLeaderState::Staging)
+        )
+    }
+
     /// Returns whether the region is downgrading.
     pub(crate) fn is_downgrading(&self) -> bool {
         matches!(

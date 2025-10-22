@@ -1,0 +1,10 @@
+{
+  "name": "greptimedb-github-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "GitHub automation scripts for GreptimeDB",
+  "dependencies": {
+    "@octokit/rest": "^21.0.0",
+    "axios": "^1.7.0"
+  }
+}

@@ -25,6 +25,7 @@ use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
 use index::fulltext_index::{Analyzer, Config};
+use index::target::IndexTarget;
 use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
 use snafu::{ResultExt, ensure};
@@ -407,16 +408,22 @@ impl AltFulltextCreator {
     ) -> Result<ByteCount> {
         match self {
             Self::Tantivy(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_BLOOM}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }

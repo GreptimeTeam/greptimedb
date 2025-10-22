@@ -26,9 +26,19 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows
 
 #[tokio::test]
 async fn test_bump_committed_sequence() {
+    test_bump_committed_sequence_with_format(false).await;
+    test_bump_committed_sequence_with_format(true).await;
+}
+
+async fn test_bump_committed_sequence_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -83,7 +93,15 @@ async fn test_bump_committed_sequence() {
     assert_eq!(region.version_control.committed_sequence(), 43);
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,
@@ -114,7 +132,15 @@ async fn test_bump_committed_sequence() {
     assert_eq!(region.version_control.current().version.flushed_sequence, 0);
 
     // Reopen region.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
     engine
         .handle_request(
             region_id,

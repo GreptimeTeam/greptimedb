@@ -31,8 +31,18 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows
 
 #[tokio::test]
 async fn test_staging_state_integration() {
+    test_staging_state_integration_with_format(false).await;
+    test_staging_state_integration_with_format(true).await;
+}
+
+async fn test_staging_state_integration_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -79,8 +89,18 @@ async fn test_staging_state_integration() {
 
 #[tokio::test]
 async fn test_staging_blocks_alter_operations() {
+    test_staging_blocks_alter_operations_with_format(false).await;
+    test_staging_blocks_alter_operations_with_format(true).await;
+}
+
+async fn test_staging_blocks_alter_operations_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -110,8 +130,18 @@ async fn test_staging_blocks_alter_operations() {
 
 #[tokio::test]
 async fn test_staging_blocks_truncate_operations() {
+    test_staging_blocks_truncate_operations_with_format(false).await;
+    test_staging_blocks_truncate_operations_with_format(true).await;
+}
+
+async fn test_staging_blocks_truncate_operations_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -186,8 +216,18 @@ async fn test_staging_state_validation_patterns() {
 
 #[tokio::test]
 async fn test_staging_manifest_directory() {
+    test_staging_manifest_directory_with_format(false).await;
+    test_staging_manifest_directory_with_format(true).await;
+}
+
+async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1024, 0);
     let request = CreateRequestBuilder::new().build();
@@ -267,8 +307,18 @@ async fn test_staging_manifest_directory() {
 
 #[tokio::test]
 async fn test_staging_exit_success_with_manifests() {
+    test_staging_exit_success_with_manifests_with_format(false).await;
+    test_staging_exit_success_with_manifests_with_format(true).await;
+}
+
+async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1024, 0);
     let request = CreateRequestBuilder::new().build();

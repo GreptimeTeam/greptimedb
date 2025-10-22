@@ -48,7 +48,7 @@ use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
 use process_list::InformationSchemaProcessList;
-use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
 use table::metadata::TableType;
@@ -68,7 +68,7 @@ use crate::system_schema::information_schema::region_peers::InformationSchemaReg
 use crate::system_schema::information_schema::runtime_metrics::InformationSchemaMetrics;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
 use crate::system_schema::information_schema::ssts::{
-    InformationSchemaSstsManifest, InformationSchemaSstsStorage,
+    InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
 };
 use crate::system_schema::information_schema::table_constraints::InformationSchemaTableConstraints;
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
@@ -263,6 +263,9 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             SSTS_STORAGE => Some(Arc::new(InformationSchemaSstsStorage::new(
                 self.catalog_manager.clone(),
             )) as _),
+            SSTS_INDEX_META => Some(Arc::new(InformationSchemaSstsIndexMeta::new(
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
@@ -341,6 +344,10 @@ impl InformationSchemaProvider {
             tables.insert(
                 SSTS_STORAGE.to_string(),
                 self.build_table(SSTS_STORAGE).unwrap(),
+            );
+            tables.insert(
+                SSTS_INDEX_META.to_string(),
+                self.build_table(SSTS_INDEX_META).unwrap(),
             );
         }
 
@@ -456,6 +463,8 @@ pub enum DatanodeInspectKind {
     SstManifest,
     /// List SST entries discovered in storage layer
     SstStorage,
+    /// List index metadata collected from manifest
+    SstIndexMeta,
 }
 
 impl DatanodeInspectRequest {
@@ -464,6 +473,7 @@ impl DatanodeInspectRequest {
         match self.kind {
             DatanodeInspectKind::SstManifest => ManifestSstEntry::build_plan(self.scan),
             DatanodeInspectKind::SstStorage => StorageSstEntry::build_plan(self.scan),
+            DatanodeInspectKind::SstIndexMeta => PuffinIndexMetaEntry::build_plan(self.scan),
         }
     }
 }

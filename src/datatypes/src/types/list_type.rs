@@ -26,22 +26,19 @@ use crate::vectors::{ListVectorBuilder, MutableVector};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ListType {
     /// The type of List's item.
-    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on ListType.
-    item_type: Box<ConcreteDataType>,
+    item_type: Arc<ConcreteDataType>,
 }
 
 impl Default for ListType {
     fn default() -> Self {
-        ListType::new(ConcreteDataType::null_datatype())
+        ListType::new(Arc::new(ConcreteDataType::null_datatype()))
     }
 }
 
 impl ListType {
     /// Create a new `ListType` whose item's data type is `item_type`.
-    pub fn new(item_type: ConcreteDataType) -> Self {
-        ListType {
-            item_type: Box::new(item_type),
-        }
+    pub fn new(item_type: Arc<ConcreteDataType>) -> Self {
+        ListType { item_type }
     }
 
     /// Returns the item data type.
@@ -61,7 +58,7 @@ impl DataType for ListType {
     }
 
     fn default_value(&self) -> Value {
-        Value::List(ListValue::new(vec![], *self.item_type.clone()))
+        Value::List(ListValue::new(vec![], self.item_type.clone()))
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
@@ -75,7 +72,7 @@ impl DataType for ListType {
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(ListVectorBuilder::with_type_capacity(
-            *self.item_type.clone(),
+            self.item_type.clone(),
             capacity,
         ))
     }
@@ -95,11 +92,14 @@ mod tests {
 
     #[test]
     fn test_list_type() {
-        let t = ListType::new(ConcreteDataType::boolean_datatype());
+        let t = ListType::new(Arc::new(ConcreteDataType::boolean_datatype()));
         assert_eq!("List<Boolean>", t.name());
         assert_eq!(LogicalTypeId::List, t.logical_type_id());
         assert_eq!(
-            Value::List(ListValue::new(vec![], ConcreteDataType::boolean_datatype())),
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::boolean_datatype())
+            )),
             t.default_value()
         );
         assert_eq!(

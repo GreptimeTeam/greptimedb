@@ -91,7 +91,10 @@ impl HeartbeatTask {
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
+            Arc::new(
+                RegionHeartbeatResponseHandler::new(region_server.clone())
+                    .with_open_region_parallelism(opts.init_regions_parallelism),
+            ),
             Arc::new(InvalidateCacheHandler::new(cache_invalidator)),
         ]));
 

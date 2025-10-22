@@ -34,6 +34,7 @@ roaring = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+store-api.workspace = true
 tantivy = { version = "0.24", features = ["zstd-compression"] }
 tantivy-jieba = "0.16"
 tokio.workspace = true
