@@ -28,11 +28,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -91,9 +92,9 @@ pub struct PartitionTreeConfig {
 impl Default for PartitionTreeConfig {
     fn default() -> Self {
         let mut fork_dictionary_bytes = ReadableSize::mb(512);
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+        if let Some(total_memory) = get_total_memory_readable() {
             let adjust_dictionary_bytes =
-                std::cmp::min(sys_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
+                std::cmp::min(total_memory / DICTIONARY_SIZE_FACTOR, fork_dictionary_bytes);
             if adjust_dictionary_bytes.0 > 0 {
                 fork_dictionary_bytes = adjust_dictionary_bytes;
             }
@@ -181,7 +182,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -190,7 +191,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
         _for_flush: bool,
     ) -> Result<MemtableRanges> {
         let projection = projection.map(|ids| ids.to_vec());
@@ -314,7 +315,7 @@ impl PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        sequence: Option<SequenceNumber>,
+        sequence: Option<SequenceRange>,
     ) -> Result<BoxedBatchIterator> {
         self.tree.read(projection, predicate, sequence, None)
     }
@@ -361,7 +362,7 @@ struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
-    sequence: Option<SequenceNumber>,
+    sequence: Option<SequenceRange>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {
@@ -428,7 +429,13 @@ mod tests {
 
         let expected_ts = kvs
             .iter()
-            .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
+            .map(|kv| {
+                kv.timestamp()
+                    .try_into_timestamp()
+                    .unwrap()
+                    .unwrap()
+                    .value()
+            })
             .collect::<Vec<_>>();
 
         let iter = memtable.iter(None, None, None).unwrap();

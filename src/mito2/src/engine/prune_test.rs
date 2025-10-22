@@ -26,9 +26,14 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
 
-async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str) {
+async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str, flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -67,6 +72,11 @@ async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str) {
 
 #[tokio::test]
 async fn test_read_parquet_stats() {
+    test_read_parquet_stats_with_format(false).await;
+    test_read_parquet_stats_with_format(true).await;
+}
+
+async fn test_read_parquet_stats_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     check_prune_row_groups(
@@ -88,12 +98,18 @@ async fn test_read_parquet_stats() {
 | 8     | 8.0     | 1970-01-01T00:00:08 |
 | 9     | 9.0     | 1970-01-01T00:00:09 |
 +-------+---------+---------------------+",
+        flat_format,
     )
     .await;
 }
 
 #[tokio::test]
 async fn test_prune_tag() {
+    test_prune_tag_with_format(false).await;
+    test_prune_tag_with_format(true).await;
+}
+
+async fn test_prune_tag_with_format(flat_format: bool) {
     // prune result: only row group 1&2
     check_prune_row_groups(
         vec![datafusion_expr::col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string()))))],
@@ -107,12 +123,18 @@ async fn test_prune_tag() {
 | 8     | 8.0     | 1970-01-01T00:00:08 |
 | 9     | 9.0     | 1970-01-01T00:00:09 |
 +-------+---------+---------------------+",
+        flat_format,
     )
     .await;
 }
 
 #[tokio::test]
 async fn test_prune_tag_and_field() {
+    test_prune_tag_and_field_with_format(false).await;
+    test_prune_tag_and_field_with_format(true).await;
+}
+
+async fn test_prune_tag_and_field_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     // prune result: only row group 1
     check_prune_row_groups(
@@ -128,6 +150,7 @@ async fn test_prune_tag_and_field() {
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |
 +-------+---------+---------------------+",
+        flat_format,
     )
     .await;
 }
@@ -147,8 +170,18 @@ fn time_range_expr(start_sec: i64, end_sec: i64) -> Expr {
 
 #[tokio::test]
 async fn test_prune_memtable() {
+    test_prune_memtable_with_format(false).await;
+    test_prune_memtable_with_format(true).await;
+}
+
+async fn test_prune_memtable_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -221,8 +254,18 @@ async fn test_prune_memtable() {
 
 #[tokio::test]
 async fn test_prune_memtable_complex_expr() {
+    test_prune_memtable_complex_expr_with_format(false).await;
+    test_prune_memtable_complex_expr_with_format(true).await;
+}
+
+async fn test_prune_memtable_complex_expr_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -274,8 +317,18 @@ async fn test_prune_memtable_complex_expr() {
 
 #[tokio::test]
 async fn test_mem_range_prune() {
+    test_mem_range_prune_with_format(false).await;
+    test_mem_range_prune_with_format(true).await;
+}
+
+async fn test_mem_range_prune_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();

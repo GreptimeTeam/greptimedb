@@ -95,8 +95,11 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::OpenRegion(SimpleReply { result, error }))
-                .unwrap(),
+            serde_json::to_string(&InstructionReply::OpenRegions(SimpleReply {
+                result,
+                error,
+            }))
+            .unwrap(),
         )),
     }
 }
@@ -157,7 +160,7 @@ pub fn new_close_region_reply(id: u64) -> MailboxMessage {
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::CloseRegion(SimpleReply {
+            serde_json::to_string(&InstructionReply::CloseRegions(SimpleReply {
                 result: false,
                 error: None,
             }))

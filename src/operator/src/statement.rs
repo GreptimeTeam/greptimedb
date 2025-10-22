@@ -691,7 +691,7 @@ fn verify_time_related_format(with: &OptionMap) -> Result<()> {
             time_format.is_none() && date_format.is_none() && timestamp_format.is_none(),
             error::TimestampFormatNotSupportedSnafu {
                 format: "<unknown>".to_string(),
-                file_format: file_format.cloned().unwrap_or_default(),
+                file_format: file_format.unwrap_or_default(),
             }
         );
     }
@@ -742,7 +742,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
     let pattern = with
         .get(common_datasource::file_format::FILE_PATTERN)
-        .cloned();
+        .map(|x| x.to_string());
 
     Ok(CopyTableRequest {
         catalog_name,

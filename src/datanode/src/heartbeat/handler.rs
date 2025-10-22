@@ -40,6 +40,7 @@ pub struct RegionHeartbeatResponseHandler {
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
+    open_region_parallelism: usize,
 }
 
 /// Handler of the instruction.
@@ -78,17 +79,29 @@ impl RegionHeartbeatResponseHandler {
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
+            // Default to half of the number of CPUs.
+            open_region_parallelism: (num_cpus::get() / 2).max(1),
         }
     }
 
+    /// Sets the parallelism for opening regions.
+    pub fn with_open_region_parallelism(mut self, parallelism: usize) -> Self {
+        self.open_region_parallelism = parallelism;
+        self
+    }
+
     /// Builds the [InstructionHandler].
-    fn build_handler(instruction: Instruction) -> MetaResult<InstructionHandler> {
+    fn build_handler(&self, instruction: Instruction) -> MetaResult<InstructionHandler> {
         match instruction {
-            Instruction::OpenRegion(open_region) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_open_region_instruction(open_region)
-            })),
-            Instruction::CloseRegion(close_region) => Ok(Box::new(|handler_context| {
-                handler_context.handle_close_region_instruction(close_region)
+            Instruction::OpenRegions(open_regions) => {
+                let open_region_parallelism = self.open_region_parallelism;
+                Ok(Box::new(move |handler_context| {
+                    handler_context
+                        .handle_open_regions_instruction(open_regions, open_region_parallelism)
+                }))
+            }
+            Instruction::CloseRegions(close_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_close_regions_instruction(close_regions)
             })),
             Instruction::DowngradeRegion(downgrade_region) => {
                 Ok(Box::new(move |handler_context| {
@@ -109,14 +122,22 @@ impl RegionHeartbeatResponseHandler {
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        matches!(
-            ctx.incoming_message.as_ref(),
-            Some((_, Instruction::OpenRegion { .. }))
-                | Some((_, Instruction::CloseRegion { .. }))
-                | Some((_, Instruction::DowngradeRegion { .. }))
-                | Some((_, Instruction::UpgradeRegion { .. }))
-                | Some((_, Instruction::FlushRegions { .. }))
-        )
+        matches!(ctx.incoming_message.as_ref(), |Some((
+            _,
+            Instruction::DowngradeRegion { .. },
+        ))| Some((
+            _,
+            Instruction::UpgradeRegion { .. }
+        )) | Some((
+            _,
+            Instruction::FlushRegions { .. }
+        )) | Some((
+            _,
+            Instruction::OpenRegions { .. }
+        )) | Some((
+            _,
+            Instruction::CloseRegions { .. }
+        )))
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
@@ -130,7 +151,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
-        let handler = Self::build_handler(instruction)?;
+        let handler = self.build_handler(instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler(HandlerContext {
                 region_server,
@@ -176,8 +197,8 @@ mod tests {
     use crate::tests::mock_region_server;
 
     pub struct HeartbeatResponseTestEnv {
-        mailbox: MailboxRef,
-        receiver: Receiver<(MessageMeta, InstructionReply)>,
+        pub(crate) mailbox: MailboxRef,
+        pub(crate) receiver: Receiver<(MessageMeta, InstructionReply)>,
     }
 
     impl HeartbeatResponseTestEnv {
@@ -248,16 +269,16 @@ mod tests {
     }
 
     fn close_region_instruction(region_id: RegionId) -> Instruction {
-        Instruction::CloseRegion(RegionIdent {
+        Instruction::CloseRegions(vec![RegionIdent {
             table_id: region_id.table_id(),
             region_number: region_id.region_number(),
             datanode_id: 2,
             engine: MITO_ENGINE_NAME.to_string(),
-        })
+        }])
     }
 
     fn open_region_instruction(region_id: RegionId, path: &str) -> Instruction {
-        Instruction::OpenRegion(OpenRegion::new(
+        Instruction::OpenRegions(vec![OpenRegion::new(
             RegionIdent {
                 table_id: region_id.table_id(),
                 region_number: region_id.region_number(),
@@ -268,7 +289,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             false,
-        ))
+        )])
     }
 
     #[tokio::test]
@@ -303,7 +324,7 @@ mod tests {
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-            if let InstructionReply::CloseRegion(reply) = reply {
+            if let InstructionReply::CloseRegions(reply) = reply {
                 assert!(reply.result);
                 assert!(reply.error.is_none());
             } else {
@@ -358,7 +379,7 @@ mod tests {
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-            if let InstructionReply::OpenRegion(reply) = reply {
+            if let InstructionReply::OpenRegions(reply) = reply {
                 assert!(reply.result);
                 assert!(reply.error.is_none());
             } else {
@@ -391,7 +412,7 @@ mod tests {
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-        if let InstructionReply::OpenRegion(reply) = reply {
+        if let InstructionReply::OpenRegions(reply) = reply {
             assert!(!reply.result);
             assert!(reply.error.is_some());
         } else {

@@ -151,20 +151,14 @@ impl CopyTableArgument {
     pub fn format(&self) -> Option<String> {
         self.with
             .get(common_datasource::file_format::FORMAT_TYPE)
-            .cloned()
+            .map(|v| v.to_string())
             .or_else(|| Some("PARQUET".to_string()))
     }
 
     pub fn pattern(&self) -> Option<String> {
         self.with
             .get(common_datasource::file_format::FILE_PATTERN)
-            .cloned()
-    }
-
-    pub fn timestamp_pattern(&self) -> Option<String> {
-        self.with
-            .get(common_datasource::file_format::TIMESTAMP_FORMAT)
-            .cloned()
+            .map(|v| v.to_string())
     }
 }
 

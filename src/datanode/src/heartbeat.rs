@@ -90,7 +90,10 @@ impl HeartbeatTask {
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
+            Arc::new(
+                RegionHeartbeatResponseHandler::new(region_server.clone())
+                    .with_open_region_parallelism(opts.init_regions_parallelism),
+            ),
             Arc::new(InvalidateCacheHandler::new(cache_invalidator)),
         ]));
 
@@ -251,6 +254,10 @@ impl HeartbeatTask {
                     start_time_ms: node_epoch,
                     cpus,
                     memory_bytes,
+                    hostname: hostname::get()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
                 }),
                 node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
                     types: workload_types.iter().map(|w| w.to_i32()).collect(),

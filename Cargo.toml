@@ -147,7 +147,7 @@ etcd-client = { git = "https://github.com/GreptimeTeam/etcd-client", rev = "f62d
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "d75496d5d09dedcd0edcade57ccf0a522f4393ae" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "69a6089933daa573c96808ec4bbc48f447ec6e8c" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -207,6 +207,7 @@ rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
 # It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
+hostname = "0.4.0"
 rustls = { version = "0.23.25", default-features = false }
 sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }

@@ -74,6 +74,7 @@ use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
+use crate::sst::FormatType;
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use crate::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use crate::sst::index::intermediate::IntermediateManager;
@@ -609,6 +610,7 @@ impl TestEnv {
                 manifest_opts,
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKey,
             )
             .await
             .map(Some)
@@ -782,6 +784,68 @@ impl CreateRequestBuilder {
                     ConcreteDataType::string_datatype(),
                     nullable,
                 ),
+                semantic_type: SemanticType::Tag,
+                column_id,
+            });
+            primary_key.push(column_id);
+            column_id += 1;
+        }
+        for i in 0..self.field_num {
+            column_metadatas.push(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::float64_datatype(),
+                    nullable,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id,
+            });
+            column_id += 1;
+        }
+        column_metadatas.push(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                self.ts_type.clone(),
+                // Time index is always not null.
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id,
+        });
+        let mut options = self.options.clone();
+        if let Some(topic) = &self.kafka_topic {
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.clone(),
+            });
+            options.insert(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&wal_options).unwrap(),
+            );
+        }
+        RegionCreateRequest {
+            engine: self.engine.clone(),
+            column_metadatas,
+            primary_key: self.primary_key.clone().unwrap_or(primary_key),
+            options,
+            table_dir: self.table_dir.clone(),
+            path_type: PathType::Bare,
+            partition_expr_json: self.partition_expr_json.clone(),
+        }
+    }
+
+    pub fn build_with_index(&self) -> RegionCreateRequest {
+        let mut column_id = 0;
+        let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
+        let mut primary_key = Vec::with_capacity(self.tag_num);
+        let nullable = !self.all_not_null;
+        for i in 0..self.tag_num {
+            column_metadatas.push(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    nullable,
+                )
+                .with_inverted_index(true),
                 semantic_type: SemanticType::Tag,
                 column_id,
             });

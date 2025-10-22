@@ -168,7 +168,7 @@ impl Helper {
                 ConstantVector::new(Arc::new(BinaryVector::from(vec![v])), length)
             }
             ScalarValue::List(array) => {
-                let item_type = ConcreteDataType::try_from(&array.value_type())?;
+                let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
                 let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
                     .context(ConvertArrowArrayToScalarsSnafu)?
@@ -291,7 +291,8 @@ impl Helper {
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
+            ArrowDataType::Utf8View => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(StringVector::try_from_arrow_array(array)?)
@@ -559,7 +560,7 @@ mod tests {
         ));
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(
-            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
             vector.data_type()
         );
         assert_eq!(3, vector.len());
@@ -742,17 +743,17 @@ mod tests {
     #[test]
     fn test_large_string_array_into_vector() {
         let input_vec = vec!["a", "b"];
-        let assertion_array = StringArray::from(input_vec.clone());
+        let assertion_array = LargeStringArray::from(input_vec.clone());
 
         let large_string_array: ArrayRef = Arc::new(LargeStringArray::from(input_vec));
         let vector = Helper::try_into_vector(large_string_array).unwrap();
         assert_eq!(2, vector.len());
         assert_eq!(0, vector.null_count());
 
-        let output_arrow_array: StringArray = vector
+        let output_arrow_array: LargeStringArray = vector
             .to_arrow_array()
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap()
             .clone();
         assert_eq!(&assertion_array, &output_arrow_array);

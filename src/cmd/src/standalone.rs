@@ -19,6 +19,7 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
@@ -404,6 +405,8 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
 
+        plugins.insert::<InformationExtensionRef>(information_extension.clone());
+
         let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
         let builder = KvBackendCatalogManagerBuilder::new(
             information_extension.clone(),
@@ -473,7 +476,11 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts.wal.clone().into();
+        let kafka_options = opts
+            .wal
+            .clone()
+            .try_into()
+            .context(error::InvalidWalProviderSnafu)?;
         let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
             .await
             .context(error::BuildWalOptionsAllocatorSnafu)?;

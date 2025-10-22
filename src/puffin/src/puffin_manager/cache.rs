@@ -57,4 +57,9 @@ impl PuffinMetadataCache {
     pub fn put_metadata(&self, file_id: String, metadata: Arc<FileMetadata>) {
         self.cache.insert(file_id, metadata);
     }
+
+    /// Removes the metadata of the given file from the cache, if present.
+    pub fn remove(&self, file_id: &str) {
+        self.cache.invalidate(file_id);
+    }
 }

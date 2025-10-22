@@ -40,6 +40,8 @@ mod edit_region_test;
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod index_build_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -67,6 +69,8 @@ mod sync_test;
 #[cfg(test)]
 mod truncate_test;
 
+mod puffin_index;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -78,7 +82,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{info, tracing};
+use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
@@ -97,12 +101,14 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
-use store_api::sst_entry::{ManifestSstEntry, StorageSstEntry};
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
+use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
+use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
     SerdeJsonSnafu, SerializeColumnMetadataSnafu,
@@ -117,7 +123,7 @@ use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
@@ -434,6 +440,89 @@ impl MitoEngine {
         results
     }
 
+    /// Lists metadata about all puffin index targets stored in the engine.
+    pub async fn all_index_metas(&self) -> Vec<PuffinIndexMetaEntry> {
+        let node_id = self.inner.workers.file_ref_manager().node_id();
+        let cache_manager = self.inner.workers.cache_manager();
+        let puffin_metadata_cache = cache_manager.puffin_metadata_cache().cloned();
+        let bloom_filter_cache = cache_manager.bloom_filter_index_cache().cloned();
+        let inverted_index_cache = cache_manager.inverted_index_cache().cloned();
+
+        let mut results = Vec::new();
+
+        for region in self.inner.workers.all_regions() {
+            let manifest_entries = region.manifest_sst_entries().await;
+            let access_layer = region.access_layer.clone();
+            let table_dir = access_layer.table_dir().to_string();
+            let path_type = access_layer.path_type();
+            let object_store = access_layer.object_store().clone();
+            let puffin_factory = access_layer.puffin_manager_factory().clone();
+            let path_factory = RegionFilePathFactory::new(table_dir, path_type);
+
+            let entry_futures = manifest_entries.into_iter().map(|entry| {
+                let object_store = object_store.clone();
+                let path_factory = path_factory.clone();
+                let puffin_factory = puffin_factory.clone();
+                let puffin_metadata_cache = puffin_metadata_cache.clone();
+                let bloom_filter_cache = bloom_filter_cache.clone();
+                let inverted_index_cache = inverted_index_cache.clone();
+
+                async move {
+                    let Some(index_file_path) = entry.index_file_path.as_ref() else {
+                        return Vec::new();
+                    };
+
+                    let file_id = match FileId::parse_str(&entry.file_id) {
+                        Ok(file_id) => file_id,
+                        Err(err) => {
+                            warn!(
+                                err;
+                                "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
+                                entry.table_dir,
+                                entry.file_id
+                            );
+                            return Vec::new();
+                        }
+                    };
+
+                    let region_file_id = RegionFileId::new(entry.region_id, file_id);
+                    let context = IndexEntryContext {
+                        table_dir: &entry.table_dir,
+                        index_file_path: index_file_path.as_str(),
+                        region_id: entry.region_id,
+                        table_id: entry.table_id,
+                        region_number: entry.region_number,
+                        region_group: entry.region_group,
+                        region_sequence: entry.region_sequence,
+                        file_id: &entry.file_id,
+                        index_file_size: entry.index_file_size,
+                        node_id,
+                    };
+
+                    let manager = puffin_factory
+                        .build(object_store, path_factory)
+                        .with_puffin_metadata_cache(puffin_metadata_cache);
+
+                    collect_index_entries_from_puffin(
+                        manager,
+                        region_file_id,
+                        context,
+                        bloom_filter_cache,
+                        inverted_index_cache,
+                    )
+                    .await
+                }
+            });
+
+            let mut meta_stream = stream::iter(entry_futures).buffer_unordered(8); // Parallelism is 8.
+            while let Some(mut metas) = meta_stream.next().await {
+                results.append(&mut metas);
+            }
+        }
+
+        results
+    }
+
     /// Lists all SSTs from the storage layer of all regions in the engine.
     pub fn all_ssts_from_storage(&self) -> impl Stream<Item = Result<StorageSstEntry>> {
         let node_id = self.inner.workers.file_ref_manager().node_id();
@@ -695,7 +784,7 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start)
-        .with_flat_format(self.config.enable_experimental_flat_format);
+        .with_flat_format(self.config.default_experimental_flat_format);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);

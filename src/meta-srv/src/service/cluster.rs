@@ -99,6 +99,10 @@ impl Metasrv {
             start_time_ms: self.start_time_ms(),
             cpus: self.resource_spec().cpus as u32,
             memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
+            hostname: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         }
         .into()
     }

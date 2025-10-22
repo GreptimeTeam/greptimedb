@@ -29,10 +29,20 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_append_mode_write_query() {
+    test_append_mode_write_query_with_format(false).await;
+    test_append_mode_write_query_with_format(true).await;
+}
+
+async fn test_append_mode_write_query_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -89,9 +99,15 @@ async fn test_append_mode_write_query() {
 
 #[tokio::test]
 async fn test_append_mode_compaction() {
+    test_append_mode_compaction_with_format(false).await;
+    test_append_mode_compaction_with_format(true).await;
+}
+
+async fn test_append_mode_compaction_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -190,6 +206,7 @@ async fn test_append_mode_compaction() {
         .reopen_engine(
             engine,
             MitoConfig {
+                default_experimental_flat_format: flat_format,
                 ..Default::default()
             },
         )

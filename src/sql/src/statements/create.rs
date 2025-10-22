@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
+use datatypes::json::JsonStructureSettings;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
@@ -25,7 +26,8 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
 use crate::error::{
-    InvalidFlowQuerySnafu, Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
+    SetSkippingIndexOptionSnafu,
 };
 use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
@@ -35,6 +37,12 @@ const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
 const INDENT: usize = 2;
 pub const VECTOR_OPT_DIM: &str = "dim";
+
+pub const JSON_OPT_UNSTRUCTURED_KEYS: &str = "unstructured_keys";
+pub const JSON_OPT_FORMAT: &str = "format";
+pub const JSON_FORMAT_FULL_STRUCTURED: &str = "structured";
+pub const JSON_FORMAT_RAW: &str = "raw";
+pub const JSON_FORMAT_PARTIAL: &str = "partial";
 
 macro_rules! format_indent {
     ($fmt: expr, $arg: expr) => {
@@ -124,6 +132,7 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
+    pub json_datatype_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -208,6 +217,39 @@ impl ColumnExtensions {
         Ok(Some(
             options.try_into().context(SetSkippingIndexOptionSnafu)?,
         ))
+    }
+
+    pub fn build_json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {
+        let Some(options) = self.json_datatype_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let unstructured_keys = options
+            .value(JSON_OPT_UNSTRUCTURED_KEYS)
+            .and_then(|v| {
+                v.as_list().map(|x| {
+                    x.into_iter()
+                        .map(|x| x.to_string())
+                        .collect::<HashSet<String>>()
+                })
+            })
+            .unwrap_or_default();
+
+        options
+            .get(JSON_OPT_FORMAT)
+            .map(|format| match format {
+                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(None)),
+                JSON_FORMAT_PARTIAL => Ok(JsonStructureSettings::PartialUnstructuredByKey {
+                    fields: None,
+                    unstructured_keys,
+                }),
+                JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
+                _ => InvalidSqlSnafu {
+                    msg: format!("unknown JSON datatype 'format': {format}"),
+                }
+                .fail(),
+            })
+            .transpose()
     }
 }
 

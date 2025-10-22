@@ -29,8 +29,18 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_scan_with_min_sst_sequence() {
+    test_scan_with_min_sst_sequence_with_format(false).await;
+    test_scan_with_min_sst_sequence_with_format(true).await;
+}
+
+async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
@@ -155,8 +165,14 @@ async fn test_scan_with_min_sst_sequence() {
 
 #[tokio::test]
 async fn test_max_concurrent_scan_files() {
+    test_max_concurrent_scan_files_with_format(false).await;
+    test_max_concurrent_scan_files_with_format(true).await;
+}
+
+async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
+        default_experimental_flat_format: flat_format,
         max_concurrent_scan_files: 2,
         ..Default::default()
     };
@@ -206,9 +222,14 @@ async fn test_max_concurrent_scan_files() {
 }
 
 #[tokio::test]
-async fn test_series_scan() {
+async fn test_series_scan_primarykey() {
     let mut env = TestEnv::with_prefix("test_series_scan").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: false,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new()
@@ -342,6 +363,152 @@ async fn test_series_scan() {
 | 3601  | 3601.0  | 1970-01-01T01:00:01 |
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 | 7202  | 7202.0  | 1970-01-01T02:00:02 |
++-------+---------+---------------------+";
+    check_result(expected);
+}
+
+#[tokio::test]
+async fn test_series_scan_flat() {
+    let mut env = TestEnv::with_prefix("test_series_scan").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let put_flush_rows = async |start, end| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+    // generates 3 SST files
+    put_flush_rows(0, 3).await;
+    put_flush_rows(2, 6).await;
+    put_flush_rows(3600, 3603).await;
+    // Put to memtable.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(7200, 7203),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(mut scanner) = scanner else {
+        panic!("Scanner should be series scan");
+    };
+    // 3 partition ranges for 3 time window.
+    assert_eq!(
+        3,
+        scanner.properties().partitions[0].len(),
+        "unexpected ranges: {:?}",
+        scanner.properties().partitions
+    );
+    let raw_ranges: Vec<_> = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let mut new_ranges = Vec::with_capacity(3);
+    for range in raw_ranges {
+        new_ranges.push(vec![range]);
+    }
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(new_ranges),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let metrics_set = ExecutionPlanMetricsSet::default();
+
+    let mut partition_batches = vec![vec![]; 3];
+    let mut streams: Vec<_> = (0..3)
+        .map(|partition| {
+            let stream = scanner
+                .scan_partition(&Default::default(), &metrics_set, partition)
+                .unwrap();
+            Some(stream)
+        })
+        .collect();
+    let mut num_done = 0;
+    let mut schema = None;
+    // Pull streams in round-robin fashion to get the consistent output from the sender.
+    while num_done < 3 {
+        if schema.is_none() {
+            schema = Some(streams[0].as_ref().unwrap().schema().clone());
+        }
+        for i in 0..3 {
+            let Some(mut stream) = streams[i].take() else {
+                continue;
+            };
+            let Some(rb) = stream.try_next().await.unwrap() else {
+                num_done += 1;
+                continue;
+            };
+            partition_batches[i].push(rb);
+            streams[i] = Some(stream);
+        }
+    }
+
+    let mut check_result = |expected| {
+        let batches =
+            RecordBatches::try_new(schema.clone().unwrap(), partition_batches.remove(0)).unwrap();
+        assert_eq!(expected, batches.pretty_print().unwrap());
+    };
+
+    // Output series order is 0, 1, 2, 3, 3600, 3601, 3602, 4, 5, 7200, 7201, 7202
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 7200  | 7200.0  | 1970-01-01T02:00:00 |
+| 7201  | 7201.0  | 1970-01-01T02:00:01 |
+| 7202  | 7202.0  | 1970-01-01T02:00:02 |
++-------+---------+---------------------+";
+    check_result(expected);
+
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 3600  | 3600.0  | 1970-01-01T01:00:00 |
+| 3601  | 3601.0  | 1970-01-01T01:00:01 |
+| 3602  | 3602.0  | 1970-01-01T01:00:02 |
++-------+---------+---------------------+";
+    check_result(expected);
+
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
 +-------+---------+---------------------+";
     check_result(expected);
 }

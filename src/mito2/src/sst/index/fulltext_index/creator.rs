@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use common_telemetry::warn;
-use datatypes::arrow::array::{Array, StringArray};
+use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
@@ -25,6 +25,7 @@ use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
 use index::fulltext_index::{Analyzer, Config};
+use index::target::IndexTarget;
 use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
 use snafu::{ResultExt, ensure};
@@ -297,7 +298,7 @@ impl SingleCreator {
                 for i in 0..batch.num_rows() {
                     let data = data.get_ref(i);
                     let text = data
-                        .as_string()
+                        .try_into_string()
                         .context(DataTypeMismatchSnafu)?
                         .unwrap_or_default();
                     self.inner.push_text(text).await?;
@@ -321,12 +322,34 @@ impl SingleCreator {
         if let Some(column_array) = batch.column_by_name(&self.column_name) {
             // Convert Arrow array to string array.
             // TODO(yingwen): Use Utf8View later if possible.
-            let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
-                .context(ComputeArrowSnafu)?;
-            let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-            for text_opt in string_array.iter() {
-                let text = text_opt.unwrap_or_default();
-                self.inner.push_text(text).await?;
+            match column_array.data_type() {
+                DataType::Utf8 => {
+                    let string_array = column_array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                DataType::LargeUtf8 => {
+                    let large_string_array = column_array
+                        .as_any()
+                        .downcast_ref::<LargeStringArray>()
+                        .unwrap();
+                    for text_opt in large_string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
+                _ => {
+                    // For other types, cast to Utf8 as before
+                    let array = datatypes::arrow::compute::cast(column_array, &DataType::Utf8)
+                        .context(ComputeArrowSnafu)?;
+                    let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                    for text_opt in string_array.iter() {
+                        let text = text_opt.unwrap_or_default();
+                        self.inner.push_text(text).await?;
+                    }
+                }
             }
         } else {
             // If the column is not found in the batch, push empty text.
@@ -385,16 +408,22 @@ impl AltFulltextCreator {
     ) -> Result<ByteCount> {
         match self {
             Self::Tantivy(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_TANTIVY}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_BLOOM}-{}", column_id);
+                let blob_key = format!(
+                    "{INDEX_BLOB_TYPE_BLOOM}-{}",
+                    IndexTarget::ColumnId(*column_id)
+                );
                 creator
-                    .finish(puffin_writer, &key, put_options)
+                    .finish(puffin_writer, &blob_key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }

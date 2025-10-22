@@ -1811,7 +1811,6 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.18.0",
  "table",
  "tempfile",
  "tokio",
@@ -1956,7 +1955,6 @@ dependencies = [
  "snafu 0.8.6",
  "standalone",
  "store-api",
- "substrait 0.18.0",
  "table",
  "temp-env",
  "tempfile",
@@ -2033,6 +2031,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-wal",
@@ -2040,13 +2039,11 @@ dependencies = [
  "datanode",
  "humantime-serde",
  "meta-client",
- "num_cpus",
  "object-store",
  "serde",
  "serde_json",
  "serde_with",
  "snafu 0.8.6",
- "sysinfo",
  "temp-env",
  "tempfile",
  "toml 0.8.23",
@@ -2481,6 +2478,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "criterion 0.7.0",
  "datafusion",
  "datafusion-common",
  "datatypes",
@@ -2553,9 +2551,12 @@ dependencies = [
 name = "common-stat"
 version = "0.18.0"
 dependencies = [
+ "common-base",
  "lazy_static",
  "nix 0.30.1",
+ "num_cpus",
  "prometheus",
+ "sysinfo",
 ]
 
 [[package]]
@@ -3929,6 +3930,7 @@ dependencies = [
  "file-engine",
  "futures",
  "futures-util",
+ "hostname 0.4.1",
  "humantime-serde",
  "lazy_static",
  "log-store",
@@ -3947,7 +3949,6 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.18.0",
  "table",
  "tokio",
  "toml 0.8.23",
@@ -4788,6 +4789,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -4804,6 +4806,7 @@ dependencies = [
  "futures",
  "get-size2",
  "greptime-proto",
+ "hostname 0.4.1",
  "http 1.3.1",
  "humantime-serde",
  "itertools 0.14.0",
@@ -4920,6 +4923,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "futures",
+ "hostname 0.4.1",
  "humantime",
  "humantime-serde",
  "lazy_static",
@@ -4945,7 +4949,6 @@ dependencies = [
  "sqlparser 0.55.0-greptime",
  "store-api",
  "strfmt",
- "substrait 0.18.0",
  "table",
  "tokio",
  "tokio-util",
@@ -5325,7 +5328,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d75496d5d09dedcd0edcade57ccf0a522f4393ae#d75496d5d09dedcd0edcade57ccf0a522f4393ae"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=69a6089933daa573c96808ec4bbc48f447ec6e8c#69a6089933daa573c96808ec4bbc48f447ec6e8c"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -6119,6 +6122,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
+ "store-api",
  "tantivy",
  "tantivy-jieba",
  "tempfile",
@@ -7412,6 +7416,7 @@ dependencies = [
  "etcd-client",
  "futures",
  "h2 0.3.26",
+ "hostname 0.4.1",
  "http-body-util",
  "humantime",
  "humantime-serde",
@@ -7609,6 +7614,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -7624,6 +7630,7 @@ dependencies = [
  "dotenv",
  "either",
  "futures",
+ "greptime-proto",
  "humantime-serde",
  "index",
  "itertools 0.14.0",
@@ -9183,9 +9190,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.33.0"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f58d371668e6151da16be31308989058156c01257277ea8af0f97524e87cfa31"
+checksum = "c748793f2a9267fa2aa409d9375a5e26e4f1504ea96e34f8cab3e2fc32042d69"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9201,6 +9208,8 @@ dependencies = [
  "ring",
  "rust_decimal",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "stringprep",
  "thiserror 2.0.17",
  "tokio",
@@ -11550,6 +11559,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-decimal",
  "common-error",
  "common-frontend",
  "common-grpc",
@@ -11996,6 +12006,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-sql",
+ "common-telemetry",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -12354,6 +12365,7 @@ dependencies = [
  "common-options",
  "common-procedure",
  "common-query",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -12362,6 +12374,7 @@ dependencies = [
  "file-engine",
  "flow",
  "frontend",
+ "hostname 0.4.1",
  "log-store",
  "mito2",
  "query",

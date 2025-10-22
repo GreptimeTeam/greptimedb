@@ -24,7 +24,7 @@ async fn test_heartbeat_mailbox() {
     let mailbox = HeartbeatMailbox::new(tx);
 
     let meta = MessageMeta::new_test(1, "test", "foo", "bar");
-    let reply = InstructionReply::OpenRegion(SimpleReply {
+    let reply = InstructionReply::OpenRegions(SimpleReply {
         result: true,
         error: None,
     });
