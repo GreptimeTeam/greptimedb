@@ -2,6 +2,12 @@ mode = 'standalone'
 enable_memory_catalog = false
 require_lease_before_startup = true
 
+[[region_engine]]
+[region_engine.mito]
+{{ if enable_flat_format }}
+default_experimental_flat_format = true
+{{ endif }}
+
 [wal]
 {{ if is_raft_engine }}
 provider = "raft_engine"
