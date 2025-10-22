@@ -305,7 +305,7 @@ impl SeriesEstimator {
 
         // Checks if there's a boundary between the last batch and this batch
         if let Some(last_ts) = self.last_timestamp {
-            if values[0] < last_ts {
+            if values[0] <= last_ts {
                 self.series_count += 1;
             }
         } else {
