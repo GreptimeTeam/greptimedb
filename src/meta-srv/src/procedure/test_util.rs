@@ -183,12 +183,15 @@ pub fn new_downgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                last_entry_id,
-                metadata_last_entry_id: None,
-                exists: exist,
-                error,
-            }))
+            serde_json::to_string(&InstructionReply::DowngradeRegions(vec![
+                DowngradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    last_entry_id,
+                    metadata_last_entry_id: None,
+                    exists: exist,
+                    error,
+                },
+            ]))
             .unwrap(),
         )),
     }

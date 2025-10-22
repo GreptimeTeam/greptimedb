@@ -55,6 +55,8 @@ impl Display for RegionIdent {
 /// The result of downgrade leader region.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DowngradeRegionReply {
+    #[serde(default)]
+    pub region_id: RegionId,
     /// Returns the `last_entry_id` if available.
     pub last_entry_id: Option<u64>,
     /// Returns the `metadata_last_entry_id` if available (Only available for metric engine).
@@ -423,8 +425,12 @@ pub enum Instruction {
     CloseRegions(Vec<RegionIdent>),
     /// Upgrades a region.
     UpgradeRegion(UpgradeRegion),
+    #[serde(
+        deserialize_with = "single_or_multiple_from",
+        alias = "DowngradeRegion"
+    )]
     /// Downgrades a region.
-    DowngradeRegion(DowngradeRegion),
+    DowngradeRegions(Vec<DowngradeRegion>),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
     /// Flushes regions.
@@ -457,9 +463,9 @@ impl Instruction {
     }
 
     /// Converts the instruction into a [DowngradeRegion].
-    pub fn into_downgrade_regions(self) -> Option<DowngradeRegion> {
+    pub fn into_downgrade_regions(self) -> Option<Vec<DowngradeRegion>> {
         match self {
-            Self::DowngradeRegion(downgrade_region) => Some(downgrade_region),
+            Self::DowngradeRegions(downgrade_region) => Some(downgrade_region),
             _ => None,
         }
     }
@@ -502,7 +508,11 @@ pub enum InstructionReply {
     #[serde(alias = "close_region")]
     CloseRegions(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
-    DowngradeRegion(DowngradeRegionReply),
+    #[serde(
+        alias = "downgrade_region",
+        deserialize_with = "single_or_multiple_from"
+    )]
+    DowngradeRegions(Vec<DowngradeRegionReply>),
     FlushRegions(FlushRegionReply),
 }
 
@@ -512,8 +522,8 @@ impl Display for InstructionReply {
             Self::OpenRegions(reply) => write!(f, "InstructionReply::OpenRegions({})", reply),
             Self::CloseRegions(reply) => write!(f, "InstructionReply::CloseRegions({})", reply),
             Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
-            Self::DowngradeRegion(reply) => {
-                write!(f, "InstructionReply::DowngradeRegion({})", reply)
+            Self::DowngradeRegions(reply) => {
+                write!(f, "InstructionReply::DowngradeRegions({:?})", reply)
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
         }
@@ -543,9 +553,9 @@ impl InstructionReply {
         }
     }
 
-    pub fn expect_downgrade_region_reply(self) -> DowngradeRegionReply {
+    pub fn expect_downgrade_region_reply(self) -> Vec<DowngradeRegionReply> {
         match self {
-            Self::DowngradeRegion(reply) => reply,
+            Self::DowngradeRegions(reply) => reply,
             _ => panic!("Expected DowngradeRegion reply"),
         }
     }

@@ -120,10 +120,10 @@ impl DowngradeLeaderRegion {
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        Instruction::DowngradeRegion(DowngradeRegion {
+        Instruction::DowngradeRegions(vec![DowngradeRegion {
             region_id,
             flush_timeout: Some(flush_timeout),
-        })
+        }])
     }
 
     /// Tries to downgrade a leader region.
@@ -173,19 +173,22 @@ impl DowngradeLeaderRegion {
                     region_id,
                     now.elapsed()
                 );
-                let InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id,
-                    metadata_last_entry_id,
-                    exists,
-                    error,
-                }) = reply
-                else {
+                let InstructionReply::DowngradeRegions(replies) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect downgrade region reply",
                     }
                     .fail();
                 };
+
+                // TODO(weny): handle multiple replies.
+                let DowngradeRegionReply {
+                    region_id,
+                    last_entry_id,
+                    metadata_last_entry_id,
+                    exists,
+                    error,
+                } = &replies[0];
 
                 if error.is_some() {
                     return error::RetryLaterSnafu {
@@ -216,12 +219,12 @@ impl DowngradeLeaderRegion {
                 }
 
                 if let Some(last_entry_id) = last_entry_id {
-                    ctx.volatile_ctx.set_last_entry_id(last_entry_id);
+                    ctx.volatile_ctx.set_last_entry_id(*last_entry_id);
                 }
 
                 if let Some(metadata_last_entry_id) = metadata_last_entry_id {
                     ctx.volatile_ctx
-                        .set_metadata_last_entry_id(metadata_last_entry_id);
+                        .set_metadata_last_entry_id(*metadata_last_entry_id);
                 }
 
                 Ok(())
