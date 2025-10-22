@@ -136,8 +136,8 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),
-            Some((_, Instruction::OpenRegion { .. }))
-                | Some((_, Instruction::CloseRegion { .. }))
+            Some((_, Instruction::OpenRegions { .. }))
+                | Some((_, Instruction::CloseRegions { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
                 | Some((_, Instruction::FlushRegions { .. }))
@@ -158,7 +158,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
         let gc_tasks = self.gc_tasks.clone();
-        let handler = Self::build_handler(instruction)?;
+        let handler = self.build_handler(instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler(HandlerContext {
                 region_server,
