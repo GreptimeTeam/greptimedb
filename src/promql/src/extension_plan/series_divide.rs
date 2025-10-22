@@ -41,7 +41,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::METRIC_NUM_SERIES;
+use crate::extension_plan::{METRIC_NUM_SERIES, resolve_column_name, serialize_column_index};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -53,6 +53,13 @@ pub struct SeriesDivide {
     /// here can avoid unnecessary sort in follow on plans.
     time_index_column: String,
     input: LogicalPlan,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub tag_column_indices: Vec<u64>,
+    pub time_index_column_idx: u64,
 }
 
 impl UserDefinedLogicalNodeCore for SeriesDivide {
@@ -87,11 +94,38 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
             ));
         }
 
-        Ok(Self {
-            tag_columns: self.tag_columns.clone(),
-            time_index_column: self.time_index_column.clone(),
-            input: inputs[0].clone(),
-        })
+        let input: LogicalPlan = inputs[0].clone();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            // transform indices to names
+            let tag_columns = unfix
+                .tag_column_indices
+                .iter()
+                .map(|idx| resolve_column_name(*idx, input_schema, "SeriesDivide", "tag"))
+                .collect::<DataFusionResult<Vec<String>>>()?;
+
+            let time_index_column = resolve_column_name(
+                unfix.time_index_column_idx,
+                input_schema,
+                "SeriesDivide",
+                "time index",
+            )?;
+
+            Ok(Self {
+                tag_columns,
+                time_index_column,
+                input,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                tag_columns: self.tag_columns.clone(),
+                time_index_column: self.time_index_column.clone(),
+                input,
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -101,6 +135,7 @@ impl SeriesDivide {
             tag_columns,
             time_index_column,
             input,
+            unfix: None,
         }
     }
 
@@ -122,9 +157,19 @@ impl SeriesDivide {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        let tag_column_indices = self
+            .tag_columns
+            .iter()
+            .map(|name| serialize_column_index(self.input.schema(), name))
+            .collect::<Vec<u64>>();
+
+        let time_index_column_idx =
+            serialize_column_index(self.input.schema(), &self.time_index_column);
+
         pb::SeriesDivide {
-            tag_columns: self.tag_columns.clone(),
-            time_index_column: self.time_index_column.clone(),
+            tag_column_indices,
+            time_index_column_idx,
+            ..Default::default()
         }
         .encode_to_vec()
     }
@@ -135,10 +180,17 @@ impl SeriesDivide {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         });
+
+        let unfix = UnfixIndices {
+            tag_column_indices: pb_series_divide.tag_column_indices.clone(),
+            time_index_column_idx: pb_series_divide.time_index_column_idx,
+        };
+
         Ok(Self {
-            tag_columns: pb_series_divide.tag_columns,
-            time_index_column: pb_series_divide.time_index_column,
+            tag_columns: Vec::new(),
+            time_index_column: String::new(),
             input: placeholder_plan,
+            unfix: Some(unfix),
         })
     }
 }
