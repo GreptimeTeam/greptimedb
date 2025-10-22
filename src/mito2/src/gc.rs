@@ -147,6 +147,15 @@ pub struct LocalGcWorker {
     /// Used to determine whether the tmp ref files are outdated.
     pub(crate) file_ref_manifest: FileRefsManifest,
     pub(crate) _permit: OwnedSemaphorePermit,
+    /// Whether to perform full file listing during GC.
+    /// When set to false, GC will only delete files that are tracked in the manifest's removed_files,
+    /// which can significantly improve performance by avoiding expensive list operations.
+    /// When set to true, GC will perform a full listing to find and delete orphan files
+    /// (files not tracked in the manifest).
+    ///
+    /// Set to false for regular GC operations to optimize performance.
+    /// Set to true periodically or when you need to clean up orphan files.
+    pub full_file_listing: bool,
 }
 
 pub struct ManifestOpenConfig {
@@ -181,6 +190,7 @@ impl LocalGcWorker {
         manifest_open_config: ManifestOpenConfig,
         file_ref_manifest: FileRefsManifest,
         limiter: &GcLimiterRef,
+        full_file_listing: bool,
     ) -> Result<Self> {
         let table_id = regions_to_gc
             .first()
@@ -197,6 +207,7 @@ impl LocalGcWorker {
             manifest_open_config,
             file_ref_manifest,
             _permit: permit,
+            full_file_listing,
         };
 
         // dedup just in case
@@ -295,7 +306,7 @@ impl LocalGcWorker {
 impl LocalGcWorker {
     /// concurrency of listing files per region.
     /// This is used to limit the number of concurrent listing operations and speed up listing
-    pub const CONCURRENCY_LIST_PER_FILES: usize = 512;
+    pub const CONCURRENCY_LIST_PER_FILES: usize = 1024;
 
     /// Perform GC for the region.
     /// 1. Get all the removed files in delta manifest files and their expel times
@@ -588,6 +599,11 @@ impl LocalGcWorker {
     /// Concurrently list unused files in the region dir
     /// because there may be a lot of files in the region dir
     /// and listing them may take a long time.
+    ///
+    /// When `full_file_listing` is false, this method will only delete files tracked in
+    /// `recently_removed_files` without performing expensive list operations, which significantly
+    /// improves performance. When `full_file_listing` is true, it performs a full listing to
+    /// find and delete orphan files.
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
@@ -625,11 +641,39 @@ impl LocalGcWorker {
         // in use filenames, include sst and index files
         let in_use_filenames = in_used.iter().collect::<HashSet<_>>();
 
+        // When full_file_listing is false, skip expensive list operations and only delete
+        // files that are tracked in recently_removed_files
+        if !self.full_file_listing {
+            // Only delete files that:
+            // 1. Are in recently_removed_files (tracked in manifest)
+            // 2. Are not in use
+            // 3. Have passed the lingering time
+            let files_to_delete: Vec<FileId> = all_files_appear_in_delta_manifests
+                .iter()
+                .filter(|file_id| !in_use_filenames.contains(*file_id))
+                .copied()
+                .copied()
+                .collect();
+
+            info!(
+                "gc: fast mode (no full listing) cost {} secs for region {}, found {} files to delete from manifest",
+                start.elapsed().as_secs_f64(),
+                region_id,
+                files_to_delete.len()
+            );
+
+            return Ok(files_to_delete);
+        }
+
+        // Full file listing mode: perform expensive list operations to find orphan files
         // Step 1: Create partitioned listers for concurrent processing
         let listers = self.partition_region_files(region_id, concurrency).await?;
+        let lister_cnt = listers.len();
 
         // Step 2: Concurrently list all files in the region directory
         let all_entries = self.list_region_files_concurrent(listers).await?;
+
+        let cnt = all_entries.len();
 
         // Step 3: Filter files to determine which ones can be deleted
         let (all_unused_files_ready_for_delete, all_in_exist_linger_files) = self
@@ -642,8 +686,10 @@ impl LocalGcWorker {
             );
 
         info!(
-            "gc: listing op cost {} secs.",
-            start.elapsed().as_secs_f64()
+            "gc: full listing mode cost {} secs using {lister_cnt} lister for {cnt} files in region {}, found {} unused files to delete",
+            start.elapsed().as_secs_f64(),
+            region_id,
+            all_unused_files_ready_for_delete.len()
         );
         info!("All in exist linger files: {:?}", all_in_exist_linger_files);
 

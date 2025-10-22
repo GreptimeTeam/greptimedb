@@ -48,7 +48,11 @@ impl HandlerContext {
         }
 
         let (region_id, gc_worker) = match self
-            .create_gc_worker(region_ids, &gc_regions.file_refs_manifest)
+            .create_gc_worker(
+                region_ids,
+                &gc_regions.file_refs_manifest,
+                gc_regions.full_file_listing,
+            )
             .await
         {
             Ok(worker) => worker,
@@ -93,6 +97,7 @@ impl HandlerContext {
         &self,
         mut region_ids: Vec<RegionId>,
         file_ref_manifest: &FileRefsManifest,
+        full_file_listing: bool,
     ) -> Result<(RegionId, LocalGcWorker)> {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
@@ -127,6 +132,7 @@ impl HandlerContext {
             mito_config.clone().into(),
             file_ref_manifest.clone(),
             &mito_engine.gc_limiter(),
+            full_file_listing,
         )
         .await
         .context(GcMitoEngineSnafu { region_id })?;

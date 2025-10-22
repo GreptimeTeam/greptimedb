@@ -69,6 +69,13 @@ pub struct GcSchedulerOptions {
     pub gc_cooldown_period: Duration,
     /// Maximum number of regions to select for GC per table.
     pub regions_per_table_threshold: usize,
+    /// Timeout duration for mailbox communication with datanodes.
+    pub mailbox_timeout: Duration,
+    /// Interval for performing full file listing during GC to find orphan files.
+    /// Full file listing is expensive but necessary to clean up orphan files.
+    /// Set to a larger value (e.g., 24 hours) to balance performance and cleanup.
+    /// Every Nth GC cycle will use full file listing, where N = full_file_listing_interval / TICKER_INTERVAL.
+    pub full_file_listing_interval: Duration,
 }
 
 impl Default for GcSchedulerOptions {
@@ -83,7 +90,80 @@ impl Default for GcSchedulerOptions {
             file_removal_rate_weight: 0.5,
             gc_cooldown_period: Duration::from_secs(60 * 30), // 30 minutes
             regions_per_table_threshold: 20,                  // Select top 20 regions per table
+            mailbox_timeout: Duration::from_secs(60),         // 60 seconds
+            // Perform full file listing every 24 hours to find orphan files
+            full_file_listing_interval: Duration::from_secs(60 * 60 * 24),
         }
+    }
+}
+
+impl GcSchedulerOptions {
+    /// Validates the configuration options.
+    pub fn validate(&self) -> Result<()> {
+        if self.max_concurrent_tables == 0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "max_concurrent_tables must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.max_retries_per_region == 0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "max_retries_per_region must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.retry_backoff_duration.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "retry_backoff_duration must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.sst_count_weight < 0.0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "sst_count_weight must be non-negative",
+            }
+            .fail();
+        }
+
+        if self.file_removal_rate_weight < 0.0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "file_removal_rate_weight must be non-negative",
+            }
+            .fail();
+        }
+
+        if self.gc_cooldown_period.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "gc_cooldown_period must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.regions_per_table_threshold == 0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "regions_per_table_threshold must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.mailbox_timeout.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "mailbox_timeout must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.full_file_listing_interval.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "full_file_listing_interval must be greater than 0",
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 }
 
@@ -110,8 +190,26 @@ impl GcCandidate {
     }
 }
 
+/// Tracks GC timing information for a region.
+#[derive(Debug, Clone)]
+struct RegionGcInfo {
+    /// Last time a regular GC was performed on this region.
+    last_gc_time: Instant,
+    /// Last time a full file listing GC was performed on this region.
+    last_full_listing_time: Option<Instant>,
+}
+
+impl RegionGcInfo {
+    fn new(last_gc_time: Instant) -> Self {
+        Self {
+            last_gc_time,
+            last_full_listing_time: None,
+        }
+    }
+}
+
 /// Tracks the last GC time for regions to implement cooldown.
-type RegionGcTracker = HashMap<RegionId, Instant>;
+type RegionGcTracker = HashMap<RegionId, RegionGcInfo>;
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
 ///
@@ -157,7 +255,7 @@ impl GcScheduler {
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
-    ) -> (Self, GcTicker) {
+    ) -> Result<(Self, GcTicker)> {
         Self::new_with_config(
             table_metadata_manager,
             meta_peer_client,
@@ -174,7 +272,10 @@ impl GcScheduler {
         mailbox: MailboxRef,
         server_addr: String,
         config: GcSchedulerOptions,
-    ) -> (Self, GcTicker) {
+    ) -> Result<(Self, GcTicker)> {
+        // Validate configuration before creating the scheduler
+        config.validate()?;
+
         let (tx, rx) = Self::channel();
         let gc_ticker = GcTicker::new(TICKER_INTERVAL, tx);
         let gc_trigger = Self {
@@ -186,7 +287,7 @@ impl GcScheduler {
             config,
             region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
-        (gc_trigger, gc_ticker)
+        Ok((gc_trigger, gc_ticker))
     }
 
     fn channel() -> (Sender<Event>, Receiver<Event>) {
@@ -274,8 +375,8 @@ impl GcScheduler {
                 }
 
                 // Skip regions that are in cooldown period
-                if let Some(last_gc_time) = gc_tracker.get(&region_stat.id)
-                    && now.duration_since(*last_gc_time) < self.config.gc_cooldown_period
+                if let Some(gc_info) = gc_tracker.get(&region_stat.id)
+                    && now.duration_since(gc_info.last_gc_time) < self.config.gc_cooldown_period
                 {
                     debug!("Skipping region {} due to cooldown", region_stat.id);
                     continue;
@@ -314,6 +415,53 @@ impl GcScheduler {
         Ok(table_candidates)
     }
 
+    /// Process multiple tables concurrently with limited parallelism.
+    async fn process_tables_concurrently(
+        &self,
+        per_table_candidates: HashMap<TableId, Vec<GcCandidate>>,
+    ) -> (usize, usize, usize) {
+        let mut table_tasks = FuturesUnordered::new();
+        let mut processed_tables = 0;
+        let mut successful_tables = 0;
+        let mut total_regions_processed = 0;
+
+        for (table_id, candidates) in per_table_candidates {
+            let task = self.process_table_gc(table_id, candidates);
+            table_tasks.push(task);
+
+            // Limit concurrent table processing
+            if table_tasks.len() >= self.config.max_concurrent_tables {
+                if let Some(result) = table_tasks.next().await {
+                    let (success, regions) = Self::handle_table_result(result);
+                    processed_tables += 1;
+                    successful_tables += success;
+                    total_regions_processed += regions;
+                }
+            }
+        }
+
+        // Process remaining tasks
+        while let Some(result) = table_tasks.next().await {
+            let (success, regions) = Self::handle_table_result(result);
+            processed_tables += 1;
+            successful_tables += success;
+            total_regions_processed += regions;
+        }
+
+        (processed_tables, successful_tables, total_regions_processed)
+    }
+
+    /// Handle the result of processing a single table.
+    fn handle_table_result(result: Result<usize>) -> (usize, usize) {
+        match result {
+            Ok(regions_count) => (1, regions_count),
+            Err(e) => {
+                error!("Failed to process table GC: {}", e);
+                (0, 0)
+            }
+        }
+    }
+
     /// Iterate through all region stats, find region that might need gc, and send gc instruction to
     /// the corresponding datanode with improved parallel processing and retry logic.
     async fn trigger_gc(&self) -> Result<()> {
@@ -336,45 +484,8 @@ impl GcScheduler {
         }
 
         // Step 3: Process tables concurrently with limited parallelism
-        let mut table_tasks = FuturesUnordered::new();
-        let mut processed_tables = 0;
-        let mut successful_tables = 0;
-        let mut total_regions_processed = 0;
-
-        for (table_id, candidates) in per_table_candidates {
-            let task = self.process_table_gc(table_id, candidates);
-            table_tasks.push(task);
-
-            // Limit concurrent table processing
-            if table_tasks.len() >= self.config.max_concurrent_tables
-                && let Some(result) = table_tasks.next().await
-            {
-                processed_tables += 1;
-                match result {
-                    Ok(regions_count) => {
-                        successful_tables += 1;
-                        total_regions_processed += regions_count;
-                    }
-                    Err(e) => {
-                        error!("Failed to process table GC: {}", e);
-                    }
-                }
-            }
-        }
-
-        // Process remaining tasks
-        while let Some(result) = table_tasks.next().await {
-            processed_tables += 1;
-            match result {
-                Ok(regions_count) => {
-                    successful_tables += 1;
-                    total_regions_processed += regions_count;
-                }
-                Err(e) => {
-                    error!("Failed to process table GC: {}", e);
-                }
-            }
-        }
+        let (processed_tables, successful_tables, total_regions_processed) =
+            self.process_tables_concurrently(per_table_candidates).await;
 
         let duration = start_time.elapsed();
         info!(
@@ -455,11 +566,18 @@ impl GcScheduler {
                 .process_region_gc_with_retry(candidate, &file_refs_manifest, &region_to_peer)
                 .await
             {
-                Ok(_report) => {
+                Ok((report, used_full_listing)) => {
                     successful_regions += 1;
                     // Update GC tracker
                     let mut gc_tracker = self.region_gc_tracker.lock().await;
-                    gc_tracker.insert(region_id, Instant::now());
+                    let now = Instant::now();
+                    let gc_info = gc_tracker
+                        .entry(region_id)
+                        .or_insert_with(|| RegionGcInfo::new(now));
+                    gc_info.last_gc_time = now;
+                    if used_full_listing {
+                        gc_info.last_full_listing_time = Some(now);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to GC region {} after all retries: {}", region_id, e);
@@ -555,91 +673,142 @@ impl GcScheduler {
             })
     }
 
+    /// Get the peer for a given region.
+    fn get_region_peer(
+        &self,
+        region_id: RegionId,
+        region_to_peer: &HashMap<RegionId, Peer>,
+    ) -> Result<Peer> {
+        region_to_peer
+            .get(&region_id)
+            .cloned()
+            .with_context(|| RegionRouteNotFoundSnafu { region_id })
+    }
+
+    /// Handle successful GC report, checking if retry is needed for outdated regions.
+    async fn handle_gc_success(
+        &self,
+        region_id: RegionId,
+        report: GcReport,
+        final_report: &mut GcReport,
+        region_to_peer: &HashMap<RegionId, Peer>,
+    ) -> Result<Option<FileRefsManifest>> {
+        if report.need_retry_regions.is_empty() {
+            final_report.merge(report);
+            info!(
+                "Successfully completed GC for region {} with report: {final_report:?}",
+                region_id
+            );
+            // note that need_retry_regions should be empty here
+            // since no more outdated regions
+            final_report.need_retry_regions.clear();
+            Ok(None)
+        } else {
+            // retry outdated regions if needed
+            let refreshed_manifest = self
+                .refresh_file_refs_for(
+                    &report.need_retry_regions.clone().into_iter().collect_vec(),
+                    region_to_peer,
+                )
+                .await?;
+            info!(
+                "Retrying GC for regions {:?} due to outdated file references",
+                &report.need_retry_regions
+            );
+            final_report.merge(report);
+            Ok(Some(refreshed_manifest))
+        }
+    }
+
+    /// Handle retryable GC error with backoff and manifest refresh.
+    async fn handle_gc_retry(
+        &self,
+        region_id: RegionId,
+        retries: &mut usize,
+        error: error::Error,
+        region_to_peer: &HashMap<RegionId, Peer>,
+    ) -> Result<(FileRefsManifest, Peer)> {
+        *retries += 1;
+        if *retries >= self.config.max_retries_per_region {
+            error!(
+                "Failed to GC region {} after {} retries: {}",
+                region_id, retries, error
+            );
+            return Err(error);
+        }
+
+        warn!(
+            "GC failed for region {} (attempt {}/{}): {}. Retrying after backoff...",
+            region_id, retries, self.config.max_retries_per_region, error
+        );
+
+        // Wait for backoff period
+        sleep(self.config.retry_backoff_duration).await;
+
+        let refreshed_manifest = self
+            .refresh_file_refs_for(&[region_id], region_to_peer)
+            .await?;
+
+        // TODO(discord9): Select the best peer based on GC load
+        // for now gc worker need to be run from datanode that hosts the region
+        // this limit might be lifted in the future
+        let peer = self.get_region_peer(region_id, region_to_peer)?;
+
+        Ok((refreshed_manifest, peer))
+    }
+
     /// Process GC for a single region with retry logic.
+    /// Returns the GC report and a boolean indicating whether full file listing was used.
     async fn process_region_gc_with_retry(
         &self,
         candidate: GcCandidate,
         file_refs_manifest: &FileRefsManifest,
         // TODO(discord9): maybe also refresh region_to_peer mapping if needed?
         region_to_peer: &HashMap<RegionId, Peer>,
-    ) -> Result<GcReport> {
+    ) -> Result<(GcReport, bool)> {
         let region_id = candidate.region_id;
 
         // TODO(discord9): Select the best peer based on GC load
         // for now gc worker need to be run from datanode that hosts the region
         // this limit might be lifted in the future
-        let mut peer = region_to_peer
-            .get(&region_id)
-            .with_context(|| RegionRouteNotFoundSnafu { region_id })?
-            .clone();
+        let mut peer = self.get_region_peer(region_id, region_to_peer)?;
 
         let mut retries = 0;
         let mut current_manifest = file_refs_manifest.clone();
         // Final report for recording all deleted files
         let mut final_report = GcReport::default();
 
+        // Determine if we should use full file listing for this region
+        let should_use_full_listing = self.should_use_full_listing(region_id).await;
+
         loop {
             match self
-                .send_gc_region_instruction(peer.clone(), region_id, &current_manifest)
+                .send_gc_region_instruction(
+                    peer.clone(),
+                    region_id,
+                    &current_manifest,
+                    should_use_full_listing,
+                )
                 .await
             {
                 Ok(report) => {
-                    if report.need_retry_regions.is_empty() {
-                        final_report.merge(report);
-                        info!(
-                            "Successfully completed GC for region {} with report: {final_report:?}",
-                            region_id
-                        );
-                        // note that need_retry_regions should be empty here
-                        // since no more outdated regions
-                        final_report.need_retry_regions.clear();
-                        return Ok(final_report);
-                    } else {
-                        // retry outdated regions if needed?
-                        current_manifest = self
-                            .refresh_file_refs_for(
-                                &report.need_retry_regions.clone().into_iter().collect_vec(),
-                                region_to_peer,
-                            )
-                            .await?;
-                        info!(
-                            "Retrying GC for regions {:?} due to outdated file references",
-                            &report.need_retry_regions
-                        );
-                        final_report.merge(report);
+                    match self
+                        .handle_gc_success(region_id, report, &mut final_report, region_to_peer)
+                        .await?
+                    {
+                        None => return Ok((final_report, should_use_full_listing)),
+                        Some(refreshed_manifest) => {
+                            current_manifest = refreshed_manifest;
+                        }
                     }
                 }
-
                 // Retryable errors: refresh file references and retry with backoff
                 Err(e) if e.is_retryable() => {
-                    retries += 1;
-                    if retries >= self.config.max_retries_per_region {
-                        error!(
-                            "Failed to GC region {} after {} retries: {}",
-                            region_id, retries, e
-                        );
-                        return Err(e);
-                    }
-
-                    warn!(
-                        "GC failed for region {} (attempt {}/{}): {}. Retrying after backoff...",
-                        region_id, retries, self.config.max_retries_per_region, e
-                    );
-
-                    // Wait for backoff period
-                    sleep(self.config.retry_backoff_duration).await;
-
-                    current_manifest = self
-                        .refresh_file_refs_for(&[region_id], region_to_peer)
+                    let (refreshed_manifest, refreshed_peer) = self
+                        .handle_gc_retry(region_id, &mut retries, e, region_to_peer)
                         .await?;
-
-                    // TODO(discord9): Select the best peer based on GC load
-                    // for now gc worker need to be run from datanode that hosts the region
-                    // this limit might be lifted in the future
-                    peer = region_to_peer
-                        .get(&region_id)
-                        .with_context(|| RegionRouteNotFoundSnafu { region_id })?
-                        .clone();
+                    current_manifest = refreshed_manifest;
+                    peer = refreshed_peer;
                 }
                 Err(e) => {
                     error!(
@@ -648,6 +817,46 @@ impl GcScheduler {
                     );
                     return Err(e);
                 }
+            }
+        }
+    }
+
+    /// Send an instruction to a datanode and wait for the reply.
+    ///
+    async fn send_instruction(
+        &self,
+        peer: &Peer,
+        instruction: Instruction,
+        description: &str,
+        timeout: Duration,
+    ) -> Result<InstructionReply> {
+        let msg = MailboxMessage::json_message(
+            &format!("{}: {}", description, instruction),
+            &format!("Metasrv@{}", self.server_addr),
+            &format!("Datanode-{}@{}", peer.id, peer.addr),
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .with_context(|_| error::SerializeToJsonSnafu {
+            input: instruction.to_string(),
+        })?;
+
+        let mailbox_rx = self
+            .mailbox
+            .send(&Channel::Datanode(peer.id), msg, timeout)
+            .await?;
+
+        match mailbox_rx.await {
+            Ok(reply_msg) => {
+                let reply = HeartbeatMailbox::json_reply(&reply_msg)?;
+                Ok(reply)
+            }
+            Err(e) => {
+                error!(
+                    "Failed to receive reply from datanode {} for {}: {}",
+                    peer, description, e
+                );
+                Err(e)
             }
         }
     }
@@ -668,129 +877,106 @@ impl GcScheduler {
             region_ids: region_ids.to_vec(),
         });
 
-        let msg = MailboxMessage::json_message(
-            &format!("Get file references: {}", instruction),
-            &format!("Metasrv@{}", self.server_addr),
-            &format!("Datanode-{}@{}", peer.id, peer.addr),
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
-
-        let mailbox_rx = self
-            .mailbox
-            .send(&Channel::Datanode(peer.id), msg, Duration::from_secs(60))
+        let reply = self
+            .send_instruction(
+                peer,
+                instruction,
+                "Get file references",
+                self.config.mailbox_timeout,
+            )
             .await?;
 
-        match mailbox_rx.await {
-            Ok(reply_msg) => {
-                let reply = HeartbeatMailbox::json_reply(&reply_msg)?;
-                let InstructionReply::GetFileRefs(GetFileRefsReply {
-                    file_refs_manifest,
-                    success,
-                    error,
-                }) = reply
-                else {
-                    return error::UnexpectedInstructionReplySnafu {
-                        mailbox_message: reply_msg.to_string(),
-                        reason: "Unexpected reply of the GetFileRefs instruction",
-                    }
-                    .fail();
-                };
-
-                if !success {
-                    return error::UnexpectedSnafu {
-                        violated: format!(
-                            "Failed to get file references from datanode {}: {:?}",
-                            peer, error
-                        ),
-                    }
-                    .fail();
-                }
-
-                Ok(file_refs_manifest)
+        let InstructionReply::GetFileRefs(GetFileRefsReply {
+            file_refs_manifest,
+            success,
+            error,
+        }) = reply
+        else {
+            return error::UnexpectedInstructionReplySnafu {
+                mailbox_message: format!("{:?}", reply),
+                reason: "Unexpected reply of the GetFileRefs instruction",
             }
-            Err(e) => {
-                error!(
-                    "Failed to receive GetFileRefs reply from datanode {}: {}",
-                    peer, e
-                );
-                Err(e)
+            .fail();
+        };
+
+        if !success {
+            return error::UnexpectedSnafu {
+                violated: format!(
+                    "Failed to get file references from datanode {}: {:?}",
+                    peer, error
+                ),
             }
+            .fail();
+        }
+
+        Ok(file_refs_manifest)
+    }
+
+    /// Determine if full file listing should be used for a region based on the last full listing time.
+    async fn should_use_full_listing(&self, region_id: RegionId) -> bool {
+        let gc_tracker = self.region_gc_tracker.lock().await;
+        let now = Instant::now();
+
+        if let Some(gc_info) = gc_tracker.get(&region_id) {
+            if let Some(last_full_listing) = gc_info.last_full_listing_time {
+                let elapsed = now.duration_since(last_full_listing);
+                elapsed >= self.config.full_file_listing_interval
+            } else {
+                // Never did full listing for this region, do it now
+                true
+            }
+        } else {
+            // First time GC for this region, do full listing
+            true
         }
     }
 
     /// Send GC instruction to a datanode for a specific region.
-    /// TODO(discord9): return outdated regions if needed
     async fn send_gc_region_instruction(
         &self,
         peer: Peer,
         region_id: RegionId,
         file_refs_manifest: &FileRefsManifest,
+        full_file_listing: bool,
     ) -> Result<GcReport> {
         info!(
-            "Sending GC instruction to datanode {} for region {}",
-            peer, region_id
+            "Sending GC instruction to datanode {} for region {} (full_file_listing: {})",
+            peer, region_id, full_file_listing
         );
 
         let instruction = Instruction::GcRegions(GcRegions {
             regions: vec![region_id],
             file_refs_manifest: file_refs_manifest.clone(),
+            full_file_listing,
         });
 
-        let msg = MailboxMessage::json_message(
-            &format!("GC region: {}", instruction),
-            &format!("Metasrv@{}", self.server_addr),
-            &format!("Datanode-{}@{}", peer.id, peer.addr),
-            common_time::util::current_time_millis(),
-            &instruction,
-        )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: instruction.to_string(),
-        })?;
-
-        let receiver = self
-            .mailbox
-            .send(&Channel::Datanode(peer.id), msg, Duration::from_secs(60))
+        let reply = self
+            .send_instruction(&peer, instruction, "GC region", self.config.mailbox_timeout)
             .await?;
 
-        match receiver.await {
-            Ok(reply_msg) => {
-                let reply = HeartbeatMailbox::json_reply(&reply_msg)?;
-                let InstructionReply::GcRegions(reply) = reply else {
-                    return error::UnexpectedInstructionReplySnafu {
-                        mailbox_message: reply_msg.to_string(),
-                        reason: "Unexpected reply of the GcRegions instruction",
-                    }
-                    .fail();
-                };
-
-                let res = reply.result;
-                match res {
-                    Ok(report) => Ok(report),
-                    Err(e) => {
-                        error!(
-                            "Datanode {} reported error during GC for region {}: {}",
-                            peer, region_id, e
-                        );
-                        Err(error::UnexpectedSnafu {
-                            violated: format!(
-                                "Datanode {} reported error during GC for region {}: {}",
-                                peer, region_id, e
-                            ),
-                        }
-                        .fail()?)
-                    }
-                }
+        let InstructionReply::GcRegions(reply) = reply else {
+            return error::UnexpectedInstructionReplySnafu {
+                mailbox_message: format!("{:?}", reply),
+                reason: "Unexpected reply of the GcRegions instruction",
             }
+            .fail();
+        };
+
+        let res = reply.result;
+        match res {
+            Ok(report) => Ok(report),
             Err(e) => {
                 error!(
-                    "Failed to receive GC reply from datanode {} for region {}: {}",
+                    "Datanode {} reported error during GC for region {}: {}",
                     peer, region_id, e
                 );
-                Err(e)
+                Err(error::UnexpectedSnafu {
+                    violated: format!(
+                        "Datanode {} reported error during GC for region {}: {}",
+                        peer, region_id, e
+                    ),
+                }
+                .fail()?)
             }
         }
     }

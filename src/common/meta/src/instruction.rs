@@ -433,6 +433,7 @@ pub struct GcRegions {
     pub regions: Vec<RegionId>,
     /// The file references manifest containing temporary file references.
     pub file_refs_manifest: FileRefsManifest,
+    pub full_file_listing: bool,
 }
 
 impl Display for GcRegions {

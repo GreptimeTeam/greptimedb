@@ -464,7 +464,7 @@ impl MetasrvBuilder {
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
                 options.gc.clone(),
-            );
+            )?;
             gc_scheduler.try_start()?;
 
             Some(Arc::new(gc_ticker))
