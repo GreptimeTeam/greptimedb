@@ -46,17 +46,8 @@ pub fn set_greptime_timestamp(name: Option<&str>) -> Result<()> {
         }
     );
 
-    #[cfg(any(test, feature = "testing"))]
-    {
-        GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
-        Ok(())
-    }
-    #[cfg(not(any(test, feature = "testing")))]
-    {
-        GREPTIME_TIMESTAMP_CELL
-            .set(ts.to_string())
-            .map_err(|message| DefaultTSColNameSnafu { name: ts, message }.build())
-    }
+    GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
+    Ok(())
 }
 
 /// Default timestamp column name constant for backward compatibility.
