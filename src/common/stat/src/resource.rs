@@ -28,7 +28,7 @@ use crate::{
     get_memory_usage_from_cgroups,
 };
 
-/// Get the total CPU in millicores.
+/// Get the total CPU in millicores. If the CPU limit is unset, it will return the total CPU cores from host system.
 pub fn get_total_cpu_millicores() -> i64 {
     // Get CPU limit from cgroups filesystem.
     if let Some(cgroup_cpu_limit) = get_cpu_limit_from_cgroups() {
@@ -39,7 +39,8 @@ pub fn get_total_cpu_millicores() -> i64 {
     }
 }
 
-/// Get the total memory in bytes.
+/// Get the total memory in bytes. If the memory limit is unset, it will return the total memory from host system.
+/// If the system is not supported to get the total host memory, it will return 0.
 pub fn get_total_memory_bytes() -> i64 {
     // Get memory limit from cgroups filesystem.
     if let Some(cgroup_memory_limit) = get_memory_limit_from_cgroups() {
@@ -126,6 +127,11 @@ impl ResourceStatImpl {
             loop {
                 let current_cpu_usage_usecs = get_cpu_usage_from_cgroups();
                 if let Some(current_cpu_usage_usecs) = current_cpu_usage_usecs {
+                    // Skip the first time to collect CPU usage.
+                    if last_cpu_usage_usecs.load(Ordering::Relaxed) == 0 {
+                        last_cpu_usage_usecs.store(current_cpu_usage_usecs, Ordering::Relaxed);
+                        continue;
+                    }
                     let cpu_usage = calculate_cpu_usage(
                         current_cpu_usage_usecs,
                         last_cpu_usage_usecs.load(Ordering::Relaxed),

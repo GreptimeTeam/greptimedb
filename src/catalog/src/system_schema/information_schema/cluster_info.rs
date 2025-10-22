@@ -236,7 +236,6 @@ impl InformationSchemaClusterInfoBuilder {
             (PEER_HOSTNAME, &Value::from(node_info.hostname.as_str())),
             (VERSION, &Value::from(node_info.version.as_str())),
             (GIT_COMMIT, &Value::from(node_info.git_commit.as_str())),
-            (PEER_HOSTNAME, &Value::from(node_info.hostname.as_str())),
         ];
 
         if !predicates.eval(&row) {
