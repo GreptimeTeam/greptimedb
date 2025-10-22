@@ -76,6 +76,10 @@ pub struct GcSchedulerOptions {
     /// Set to a larger value (e.g., 24 hours) to balance performance and cleanup.
     /// Every Nth GC cycle will use full file listing, where N = full_file_listing_interval / TICKER_INTERVAL.
     pub full_file_listing_interval: Duration,
+    /// Interval for cleaning up stale region entries from the GC tracker.
+    /// This removes entries for regions that no longer exist (e.g., after table drops).
+    /// Set to a larger value (e.g., 6 hours) since this is just for memory cleanup.
+    pub tracker_cleanup_interval: Duration,
 }
 
 impl Default for GcSchedulerOptions {
@@ -93,6 +97,8 @@ impl Default for GcSchedulerOptions {
             mailbox_timeout: Duration::from_secs(60),         // 60 seconds
             // Perform full file listing every 24 hours to find orphan files
             full_file_listing_interval: Duration::from_secs(60 * 60 * 24),
+            // Clean up stale tracker entries every 6 hours
+            tracker_cleanup_interval: Duration::from_secs(60 * 60 * 6),
         }
     }
 }
@@ -159,6 +165,13 @@ impl GcSchedulerOptions {
         if self.full_file_listing_interval.is_zero() {
             return error::InvalidArgumentsSnafu {
                 err_msg: "full_file_listing_interval must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.tracker_cleanup_interval.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "tracker_cleanup_interval must be greater than 0",
             }
             .fail();
         }
@@ -245,6 +258,8 @@ pub struct GcScheduler {
     config: GcSchedulerOptions,
     /// Tracks the last GC time for regions.
     region_gc_tracker: Arc<tokio::sync::Mutex<RegionGcTracker>>,
+    /// Last time the tracker was cleaned up.
+    last_tracker_cleanup: Arc<tokio::sync::Mutex<Instant>>,
 }
 
 impl GcScheduler {
@@ -286,6 +301,7 @@ impl GcScheduler {
             receiver: rx,
             config,
             region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
         };
         Ok((gc_trigger, gc_ticker))
     }
@@ -317,6 +333,12 @@ impl GcScheduler {
         if let Err(e) = self.trigger_gc().await {
             error!(e; "Failed to trigger gc");
         }
+
+        // Periodically clean up stale tracker entries
+        if let Err(e) = self.cleanup_tracker_if_needed().await {
+            error!(e; "Failed to cleanup tracker");
+        }
+
         info!("Finished gc trigger");
     }
 
@@ -979,5 +1001,47 @@ impl GcScheduler {
                 .fail()?)
             }
         }
+    }
+
+    /// Clean up stale entries from the region GC tracker if enough time has passed.
+    /// This removes entries for regions that no longer exist in the current table routes.
+    async fn cleanup_tracker_if_needed(&self) -> Result<()> {
+        let mut last_cleanup = self.last_tracker_cleanup.lock().await;
+        let now = Instant::now();
+
+        // Check if enough time has passed since last cleanup
+        if now.duration_since(*last_cleanup) < self.config.tracker_cleanup_interval {
+            return Ok(());
+        }
+
+        info!("Starting region GC tracker cleanup");
+        let cleanup_start = Instant::now();
+
+        // Get all current region IDs from table routes
+        let table_to_region_stats = self.get_table_to_region_stats().await?;
+        let mut current_regions = HashSet::new();
+        for region_stats in table_to_region_stats.values() {
+            for region_stat in region_stats {
+                current_regions.insert(region_stat.id);
+            }
+        }
+
+        // Remove stale entries from tracker
+        let mut tracker = self.region_gc_tracker.lock().await;
+        let initial_count = tracker.len();
+        tracker.retain(|region_id, _| current_regions.contains(region_id));
+        let removed_count = initial_count - tracker.len();
+
+        *last_cleanup = now;
+
+        info!(
+            "Completed region GC tracker cleanup: removed {} stale entries out of {} total (retained {}). Duration: {:?}",
+            removed_count,
+            initial_count,
+            tracker.len(),
+            cleanup_start.elapsed()
+        );
+
+        Ok(())
     }
 }
