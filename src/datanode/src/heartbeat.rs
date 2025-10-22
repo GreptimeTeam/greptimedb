@@ -281,8 +281,13 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
+                                    let mut extensions = heartbeat_request.extensions.clone();
+                                    let gc_stat = gc_limiter.gc_stat();
+                                    gc_stat.into_extensions(&mut extensions);
+
                                     let req = HeartbeatRequest {
                                         mailbox_message: Some(message),
+                                        extensions,
                                         ..heartbeat_request.clone()
                                     };
                                     HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();

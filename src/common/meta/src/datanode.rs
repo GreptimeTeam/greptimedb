@@ -67,7 +67,7 @@ pub struct Stat {
     /// The datanode workloads.
     pub datanode_workloads: DatanodeWorkloads,
     /// The GC statistics of the datanode.
-    pub gc_stat: GcStat,
+    pub gc_stat: Option<GcStat>,
 }
 
 /// The statistics of a region.
@@ -239,7 +239,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
 
-                let gc_stat = GcStat::from_extensions(extensions).ok_or(None)?;
+                let gc_stat = GcStat::from_extensions(extensions);
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
