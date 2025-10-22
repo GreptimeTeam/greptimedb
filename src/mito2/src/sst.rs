@@ -335,3 +335,337 @@ impl SeriesEstimator {
         count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::OpType;
+    use datatypes::arrow::array::{
+        BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt8Builder,
+        UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
+    use datatypes::arrow::record_batch::RecordBatch;
+
+    use super::*;
+    use crate::read::{Batch, BatchBuilder};
+
+    fn new_batch(
+        primary_key: &[u8],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+    ) -> Batch {
+        let timestamps = Arc::new(TimestampMillisecondArray::from(timestamps.to_vec()));
+        let sequences = Arc::new(UInt64Array::from(sequences.to_vec()));
+        let mut op_type_builder = UInt8Builder::with_capacity(op_types.len());
+        for op_type in op_types {
+            op_type_builder.append_value(*op_type as u8);
+        }
+        let op_types = Arc::new(UInt8Array::from(
+            op_types.iter().map(|op| *op as u8).collect::<Vec<_>>(),
+        ));
+
+        let mut builder = BatchBuilder::new(primary_key.to_vec());
+        builder
+            .timestamps_array(timestamps)
+            .unwrap()
+            .sequences_array(sequences)
+            .unwrap()
+            .op_types_array(op_types)
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    fn new_flat_record_batch(timestamps: &[i64]) -> RecordBatch {
+        // Flat format has: [fields..., time_index, __primary_key, __sequence, __op_type]
+        let num_cols = 4; // time_index + 3 internal columns
+        let time_index_pos = time_index_column_index(num_cols);
+        assert_eq!(time_index_pos, 0); // For 4 columns, time index should be at position 0
+
+        let time_array = Arc::new(TimestampMillisecondArray::from(timestamps.to_vec()));
+        let pk_array = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0; timestamps.len()]),
+            Arc::new(BinaryArray::from(vec![b"test".as_slice()])),
+        ));
+        let seq_array = Arc::new(UInt64Array::from(vec![1; timestamps.len()]));
+        let op_array = Arc::new(UInt8Array::from(vec![1; timestamps.len()]));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "time",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new_dictionary(
+                "__primary_key",
+                ArrowDataType::UInt32,
+                ArrowDataType::Binary,
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ]));
+
+        RecordBatch::try_new(schema, vec![time_array, pk_array, seq_array, op_array]).unwrap()
+    }
+
+    #[test]
+    fn test_series_estimator_empty_batch() {
+        let mut estimator = SeriesEstimator::default();
+        let batch = new_batch(b"test", &[], &[], &[]);
+        estimator.update(&batch);
+        assert_eq!(0, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_single_batch() {
+        let mut estimator = SeriesEstimator::default();
+        let batch = new_batch(
+            b"test",
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch);
+        assert_eq!(1, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_multiple_batches_same_series() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch with timestamps 1, 2, 3
+        let batch1 = new_batch(
+            b"test",
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch1);
+
+        // Second batch with timestamps 4, 5, 6 (continuation)
+        let batch2 = new_batch(
+            b"test",
+            &[4, 5, 6],
+            &[4, 5, 6],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch2);
+
+        assert_eq!(1, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_new_series_detected() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch with timestamps 1, 2, 3
+        let batch1 = new_batch(
+            b"pk0",
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch1);
+
+        // Second batch with timestamps 2, 3, 4 (timestamp goes back, new series)
+        let batch2 = new_batch(
+            b"pk1",
+            &[2, 3, 4],
+            &[4, 5, 6],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch2);
+
+        assert_eq!(2, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_equal_timestamp_boundary() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch ending at timestamp 5
+        let batch1 = new_batch(
+            b"test",
+            &[1, 2, 5],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch1);
+
+        // Second batch starting at timestamp 5 (equal, indicates new series)
+        let batch2 = new_batch(
+            b"test",
+            &[5, 6, 7],
+            &[4, 5, 6],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch2);
+
+        assert_eq!(2, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_finish_resets_state() {
+        let mut estimator = SeriesEstimator::default();
+
+        let batch1 = new_batch(
+            b"test",
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch1);
+
+        assert_eq!(1, estimator.finish());
+
+        // After finish, state should be reset
+        let batch2 = new_batch(
+            b"test",
+            &[4, 5, 6],
+            &[4, 5, 6],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        estimator.update(&batch2);
+
+        assert_eq!(1, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_empty_batch() {
+        let mut estimator = SeriesEstimator::default();
+        let record_batch = new_flat_record_batch(&[]);
+        estimator.update_flat(&record_batch);
+        assert_eq!(0, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_single_batch() {
+        let mut estimator = SeriesEstimator::default();
+        let record_batch = new_flat_record_batch(&[1, 2, 3]);
+        estimator.update_flat(&record_batch);
+        assert_eq!(1, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_series_boundary_within_batch() {
+        let mut estimator = SeriesEstimator::default();
+        // Timestamps decrease from 3 to 2, indicating a series boundary
+        let record_batch = new_flat_record_batch(&[1, 2, 3, 2, 4, 5]);
+        estimator.update_flat(&record_batch);
+        // Should detect boundary at position 3 (3 >= 2)
+        assert_eq!(2, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_multiple_boundaries_within_batch() {
+        let mut estimator = SeriesEstimator::default();
+        // Multiple series boundaries: 5>=4, 6>=3
+        let record_batch = new_flat_record_batch(&[1, 2, 5, 4, 6, 3, 7]);
+        estimator.update_flat(&record_batch);
+        assert_eq!(3, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_equal_timestamps() {
+        let mut estimator = SeriesEstimator::default();
+        // Equal timestamps are considered as new series
+        let record_batch = new_flat_record_batch(&[1, 2, 2, 3, 3, 3, 4]);
+        estimator.update_flat(&record_batch);
+        // Boundaries at: 2>=2, 3>=3, 3>=3
+        assert_eq!(4, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_multiple_batches_continuation() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch: timestamps 1, 2, 3
+        let batch1 = new_flat_record_batch(&[1, 2, 3]);
+        estimator.update_flat(&batch1);
+
+        // Second batch: timestamps 4, 5, 6 (continuation)
+        let batch2 = new_flat_record_batch(&[4, 5, 6]);
+        estimator.update_flat(&batch2);
+
+        assert_eq!(1, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_multiple_batches_new_series() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch: timestamps 1, 2, 3
+        let batch1 = new_flat_record_batch(&[1, 2, 3]);
+        estimator.update_flat(&batch1);
+
+        // Second batch: timestamps 2, 3, 4 (goes back to 2, new series)
+        let batch2 = new_flat_record_batch(&[2, 3, 4]);
+        estimator.update_flat(&batch2);
+
+        assert_eq!(2, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_boundary_at_batch_edge_equal() {
+        let mut estimator = SeriesEstimator::default();
+
+        // First batch ending at 5
+        let batch1 = new_flat_record_batch(&[1, 2, 5]);
+        estimator.update_flat(&batch1);
+
+        // Second batch starting at 5 (equal timestamp, new series)
+        let batch2 = new_flat_record_batch(&[5, 6, 7]);
+        estimator.update_flat(&batch2);
+
+        assert_eq!(2, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_mixed_batches() {
+        let mut estimator = SeriesEstimator::default();
+
+        // Batch 1: single series [10, 20, 30]
+        let batch1 = new_flat_record_batch(&[10, 20, 30]);
+        estimator.update_flat(&batch1);
+
+        // Batch 2: starts new series [5, 15], boundary within batch [15, 10, 25]
+        let batch2 = new_flat_record_batch(&[5, 15, 10, 25]);
+        estimator.update_flat(&batch2);
+
+        // Batch 3: continues from 25 to [30, 35]
+        let batch3 = new_flat_record_batch(&[30, 35]);
+        estimator.update_flat(&batch3);
+
+        // Expected: 1 (batch1) + 1 (batch2 start) + 1 (within batch2) = 3
+        assert_eq!(3, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_descending_timestamps() {
+        let mut estimator = SeriesEstimator::default();
+        // Strictly descending timestamps - each pair creates a boundary
+        let record_batch = new_flat_record_batch(&[10, 9, 8, 7, 6]);
+        estimator.update_flat(&record_batch);
+        // Boundaries: 10>=9, 9>=8, 8>=7, 7>=6 = 4 boundaries + 1 initial = 5 series
+        assert_eq!(5, estimator.finish());
+    }
+
+    #[test]
+    fn test_series_estimator_flat_finish_resets_state() {
+        let mut estimator = SeriesEstimator::default();
+
+        let batch1 = new_flat_record_batch(&[1, 2, 3]);
+        estimator.update_flat(&batch1);
+
+        assert_eq!(1, estimator.finish());
+
+        // After finish, state should be reset
+        let batch2 = new_flat_record_batch(&[4, 5, 6]);
+        estimator.update_flat(&batch2);
+
+        assert_eq!(1, estimator.finish());
+    }
+}
