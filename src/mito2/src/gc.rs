@@ -123,7 +123,7 @@ pub struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             // expect long running queries to be finished within a reasonable time
             lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
@@ -182,6 +182,7 @@ impl LocalGcWorker {
     /// Create a new LocalGcWorker, with `regions_to_gc` regions to GC.
     /// The regions are specified by their `RegionId` and should all belong to the same table.
     ///
+    #[allow(clippy::too_many_arguments)]
     pub async fn try_new(
         access_layer: AccessLayerRef,
         cache_manager: Option<CacheManagerRef>,
