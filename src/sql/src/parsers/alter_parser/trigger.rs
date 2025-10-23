@@ -640,7 +640,7 @@ mod tests {
             panic!("Expected PartialChanges label operations");
         };
         assert_eq!(changes.len(), 3);
-        let change0 = changes.get(0).unwrap();
+        let change0 = changes.first().unwrap();
         let LabelChange::Add(labels) = change0 else {
             panic!("Expected Add label change");
         };
@@ -659,7 +659,7 @@ mod tests {
             panic!("Expected Drop label change");
         };
         assert_eq!(names.len(), 1);
-        assert_eq!(names.get(0).unwrap(), "key3");
+        assert_eq!(names.first().unwrap(), "key3");
 
         // Failed case: Duplicate SET LABELS.
         let sql =
