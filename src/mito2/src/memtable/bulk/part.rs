@@ -404,7 +404,7 @@ impl BulkPartConverter {
             kv.sequence(),
             kv.op_type() as u8,
             kv.fields(),
-        );
+        )?;
 
         // Updates statistics
         // Safety: timestamp of kv must be both present and a valid timestamp value.

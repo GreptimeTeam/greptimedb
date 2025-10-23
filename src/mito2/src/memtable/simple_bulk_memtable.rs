@@ -103,12 +103,12 @@ impl SimpleBulkMemtable {
         }
     }
 
-    fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) {
+    fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> error::Result<()> {
         let ts = kv.timestamp();
         let sequence = kv.sequence();
         let op_type = kv.op_type();
         let mut series = self.series.write().unwrap();
-        let size = series.push(ts, sequence, op_type, kv.fields());
+        let size = series.push(ts, sequence, op_type, kv.fields())?;
         stats.value_bytes += size;
         // safety: timestamp of kv must be both present and a valid timestamp value.
         let ts = kv
@@ -119,6 +119,7 @@ impl SimpleBulkMemtable {
             .value();
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
+        Ok(())
     }
 
     /// Updates memtable stats.
@@ -153,7 +154,7 @@ impl Memtable for SimpleBulkMemtable {
         let mut stats = WriteMetrics::default();
         let max_sequence = kvs.max_sequence();
         for kv in kvs.iter() {
-            self.write_key_value(kv, &mut stats);
+            self.write_key_value(kv, &mut stats)?;
         }
         stats.max_sequence = max_sequence;
         stats.num_rows = kvs.num_rows();
@@ -164,7 +165,7 @@ impl Memtable for SimpleBulkMemtable {
     fn write_one(&self, kv: KeyValue) -> error::Result<()> {
         debug_assert_eq!(0, kv.num_primary_keys());
         let mut stats = WriteMetrics::default();
-        self.write_key_value(kv, &mut stats);
+        self.write_key_value(kv, &mut stats)?;
         stats.num_rows = 1;
         stats.max_sequence = kv.sequence();
         self.update_stats(stats);
