@@ -62,6 +62,7 @@ use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::worker::WorkerListener;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
@@ -451,6 +452,7 @@ pub struct IndexBuildTask {
     pub file_meta: FileMeta,
     pub reason: IndexBuildType,
     pub access_layer: AccessLayerRef,
+    pub(crate) listener: WorkerListener,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub write_cache: Option<WriteCacheRef>,
     pub file_purger: FilePurgerRef,
@@ -486,6 +488,12 @@ impl IndexBuildTask {
     }
 
     async fn do_index_build(&mut self, version_control: VersionControlRef) {
+        self.listener
+            .on_index_build_begin(RegionFileId::new(
+                self.file_meta.region_id,
+                self.file_meta.file_id,
+            ))
+            .await;
         match self.index_build(version_control).await {
             Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
@@ -540,6 +548,12 @@ impl IndexBuildTask {
         if !self.check_sst_file_exists(&version_control).await {
             // Calls abort to clean up index files.
             indexer.abort().await;
+            self.listener
+                .on_index_build_abort(RegionFileId::new(
+                    self.file_meta.region_id,
+                    self.file_meta.file_id,
+                ))
+                .await;
             return Ok(IndexBuildOutcome::Aborted(format!(
                 "SST file not found during index build, region: {}, file_id: {}",
                 self.file_meta.region_id, self.file_meta.file_id
@@ -575,6 +589,12 @@ impl IndexBuildTask {
             if !self.check_sst_file_exists(&version_control).await {
                 // Calls abort to clean up index files.
                 indexer.abort().await;
+                self.listener
+                    .on_index_build_abort(RegionFileId::new(
+                        self.file_meta.region_id,
+                        self.file_meta.file_id,
+                    ))
+                    .await;
                 return Ok(IndexBuildOutcome::Aborted(format!(
                     "SST file not found during index build, region: {}, file_id: {}",
                     self.file_meta.region_id, self.file_meta.file_id
@@ -1192,6 +1212,7 @@ mod tests {
             },
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1242,6 +1263,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1309,6 +1331,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1405,6 +1428,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1485,6 +1509,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: Some(write_cache.clone()),
             file_purger,
