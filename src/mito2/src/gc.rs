@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::datanode::GcStat;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use common_time::Timestamp;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
@@ -283,14 +283,14 @@ impl LocalGcWorker {
         let mut deleted_files = HashMap::new();
         let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
         for region_id in self.manifest_mgrs.keys() {
-            info!("Doing gc for region {}", region_id);
+            debug!("Doing gc for region {}", region_id);
             let tmp_ref_files = tmp_ref_files
                 .get(region_id)
                 .cloned()
                 .unwrap_or_else(HashSet::new);
             let files = self.do_region_gc(*region_id, &tmp_ref_files).await?;
             deleted_files.insert(*region_id, files);
-            info!("Gc for region {} finished", region_id);
+            debug!("Gc for region {} finished", region_id);
         }
         info!(
             "LocalGcWorker finished after {} secs.",
@@ -322,7 +322,7 @@ impl LocalGcWorker {
         region_id: RegionId,
         tmp_ref_files: &HashSet<FileId>,
     ) -> Result<Vec<FileId>> {
-        info!("Doing gc for region {}", region_id);
+        debug!("Doing gc for region {}", region_id);
         let manifest = self
             .manifest_mgrs
             .get(&region_id)
@@ -335,10 +335,10 @@ impl LocalGcWorker {
 
         if recently_removed_files.is_empty() {
             // no files to remove, skip
-            info!("No recently removed files to gc for region {}", region_id);
+            debug!("No recently removed files to gc for region {}", region_id);
         }
 
-        info!(
+        debug!(
             "Found {} recently removed files sets for region {}",
             recently_removed_files.len(),
             region_id
@@ -354,27 +354,20 @@ impl LocalGcWorker {
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
 
-        let true_tmp_ref_files = tmp_ref_files
-            .iter()
-            .filter(|f| !current_files.contains_key(f))
-            .collect::<HashSet<_>>();
-
-        info!("True tmp ref files: {:?}", true_tmp_ref_files);
-
         let unused_files = self
             .list_to_be_deleted_files(region_id, in_used, recently_removed_files, concurrency)
             .await?;
 
         let unused_len = unused_files.len();
 
-        info!(
+        debug!(
             "Found {} unused files to delete for region {}",
             unused_len, region_id
         );
 
         self.delete_files(region_id, &unused_files).await?;
 
-        info!(
+        debug!(
             "Successfully deleted {} unused files for region {}",
             unused_len, region_id
         );
@@ -695,7 +688,7 @@ impl LocalGcWorker {
             region_id,
             all_unused_files_ready_for_delete.len()
         );
-        info!("All in exist linger files: {:?}", all_in_exist_linger_files);
+        debug!("All in exist linger files: {:?}", all_in_exist_linger_files);
 
         Ok(all_unused_files_ready_for_delete)
     }
