@@ -19,7 +19,7 @@ use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
+    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, info, warn};
@@ -173,7 +173,8 @@ impl DowngradeLeaderRegion {
                     region_id,
                     now.elapsed()
                 );
-                let InstructionReply::DowngradeRegions(replies) = reply else {
+                let InstructionReply::DowngradeRegions(DowngradeRegionsReply { replies }) = reply
+                else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect downgrade region reply",

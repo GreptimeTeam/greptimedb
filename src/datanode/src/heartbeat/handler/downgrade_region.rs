@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
+    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
 use common_telemetry::tracing::info;
 use common_telemetry::{error, warn};
@@ -169,7 +169,9 @@ impl InstructionHandler for DowngradeRegionsHandler {
         // Join all futures; parallelism is governed by the underlying flush scheduler.
         let results = join_all(futures).await;
 
-        Some(InstructionReply::DowngradeRegions(results))
+        Some(InstructionReply::DowngradeRegions(
+            DowngradeRegionsReply::new(results),
+        ))
     }
 }
 
