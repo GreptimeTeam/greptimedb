@@ -58,7 +58,7 @@ impl ParserContext<'_> {
                     expected: "a trigger name",
                     actual: self.peek_token_as_string(),
                 })?;
-        let trigger_ident = Self::canonicalize_object_name(raw_trigger_ident);
+        let trigger_ident = Self::canonicalize_object_name(raw_trigger_ident)?;
         ensure!(
             !trigger_ident.0.is_empty(),
             error::InvalidTriggerNameSnafu {
@@ -82,7 +82,7 @@ impl ParserContext<'_> {
                 expected: "a view name",
                 actual: self.peek_token_as_string(),
             })?;
-        let view_ident = Self::canonicalize_object_name(raw_view_ident);
+        let view_ident = Self::canonicalize_object_name(raw_view_ident)?;
         ensure!(
             !view_ident.0.is_empty(),
             InvalidTableNameSnafu {
@@ -106,7 +106,7 @@ impl ParserContext<'_> {
                 expected: "a flow name",
                 actual: self.peek_token_as_string(),
             })?;
-        let flow_ident = Self::canonicalize_object_name(raw_flow_ident);
+        let flow_ident = Self::canonicalize_object_name(raw_flow_ident)?;
         ensure!(
             !flow_ident.0.is_empty(),
             InvalidFlowNameSnafu {
@@ -129,7 +129,7 @@ impl ParserContext<'_> {
                         expected: "a table name",
                         actual: self.peek_token_as_string(),
                     })?;
-            let table_ident = Self::canonicalize_object_name(raw_table_ident);
+            let table_ident = Self::canonicalize_object_name(raw_table_ident)?;
             ensure!(
                 !table_ident.0.is_empty(),
                 InvalidTableNameSnafu {
@@ -155,7 +155,7 @@ impl ParserContext<'_> {
                 expected: "a database name",
                 actual: self.peek_token_as_string(),
             })?;
-        let database_name = Self::canonicalize_object_name(database_name);
+        let database_name = Self::canonicalize_object_name(database_name)?;
 
         Ok(Statement::DropDatabase(DropDatabase::new(
             database_name,

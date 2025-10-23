@@ -54,6 +54,7 @@ meter-core.workspace = true
 meter-macros.workspace = true
 object-store.workspace = true
 once_cell.workspace = true
+parking_lot.workspace = true
 partition.workspace = true
 prometheus.workspace = true
 promql.workspace = true

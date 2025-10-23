@@ -196,9 +196,9 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         // TODO(discord9): do this in logical plan instead as it's lessy bugy there
         // Collects alias of the time index column.
         if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
-            for (expr, output_name) in projection.expr() {
-                if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
-                    alias_map.push((column_expr.name().to_string(), output_name.clone()));
+            for expr in projection.expr() {
+                if let Some(column_expr) = expr.expr.as_any().downcast_ref::<PhysicalColumn>() {
+                    alias_map.push((column_expr.name().to_string(), expr.alias.clone()));
                 }
             }
             // resolve alias properly

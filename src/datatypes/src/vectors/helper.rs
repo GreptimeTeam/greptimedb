@@ -245,7 +245,9 @@ impl Helper {
                     length,
                 )
             }
-            ScalarValue::Decimal256(_, _, _)
+            ScalarValue::Decimal32(_, _, _)
+            | ScalarValue::Decimal64(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)

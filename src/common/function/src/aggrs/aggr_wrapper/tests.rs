@@ -39,8 +39,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
 use datafusion_common::{Column, TableReference};
-use datafusion_expr::expr::AggregateFunction;
-use datafusion_expr::sqlparser::ast::NullTreatment;
+use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::{
     Aggregate, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr, TableScan, lit,
 };

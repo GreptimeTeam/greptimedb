@@ -104,7 +104,7 @@ impl ParserContext<'_> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
-        let table_name = Self::canonicalize_object_name(raw_table_name);
+        let table_name = Self::canonicalize_object_name(raw_table_name)?;
 
         if self.parser.parse_keyword(Keyword::TO) {
             let (with, connection, location, limit) = self.parse_copy_parameters()?;

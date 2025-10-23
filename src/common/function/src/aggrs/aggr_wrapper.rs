@@ -22,6 +22,7 @@
 //! `foo_merge`'s input arg is the same as `foo_state`'s output, and its output is the same as `foo`'s input.
 //!
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::StructArray;
@@ -272,7 +273,7 @@ impl StateMergeHelper {
 }
 
 /// Wrapper to make an aggregate function out of a state function.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
@@ -613,6 +614,20 @@ impl AggregateUDFImpl for MergeWrapper {
         _args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<FieldRef>> {
         self.original_phy_expr.state_fields()
+    }
+}
+
+impl PartialEq for MergeWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl Eq for MergeWrapper {}
+
+impl Hash for MergeWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.hash(state);
     }
 }
 

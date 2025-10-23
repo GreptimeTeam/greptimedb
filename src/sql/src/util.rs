@@ -194,7 +194,7 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectNa
             extract_tables_from_set_expr(left, names);
             extract_tables_from_set_expr(right, names);
         }
-        SetExpr::Values(_) | SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {}
+        _ => {}
     };
 }
 

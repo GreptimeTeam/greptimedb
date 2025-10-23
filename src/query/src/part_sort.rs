@@ -33,11 +33,14 @@ use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
+    TopKDynamicFilters,
 };
 use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::expressions::{DynamicFilterPhysicalExpr, lit};
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
+use parking_lot::RwLock;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
 
@@ -239,6 +242,9 @@ impl PartSortStream {
         partition: usize,
     ) -> datafusion_common::Result<Self> {
         let buffer = if let Some(limit) = limit {
+            let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+                DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+            ))));
             PartSortBuffer::Top(
                 TopK::try_new(
                     partition,
@@ -249,7 +255,7 @@ impl PartSortStream {
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
-                    None,
+                    filter,
                 )?,
                 0,
             )
@@ -497,6 +503,9 @@ impl PartSortStream {
 
     /// Internal method for sorting `Top` buffer (with limit).
     fn sort_top_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        let filter = Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+            DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+        ))));
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
@@ -506,7 +515,7 @@ impl PartSortStream {
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
-            None,
+            filter,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))

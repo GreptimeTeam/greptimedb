@@ -184,6 +184,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after EnsureCooperative_| CooperativeExec_|
@@ -321,6 +322,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after EnsureCooperative_| CooperativeExec_|
