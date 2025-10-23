@@ -640,18 +640,26 @@ mod tests {
             panic!("Expected PartialChanges label operations");
         };
         assert_eq!(changes.len(), 3);
-        let expected_changes = vec![
-            LabelChange::Add(OptionMap::from([(
-                "key1".to_string(),
-                "value1".to_string(),
-            )])),
-            LabelChange::Modify(OptionMap::from([(
-                "key2".to_string(),
-                "value2".to_string(),
-            )])),
-            LabelChange::Drop(vec!["key3".to_string()]),
-        ];
-        assert_eq!(changes, expected_changes);
+        let change0 = changes.get(0).unwrap();
+        let LabelChange::Add(labels) = change0 else {
+            panic!("Expected Add label change");
+        };
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get("key1"), Some("value1"));
+
+        let change1 = changes.get(1).unwrap();
+        let LabelChange::Modify(labels) = change1 else {
+            panic!("Expected Modify label change");
+        };
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get("key2"), Some("value2"));
+
+        let change2 = changes.get(2).unwrap();
+        let LabelChange::Drop(names) = change2 else {
+            panic!("Expected Drop label change");
+        };
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.get(0).unwrap(), "key3");
 
         // Failed case: Duplicate SET LABELS.
         let sql =
