@@ -12,10 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod plan;
-pub mod procedure;
+use common_meta::ddl::DdlContext;
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::node_manager::NodeManagerRef;
 
-pub use plan::{
-    PartitionChange, PartitionRuleDiff, PlanGroup, PlanGroupId, RepartitionPlan, ResourceDemand,
-};
-pub use procedure::{RepartitionProcedure, RepartitionTask};
+#[derive(Clone)]
+pub struct RepartitionContext {
+    pub table_metadata_manager: TableMetadataManagerRef,
+    pub _node_manager: NodeManagerRef,
+}
+
+impl RepartitionContext {
+    pub fn new(context: &DdlContext) -> Self {
+        Self {
+            table_metadata_manager: context.table_metadata_manager.clone(),
+            _node_manager: context.node_manager.clone(),
+        }
+    }
+}
