@@ -274,7 +274,7 @@ impl MitoEngine {
         let file_ref_mgr = self.file_ref_manager();
 
         let region_ids = region_ids.into_iter().collect::<Vec<_>>();
-        info!("Getting region refs for regions: {:?}", region_ids);
+
         // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
         let regions: Vec<MitoRegionRef> = region_ids
             .into_iter()
@@ -283,7 +283,6 @@ impl MitoEngine {
                     .with_context(|| RegionNotFoundSnafu { region_id })
             })
             .collect::<Result<_>>()?;
-        info!("Finding unmanifested file refs for regions: {:?}", regions);
 
         file_ref_mgr
             .get_snapshot_of_unmanifested_refs(regions)

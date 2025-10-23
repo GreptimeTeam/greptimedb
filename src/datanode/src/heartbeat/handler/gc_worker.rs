@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, warn};
 use mito2::gc::LocalGcWorker;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{FileRefsManifest, RegionId};
@@ -64,12 +64,12 @@ impl HandlerContext {
             .try_register(
                 region_id,
                 Box::pin(async move {
-                    info!("Starting gc worker for region {}", region_id);
+                    debug!("Starting gc worker for region {}", region_id);
                     let report = gc_worker
                         .run()
                         .await
                         .context(GcMitoEngineSnafu { region_id })?;
-                    info!("Gc worker for region {} finished", region_id);
+                    debug!("Gc worker for region {} finished", region_id);
                     Ok(report)
                 }),
             )
