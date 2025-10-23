@@ -256,15 +256,15 @@ impl LocalGcWorker {
         // TODO(discord9): verify manifest version before reading tmp ref files
 
         let mut tmp_ref_files = HashMap::new();
-        for file_ref in &self.file_ref_manifest.file_refs {
-            if outdated_regions.contains(&file_ref.region_id) {
+        for (region_id, file_refs) in &self.file_ref_manifest.file_refs {
+            if outdated_regions.contains(region_id) {
                 // skip outdated regions
                 continue;
             }
             tmp_ref_files
-                .entry(file_ref.region_id)
+                .entry(*region_id)
                 .or_insert_with(HashSet::new)
-                .insert(file_ref.file_id);
+                .extend(file_refs.clone());
         }
 
         Ok(tmp_ref_files)

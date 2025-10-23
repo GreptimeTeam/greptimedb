@@ -587,6 +587,8 @@ impl InstructionReply {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
@@ -856,10 +858,10 @@ mod tests {
         let r1 = RegionId::new(1024, 2);
         manifest
             .file_refs
-            .insert(FileRef::new(r0, FileId::random()));
+            .insert(r0, HashSet::from([FileId::random()]));
         manifest
             .file_refs
-            .insert(FileRef::new(r1, FileId::random()));
+            .insert(r1, HashSet::from([FileId::random()]));
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
 

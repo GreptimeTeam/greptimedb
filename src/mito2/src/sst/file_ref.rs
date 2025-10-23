@@ -99,10 +99,10 @@ impl FileReferenceManager {
         regions: impl IntoIterator<Item = MitoRegionRef>,
     ) -> Result<FileRefsManifest> {
         let regions: Vec<MitoRegionRef> = regions.into_iter().collect();
-        let mut ref_files = HashSet::new();
+        let mut ref_files = HashMap::new();
         for region_id in regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
-                ref_files.extend(files);
+                ref_files.insert(region_id, files);
             }
         }
 
@@ -118,9 +118,17 @@ impl FileReferenceManager {
 
         let ref_files_excluding_in_manifest = ref_files
             .iter()
-            .filter(|f| !in_manifest_files.contains(&f.file_id))
-            .cloned()
-            .collect::<HashSet<_>>();
+            .map(|(r, f)| {
+                (
+                    *r,
+                    f.iter()
+                        .filter_map(|f| {
+                            (!in_manifest_files.contains(&f.file_id)).then_some(f.file_id)
+                        })
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect();
         Ok(FileRefsManifest {
             file_refs: ref_files_excluding_in_manifest,
             manifest_version,
