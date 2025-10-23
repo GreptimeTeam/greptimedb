@@ -15,18 +15,20 @@
 //! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
+use std::collections::HashMap;
 use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
-use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::array::{ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TimeSeriesRowSelector;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 
 use crate::error::{
     ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
@@ -37,11 +39,11 @@ use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::flat_format::{DecodedPrimaryKeys, decode_primary_keys};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
-
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
 #[derive(Clone)]
@@ -357,7 +359,34 @@ impl RangeBase {
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    ///
+    /// It assumes all necessary tags are already decoded from the primary key.
     pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
+        let mask = self.compute_filter_mask_flat(&input)?;
+
+        // If mask is None, the entire batch is filtered out
+        let Some(mask) = mask else {
+            return Ok(None);
+        };
+
+        let filtered_batch =
+            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
+                .context(ComputeArrowSnafu)?;
+
+        if filtered_batch.num_rows() > 0 {
+            Ok(Some(filtered_batch))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
+    ///
+    /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
+    pub(crate) fn compute_filter_mask_flat(
+        &self,
+        input: &RecordBatch,
+    ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
         let flat_format = self
@@ -366,6 +395,11 @@ impl RangeBase {
             .context(crate::error::UnexpectedSnafu {
                 reason: "Expected flat format for precise_filter_flat",
             })?;
+
+        // Decodes primary keys once if we have any tag filters not in projection
+        let mut decoded_pks: Option<DecodedPrimaryKeys> = None;
+        // Cache decoded tag arrays by column id to avoid redundant decoding
+        let mut decoded_tag_cache: HashMap<ColumnId, ArrayRef> = HashMap::new();
 
         // Run filter one by one and combine them result
         for filter_ctx in &self.filters {
@@ -383,20 +417,53 @@ impl RangeBase {
                 let column = &input.columns()[idx];
                 let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
-            } else {
-                // Column not found in projection, continue
-                continue;
+            } else if filter_ctx.semantic_type() == SemanticType::Tag {
+                // Column not found in projection, it may be a tag column.
+                // Decodes primary keys if not already decoded.
+                if decoded_pks.is_none() {
+                    decoded_pks = Some(decode_primary_keys(self.codec.as_ref(), input)?);
+                }
+
+                let metadata = flat_format.metadata();
+                let column_id = filter_ctx.column_id();
+
+                // Check cache first
+                let tag_column = if let Some(cached_column) = decoded_tag_cache.get(&column_id) {
+                    cached_column.clone()
+                } else {
+                    // For dense encoding, we need pk_index. For sparse encoding, pk_index is None.
+                    let pk_index = if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
+                        None
+                    } else {
+                        metadata.primary_key_index(column_id)
+                    };
+                    let column_index = metadata.column_index_by_id(column_id);
+
+                    if let (Some(column_index), Some(decoded)) =
+                        (column_index, decoded_pks.as_ref())
+                    {
+                        let column_metadata = &metadata.column_metadatas[column_index];
+                        let tag_column = decoded.get_tag_column(
+                            column_id,
+                            pk_index,
+                            &column_metadata.column_schema.data_type,
+                        )?;
+                        // Cache the decoded tag column
+                        decoded_tag_cache.insert(column_id, tag_column.clone());
+                        tag_column
+                    } else {
+                        continue;
+                    }
+                };
+
+                let result = filter
+                    .evaluate_array(&tag_column)
+                    .context(RecordBatchSnafu)?;
+                mask = mask.bitand(&result);
             }
+            // Non-tag column not found in projection.
         }
 
-        let filtered_batch =
-            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
-                .context(ComputeArrowSnafu)?;
-
-        if filtered_batch.num_rows() > 0 {
-            Ok(Some(filtered_batch))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(mask))
     }
 }

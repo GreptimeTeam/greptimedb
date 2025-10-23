@@ -972,17 +972,17 @@ async fn test_list_ssts_with_format(
 #[tokio::test]
 async fn test_all_index_metas_list_all_types() {
     test_all_index_metas_list_all_types_with_format(false, r#"
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "bloom_filter", target_type: "column", target_key: "3", target_json: "{\"column\":3}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "fulltext_bloom", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 87, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "fulltext_tantivy", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 1104, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "inverted", target_type: "column", target_key: "0", target_json: "{\"column\":0}", blob_size: 70, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":44,\"inverted_index_size\":70,\"null_bitmap_size\":8,\"relative_fst_offset\":26,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6032), index_type: "inverted", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1100, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
     test_all_index_metas_list_all_types_with_format(true, r#"
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6144), index_type: "bloom_filter", target_type: "column", target_key: "3", target_json: "{\"column\":3}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6144), index_type: "fulltext_bloom", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6144), index_type: "fulltext_tantivy", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 1104, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6144), index_type: "inverted", target_type: "column", target_key: "0", target_json: "{\"column\":0}", blob_size: 92, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":66,\"inverted_index_size\":92,\"null_bitmap_size\":8,\"relative_fst_offset\":26,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6144), index_type: "inverted", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1100, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6500), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
 }
 
 async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expect_format: &str) {
@@ -1001,12 +1001,33 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
     // One region with both fulltext backends and inverted index enabled, plus bloom skipping index
     let region_id = RegionId::new(11, 1);
 
-    let mut request = CreateRequestBuilder::new().tag_num(3).field_num(2).build();
-    // inverted index on tag_0
-    request.column_metadatas[0]
+    let mut request = CreateRequestBuilder::new().tag_num(1).field_num(2).build();
+    // bloom filter skipping index on field_1
+    let skipping = SkippingIndexOptions::new_unchecked(2, 0.01, SkippingIndexType::BloomFilter);
+    request.column_metadatas[1]
+        .column_schema
+        .set_skipping_options(&skipping)
+        .unwrap();
+
+    // inverted index on field_1
+    request.column_metadatas[2]
         .column_schema
         .set_inverted_index(true);
-    // fulltext bloom on tag_1
+    // inverted index on tag_0
+    request.column_metadatas[1]
+        .column_schema
+        .set_inverted_index(true);
+
+    request.column_metadatas.push(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "field_2".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        semantic_type: SemanticType::Field,
+        column_id: 4,
+    });
+    // fulltext bloom on field_2
     let ft_bloom = FulltextOptions::new_unchecked(
         true,
         FulltextAnalyzer::English,
@@ -1015,11 +1036,24 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         4,
         0.001,
     );
-    request.column_metadatas[1]
+    request
+        .column_metadatas
+        .last_mut()
+        .unwrap()
         .column_schema
         .set_fulltext_options(&ft_bloom)
         .unwrap();
-    // fulltext tantivy on tag_2
+
+    request.column_metadatas.push(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "field_3".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        semantic_type: SemanticType::Field,
+        column_id: 5,
+    });
+    // fulltext tantivy on field_3
     let ft_tantivy = FulltextOptions::new_unchecked(
         true,
         FulltextAnalyzer::Chinese,
@@ -1028,40 +1062,26 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         2,
         0.01,
     );
-    request.column_metadatas[2]
+    request
+        .column_metadatas
+        .last_mut()
+        .unwrap()
         .column_schema
         .set_fulltext_options(&ft_tantivy)
         .unwrap();
-    // bloom filter skipping index on field_1 (which is at index 3)
-    let skipping = SkippingIndexOptions::new_unchecked(2, 0.01, SkippingIndexType::BloomFilter);
-    request.column_metadatas[3]
-        .column_schema
-        .set_skipping_options(&skipping)
-        .unwrap();
-
-    // inverted index on field_1
-    request.column_metadatas[4]
-        .column_schema
-        .set_inverted_index(true);
 
     engine
         .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
 
-    // write some rows (schema: tag_0, tag_1, tag_2, field_0, field_1, ts)
+    // write some rows (schema: tag_0, field_0, field_1, field_2, field_3, ts)
     let column_schemas = rows_schema(&request);
     let rows_vec: Vec<api::v1::Row> = (0..20)
         .map(|ts| api::v1::Row {
             values: vec![
                 api::v1::Value {
                     value_data: Some(api::v1::value::ValueData::StringValue("x".to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::StringValue("y".to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::StringValue("z".to_string())),
                 },
                 api::v1::Value {
                     value_data: Some(api::v1::value::ValueData::F64Value(ts as f64)),
@@ -1073,6 +1093,12 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
                     value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
                         ts as i64 * 1000,
                     )),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("y".to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue("z".to_string())),
                 },
             ],
         })
@@ -1095,7 +1121,7 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         .unwrap();
 
     fn bucket_size(size: u64) -> u64 {
-        if size < 512 { size } else { (size / 16) * 16 }
+        if size < 512 { size } else { (size / 100) * 100 }
     }
 
     let mut metas = engine.all_index_metas().await;
@@ -1125,5 +1151,5 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         .map(|entry| format!("\n{:?}", entry))
         .collect::<String>();
 
-    assert_eq!(debug_format, expect_format);
+    assert_eq!(expect_format, debug_format);
 }

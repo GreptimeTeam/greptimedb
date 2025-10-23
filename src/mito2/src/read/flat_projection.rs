@@ -48,6 +48,8 @@ pub struct FlatProjectionMapper {
     /// Ids of columns to project. It keeps ids in the same order as the `projection`
     /// indices to build the mapper.
     /// The mapper won't deduplicate the column ids.
+    ///
+    /// Note that this doesn't contain the `__table_id` and `__tsid`.
     column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
