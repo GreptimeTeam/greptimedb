@@ -49,10 +49,10 @@ const FILE_DIR: &str = "cache/object/write/";
 pub(crate) struct FileCache {
     /// Local store to cache files.
     local_store: ObjectStore,
-    /// Index to track cached files.
-    ///
-    /// File id is enough to identity a file uniquely.
-    memory_index: Cache<IndexKey, IndexValue>,
+    /// Index to track cached Parquet files.
+    parquet_index: Cache<IndexKey, IndexValue>,
+    /// Index to track cached Puffin files.
+    puffin_index: Cache<IndexKey, IndexValue>,
 }
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
@@ -64,14 +64,33 @@ impl FileCache {
         capacity: ReadableSize,
         ttl: Option<Duration>,
     ) -> FileCache {
-        let cache_store = local_store.clone();
+        // Split capacity evenly between Parquet and Puffin caches
+        let per_cache_capacity = capacity.as_bytes() / 2;
+
+        let parquet_index = Self::build_cache(local_store.clone(), per_cache_capacity, ttl);
+        let puffin_index = Self::build_cache(local_store.clone(), per_cache_capacity, ttl);
+
+        FileCache {
+            local_store,
+            parquet_index,
+            puffin_index,
+        }
+    }
+
+    /// Builds a cache for a specific file type.
+    fn build_cache(
+        local_store: ObjectStore,
+        capacity: u64,
+        ttl: Option<Duration>,
+    ) -> Cache<IndexKey, IndexValue> {
+        let cache_store = local_store;
         let mut builder = Cache::builder()
             .eviction_policy(EvictionPolicy::lru())
             .weigher(|_key, value: &IndexValue| -> u32 {
                 // We only measure space on local store.
                 value.file_size
             })
-            .max_capacity(capacity.as_bytes())
+            .max_capacity(capacity)
             .async_eviction_listener(move |key, value, cause| {
                 let store = cache_store.clone();
                 // Stores files under FILE_DIR.
@@ -99,10 +118,14 @@ impl FileCache {
         if let Some(ttl) = ttl {
             builder = builder.time_to_idle(ttl);
         }
-        let memory_index = builder.build();
-        FileCache {
-            local_store,
-            memory_index,
+        builder.build()
+    }
+
+    /// Returns the appropriate memory index for the given file type.
+    fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
+        match file_type {
+            FileType::Parquet => &self.parquet_index,
+            FileType::Puffin => &self.puffin_index,
         }
     }
 
@@ -113,14 +136,15 @@ impl FileCache {
         CACHE_BYTES
             .with_label_values(&[FILE_TYPE])
             .add(value.file_size.into());
-        self.memory_index.insert(key, value).await;
+        let index = self.memory_index(key.file_type);
+        index.insert(key, value).await;
 
         // Since files are large items, we run the pending tasks immediately.
-        self.memory_index.run_pending_tasks().await;
+        index.run_pending_tasks().await;
     }
 
     pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
-        self.memory_index.get(&key).await
+        self.memory_index(key.file_type).get(&key).await
     }
 
     /// Reads a file from the cache.
@@ -128,7 +152,8 @@ impl FileCache {
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
         // We must use `get()` to update the estimator of the cache.
         // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
-        if self.memory_index.get(&key).await.is_none() {
+        let index = self.memory_index(key.file_type);
+        if index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }
@@ -148,7 +173,7 @@ impl FileCache {
         }
 
         // We removes the file from the index.
-        self.memory_index.remove(&key).await;
+        index.remove(&key).await;
         CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
         None
     }
@@ -159,7 +184,8 @@ impl FileCache {
         key: IndexKey,
         ranges: &[Range<u64>],
     ) -> Option<Vec<Bytes>> {
-        if self.memory_index.get(&key).await.is_none() {
+        let index = self.memory_index(key.file_type);
+        if index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }
@@ -179,7 +205,7 @@ impl FileCache {
                 }
 
                 // We removes the file from the index.
-                self.memory_index.remove(&key).await;
+                index.remove(&key).await;
                 CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
                 None
             }
@@ -191,7 +217,7 @@ impl FileCache {
     /// in the memory index if upload is failed.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
-        self.memory_index.remove(&key).await;
+        self.memory_index(key.file_type).remove(&key).await;
         // Always delete the file from the local store.
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
@@ -223,7 +249,8 @@ impl FileCache {
                 .await
                 .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
-            self.memory_index
+            let index = self.memory_index(key.file_type);
+            index
                 .insert(key, IndexValue { file_size })
                 .await;
             total_size += i64::from(file_size);
@@ -234,13 +261,21 @@ impl FileCache {
 
         // Run all pending tasks of the moka cache so that the cache size is updated
         // and the eviction policy is applied.
-        self.memory_index.run_pending_tasks().await;
+        self.parquet_index.run_pending_tasks().await;
+        self.puffin_index.run_pending_tasks().await;
 
+        let parquet_weight = self.parquet_index.weighted_size();
+        let parquet_count = self.parquet_index.entry_count();
+        let puffin_weight = self.puffin_index.weighted_size();
+        let puffin_count = self.puffin_index.entry_count();
         info!(
-            "Recovered file cache, num_keys: {}, num_bytes: {}, total weight: {}, cost: {:?}",
+            "Recovered file cache, num_keys: {}, num_bytes: {}, parquet(count: {}, weight: {}), puffin(count: {}, weight: {}), cost: {:?}",
             total_keys,
             total_size,
-            self.memory_index.weighted_size(),
+            parquet_count,
+            parquet_weight,
+            puffin_count,
+            puffin_weight,
             now.elapsed()
         );
         Ok(())
@@ -274,7 +309,7 @@ impl FileCache {
     /// If the file is not in the cache or fail to load metadata, return None.
     pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
         // Check if file cache contains the key
-        if let Some(index_value) = self.memory_index.get(&key).await {
+        if let Some(index_value) = self.parquet_index.get(&key).await {
             // Load metadata from file cache
             let local_store = self.local_store();
             let file_path = self.cache_file_path(key);
@@ -294,7 +329,7 @@ impl FileCache {
                         );
                     }
                     // We removes the file from the index.
-                    self.memory_index.remove(&key).await;
+                    self.parquet_index.remove(&key).await;
                     CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
                     None
                 }
@@ -316,7 +351,7 @@ impl FileCache {
     /// Checks if the key is in the file cache.
     #[cfg(test)]
     pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
-        self.memory_index.contains_key(key)
+        self.memory_index(key.file_type).contains_key(key)
     }
 }
 
@@ -455,7 +490,7 @@ mod tests {
         let exist = cache.reader(key).await;
         assert!(exist.is_some());
         tokio::time::sleep(Duration::from_millis(15)).await;
-        cache.memory_index.run_pending_tasks().await;
+        cache.parquet_index.run_pending_tasks().await;
         let non = cache.reader(key).await;
         assert!(non.is_none());
     }
@@ -493,19 +528,19 @@ mod tests {
         assert_eq!("hello", String::from_utf8(buf).unwrap());
 
         // Get weighted size.
-        cache.memory_index.run_pending_tasks().await;
-        assert_eq!(5, cache.memory_index.weighted_size());
+        cache.parquet_index.run_pending_tasks().await;
+        assert_eq!(5, cache.parquet_index.weighted_size());
 
         // Remove the file.
         cache.remove(key).await;
         assert!(cache.reader(key).await.is_none());
 
         // Ensure all pending tasks of the moka cache is done before assertion.
-        cache.memory_index.run_pending_tasks().await;
+        cache.parquet_index.run_pending_tasks().await;
 
         // The file also not exists.
         assert!(!local_store.exists(&file_path).await.unwrap());
-        assert_eq!(0, cache.memory_index.weighted_size());
+        assert_eq!(0, cache.parquet_index.weighted_size());
     }
 
     #[tokio::test]
@@ -538,7 +573,7 @@ mod tests {
         // Reader is none.
         assert!(cache.reader(key).await.is_none());
         // Key is removed.
-        assert!(!cache.memory_index.contains_key(&key));
+        assert!(!cache.parquet_index.contains_key(&key));
     }
 
     #[tokio::test]
@@ -586,8 +621,8 @@ mod tests {
         cache.recover(true).await;
 
         // Check size.
-        cache.memory_index.run_pending_tasks().await;
-        assert_eq!(total_size, cache.memory_index.weighted_size() as usize);
+        cache.parquet_index.run_pending_tasks().await;
+        assert_eq!(total_size, cache.parquet_index.weighted_size() as usize);
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);
