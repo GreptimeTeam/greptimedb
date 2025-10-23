@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use mito2::gc::LocalGcWorker;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{FileRefsManifest, RegionId};
@@ -27,15 +27,11 @@ impl HandlerContext {
         gc_regions: GcRegions,
     ) -> Option<InstructionReply> {
         let region_ids = gc_regions.regions.clone();
-        info!("Received gc regions instruction: {:?}", region_ids);
+        debug!("Received gc regions instruction: {:?}", region_ids);
 
-        let mut table_id = None;
         let is_same_table = region_ids.windows(2).all(|w| {
             let t1 = w[0].table_id();
             let t2 = w[1].table_id();
-            if table_id.is_none() {
-                table_id = Some(t1);
-            }
             t1 == t2
         });
         if !is_same_table {
@@ -80,6 +76,11 @@ impl HandlerContext {
             .await;
         if register_result.is_busy() {
             warn!("Another gc task is running for the region: {region_id}");
+            return Some(InstructionReply::GcRegions(GcRegionsReply {
+                result: Err(format!(
+                    "Another gc task is running for the region: {region_id}"
+                )),
+            }));
         }
         let mut watcher = register_result.into_watcher();
         let result = self.gc_tasks.wait_until_finish(&mut watcher).await;
@@ -101,10 +102,13 @@ impl HandlerContext {
     ) -> Result<(RegionId, LocalGcWorker)> {
         // always use the smallest region id on datanode as the target region id
         region_ids.sort_by_key(|r| r.region_number());
-        let mito_engine = self.region_server.mito_engine().context(UnexpectedSnafu {
-            violated: "MitoEngine not found".to_string(),
-        })?;
-        let region_id = *region_ids.first().context(UnexpectedSnafu {
+        let mito_engine = self
+            .region_server
+            .mito_engine()
+            .with_context(|| UnexpectedSnafu {
+                violated: "MitoEngine not found".to_string(),
+            })?;
+        let region_id = *region_ids.first().with_context(|| UnexpectedSnafu {
             violated: "No region ids provided".to_string(),
         })?;
 

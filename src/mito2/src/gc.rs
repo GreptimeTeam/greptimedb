@@ -656,8 +656,7 @@ impl LocalGcWorker {
             let files_to_delete: Vec<FileId> = all_files_appear_in_delta_manifests
                 .iter()
                 .filter(|file_id| !in_use_filenames.contains(*file_id))
-                .copied()
-                .copied()
+                .map(|&f| *f)
                 .collect();
 
             info!(

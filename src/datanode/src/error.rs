@@ -315,7 +315,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to run gc for mito engine"))]
+    #[snafu(display("Failed to run gc for region {}", region_id))]
     GcMitoEngine {
         region_id: RegionId,
         source: mito2::error::Error,
@@ -444,8 +444,7 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | TomlFormat { .. }
-            | InvalidGcArgs { .. } => StatusCode::InvalidArguments,
+            | TomlFormat { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
             | Unexpected { .. }
@@ -454,9 +453,11 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
-                StatusCode::Internal
-            }
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | InvalidGcArgs { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
