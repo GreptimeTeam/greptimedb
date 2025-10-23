@@ -2,8 +2,8 @@ name: PR Review Reminder
 
 on:
   schedule:
-    # Run at 9:00 AM UTC+8 (01:00 AM UTC) every day
-    - cron: '0 1 * * *'
+    # Run at 9:00 AM UTC+8 (01:00 AM UTC) on Monday, Wednesday, Friday
+    - cron: '0 1 * * 1,3,5'
   workflow_dispatch:
 
 jobs:

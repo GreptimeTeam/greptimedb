@@ -78,7 +78,7 @@ impl OpenCandidateRegion {
             engine,
         } = datanode_table_value.region_info.clone();
 
-        let open_instruction = Instruction::OpenRegion(OpenRegion::new(
+        let open_instruction = Instruction::OpenRegions(vec![OpenRegion::new(
             RegionIdent {
                 datanode_id: candidate_id,
                 table_id,
@@ -89,7 +89,7 @@ impl OpenCandidateRegion {
             region_options,
             region_wal_options,
             true,
-        ));
+        )]);
 
         Ok(open_instruction)
     }
@@ -155,7 +155,7 @@ impl OpenCandidateRegion {
                     region_id,
                     now.elapsed()
                 );
-                let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::OpenRegions(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
                         reason: "expect open region reply",
@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
-        Instruction::OpenRegion(OpenRegion {
+        Instruction::OpenRegions(vec![OpenRegion {
             region_ident: RegionIdent {
                 datanode_id,
                 table_id: region_id.table_id(),
@@ -226,7 +226,7 @@ mod tests {
             region_options: Default::default(),
             region_wal_options: Default::default(),
             skip_wal_replay: true,
-        })
+        }])
     }
 
     #[tokio::test]

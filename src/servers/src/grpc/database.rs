@@ -20,11 +20,14 @@ use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
+use prost::Message;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{TonicResult, cancellation};
 use crate::hint_headers;
+use crate::metrics::{METRIC_GRPC_MEMORY_USAGE_BYTES, METRIC_GRPC_REQUESTS_REJECTED_TOTAL};
+use crate::request_limiter::RequestMemoryLimiter;
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -48,6 +51,27 @@ impl GreptimeDatabase for DatabaseService {
             "GreptimeDatabase::Handle: request from {:?} with hints: {:?}",
             remote_addr, hints
         );
+
+        let _guard = request
+            .extensions()
+            .get::<RequestMemoryLimiter>()
+            .filter(|limiter| limiter.is_enabled())
+            .and_then(|limiter| {
+                let message_size = request.get_ref().encoded_len();
+                limiter
+                    .try_acquire(message_size)
+                    .map(|guard| {
+                        guard.inspect(|g| {
+                            METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                        })
+                    })
+                    .inspect_err(|_| {
+                        METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                    })
+                    .transpose()
+            })
+            .transpose()?;
+
         let handler = self.handler.clone();
         let request_future = async move {
             let request = request.into_inner();
@@ -94,6 +118,9 @@ impl GreptimeDatabase for DatabaseService {
             "GreptimeDatabase::HandleRequests: request from {:?} with hints: {:?}",
             remote_addr, hints
         );
+
+        let limiter = request.extensions().get::<RequestMemoryLimiter>().cloned();
+
         let handler = self.handler.clone();
         let request_future = async move {
             let mut affected_rows = 0;
@@ -101,6 +128,25 @@ impl GreptimeDatabase for DatabaseService {
             let mut stream = request.into_inner();
             while let Some(request) = stream.next().await {
                 let request = request?;
+
+                let _guard = limiter
+                    .as_ref()
+                    .filter(|limiter| limiter.is_enabled())
+                    .and_then(|limiter| {
+                        let message_size = request.encoded_len();
+                        limiter
+                            .try_acquire(message_size)
+                            .map(|guard| {
+                                guard.inspect(|g| {
+                                    METRIC_GRPC_MEMORY_USAGE_BYTES.set(g.current_usage() as i64);
+                                })
+                            })
+                            .inspect_err(|_| {
+                                METRIC_GRPC_REQUESTS_REJECTED_TOTAL.inc();
+                            })
+                            .transpose()
+                    })
+                    .transpose()?;
                 let output = handler.handle_request(request, hints.clone()).await?;
                 match output.data {
                     OutputData::AffectedRows(rows) => affected_rows += rows,

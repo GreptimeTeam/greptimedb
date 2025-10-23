@@ -57,14 +57,6 @@
     return days;
   }
 
-  // Get urgency emoji based on PR age
-  function getAgeEmoji(days) {
-    if (days >= 14) return "🔴"; // 14+ days - critical
-    if (days >= 7) return "🟠";  // 7+ days - urgent
-    if (days >= 3) return "🟡";  // 3+ days - needs attention
-    return "🟢"; // < 3 days - fresh
-  }
-
   // Build Slack notification message from PR list
   function buildSlackMessage(prs) {
     if (prs.length === 0) {

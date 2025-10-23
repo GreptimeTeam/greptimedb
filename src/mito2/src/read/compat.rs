@@ -386,7 +386,8 @@ impl FlatCompatBatch {
 /// Repeats the vector value `to_len` times.
 fn repeat_vector(vector: &VectorRef, to_len: usize, is_tag: bool) -> Result<ArrayRef> {
     assert_eq!(1, vector.len());
-    if is_tag {
+    let data_type = vector.data_type();
+    if is_tag && data_type.is_string() {
         let values = vector.to_arrow_array();
         if values.is_null(0) {
             // Creates a dictionary array with `to_len` null keys.
