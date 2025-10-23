@@ -97,7 +97,7 @@ impl GcLimiter {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     /// Whether GC is enabled.
-    pub enabled: bool,
+    pub enable: bool,
     /// Lingering time before deleting files.
     /// Should be long enough to allow long running queries to finish.
     ///
@@ -123,7 +123,7 @@ pub struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enable: false,
             // expect long running queries to be finished within a reasonable time
             lingering_time: Duration::from_secs(60 * 5),
             // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
