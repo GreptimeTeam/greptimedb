@@ -433,6 +433,7 @@ pub struct GcRegions {
     pub regions: Vec<RegionId>,
     /// The file references manifest containing temporary file references.
     pub file_refs_manifest: FileRefsManifest,
+    /// Whether to perform a full file listing to find orphan files.
     pub full_file_listing: bool,
 }
 
@@ -440,9 +441,10 @@ impl Display for GcRegions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "GcRegion(regions={:?}, file_refs_count={})",
+            "GcRegion(regions={:?}, file_refs_count={}, full_file_listing={})",
             self.regions,
-            self.file_refs_manifest.file_refs.len()
+            self.file_refs_manifest.file_refs.len(),
+            self.full_file_listing
         )
     }
 }
