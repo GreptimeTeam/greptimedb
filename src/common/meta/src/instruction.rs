@@ -586,7 +586,7 @@ impl InstructionReply {
         }
     }
 
-    pub fn expect_downgrade_region_reply(self) -> Vec<DowngradeRegionReply> {
+    pub fn expect_downgrade_regions_reply(self) -> Vec<DowngradeRegionReply> {
         match self {
             Self::DowngradeRegions(reply) => reply.replies,
             _ => panic!("Expected DowngradeRegion reply"),

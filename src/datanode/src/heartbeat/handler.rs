@@ -451,7 +451,7 @@ mod tests {
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-            let reply = &reply.expect_downgrade_region_reply()[0];
+            let reply = &reply.expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
             assert!(reply.error.is_none());
             assert_eq!(reply.last_entry_id.unwrap(), 0);
@@ -469,7 +469,7 @@ mod tests {
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
-        let reply = reply.expect_downgrade_region_reply();
+        let reply = reply.expect_downgrade_regions_reply();
         assert!(!reply[0].exists);
         assert!(reply[0].error.is_none());
         assert!(reply[0].last_entry_id.is_none());

@@ -225,12 +225,18 @@ impl HandlerContext {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
+    use common_meta::heartbeat::mailbox::MessageMeta;
     use common_meta::instruction::{DowngradeRegion, Instruction};
+    use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv};
     use store_api::region_engine::{
-        RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+        RegionEngine, RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
     };
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
@@ -238,7 +244,10 @@ mod tests {
 
     use crate::error;
     use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
-    use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
+    use crate::heartbeat::handler::tests::HeartbeatResponseTestEnv;
+    use crate::heartbeat::handler::{
+        HandlerContext, InstructionHandler, RegionHeartbeatResponseHandler,
+    };
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
@@ -261,7 +270,7 @@ mod tests {
                 )
                 .await;
 
-            let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+            let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(!reply.exists);
             assert!(reply.error.is_none());
             assert!(reply.last_entry_id.is_none());
@@ -304,7 +313,7 @@ mod tests {
                 )
                 .await;
 
-            let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+            let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
             assert!(reply.error.is_none());
             assert_eq!(reply.last_entry_id.unwrap(), 1024);
@@ -339,7 +348,7 @@ mod tests {
             )
             .await;
 
-        let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+        let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
         assert!(reply.error.as_ref().unwrap().contains("timeout"));
         assert!(reply.last_entry_id.is_none());
@@ -378,7 +387,7 @@ mod tests {
                 )
                 .await;
 
-            let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+            let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
             assert!(reply.error.as_ref().unwrap().contains("timeout"));
             assert!(reply.last_entry_id.is_none());
@@ -396,7 +405,7 @@ mod tests {
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+        let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
         assert!(reply.error.is_none());
         assert_eq!(reply.last_entry_id.unwrap(), 1024);
@@ -440,7 +449,7 @@ mod tests {
                     }]),
                 )
                 .await;
-            let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+            let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
             assert!(reply.error.as_ref().unwrap().contains("timeout"));
             assert!(reply.last_entry_id.is_none());
@@ -457,7 +466,7 @@ mod tests {
             .await;
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
-        let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+        let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
         assert!(reply.error.as_ref().unwrap().contains("flush failed"));
         assert!(reply.last_entry_id.is_none());
@@ -484,7 +493,7 @@ mod tests {
                 }]),
             )
             .await;
-        let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+        let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(!reply.exists);
         assert!(reply.error.is_none());
         assert!(reply.last_entry_id.is_none());
@@ -515,7 +524,7 @@ mod tests {
                 }]),
             )
             .await;
-        let reply = &reply.unwrap().expect_downgrade_region_reply()[0];
+        let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
         assert!(
             reply
@@ -525,5 +534,58 @@ mod tests {
                 .contains("Failed to set region to readonly")
         );
         assert!(reply.last_entry_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_downgrade_regions() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut region_server = mock_region_server();
+        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let mut engine_env = TestEnv::with_prefix("downgrade-regions").await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        region_server.register_engine(Arc::new(engine.clone()));
+        let region_id = RegionId::new(1024, 1);
+        let region_id1 = RegionId::new(1024, 2);
+        let builder = CreateRequestBuilder::new();
+        let create_req = builder.build();
+        region_server
+            .handle_request(region_id, RegionRequest::Create(create_req))
+            .await
+            .unwrap();
+        let create_req1 = builder.build();
+        region_server
+            .handle_request(region_id1, RegionRequest::Create(create_req1))
+            .await
+            .unwrap();
+        let meta = MessageMeta::new_test(1, "test", "dn-1", "meta-0");
+        let instruction = Instruction::DowngradeRegions(vec![
+            DowngradeRegion {
+                region_id,
+                flush_timeout: Some(Duration::from_secs(1)),
+            },
+            DowngradeRegion {
+                region_id: region_id1,
+                flush_timeout: Some(Duration::from_secs(1)),
+            },
+        ]);
+        let mut heartbeat_env = HeartbeatResponseTestEnv::new();
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
+        assert_matches!(control, HandleControl::Continue);
+
+        let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
+        let reply = reply.expect_downgrade_regions_reply();
+        assert_eq!(reply[0].region_id, region_id);
+        assert!(reply[0].exists);
+        assert!(reply[0].error.is_none());
+        assert_eq!(reply[0].last_entry_id, Some(0));
+        assert_eq!(reply[1].region_id, region_id1);
+        assert!(reply[1].exists);
+        assert!(reply[1].error.is_none());
+        assert_eq!(reply[1].last_entry_id, Some(0));
+
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Follower);
+        assert_eq!(engine.role(region_id1).unwrap(), RegionRole::Follower);
     }
 }
