@@ -39,8 +39,9 @@ use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
 
-use crate::access_layer::AccessLayer;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -53,6 +54,7 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
+use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_TOTAL_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -62,11 +64,12 @@ use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::FormatType;
+use crate::sst::file::RegionFileId;
 use crate::sst::file_purger::create_local_file_purger;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::location::region_dir_from_table_dir;
+use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -539,8 +542,8 @@ impl RegionOpener {
 
         let region = MitoRegion {
             region_id: self.region_id,
-            version_control,
-            access_layer,
+            version_control: version_control.clone(),
+            access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
@@ -557,6 +560,15 @@ impl RegionOpener {
             sst_format,
             stats: self.stats.clone(),
         };
+
+        // Spawn background task to fill write cache with index files
+        spawn_cache_fill_task(
+            self.region_id,
+            &version_control,
+            &self.cache_manager,
+            &access_layer,
+        );
+
         Ok(Some(region))
     }
 
@@ -808,4 +820,97 @@ where
 /// Returns the directory to the manifest files.
 pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
     join_dir(region_dir, "manifest")
+}
+
+/// Spawns a background task to download all index (Puffin) files from the version into the write cache.
+fn spawn_cache_fill_task(
+    region_id: RegionId,
+    version_control: &VersionControlRef,
+    cache_manager: &Option<CacheManagerRef>,
+    access_layer: &AccessLayerRef,
+) {
+    let Some(cache_manager) = cache_manager else {
+        return;
+    };
+    let Some(write_cache) = cache_manager.write_cache() else {
+        return;
+    };
+
+    let write_cache = write_cache.clone();
+    let table_dir = access_layer.table_dir().to_string();
+    let path_type = access_layer.path_type();
+    let object_store = access_layer.object_store().clone();
+    let version_control = version_control.clone();
+
+    common_runtime::spawn_global(async move {
+        // First pass: collect IndexKeys and file sizes for files that need to be downloaded
+        let mut files_to_download_list = Vec::new();
+        let mut files_skipped = 0;
+
+        {
+            let version = version_control.current().version;
+            for level in version.ssts.levels() {
+                for file_handle in level.files.values() {
+                    let file_meta = file_handle.meta_ref();
+                    // Only collect Puffin (index) files if they exist
+                    if file_meta.exists_index() {
+                        let puffin_key =
+                            IndexKey::new(file_meta.region_id, file_meta.file_id, FileType::Puffin);
+
+                        if !write_cache.file_cache().contains_key(&puffin_key) {
+                            files_to_download_list.push((puffin_key, file_meta.index_file_size));
+                        } else {
+                            files_skipped += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let files_to_download = files_to_download_list.len() as i64;
+
+        info!(
+            "Starting background cache fill task for region {}, total_files_to_download: {}, files_already_cached: {}",
+            region_id, files_to_download, files_skipped
+        );
+
+        // Set the total files gauge and reset the downloaded files gauge
+        CACHE_FILL_TOTAL_FILES.set(files_to_download);
+        CACHE_FILL_DOWNLOADED_FILES.set(0);
+
+        // Second pass: download the files
+        let mut files_downloaded = 0;
+
+        for (puffin_key, file_size) in files_to_download_list {
+            let index_remote_path = location::index_file_path(
+                &table_dir,
+                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
+                path_type,
+            );
+
+            match write_cache
+                .download(puffin_key, &index_remote_path, &object_store, file_size)
+                .await
+            {
+                Ok(_) => {
+                    files_downloaded += 1;
+                    CACHE_FILL_DOWNLOADED_FILES.set(files_downloaded);
+                    debug!(
+                        "Downloaded index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        e; "Failed to download index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Completed background cache fill task for region {}, files_to_download: {}, files_downloaded: {}, files_skipped: {}",
+            region_id, files_to_download, files_downloaded, files_skipped
+        );
+    });
 }

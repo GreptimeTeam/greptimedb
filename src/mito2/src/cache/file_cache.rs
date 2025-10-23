@@ -349,7 +349,6 @@ impl FileCache {
     }
 
     /// Checks if the key is in the file cache.
-    #[cfg(test)]
     pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
         self.memory_index(key.file_type).contains_key(key)
     }
