@@ -25,8 +25,7 @@ use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, DeserializeFromJsonSnafu, Result};
 use crate::heartbeat::utils::get_datanode_workloads;
 
 const DATANODE_STAT_PREFIX: &str = "__meta_datanode_stat";
@@ -229,7 +228,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
         } = value;
 
         match (header, peer) {
-            (Some(_header), Some(peer)) => {
+            (Some(header), Some(peer)) => {
                 let region_stats = region_stats
                     .iter()
                     .map(RegionStat::from)
@@ -238,7 +237,13 @@ impl TryFrom<&HeartbeatRequest> for Stat {
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
 
-                let gc_stat = GcStat::from_extensions(extensions);
+                let gc_stat = GcStat::from_extensions(extensions).map_err(|err| {
+                    common_telemetry::error!(
+                        "Failed to deserialize GcStat from extensions: {}",
+                        err
+                    );
+                    header.clone()
+                })?;
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
@@ -350,10 +355,15 @@ impl GcStat {
 
     pub fn from_extensions(
         extensions: &std::collections::HashMap<String, Vec<u8>>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>> {
         extensions
             .get(Self::GC_STAT_KEY)
-            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+            .map(|bytes| {
+                serde_json::from_slice(bytes).with_context(|_| DeserializeFromJsonSnafu {
+                    input: String::from_utf8_lossy(bytes).to_string(),
+                })
+            })
+            .transpose()
     }
 }
 
