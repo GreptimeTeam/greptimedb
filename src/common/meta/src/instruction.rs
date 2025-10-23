@@ -501,6 +501,39 @@ impl Display for UpgradeRegionReply {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct DowngradeRegionsReply {
+    pub replies: Vec<DowngradeRegionReply>,
+}
+
+impl DowngradeRegionsReply {
+    pub fn new(replies: Vec<DowngradeRegionReply>) -> Self {
+        Self { replies }
+    }
+
+    pub fn single(reply: DowngradeRegionReply) -> Self {
+        Self::new(vec![reply])
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DowngradeRegionsCompat {
+    Single(DowngradeRegionReply),
+    Multiple(DowngradeRegionsReply),
+}
+
+fn downgrade_regions_compat_from<'de, D>(deserializer: D) -> Result<DowngradeRegionsReply, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let helper = DowngradeRegionsCompat::deserialize(deserializer)?;
+    Ok(match helper {
+        DowngradeRegionsCompat::Single(x) => DowngradeRegionsReply::new(vec![x]),
+        DowngradeRegionsCompat::Multiple(reply) => reply,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
@@ -510,9 +543,9 @@ pub enum InstructionReply {
     UpgradeRegion(UpgradeRegionReply),
     #[serde(
         alias = "downgrade_region",
-        deserialize_with = "single_or_multiple_from"
+        deserialize_with = "downgrade_regions_compat_from"
     )]
-    DowngradeRegions(Vec<DowngradeRegionReply>),
+    DowngradeRegions(DowngradeRegionsReply),
     FlushRegions(FlushRegionReply),
 }
 
@@ -555,7 +588,7 @@ impl InstructionReply {
 
     pub fn expect_downgrade_region_reply(self) -> Vec<DowngradeRegionReply> {
         match self {
-            Self::DowngradeRegions(reply) => reply,
+            Self::DowngradeRegions(reply) => reply.replies,
             _ => panic!("Expected DowngradeRegion reply"),
         }
     }
@@ -605,11 +638,27 @@ mod tests {
             r#"{"CloseRegions":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#,
             serialized
         );
+
+        let downgrade_region = InstructionReply::DowngradeRegions(DowngradeRegionsReply::single(
+            DowngradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: true,
+                error: None,
+            },
+        ));
+
+        let serialized = serde_json::to_string(&downgrade_region).unwrap();
+        assert_eq!(
+            r#"{"type":"downgrade_regions","replies":[{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"exists":true,"error":null}]}"#,
+            serialized
+        )
     }
 
     #[test]
     fn test_deserialize_instruction() {
-        let open_region_instruction = r#"{"OpenRegion":[{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}]}"#;
+        let open_region_instruction = r#"{"OpenRegion":{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#;
         let open_region_instruction: Instruction =
             serde_json::from_str(open_region_instruction).unwrap();
         let open_region = Instruction::OpenRegions(vec![OpenRegion::new(
@@ -626,7 +675,7 @@ mod tests {
         )]);
         assert_eq!(open_region_instruction, open_region);
 
-        let close_region_instruction = r#"{"CloseRegion":[{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}]}"#;
+        let close_region_instruction = r#"{"CloseRegion":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#;
         let close_region_instruction: Instruction =
             serde_json::from_str(close_region_instruction).unwrap();
         let close_region = Instruction::CloseRegions(vec![RegionIdent {
@@ -636,6 +685,15 @@ mod tests {
             engine: "mito2".to_string(),
         }]);
         assert_eq!(close_region_instruction, close_region);
+
+        let downgrade_region_instruction = r#"{"DowngradeRegions":{"region_id":4398046511105,"flush_timeout":{"secs":1,"nanos":0}}}"#;
+        let downgrade_region_instruction: Instruction =
+            serde_json::from_str(downgrade_region_instruction).unwrap();
+        let downgrade_region = Instruction::DowngradeRegions(vec![DowngradeRegion {
+            region_id: RegionId::new(1024, 1),
+            flush_timeout: Some(Duration::from_millis(1000)),
+        }]);
+        assert_eq!(downgrade_region_instruction, downgrade_region);
 
         let close_region_instruction_reply =
             r#"{"result":true,"error":null,"type":"close_region"}"#;
@@ -655,6 +713,20 @@ mod tests {
             error: None,
         });
         assert_eq!(open_region_instruction_reply, open_region_reply);
+
+        let downgrade_region_instruction_reply = r#"{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"exists":true,"error":null,"type":"downgrade_region"}"#;
+        let downgrade_region_instruction_reply: InstructionReply =
+            serde_json::from_str(downgrade_region_instruction_reply).unwrap();
+        let downgrade_region_reply = InstructionReply::DowngradeRegions(
+            DowngradeRegionsReply::single(DowngradeRegionReply {
+                region_id: RegionId::new(1024, 1),
+                last_entry_id: None,
+                metadata_last_entry_id: None,
+                exists: true,
+                error: None,
+            }),
+        );
+        assert_eq!(downgrade_region_instruction_reply, downgrade_region_reply);
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
