@@ -97,7 +97,7 @@ impl Categorizer {
         // Subquery is treated separately in `inspect_plan_with_subquery`. To avoid rewrite the
         // "maybe rewritten" plan, stop the check here.
         if has_subquery(plan)? {
-            return Ok(Commutativity::NonCommutative);
+            return Ok(Commutativity::Unimplemented);
         }
 
         let partition_cols = partition_cols.unwrap_or_default();
