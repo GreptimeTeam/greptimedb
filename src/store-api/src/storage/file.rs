@@ -112,10 +112,13 @@ impl GcReport {
 
     pub fn merge(&mut self, other: GcReport) {
         for (region, files) in other.deleted_files {
-            self.deleted_files
-                .entry(region)
-                .or_default()
-                .extend(files.into_iter());
+            let self_files = self.deleted_files.entry(region).or_default();
+            let dedup: HashSet<FileId> = HashSet::from_iter(
+                std::mem::take(self_files)
+                    .into_iter()
+                    .chain(files.iter().cloned()),
+            );
+            *self_files = dedup.into_iter().collect();
         }
         self.need_retry_regions.extend(other.need_retry_regions);
     }

@@ -58,7 +58,7 @@ impl FileReferenceManager {
         let file_refs = if let Some(file_refs) = self.files_per_region.get(&region_id) {
             file_refs.clone()
         } else {
-            // table_id not found.
+            // region id not found.
             return None;
         };
 
@@ -96,9 +96,8 @@ impl FileReferenceManager {
     #[allow(unused)]
     pub(crate) async fn get_snapshot_of_unmanifested_refs(
         &self,
-        regions: impl IntoIterator<Item = MitoRegionRef>,
+        regions: Vec<MitoRegionRef>,
     ) -> Result<FileRefsManifest> {
-        let regions: Vec<MitoRegionRef> = regions.into_iter().collect();
         let mut ref_files = HashMap::new();
         for region_id in regions.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {

@@ -146,7 +146,7 @@ pub struct LocalGcWorker {
     /// Also contains manifest versions of regions when the tmp ref files are generated.
     /// Used to determine whether the tmp ref files are outdated.
     pub(crate) file_ref_manifest: FileRefsManifest,
-    pub(crate) _permit: OwnedSemaphorePermit,
+    _permit: OwnedSemaphorePermit,
     /// Whether to perform full file listing during GC.
     /// When set to false, GC will only delete files that are tracked in the manifest's removed_files,
     /// which can significantly improve performance by avoiding expensive list operations.
@@ -547,7 +547,7 @@ impl LocalGcWorker {
         entries: Vec<Entry>,
         in_use_filenames: &HashSet<&FileId>,
         may_linger_filenames: &HashSet<&FileId>,
-        all_files_appear_in_delta_manifests: &HashSet<&FileId>,
+        eligible_for_removal: &HashSet<&FileId>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> (Vec<FileId>, HashSet<FileId>) {
         let mut all_unused_files_ready_for_delete = vec![];
@@ -571,7 +571,7 @@ impl LocalGcWorker {
             let should_delete = !in_use_filenames.contains(&file_id)
                 && !may_linger_filenames.contains(&file_id)
                 && {
-                    if !all_files_appear_in_delta_manifests.contains(&file_id) {
+                    if !eligible_for_removal.contains(&file_id) {
                         // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
                         // using it's last modified time
                         // notice unknown files use a different lingering time
@@ -631,7 +631,7 @@ impl LocalGcWorker {
         let may_linger_files = recently_removed_files.split_off(&threshold);
         let may_linger_filenames = may_linger_files.values().flatten().collect::<HashSet<_>>();
 
-        let all_files_appear_in_delta_manifests = recently_removed_files
+        let eligible_for_removal = recently_removed_files
             .values()
             .flatten()
             .collect::<HashSet<_>>();
@@ -646,7 +646,7 @@ impl LocalGcWorker {
             // 1. Are in recently_removed_files (tracked in manifest)
             // 2. Are not in use
             // 3. Have passed the lingering time
-            let files_to_delete: Vec<FileId> = all_files_appear_in_delta_manifests
+            let files_to_delete: Vec<FileId> = eligible_for_removal
                 .iter()
                 .filter(|file_id| !in_use_filenames.contains(*file_id))
                 .map(|&f| *f)
@@ -678,7 +678,7 @@ impl LocalGcWorker {
                 all_entries,
                 &in_use_filenames,
                 &may_linger_filenames,
-                &all_files_appear_in_delta_manifests,
+                &eligible_for_removal,
                 unknown_file_may_linger_until,
             );
 

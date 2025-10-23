@@ -346,6 +346,13 @@ mod tests {
     }
 
     #[test]
+    fn test_region_id_from_str() {
+        let region_id_str = "\"8589934602\"";
+        let region_id: RegionId = serde_json::from_str(region_id_str).unwrap();
+        assert_eq!(RegionId::new(2, 10), region_id);
+    }
+
+    #[test]
     fn test_retrieve_region_group_and_seq() {
         let region_id = RegionId::with_group_and_seq(111, 222, 333);
         assert_eq!(111, region_id.table_id());

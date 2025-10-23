@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionReply};
 use store_api::storage::FileRefsManifest;
 
@@ -48,7 +49,7 @@ impl HandlerContext {
             Err(e) => Some(InstructionReply::GetFileRefs(GetFileRefsReply {
                 file_refs_manifest: FileRefsManifest::default(),
                 success: false,
-                error: Some(format!("Failed to get file refs: {}", e)),
+                error: Some(format!("Failed to get file refs: {}", e.output_msg())),
             })),
         }
     }

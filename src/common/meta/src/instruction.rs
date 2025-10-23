@@ -589,7 +589,7 @@ impl InstructionReply {
 mod tests {
     use std::collections::HashSet;
 
-    use store_api::storage::{FileId, FileRef};
+    use store_api::storage::FileId;
 
     use super::*;
 
