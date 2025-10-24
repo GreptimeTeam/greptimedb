@@ -67,8 +67,10 @@ impl FileCache {
         // Split capacity evenly between Parquet and Puffin caches
         let per_cache_capacity = capacity.as_bytes() / 2;
 
-        let parquet_index = Self::build_cache(local_store.clone(), per_cache_capacity, ttl);
-        let puffin_index = Self::build_cache(local_store.clone(), per_cache_capacity, ttl);
+        let parquet_index =
+            Self::build_cache(local_store.clone(), per_cache_capacity, ttl, "parquet");
+        let puffin_index =
+            Self::build_cache(local_store.clone(), per_cache_capacity, ttl, "puffin");
 
         FileCache {
             local_store,
@@ -82,6 +84,7 @@ impl FileCache {
         local_store: ObjectStore,
         capacity: u64,
         ttl: Option<Duration>,
+        label: &'static str,
     ) -> Cache<IndexKey, IndexValue> {
         let cache_store = local_store;
         let mut builder = Cache::builder()
@@ -99,14 +102,14 @@ impl FileCache {
                     if let RemovalCause::Replaced = cause {
                         // The cache is replaced by another file. This is unexpected, we don't remove the same
                         // file but updates the metrics as the file is already replaced by users.
-                        CACHE_BYTES.with_label_values(&[FILE_TYPE]).sub(value.file_size.into());
+                        CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
                         warn!("Replace existing cache {} for region {} unexpectedly", file_path, key.region_id);
                         return;
                     }
 
                     match store.delete(&file_path).await {
                         Ok(()) => {
-                            CACHE_BYTES.with_label_values(&[FILE_TYPE]).sub(value.file_size.into());
+                            CACHE_BYTES.with_label_values(&[label]).sub(value.file_size.into());
                         }
                         Err(e) => {
                             warn!(e; "Failed to delete cached file {} for region {}", file_path, key.region_id);
@@ -250,9 +253,7 @@ impl FileCache {
                 .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             let index = self.memory_index(key.file_type);
-            index
-                .insert(key, IndexValue { file_size })
-                .await;
+            index.insert(key, IndexValue { file_size }).await;
             total_size += i64::from(file_size);
             total_keys += 1;
         }
