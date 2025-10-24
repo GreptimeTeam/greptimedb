@@ -52,7 +52,7 @@ impl DataType for StructType {
             "Struct<{}>",
             self.fields
                 .iter()
-                .map(|f| f.name())
+                .map(|f| format!(r#""{}": {}"#, f.name(), f.data_type()))
                 .collect::<Vec<_>>()
                 .join(", ")
         )

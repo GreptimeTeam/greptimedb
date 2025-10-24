@@ -259,6 +259,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to merge JSON datatype: {reason}"))]
+    MergeJsonDatatype {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -281,7 +288,8 @@ impl ErrorExt for Error {
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
-            | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
+            | InvalidSkippingIndexOption { .. }
+            | MergeJsonDatatype { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

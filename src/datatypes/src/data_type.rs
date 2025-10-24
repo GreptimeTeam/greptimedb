@@ -348,9 +348,9 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn as_json(&self) -> Option<JsonType> {
+    pub fn as_json(&self) -> Option<&JsonType> {
         match self {
-            ConcreteDataType::Json(j) => Some(j.clone()),
+            ConcreteDataType::Json(j) => Some(j),
             _ => None,
         }
     }
