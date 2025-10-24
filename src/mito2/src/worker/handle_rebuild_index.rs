@@ -22,6 +22,7 @@ use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
+use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::region::MitoRegionRef;
 use crate::request::{
@@ -205,11 +206,19 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
+        // Clean old puffin-related cache for all rebuilt files.
+        let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
+        for file_meta in &request.edit.files_to_add {
+            let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
+            cache_strategy.evict_puffin_cache(region_file_id).await;
+        }
+
         region.version_control.apply_edit(
             Some(request.edit.clone()),
             &[],
             region.file_purger.clone(),
         );
+        
         for file_meta in &request.edit.files_to_add {
             self.listener
                 .on_index_build_finish(RegionFileId::new(region_id, file_meta.file_id))
