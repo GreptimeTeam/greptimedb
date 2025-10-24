@@ -146,6 +146,11 @@ pub struct FileMeta {
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Size of the index file.
     pub index_file_size: u64,
+    /// File ID of the index file.
+    /// 
+    /// When this field is None, it means the index file id is the same as the file id.
+    /// Used for rebuilding index files.
+    pub index_file_id: Option<FileId>,
     /// Number of rows in the file.
     ///
     /// For historical reasons, this field might be missing in old files. Thus
@@ -292,6 +297,16 @@ impl FileHandle {
     /// Returns the cross-region file id.
     pub fn file_id(&self) -> RegionFileId {
         RegionFileId::new(self.inner.meta.region_id, self.inner.meta.file_id)
+    }
+
+    /// Returns the cross-region index file id.
+    /// If the index file id is not set, returns the file id.
+    pub fn index_file_id(&self) -> RegionFileId {
+        if let Some(index_file_id) = self.inner.meta.index_file_id {
+            RegionFileId::new(self.inner.meta.region_id, index_file_id)
+        } else {
+            self.file_id()
+        }
     }
 
     /// Returns the complete file path of the file.
@@ -459,6 +474,7 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
@@ -505,6 +521,7 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,

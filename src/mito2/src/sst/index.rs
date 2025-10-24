@@ -607,7 +607,13 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
-        let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
+        let index_file_id = if self.file_meta.index_file_size > 0 {
+            // Generate new file ID if index file exists to avoid overwrite.
+            FileId::random()
+        } else {
+            self.file_meta.file_id
+        };
+        let mut indexer = self.indexer_builder.build(index_file_id).await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
@@ -669,7 +675,7 @@ impl IndexBuildTask {
             // Upload index file if write cache is enabled.
             self.maybe_upload_index_file(index_output.clone()).await?;
 
-            let worker_request = match self.update_manifest(index_output).await {
+            let worker_request = match self.update_manifest(index_output, index_file_id).await {
                 Ok(edit) => {
                     let index_build_finished = IndexBuildFinished {
                         region_id: self.file_meta.region_id,
@@ -738,9 +744,10 @@ impl IndexBuildTask {
         Ok(())
     }
 
-    async fn update_manifest(&mut self, output: IndexOutput) -> Result<RegionEdit> {
+    async fn update_manifest(&mut self, output: IndexOutput, index_file_id: FileId) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.index_file_size = output.file_size;
+        self.file_meta.index_file_id = Some(index_file_id);
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
