@@ -469,9 +469,9 @@ impl ScanRegion {
         // Remove field filters for LastNonNull mode after logging the request.
         self.maybe_remove_field_filters();
 
-        let inverted_index_applier = self.build_invereted_index_applier();
-        let bloom_filter_applier = self.build_bloom_filter_applier();
-        let fulltext_index_applier = self.build_fulltext_index_applier();
+        let inverted_index_applier = self.build_invereted_index_applier(&self.request.filters);
+        let bloom_filter_applier = self.build_bloom_filter_applier(&self.request.filters);
+        let fulltext_index_applier = self.build_fulltext_index_applier(&self.request.filters);
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         if self.flat_format {
@@ -559,8 +559,48 @@ impl ScanRegion {
         });
     }
 
+    /// Collects and returns filters that don't reference field columns.
+    /// Returns a new vector containing only non-field filters.
+    /// If the region is append-only, returns None.
+    fn filters_without_field_filters(&self) -> Option<Vec<Expr>> {
+        if self.version.options.append_mode {
+            return None;
+        }
+
+        let field_columns = self
+            .version
+            .metadata
+            .field_columns()
+            .map(|col| &col.column_schema.name)
+            .collect::<HashSet<_>>();
+
+        let mut columns = HashSet::new();
+
+        let filters = self
+            .request
+            .filters
+            .iter()
+            .filter(|expr| {
+                columns.clear();
+                // `expr_to_columns` won't return error.
+                if expr_to_columns(expr, &mut columns).is_err() {
+                    return false;
+                }
+                // Keep the filter if it doesn't reference any field columns
+                for column in &columns {
+                    if field_columns.contains(&column.name) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        Some(filters)
+    }
+
     /// Use the latest schema to build the inverted index applier.
-    fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
+    fn build_invereted_index_applier(&self, filters: &[Expr]) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
@@ -588,7 +628,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()
         .flatten()
@@ -596,7 +636,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the bloom filter index applier.
-    fn build_bloom_filter_applier(&self) -> Option<BloomFilterIndexApplierRef> {
+    fn build_bloom_filter_applier(&self, filters: &[Expr]) -> Option<BloomFilterIndexApplierRef> {
         if self.ignore_bloom_filter {
             return None;
         }
@@ -615,7 +655,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
         .ok()
         .flatten()
@@ -623,7 +663,7 @@ impl ScanRegion {
     }
 
     /// Use the latest schema to build the fulltext index applier.
-    fn build_fulltext_index_applier(&self) -> Option<FulltextIndexApplierRef> {
+    fn build_fulltext_index_applier(&self, filters: &[Expr]) -> Option<FulltextIndexApplierRef> {
         if self.ignore_fulltext_index {
             return None;
         }
@@ -641,7 +681,7 @@ impl ScanRegion {
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .with_bloom_filter_cache(bloom_filter_index_cache)
-        .build(&self.request.filters)
+        .build(filters)
         .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()
         .flatten()
