@@ -142,6 +142,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.flush_scheduler.on_region_truncated(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_truncated(region_id);
+        // Notifies index build scheduler.
+        self.index_build_scheduler.on_region_truncated(region_id).await;
 
         if let TruncateKind::All {
             truncated_entry_id,

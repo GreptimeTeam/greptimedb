@@ -24,7 +24,9 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::region::MitoRegionRef;
-use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
+use crate::request::{
+    BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
+};
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
@@ -221,6 +223,27 @@ impl<S> RegionWorkerLoop<S> {
         request: IndexBuildFailed,
     ) {
         error!(request.err; "Index build failed for region: {}", region_id);
-        // TODO(SNC123): Implement error handling logic after IndexBuildScheduler optimization.
+        self.index_build_scheduler
+            .on_failure(region_id, request.err.clone())
+            .await;
+    }
+
+    pub(crate) async fn handle_index_build_stopped(
+        &mut self,
+        region_id: RegionId,
+        request: IndexBuildStopped,
+    ) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            warn!(
+                "Region not found for index build stopped, region_id: {}",
+                region_id
+            );
+            return;
+        };
+        self.index_build_scheduler.on_task_stopped(
+            region_id,
+            request.file_id,
+            &region.version_control,
+        );
     }
 }
