@@ -43,6 +43,15 @@ use crate::sst::parquet::metadata::MetadataLoader;
 /// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
 const FILE_DIR: &str = "cache/object/write/";
 
+/// Environment variable for index (puffin) cache ratio.
+const INDEX_CACHE_RATIO_ENV: &str = "INDEX_CACHE_RATIO";
+
+/// Default ratio for index (puffin) cache (60% of total capacity).
+const DEFAULT_INDEX_CACHE_RATIO: f64 = 0.6;
+
+/// Minimum capacity for each cache (512MB).
+const MIN_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
+
 /// A file cache manages files on local store and evict files based
 /// on size.
 #[derive(Debug)]
@@ -57,6 +66,16 @@ pub(crate) struct FileCache {
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
 
+/// Reads the index cache ratio from environment variable.
+/// Returns the default ratio (0.6) if the env var is not set or invalid.
+fn get_index_cache_ratio() -> f64 {
+    std::env::var(INDEX_CACHE_RATIO_ENV)
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|&ratio| ratio > 0.0 && ratio < 1.0)
+        .unwrap_or(DEFAULT_INDEX_CACHE_RATIO)
+}
+
 impl FileCache {
     /// Creates a new file cache.
     pub(crate) fn new(
@@ -64,13 +83,28 @@ impl FileCache {
         capacity: ReadableSize,
         ttl: Option<Duration>,
     ) -> FileCache {
-        // Split capacity evenly between Parquet and Puffin caches
-        let per_cache_capacity = capacity.as_bytes() / 2;
+        // Get the ratio for puffin/index cache from environment variable
+        let index_ratio = get_index_cache_ratio();
+        let total_capacity = capacity.as_bytes();
 
-        let parquet_index =
-            Self::build_cache(local_store.clone(), per_cache_capacity, ttl, "parquet");
-        let puffin_index =
-            Self::build_cache(local_store.clone(), per_cache_capacity, ttl, "puffin");
+        // Calculate capacity for each cache based on the ratio
+        let puffin_capacity = (total_capacity as f64 * index_ratio) as u64;
+        let parquet_capacity = total_capacity - puffin_capacity;
+
+        // Ensure both capacities are at least 512MB
+        let puffin_capacity = puffin_capacity.max(MIN_CACHE_CAPACITY);
+        let parquet_capacity = parquet_capacity.max(MIN_CACHE_CAPACITY);
+
+        info!(
+            "Initializing file cache with index_ratio: {}, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
+            index_ratio,
+            ReadableSize(total_capacity),
+            ReadableSize(parquet_capacity),
+            ReadableSize(puffin_capacity)
+        );
+
+        let parquet_index = Self::build_cache(local_store.clone(), parquet_capacity, ttl, "file");
+        let puffin_index = Self::build_cache(local_store.clone(), puffin_capacity, ttl, "index");
 
         FileCache {
             local_store,

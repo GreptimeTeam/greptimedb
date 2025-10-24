@@ -843,6 +843,15 @@ fn spawn_cache_fill_task(
     let version_control = version_control.clone();
 
     common_runtime::spawn_global(async move {
+        // Read parallelism from environment variable, default to 1
+        let parallelism = std::env::var("CACHE_FILL_PARALLELISM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+        if parallelism == 0 {
+            return;
+        }
+
         // First pass: collect IndexKeys and file sizes for files that need to be downloaded
         let mut files_to_download_list = Vec::new();
         let mut files_skipped = 0;
@@ -869,43 +878,62 @@ fn spawn_cache_fill_task(
         let files_to_download = files_to_download_list.len() as i64;
 
         info!(
-            "Starting background cache fill task for region {}, total_files_to_download: {}, files_already_cached: {}",
-            region_id, files_to_download, files_skipped
+            "Starting background cache fill task for region {}, total_files_to_download: {}, files_already_cached: {}, parallelism: {}",
+            region_id, files_to_download, files_skipped, parallelism
         );
 
         // Set the total files gauge and reset the downloaded files gauge
         CACHE_FILL_TOTAL_FILES.set(files_to_download);
         CACHE_FILL_DOWNLOADED_FILES.set(0);
 
-        // Second pass: download the files
+        // Second pass: download the files in parallel
         let mut files_downloaded = 0;
 
-        for (puffin_key, file_size) in files_to_download_list {
-            let index_remote_path = location::index_file_path(
-                &table_dir,
-                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                path_type,
-            );
+        // Process files in chunks based on parallelism
+        for chunk in files_to_download_list.chunks(parallelism) {
+            let futures = chunk.iter().map(|(puffin_key, file_size)| {
+                let write_cache = write_cache.clone();
+                let table_dir = table_dir.clone();
+                let object_store = object_store.clone();
+                let puffin_key = *puffin_key;
+                let file_size = *file_size;
 
-            match write_cache
-                .download(puffin_key, &index_remote_path, &object_store, file_size)
-                .await
-            {
-                Ok(_) => {
-                    files_downloaded += 1;
-                    CACHE_FILL_DOWNLOADED_FILES.set(files_downloaded);
-                    debug!(
-                        "Downloaded index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
+                async move {
+                    let index_remote_path = location::index_file_path(
+                        &table_dir,
+                        RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
+                        path_type,
                     );
+
+                    match write_cache
+                        .download(puffin_key, &index_remote_path, &object_store, file_size)
+                        .await
+                    {
+                        Ok(_) => {
+                            debug!(
+                                "Downloaded index file to write cache, region: {}, file_id: {}",
+                                region_id, puffin_key.file_id
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            warn!(
+                                e; "Failed to download index file to write cache, region: {}, file_id: {}",
+                                region_id, puffin_key.file_id
+                            );
+                            false
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        e; "Failed to download index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
-                    );
-                }
-            }
+            });
+
+            // Wait for all downloads in this chunk to complete
+            let results = futures::future::join_all(futures).await;
+
+            // Count successful downloads and update metric
+            let chunk_downloaded = results.iter().filter(|&&success| success).count() as i64;
+            files_downloaded += chunk_downloaded;
+            CACHE_FILL_DOWNLOADED_FILES.set(files_downloaded);
         }
 
         info!(
