@@ -560,6 +560,8 @@ pub(super) struct SystemCatalog {
     #[cfg(feature = "enterprise")]
     pub(super) extra_information_table_factories:
         std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
+    /// Enable the builtin `numbers` table
+    pub(super) enable_numbers_table: bool,
 }
 
 impl SystemCatalog {
@@ -585,7 +587,11 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => {
-                vec![NUMBERS_TABLE_NAME.to_string()]
+                if self.enable_numbers_table {
+                    vec![NUMBERS_TABLE_NAME.to_string()]
+                } else {
+                    vec![]
+                }
             }
             _ => vec![],
         }
@@ -604,7 +610,7 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
-            table == NUMBERS_TABLE_NAME
+            self.enable_numbers_table && table == NUMBERS_TABLE_NAME
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
         } else {
@@ -650,7 +656,11 @@ impl SystemCatalog {
                 pg_catalog_provider.table(table_name)
             }
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
-            Some(NumbersTable::table(NUMBERS_TABLE_ID))
+            if self.enable_numbers_table {
+                Some(NumbersTable::table(NUMBERS_TABLE_ID))
+            } else {
+                None
+            }
         } else {
             None
         }

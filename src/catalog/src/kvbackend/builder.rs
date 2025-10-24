@@ -40,6 +40,7 @@ pub struct KvBackendCatalogManagerBuilder {
     #[cfg(feature = "enterprise")]
     extra_information_table_factories:
         std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
+    enable_numbers_table: bool,
 }
 
 impl KvBackendCatalogManagerBuilder {
@@ -56,6 +57,7 @@ impl KvBackendCatalogManagerBuilder {
             process_manager: None,
             #[cfg(feature = "enterprise")]
             extra_information_table_factories: std::collections::HashMap::new(),
+            enable_numbers_table: true,
         }
     }
 
@@ -66,6 +68,12 @@ impl KvBackendCatalogManagerBuilder {
 
     pub fn with_process_manager(mut self, process_manager: ProcessManagerRef) -> Self {
         self.process_manager = Some(process_manager);
+        self
+    }
+
+    /// Sets whether to enable the builtin `numbers` table.
+    pub fn with_enable_numbers_table(mut self, enable: bool) -> Self {
+        self.enable_numbers_table = enable;
         self
     }
 
@@ -88,6 +96,7 @@ impl KvBackendCatalogManagerBuilder {
             process_manager,
             #[cfg(feature = "enterprise")]
             extra_information_table_factories,
+            enable_numbers_table,
         } = self;
         Arc::new_cyclic(|me| KvBackendCatalogManager {
             information_extension,
@@ -123,9 +132,128 @@ impl KvBackendCatalogManagerBuilder {
                 process_manager,
                 #[cfg(feature = "enterprise")]
                 extra_information_table_factories,
+                enable_numbers_table,
             },
             cache_registry,
             procedure_manager,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use table::table::numbers::NUMBERS_TABLE_NAME;
+
+    use super::*;
+    use crate::CatalogManager;
+    use crate::information_schema::NoopInformationExtension;
+
+    #[tokio::test]
+    async fn test_numbers_table_enabled_by_default() {
+        let backend = Arc::new(MemoryKvBackend::new());
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(CacheRegistryBuilder::default().build());
+        let fundamental_cache_registry = build_fundamental_cache_registry(backend.clone());
+        let cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            backend,
+            cache_registry,
+        )
+        .build();
+
+        // Numbers table should be enabled by default
+        let table_names = catalog_manager
+            .table_names(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, None)
+            .await
+            .unwrap();
+        assert!(table_names.contains(&NUMBERS_TABLE_NAME.to_string()));
+
+        let table = catalog_manager
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                NUMBERS_TABLE_NAME,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(table.is_some());
+
+        let exists = catalog_manager
+            .table_exists(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                NUMBERS_TABLE_NAME,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[tokio::test]
+    async fn test_numbers_table_disabled() {
+        let backend = Arc::new(MemoryKvBackend::new());
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(CacheRegistryBuilder::default().build());
+        let fundamental_cache_registry = build_fundamental_cache_registry(backend.clone());
+        let cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            backend,
+            cache_registry,
+        )
+        .with_enable_numbers_table(false)
+        .build();
+
+        // Numbers table should be disabled
+        let table_names = catalog_manager
+            .table_names(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, None)
+            .await
+            .unwrap();
+        assert!(!table_names.contains(&NUMBERS_TABLE_NAME.to_string()));
+
+        let table = catalog_manager
+            .table(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                NUMBERS_TABLE_NAME,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(table.is_none());
+
+        let exists = catalog_manager
+            .table_exists(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                NUMBERS_TABLE_NAME,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!exists);
     }
 }

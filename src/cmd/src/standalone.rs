@@ -414,7 +414,8 @@ impl StartCommand {
             layered_cache_registry.clone(),
         )
         .with_procedure_manager(procedure_manager.clone())
-        .with_process_manager(process_manager.clone());
+        .with_process_manager(process_manager.clone())
+        .with_enable_numbers_table(opts.enable_numbers_table);
         #[cfg(feature = "enterprise")]
         let builder = if let Some(factories) = plugins.get() {
             builder.with_extra_information_table_factories(factories)

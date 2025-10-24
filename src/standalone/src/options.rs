@@ -62,6 +62,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// Enable the builtin `numbers` table. Default: true
+    pub enable_numbers_table: bool,
 }
 
 impl Default for StandaloneOptions {
@@ -96,6 +98,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            enable_numbers_table: true,
         }
     }
 }
