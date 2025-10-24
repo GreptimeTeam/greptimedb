@@ -66,7 +66,7 @@ pub fn greptime_value() -> &'static str {
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
-/// Default counter column name for OTLP metrics.
+/// Default counter column name for OTLP metrics (legacy mode).
 pub const GREPTIME_COUNT: &str = "greptime_count";
 /// Default physical table name
 pub const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";
