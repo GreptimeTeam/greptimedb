@@ -28,9 +28,15 @@ static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
 
 pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
     match prefix {
-        None | Some("") => {
+        None => {
+            // use default greptime prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
+        }
+        Some("") => {
+            // use "" to disable prefix
+            GREPTIME_TIMESTAMP_CELL.get_or_init(|| "timestamp".to_string());
+            GREPTIME_VALUE_CELL.get_or_init(|| "value".to_string());
         }
         Some(x) => {
             ensure!(
