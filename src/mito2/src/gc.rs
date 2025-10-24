@@ -385,6 +385,7 @@ impl LocalGcWorker {
         )
         .await?;
 
+        // FIXME(discord9): if files are already deleted before calling delete_files, the metric will be inaccurate, no clean way to fix it now
         GC_DEL_FILE_CNT.add(file_ids.len() as i64);
 
         Ok(())
