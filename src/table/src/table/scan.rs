@@ -26,6 +26,9 @@ use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -359,6 +362,16 @@ impl ExecutionPlan for RegionScanExec {
 
     fn name(&self) -> &str {
         "RegionScanExec"
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        // TODO(discord9): use the pushdown result to update the scanner's predicate
+        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
     }
 }
 
