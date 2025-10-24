@@ -62,7 +62,7 @@ use crate::sst::{
 };
 
 /// Parquet SST writer.
-pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
+pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
     /// Path provider that creates SST and index file paths according to file id.
     path_provider: P,
     writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
@@ -81,7 +81,7 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     /// Cleaner to remove temp files on failure.
     file_cleaner: Option<TempFileCleaner>,
     /// Write metrics
-    metrics: Metrics,
+    metrics: &'a mut Metrics,
 }
 
 pub trait WriterFactory {
@@ -107,7 +107,7 @@ impl WriterFactory for ObjectStoreWriterFactory {
     }
 }
 
-impl<I, P> ParquetWriter<ObjectStoreWriterFactory, I, P>
+impl<'a, I, P> ParquetWriter<'a, ObjectStoreWriterFactory, I, P>
 where
     P: FilePathProvider,
     I: IndexerBuilder,
@@ -118,8 +118,8 @@ where
         index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
-        metrics: Metrics,
-    ) -> ParquetWriter<ObjectStoreWriterFactory, I, P> {
+        metrics: &'a mut Metrics,
+    ) -> ParquetWriter<'a, ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
@@ -137,7 +137,7 @@ where
     }
 }
 
-impl<F, I, P> ParquetWriter<F, I, P>
+impl<'a, F, I, P> ParquetWriter<'a, F, I, P>
 where
     F: WriterFactory,
     I: IndexerBuilder,
@@ -150,8 +150,8 @@ where
         index_config: IndexConfig,
         indexer_builder: I,
         path_provider: P,
-        metrics: Metrics,
-    ) -> ParquetWriter<F, I, P> {
+        metrics: &'a mut Metrics,
+    ) -> ParquetWriter<'a, F, I, P> {
         let init_file = FileId::random();
         let indexer = indexer_builder.build(init_file).await;
 
@@ -486,11 +486,6 @@ where
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
         }
-    }
-
-    /// Consumes write and return the collected metrics.
-    pub fn into_metrics(self) -> Metrics {
-        self.metrics
     }
 }
 

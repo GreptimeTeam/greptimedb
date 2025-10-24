@@ -47,7 +47,7 @@ pub mod schedule;
 pub mod sst;
 mod time_provider;
 pub mod wal;
-mod worker;
+pub mod worker;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Mito developer document

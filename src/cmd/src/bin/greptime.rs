@@ -103,12 +103,15 @@ async fn main_body() -> Result<()> {
 
 async fn start(cli: Command) -> Result<()> {
     match cli.subcmd {
-        SubCommand::Datanode(cmd) => {
-            let opts = cmd.load_options(&cli.global_options)?;
-            let plugins = Plugins::new();
-            let builder = InstanceBuilder::try_new_with_init(opts, plugins).await?;
-            cmd.build_with(builder).await?.run().await
-        }
+        SubCommand::Datanode(cmd) => match cmd.subcmd {
+            datanode::SubCommand::Start(ref start) => {
+                let opts = start.load_options(&cli.global_options)?;
+                let plugins = Plugins::new();
+                let builder = InstanceBuilder::try_new_with_init(opts, plugins).await?;
+                cmd.build_with(builder).await?.run().await
+            }
+            datanode::SubCommand::Objbench(ref bench) => bench.run().await,
+        },
         SubCommand::Flownode(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
                 .await?

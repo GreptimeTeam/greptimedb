@@ -791,7 +791,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::access_layer::{FilePathProvider, SstWriteRequest, WriteType};
+    use crate::access_layer::{FilePathProvider, Metrics, SstWriteRequest, WriteType};
     use crate::cache::write_cache::WriteCache;
     use crate::config::{FulltextIndexConfig, IndexBuildMode, MitoConfig, Mode};
     use crate::memtable::time_partition::TimePartitions;
@@ -927,11 +927,11 @@ mod tests {
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
         };
+        let mut metrics = Metrics::new(WriteType::Flush);
         env.access_layer
-            .write_sst(write_request, &WriteOptions::default(), WriteType::Flush)
+            .write_sst(write_request, &WriteOptions::default(), &mut metrics)
             .await
             .unwrap()
-            .0
             .remove(0)
     }
 

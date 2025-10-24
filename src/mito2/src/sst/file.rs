@@ -295,8 +295,8 @@ impl FileHandle {
     }
 
     /// Returns the complete file path of the file.
-    pub fn file_path(&self, file_dir: &str, path_type: PathType) -> String {
-        location::sst_file_path(file_dir, self.file_id(), path_type)
+    pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
+        location::sst_file_path(table_dir, self.file_id(), path_type)
     }
 
     /// Returns the time range of the file.
