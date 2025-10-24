@@ -127,6 +127,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            num_series: 0,
             sequence: None,
             partition_expr: None,
         },

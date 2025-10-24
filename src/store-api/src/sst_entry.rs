@@ -61,6 +61,8 @@ pub struct ManifestSstEntry {
     pub num_rows: u64,
     /// Number of row groups in the SST.
     pub num_row_groups: u64,
+    /// Number of series in the SST.
+    pub num_series: Option<u64>,
     /// Min timestamp.
     pub min_ts: Timestamp,
     /// Max timestamp.
@@ -94,6 +96,7 @@ impl ManifestSstEntry {
             ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
             ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
             ColumnSchema::new("num_row_groups", Ty::uint64_datatype(), false),
+            ColumnSchema::new("num_series", Ty::uint64_datatype(), true),
             ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
             ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
@@ -120,6 +123,7 @@ impl ManifestSstEntry {
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
         let num_row_groups = entries.iter().map(|e| e.num_row_groups);
+        let num_series = entries.iter().map(|e| e.num_series);
         let min_ts = entries.iter().map(|e| {
             e.min_ts
                 .convert_to(TimeUnit::Nanosecond)
@@ -150,6 +154,7 @@ impl ManifestSstEntry {
             Arc::new(UInt64Array::from_iter(index_file_sizes)),
             Arc::new(UInt64Array::from_iter_values(num_rows)),
             Arc::new(UInt64Array::from_iter_values(num_row_groups)),
+            Arc::new(UInt64Array::from_iter(num_series)),
             Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
             Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
             Arc::new(UInt64Array::from_iter(sequences)),
@@ -434,6 +439,7 @@ mod tests {
                 index_file_size: None,
                 num_rows: 10,
                 num_row_groups: 2,
+                num_series: Some(5),
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
@@ -456,6 +462,7 @@ mod tests {
                 index_file_size: Some(11),
                 num_rows: 20,
                 num_row_groups: 4,
+                num_series: None,
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
@@ -590,8 +597,16 @@ mod tests {
         assert_eq!(2, num_row_groups.value(0));
         assert_eq!(4, num_row_groups.value(1));
 
-        let min_ts = batch
+        let num_series = batch
             .column(14)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(5, num_series.value(0));
+        assert!(num_series.is_null(1));
+
+        let min_ts = batch
+            .column(15)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -599,7 +614,7 @@ mod tests {
         assert_eq!(5, min_ts.value(1));
 
         let max_ts = batch
-            .column(15)
+            .column(16)
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .unwrap();
@@ -607,7 +622,7 @@ mod tests {
         assert_eq!(2_000_000, max_ts.value(1));
 
         let sequences = batch
-            .column(16)
+            .column(17)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -615,7 +630,7 @@ mod tests {
         assert_eq!(9, sequences.value(1));
 
         let origin_region_ids = batch
-            .column(17)
+            .column(18)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -623,7 +638,7 @@ mod tests {
         assert_eq!(region_id2.as_u64(), origin_region_ids.value(1));
 
         let node_ids = batch
-            .column(18)
+            .column(19)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -631,7 +646,7 @@ mod tests {
         assert!(node_ids.is_null(1));
 
         let visible = batch
-            .column(19)
+            .column(20)
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();

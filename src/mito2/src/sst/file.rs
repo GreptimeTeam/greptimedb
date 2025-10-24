@@ -175,6 +175,10 @@ pub struct FileMeta {
         deserialize_with = "deserialize_partition_expr"
     )]
     pub partition_expr: Option<PartitionExpr>,
+    /// Number of series in the file.
+    ///
+    /// The number is 0 if the series number is not available.
+    pub num_series: u64,
 }
 
 impl Debug for FileMeta {
@@ -210,6 +214,7 @@ impl Debug for FileMeta {
                 }
             })
             .field("partition_expr", &self.partition_expr)
+            .field("num_series", &self.num_series)
             .finish()
     }
 }
@@ -458,6 +463,7 @@ mod tests {
             num_row_groups: 0,
             sequence: None,
             partition_expr: None,
+            num_series: 0,
         }
     }
 
@@ -503,6 +509,7 @@ mod tests {
             num_row_groups: 0,
             sequence: None,
             partition_expr: Some(partition_expr.clone()),
+            num_series: 0,
         };
 
         // Test serialization/deserialization
