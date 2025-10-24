@@ -526,38 +526,25 @@ impl fmt::Debug for QueryMemoryTracker {
 }
 
 impl QueryMemoryTracker {
-    /// Default maximum number of streams that can get privileged memory access.
-    /// Privileged streams can use up to the full memory limit.
-    /// Privilege is granted on a first-come-first-served basis.
-    pub const DEFAULT_PRIVILEGED_SLOTS: usize = 20;
-    /// Default memory fraction available to standard-tier (non-privileged) streams.
-    /// Standard-tier streams can only use up to `limit * this_fraction`.
-    /// Value range: [0.0, 1.0].
-    pub const DEFAULT_STANDARD_TIER_MEMORY_FRACTION: f64 = 0.7;
+    // Default privileged slots when max_concurrent_queries is 0.
+    const DEFAULT_PRIVILEGED_SLOTS: usize = 20;
+    // Ratio for privileged tier: 70% queries get privileged access, standard tier uses 70% memory.
+    const DEFAULT_PRIVILEGED_TIER_RATIO: f64 = 0.7;
 
-    /// Create a new memory tracker with the given limit (in bytes).
-    ///
-    /// Uses default configuration:
-    /// - Privileged slots: 20
-    /// - Standard-tier memory fraction: 0.7 (70%)
+    /// Create a new memory tracker with the given limit and max_concurrent_queries.
+    /// Calculates privileged slots as 70% of max_concurrent_queries (or 20 if max_concurrent_queries is 0).
     ///
     /// # Arguments
     /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
-    pub fn new(limit: usize) -> Self {
-        Self::with_config(
-            limit,
-            Self::DEFAULT_PRIVILEGED_SLOTS,
-            Self::DEFAULT_STANDARD_TIER_MEMORY_FRACTION,
-        )
+    /// * `max_concurrent_queries` - Maximum number of concurrent queries (0 = unlimited).
+    pub fn new(limit: usize, max_concurrent_queries: usize) -> Self {
+        let privileged_slots = Self::calculate_privileged_slots(max_concurrent_queries);
+        Self::with_privileged_slots(limit, privileged_slots)
     }
 
     /// Create a new memory tracker with custom privileged slots limit.
     pub fn with_privileged_slots(limit: usize, privileged_slots: usize) -> Self {
-        Self::with_config(
-            limit,
-            privileged_slots,
-            Self::DEFAULT_STANDARD_TIER_MEMORY_FRACTION,
-        )
+        Self::with_config(limit, privileged_slots, Self::DEFAULT_PRIVILEGED_TIER_RATIO)
     }
 
     /// Create a new memory tracker with full configuration.
@@ -643,6 +630,15 @@ impl QueryMemoryTracker {
     /// Get the current memory usage in bytes.
     pub fn current(&self) -> usize {
         self.current.load(Ordering::Acquire)
+    }
+
+    // Calculate privileged slots based on max_concurrent_queries.
+    fn calculate_privileged_slots(max_concurrent_queries: usize) -> usize {
+        if max_concurrent_queries == 0 {
+            Self::DEFAULT_PRIVILEGED_SLOTS
+        } else {
+            ((max_concurrent_queries as f64 * Self::DEFAULT_PRIVILEGED_TIER_RATIO) as usize).max(1)
+        }
     }
 
     /// Internal method to track additional memory usage.
@@ -888,7 +884,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_basic() {
-        let tracker = Arc::new(QueryMemoryTracker::new(1000));
+        let tracker = Arc::new(QueryMemoryTracker::new(1000, 0));
 
         // Register first stream - should get privileged status
         let permit1 = tracker.register_permit();
@@ -982,7 +978,7 @@ mod tests {
         // Test that the configured limit is absolute hard limit for all streams
         // Privileged: can use full limit (1000)
         // Standard-tier: can use 0.7x limit (700 with defaults)
-        let tracker = Arc::new(QueryMemoryTracker::new(1000));
+        let tracker = Arc::new(QueryMemoryTracker::new(1000, 0));
 
         let permit1 = tracker.register_permit();
         assert!(permit1.is_privileged());

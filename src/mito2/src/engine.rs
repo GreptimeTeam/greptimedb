@@ -150,6 +150,7 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
+    max_concurrent_queries: usize,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -165,6 +166,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
+        max_concurrent_queries: usize,
     ) -> Self {
         Self {
             data_home,
@@ -175,6 +177,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
+            max_concurrent_queries,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -209,13 +212,14 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
-            .with_update_callback(|usage| {
-                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-            })
-            .with_reject_callback(|| {
-                SCAN_REQUESTS_REJECTED_TOTAL.inc();
-            });
+        let scan_memory_tracker =
+            QueryMemoryTracker::new(scan_memory_limit, self.max_concurrent_queries)
+                .with_update_callback(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .with_reject_callback(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                });
 
         let inner = EngineInner {
             workers,
@@ -264,6 +268,7 @@ impl MitoEngine {
             file_ref_manager,
             partition_expr_fetcher,
             plugins,
+            0, // Default: no limit on concurrent queries
         );
         builder.try_build().await
     }
@@ -1272,7 +1277,7 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit)
+        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit, 0)
             .with_update_callback(|usage| {
                 SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
             })
