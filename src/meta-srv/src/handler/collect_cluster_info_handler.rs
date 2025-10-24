@@ -52,8 +52,10 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
-            cpus: info.cpus,
-            memory_bytes: info.memory_bytes,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
         };
 
@@ -88,8 +90,10 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
-            cpus: info.cpus,
-            memory_bytes: info.memory_bytes,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
         };
 
@@ -142,8 +146,10 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
             version: info.version,
             git_commit: info.git_commit,
             start_time_ms: info.start_time_ms,
-            cpus: info.cpus,
-            memory_bytes: info.memory_bytes,
+            total_cpu_millicores: info.total_cpu_millicores,
+            total_memory_bytes: info.total_memory_bytes,
+            cpu_usage_millicores: info.cpu_usage_millicores,
+            memory_usage_bytes: info.memory_usage_bytes,
             hostname: info.hostname,
         };
 

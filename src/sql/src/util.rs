@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
+use itertools::Itertools;
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
@@ -128,6 +129,22 @@ impl From<Vec<&str>> for OptionValue {
                 .collect(),
             named: false,
         }))
+    }
+}
+
+impl Display for OptionValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(s) = self.as_string() {
+            write!(f, "'{s}'")
+        } else if let Some(s) = self.as_list() {
+            write!(
+                f,
+                "[{}]",
+                s.into_iter().map(|x| format!("'{x}'")).join(", ")
+            )
+        } else {
+            write!(f, "'{}'", self.0)
+        }
     }
 }
 

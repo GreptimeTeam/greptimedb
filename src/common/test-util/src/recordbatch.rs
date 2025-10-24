@@ -28,7 +28,7 @@ pub async fn check_output_stream(output: OutputData, expected: &str) {
         _ => unreachable!(),
     };
     let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected, "actual: \n{}", pretty_print);
+    assert_eq!(pretty_print, expected.trim(), "actual: \n{}", pretty_print);
 }
 
 pub async fn execute_and_check_output(db: &Database, sql: &str, expected: ExpectedOutput<'_>) {

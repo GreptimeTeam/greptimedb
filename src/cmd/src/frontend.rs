@@ -32,6 +32,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
@@ -426,11 +427,15 @@ impl StartCommand {
             Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = HeartbeatTask::new(
             &opts,
             meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(executor),
+            Arc::new(resource_stat),
         );
         let heartbeat_task = Some(heartbeat_task);
 

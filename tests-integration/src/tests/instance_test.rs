@@ -2338,3 +2338,59 @@ async fn test_copy_parquet_map_to_binary(instance: Arc<dyn MockInstance>) {
 +----+-----------------------------------------+"#;
     check_output_stream(output, expected).await;
 }
+
+#[apply(both_instances_cases)]
+async fn test_create_table_with_json_datatype(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let sql = r#"
+CREATE TABLE a (
+    j JSON(format = "partial", unstructured_keys = ["foo", "foo.bar"]),
+    ts TIMESTAMP TIME INDEX,
+)"#;
+    let output = execute_sql(&instance, sql).await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    // "show create table" finds the information from table metadata.
+    // So if the output is expected, we know the options are really set.
+    let output = execute_sql(&instance, "SHOW CREATE TABLE a").await.data;
+    let expected = r#"
++-------+------------------------------------------------------------------------------+
+| Table | Create Table                                                                 |
++-------+------------------------------------------------------------------------------+
+| a     | CREATE TABLE IF NOT EXISTS "a" (                                             |
+|       |   "j" JSON(format = 'partial', unstructured_keys = ['foo', 'foo.bar']) NULL, |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                |
+|       |   TIME INDEX ("ts")                                                          |
+|       | )                                                                            |
+|       |                                                                              |
+|       | ENGINE=mito                                                                  |
+|       |                                                                              |
++-------+------------------------------------------------------------------------------+"#;
+    check_output_stream(output, expected).await;
+
+    // test the default options
+    let sql = r#"
+CREATE TABLE b (
+    j JSON,
+    ts TIMESTAMP TIME INDEX,
+)"#;
+    let output = execute_sql(&instance, sql).await.data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let output = execute_sql(&instance, "SHOW CREATE TABLE b").await.data;
+    let expected = r#"
++-------+-----------------------------------------+
+| Table | Create Table                            |
++-------+-----------------------------------------+
+| b     | CREATE TABLE IF NOT EXISTS "b" (        |
+|       |   "j" JSON(format = 'structured') NULL, |
+|       |   "ts" TIMESTAMP(3) NOT NULL,           |
+|       |   TIME INDEX ("ts")                     |
+|       | )                                       |
+|       |                                         |
+|       | ENGINE=mito                             |
+|       |                                         |
++-------+-----------------------------------------+"#;
+    check_output_stream(output, expected).await;
+}

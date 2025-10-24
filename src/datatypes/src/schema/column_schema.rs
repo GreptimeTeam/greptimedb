@@ -23,6 +23,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
+use crate::json::JsonStructureSettings;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
@@ -41,6 +42,7 @@ pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 /// Key used to store skip options in arrow field's metadata.
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
+pub const JSON_STRUCTURE_SETTINGS_KEY: &str = "greptime:json:structure_settings";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
@@ -389,6 +391,21 @@ impl ColumnSchema {
 
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
+
+    pub fn json_structure_settings(&self) -> Result<Option<JsonStructureSettings>> {
+        self.metadata
+            .get(JSON_STRUCTURE_SETTINGS_KEY)
+            .map(|json| serde_json::from_str(json).context(error::DeserializeSnafu { json }))
+            .transpose()
+    }
+
+    pub fn with_json_structure_settings(&mut self, settings: &JsonStructureSettings) -> Result<()> {
+        self.metadata.insert(
+            JSON_STRUCTURE_SETTINGS_KEY.to_string(),
+            serde_json::to_string(settings).context(error::SerializeSnafu)?,
+        );
         Ok(())
     }
 }

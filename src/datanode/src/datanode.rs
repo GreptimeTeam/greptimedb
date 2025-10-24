@@ -28,6 +28,7 @@ use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_query::prelude::set_default_prefix;
+use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
@@ -286,6 +287,9 @@ impl DatanodeBuilder {
             open_all_regions.await?;
         }
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(
                 HeartbeatTask::try_new(
@@ -294,6 +298,7 @@ impl DatanodeBuilder {
                     meta_client,
                     cache_registry,
                     self.plugins.clone(),
+                    Arc::new(resource_stat),
                 )
                 .await?,
             )

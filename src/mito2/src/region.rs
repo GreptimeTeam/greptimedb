@@ -608,6 +608,7 @@ impl MitoRegion {
                     index_file_size,
                     num_rows: meta.num_rows,
                     num_row_groups: meta.num_row_groups,
+                    num_series: Some(meta.num_series),
                     min_ts: meta.time_range.0,
                     max_ts: meta.time_range.1,
                     sequence: meta.sequence.map(|s| s.get()),

@@ -84,6 +84,8 @@ pub struct SstInfo {
     pub file_metadata: Option<Arc<ParquetMetaData>>,
     /// Index Meta Data
     pub index_metadata: IndexOutput,
+    /// Number of series
+    pub num_series: u64,
 }
 
 #[cfg(test)]
@@ -766,6 +768,7 @@ mod tests {
                         .expect("partition expression should be valid JSON"),
                     None => None,
                 },
+                num_series: 0,
             },
             Arc::new(NoopFilePurger),
         );

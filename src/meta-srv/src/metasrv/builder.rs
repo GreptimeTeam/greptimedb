@@ -46,6 +46,7 @@ use common_meta::stats::topic::TopicStatsRegistry;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
+use common_stat::ResourceStatImpl;
 use common_telemetry::{info, warn};
 use snafu::{ResultExt, ensure};
 use store_api::storage::MAX_REGION_SEQ;
@@ -517,6 +518,9 @@ impl MetasrvBuilder {
             .try_start()
             .context(error::InitReconciliationManagerSnafu)?;
 
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+
         Ok(Metasrv {
             state,
             started: Arc::new(AtomicBool::new(false)),
@@ -556,7 +560,7 @@ impl MetasrvBuilder {
             table_id_sequence,
             reconciliation_manager,
             topic_stats_registry,
-            resource_spec: Default::default(),
+            resource_stat: Arc::new(resource_stat),
         })
     }
 }
