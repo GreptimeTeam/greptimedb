@@ -11964,6 +11964,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-sql",
  "datatypes",
+ "either",
  "hex",
  "humantime",
  "iso8601",

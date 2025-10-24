@@ -15,6 +15,7 @@
 use std::str::FromStr;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use arrow_schema::Fields;
 use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -63,7 +64,10 @@ impl DataType for JsonType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Binary
+        match self.format {
+            JsonFormat::Jsonb => ArrowDataType::Binary,
+            JsonFormat::Native(_) => ArrowDataType::Struct(Fields::empty()),
+        }
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {

@@ -159,6 +159,10 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
 
+    if let Some(settings) = column_schema.json_structure_settings()? {
+        extensions.set_json_structure_settings(settings);
+    }
+
     Ok(Column {
         column_def: ColumnDef {
             name: Ident::with_quote(quote_style, name),
