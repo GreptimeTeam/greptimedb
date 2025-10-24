@@ -147,7 +147,7 @@ pub struct FileMeta {
     /// Size of the index file.
     pub index_file_size: u64,
     /// File ID of the index file.
-    /// 
+    ///
     /// When this field is None, it means the index file id is the same as the file id.
     /// Used for rebuilding index files.
     pub index_file_id: Option<FileId>,
@@ -414,7 +414,10 @@ pub async fn delete_files(
             .get(idx)
             .and_then(|id| *id)
             .map(|id| RegionFileId::new(region_id, id));
-        match access_layer.delete_sst(&region_file_id, index_file_id).await {
+        match access_layer
+            .delete_sst(&region_file_id, index_file_id)
+            .await
+        {
             Ok(_) => {
                 deleted_files.push(*file_id);
             }
