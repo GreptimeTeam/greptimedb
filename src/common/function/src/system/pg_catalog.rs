@@ -191,7 +191,10 @@ impl PGCatalogFunction {
         registry.register(pg_catalog::create_pg_get_userbyid_udf());
         registry.register(pg_catalog::create_pg_table_is_visible());
         registry.register(pg_catalog::pg_get_expr_udf::create_pg_get_expr_udf());
-        // TODO(sunng87): upgrade datafusion to add
-        //registry.register(pg_catalog::create_pg_encoding_to_char_udf());
+        registry.register(pg_catalog::create_pg_encoding_to_char_udf());
+        registry.register(pg_catalog::create_pg_relation_size_udf());
+        registry.register(pg_catalog::create_pg_total_relation_size_udf());
+        registry.register(pg_catalog::create_pg_stat_get_numscans());
+        registry.register(pg_catalog::create_pg_get_constraintdef());
     }
 }
