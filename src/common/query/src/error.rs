@@ -200,17 +200,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to set default timestamp column name: {}, message: {}",
-        name,
-        message
-    ))]
-    DefaultTSColName {
-        name: String,
-        message: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
+    #[snafu(display("Invalid character in prefix config: {}", prefix))]
+    InvalidColumnPrefix { prefix: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -240,7 +231,7 @@ impl ErrorExt for Error {
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
             | Error::InvalidFuncArgs { .. }
-            | Error::DefaultTSColName { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 

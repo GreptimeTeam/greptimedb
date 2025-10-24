@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{Column, ColumnDataType, InsertRequest as GrpcInsertRequest, SemanticType, column};
-use common_query::prelude::{GREPTIME_VALUE, greptime_timestamp};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 
 use crate::error::{self, Result};
 
@@ -141,7 +141,7 @@ impl DataPoint {
         columns.push(ts_column);
 
         let field_column = Column {
-            column_name: GREPTIME_VALUE.to_string(),
+            column_name: greptime_value().to_string(),
             values: Some(column::Values {
                 f64_values: vec![self.value],
                 ..Default::default()
@@ -277,7 +277,7 @@ mod test {
             vec![1000]
         );
 
-        assert_eq!(columns[1].column_name, GREPTIME_VALUE);
+        assert_eq!(columns[1].column_name, greptime_value());
         assert_eq!(columns[1].values.as_ref().unwrap().f64_values, vec![1.0]);
 
         assert_eq!(columns[2].column_name, "tagk1");

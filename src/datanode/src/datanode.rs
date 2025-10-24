@@ -27,7 +27,7 @@ use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
-use common_query::prelude::set_greptime_timestamp;
+use common_query::prelude::set_default_prefix;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
@@ -220,7 +220,7 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        set_greptime_timestamp(self.opts.default_timestamp_column_name.as_deref())
+        set_default_prefix(self.opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
             .context(BuildDatanodeSnafu)?;
 

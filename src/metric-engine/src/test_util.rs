@@ -17,7 +17,7 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use common_meta::ddl::utils::parse_column_metadatas;
-use common_query::prelude::greptime_timestamp;
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -142,7 +142,7 @@ impl TestEnv {
                     column_id: 1,
                     semantic_type: SemanticType::Field,
                     column_schema: ColumnSchema::new(
-                        "greptime_value",
+                        greptime_value(),
                         ConcreteDataType::float64_datatype(),
                         false,
                     ),
@@ -206,7 +206,7 @@ impl TestEnv {
             column_names,
             vec![
                 greptime_timestamp(),
-                "greptime_value",
+                greptime_value(),
                 "__table_id",
                 "__tsid",
                 "job",
@@ -310,7 +310,7 @@ pub fn create_logical_region_request(
             column_id: 1,
             semantic_type: SemanticType::Field,
             column_schema: ColumnSchema::new(
-                "greptime_value",
+                greptime_value(),
                 ConcreteDataType::float64_datatype(),
                 false,
             ),
@@ -380,7 +380,7 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
             options: None,
         },
         PbColumnSchema {
-            column_name: "greptime_value".to_string(),
+            column_name: greptime_value().to_string(),
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
             datatype_extension: None,

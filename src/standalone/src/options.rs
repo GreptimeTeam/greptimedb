@@ -37,7 +37,7 @@ use servers::http::HttpOptions;
 pub struct StandaloneOptions {
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
-    pub default_timestamp_column_name: Option<String>,
+    pub default_column_prefix: Option<String>,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -70,7 +70,7 @@ impl Default for StandaloneOptions {
         Self {
             enable_telemetry: true,
             default_timezone: None,
-            default_timestamp_column_name: None,
+            default_column_prefix: None,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),

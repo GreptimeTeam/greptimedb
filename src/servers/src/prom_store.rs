@@ -22,7 +22,7 @@ use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_VALUE, greptime_timestamp};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
@@ -241,7 +241,8 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
         ));
 
         for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
-            if column_schema.name == GREPTIME_VALUE || column_schema.name == greptime_timestamp() {
+            if column_schema.name == greptime_value() || column_schema.name == greptime_timestamp()
+            {
                 continue;
             }
 
@@ -289,7 +290,7 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
         }
     );
 
-    let field_column = recordbatch.column_by_name(GREPTIME_VALUE).context(
+    let field_column = recordbatch.column_by_name(greptime_value()).context(
         error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
         },
@@ -381,7 +382,7 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
             // value
             row_writer::write_f64(
                 table_data,
-                GREPTIME_VALUE,
+                greptime_value(),
                 series.samples[0].value,
                 &mut one_row,
             )?;
@@ -403,7 +404,7 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 let kvs = kvs.clone();
                 row_writer::write_tags(table_data, kvs, &mut one_row)?;
                 // value
-                row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
+                row_writer::write_f64(table_data, greptime_value(), *value, &mut one_row)?;
                 // timestamp
                 row_writer::write_ts_to_millis(
                     table_data,
@@ -632,7 +633,7 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
         ]));
@@ -701,7 +702,7 @@ mod tests {
         mut kts_iter: Vec<(&str, ColumnDataType, SemanticType)>,
     ) -> Vec<api::v1::ColumnSchema> {
         kts_iter.push((
-            "greptime_value",
+            greptime_value(),
             ColumnDataType::Float64,
             SemanticType::Field,
         ));
@@ -845,7 +846,7 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(GREPTIME_VALUE, ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
 

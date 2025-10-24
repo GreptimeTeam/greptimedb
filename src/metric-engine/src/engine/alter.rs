@@ -224,7 +224,7 @@ mod test {
     use api::v1::SemanticType;
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
-    use common_query::prelude::greptime_timestamp;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
@@ -307,7 +307,7 @@ mod test {
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
-                ("greptime_value", 1),
+                (greptime_value(), 1),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
                 ("job", 2),
@@ -366,7 +366,7 @@ mod test {
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
-                ("greptime_value", 1),
+                (greptime_value(), 1),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
                 ("job", 2),

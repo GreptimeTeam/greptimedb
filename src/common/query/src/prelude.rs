@@ -18,10 +18,31 @@ use once_cell::sync::OnceCell;
 use snafu::ensure;
 
 pub use crate::columnar_value::ColumnarValue;
-use crate::error::{DefaultTSColNameSnafu, Result};
+use crate::error::{InvalidColumnPrefixSnafu, Result};
 
 /// Default timestamp column name.
 static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
+
+/// Default value column name.
+static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
+
+pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
+    match prefix {
+        None | Some("") => {
+            GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
+            GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
+        }
+        Some(x) => {
+            ensure!(
+                NAME_PATTERN_REG.is_match(x),
+                InvalidColumnPrefixSnafu { prefix: x }
+            );
+            GREPTIME_TIMESTAMP_CELL.get_or_init(|| format!("{}_timestamp", x));
+            GREPTIME_VALUE_CELL.get_or_init(|| format!("{}_value", x));
+        }
+    }
+    Ok(())
+}
 
 /// Get the default timestamp column name.
 /// Returns the configured value, or `greptime_timestamp` if not set.
@@ -29,31 +50,16 @@ pub fn greptime_timestamp() -> &'static str {
     GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string())
 }
 
-/// Set the default timestamp column name.
-/// This should be called once during application startup.
-/// Returns Ok(()) if successful, or Err with the attempted value if already set.
-pub fn set_greptime_timestamp(name: Option<&str>) -> Result<()> {
-    let ts = match name {
-        None | Some("") => GREPTIME_TIMESTAMP,
-        Some(ts) => ts,
-    };
-
-    ensure!(
-        NAME_PATTERN_REG.is_match(ts),
-        DefaultTSColNameSnafu {
-            name: ts,
-            message: format!("Invalid character in timestamp column name: {}", ts)
-        }
-    );
-
-    GREPTIME_TIMESTAMP_CELL.get_or_init(|| ts.to_string());
-    Ok(())
+/// Get the default value column name.
+/// Returns the configured value, or `greptime_value` if not set.
+pub fn greptime_value() -> &'static str {
+    GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string())
 }
 
 /// Default timestamp column name constant for backward compatibility.
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
-/// Default value column name for Prometheus metrics.
-pub const GREPTIME_VALUE: &str = "greptime_value";
+/// Default value column name constant for backward compatibility.
+const GREPTIME_VALUE: &str = "greptime_value";
 /// Default counter column name for OTLP metrics.
 pub const GREPTIME_COUNT: &str = "greptime_count";
 /// Default physical table name

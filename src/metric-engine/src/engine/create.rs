@@ -619,7 +619,7 @@ pub(crate) fn region_options_for_metadata_region(
 mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
-    use common_query::prelude::greptime_timestamp;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::region_request::BatchRegionDdlRequest;
 
@@ -858,7 +858,7 @@ mod test {
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
-                ("greptime_value", 1),
+                (greptime_value(), 1),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
                 ("job", 2),

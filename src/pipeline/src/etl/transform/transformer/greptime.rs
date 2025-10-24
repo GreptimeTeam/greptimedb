@@ -24,7 +24,7 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
-use common_query::prelude::{GREPTIME_VALUE, greptime_timestamp};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
@@ -412,7 +412,7 @@ pub(crate) fn values_to_row(
 }
 
 fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
-    if p_ctx.channel == Channel::Prometheus && column_name != GREPTIME_VALUE {
+    if p_ctx.channel == Channel::Prometheus && column_name != greptime_value() {
         SemanticType::Tag as i32
     } else {
         SemanticType::Field as i32

@@ -17,7 +17,6 @@ use std::time::Duration;
 use cmd::options::GreptimeOptions;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_query::prelude::greptime_timestamp;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -49,7 +48,7 @@ fn test_load_datanode_example_config() {
     let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
-            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -115,7 +114,7 @@ fn test_load_frontend_example_config() {
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
-            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -276,7 +275,7 @@ fn test_load_standalone_example_config() {
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
-            default_timestamp_column_name: Some(greptime_timestamp().to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),

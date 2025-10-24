@@ -45,7 +45,7 @@ use crate::service_config::{
 pub struct FrontendOptions {
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
-    pub default_timestamp_column_name: Option<String>,
+    pub default_column_prefix: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -78,7 +78,7 @@ impl Default for FrontendOptions {
         Self {
             node_id: None,
             default_timezone: None,
-            default_timestamp_column_name: None,
+            default_column_prefix: None,
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),

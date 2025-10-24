@@ -154,7 +154,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_query::prelude::greptime_timestamp;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use datafusion_common::Column;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
     use datatypes::prelude::ConcreteDataType;
@@ -194,7 +194,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     false,
                 ),

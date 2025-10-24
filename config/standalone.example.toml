@@ -2,9 +2,9 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default timestamp column name.
+## The default column prefix for auto-created timestamp and value columns.
 ## @toml2docs:none-default
-default_timestamp_column_name = "greptime_timestamp"
+default_column_prefix = "greptime"
 
 ## Initialize all regions in the background during the startup.
 ## By default, it provides services after all regions have been initialized.
