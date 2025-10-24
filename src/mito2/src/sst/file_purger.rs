@@ -130,6 +130,7 @@ impl LocalFilePurger {
                 file_meta.region_id,
                 &[file_meta.file_id],
                 file_meta.exists_index(),
+                &[file_meta.index_file_id],
                 &sst_layer,
                 &cache_manager,
             )
@@ -232,6 +233,7 @@ mod tests {
                     file_size: 4096,
                     available_indexes: Default::default(),
                     index_file_size: 0,
+                    index_file_id: None,
                     num_rows: 0,
                     num_row_groups: 0,
                     sequence: None,
@@ -299,6 +301,7 @@ mod tests {
                     file_size: 4096,
                     available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
                     index_file_size: 4096,
+                    index_file_id: None,
                     num_rows: 1024,
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),
