@@ -32,11 +32,6 @@ use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
-// wait listener receives enough success count.
-async fn wait_finish(listener: &IndexBuildListener, times: usize) {
-    listener.wait_finish(times).await;
-}
-
 fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
     let mut config = MitoConfig::default();
     config.index.build_mode = IndexBuildMode::Async;
@@ -84,7 +79,7 @@ fn assert_listener_counts(
     expected_success_count: usize,
 ) {
     assert_eq!(listener.begin_count(), expected_begin_count);
-    assert_eq!(listener.success_count(), expected_success_count);
+    assert_eq!(listener.finish_count(), expected_success_count);
 }
 
 #[tokio::test]
@@ -155,7 +150,7 @@ async fn test_index_build_type_flush() {
     flush_region(&engine, region_id, None).await;
 
     // After 2 index build task are finished, 2 index files should exist.
-    wait_finish(&listener, 2).await;
+    listener.wait_finish(2).await;
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
@@ -204,6 +199,8 @@ async fn test_index_build_type_compact() {
     put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
     put_and_flush(&engine, region_id, &column_schemas, 40..50).await;
 
+    // all index build tasks begin means flush tasks are all finished.
+    listener.wait_begin(4).await;
     // Before compaction is triggered, files should be 4, and not all index files are built.
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
@@ -216,8 +213,8 @@ async fn test_index_build_type_compact() {
     // This explicit compaction call serves to make the process deterministic for the test.
     compact(&engine, region_id).await;
 
+    listener.wait_begin(5).await; // 4 flush + 1 compaction begin
     // Before compaction is triggered, files should be 2, and not all index files are built.
-    listener.clear_success_count();
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
@@ -226,7 +223,7 @@ async fn test_index_build_type_compact() {
     assert!(num_of_index_files(&engine, &scanner, region_id).await < 2);
 
     // Wait a while to make sure index build tasks are finished.
-    wait_finish(&listener, 2).await;
+    listener.wait_stop(5).await; // 4 flush + 1 compaction = some abort + some finish
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
@@ -292,7 +289,7 @@ async fn test_index_build_type_schema_change() {
         .handle_request(region_id, RegionRequest::Alter(set_index_request))
         .await
         .unwrap();
-    wait_finish(&listener, 1).await;
+    listener.wait_finish(1).await;
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
