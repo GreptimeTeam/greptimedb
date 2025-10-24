@@ -14,6 +14,9 @@ init_regions_in_background = false
 init_regions_parallelism = 16
 
 ## The maximum current queries allowed to be executed. Zero means unlimited.
+## NOTE: This setting affects scan_memory_limit's privileged tier allocation.
+## When set, 70% of queries get privileged memory access (full scan_memory_limit).
+## The remaining 30% get standard tier access (70% of scan_memory_limit).
 max_concurrent_queries = 0
 
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
@@ -602,6 +605,9 @@ allow_stale_entries = false
 ## Memory limit for table scans across all queries.
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit.
+## NOTE: Works with max_concurrent_queries for tiered memory allocation.
+## - If max_concurrent_queries is set: 70% of queries get full access, 30% get 70% access.
+## - If max_concurrent_queries is 0 (unlimited): first 20 queries get full access, rest get 70% access.
 scan_memory_limit = "50%"
 
 ## Minimum time interval between two compactions.
