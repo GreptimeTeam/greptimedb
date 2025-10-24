@@ -1534,6 +1534,13 @@ mem_threshold_on_create = "auto"
 [region_engine.mito.memtable]
 type = "time_series"
 
+[region_engine.mito.gc]
+enable = false
+lingering_time = "5m"
+unknown_file_lingering_time = "6h"
+max_concurrent_lister_per_gc_job = 32
+max_concurrent_gc_job = 4
+
 [[region_engine]]
 
 [region_engine.file]
