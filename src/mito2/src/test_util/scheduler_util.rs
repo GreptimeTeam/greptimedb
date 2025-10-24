@@ -114,7 +114,7 @@ impl SchedulerEnv {
     pub(crate) fn mock_index_build_scheduler(&self) -> IndexBuildScheduler {
         let scheduler = self.get_scheduler();
 
-        IndexBuildScheduler::new(scheduler)
+        IndexBuildScheduler::new(scheduler, 5)
     }
 
     /// Creates a new manifest context.

@@ -498,7 +498,7 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
-            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool),
+            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool, self.config.max_background_index_builds),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -1047,6 +1047,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
             BackgroundNotify::IndexBuildFinished(req) => {
                 self.handle_index_build_finished(region_id, req).await
+            }
+            BackgroundNotify::IndexBuildStopped(req) => {
+                self.handle_index_build_stopped(region_id, req).await
             }
             BackgroundNotify::IndexBuildFailed(req) => {
                 self.handle_index_build_failed(region_id, req).await

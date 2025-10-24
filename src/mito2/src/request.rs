@@ -39,7 +39,7 @@ use store_api::region_request::{
     RegionCatchupRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
@@ -780,8 +780,9 @@ pub(crate) enum BackgroundNotify {
     FlushFailed(FlushFailed),
     /// Index build has finished.
     IndexBuildFinished(IndexBuildFinished),
+    /// Index build has been stopped (aborted or succeeded).
+    IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
-    #[allow(dead_code)]
     IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
@@ -846,10 +847,17 @@ pub(crate) struct IndexBuildFinished {
     pub(crate) edit: RegionEdit,
 }
 
+/// Notifies an index build job has been stopped.
+#[derive(Debug)]
+pub(crate) struct IndexBuildStopped {
+    #[allow(dead_code)]
+    pub(crate) region_id: RegionId,
+    pub(crate) file_id: FileId,
+}
+
 /// Notifies an index build job has failed.
 #[derive(Debug)]
 pub(crate) struct IndexBuildFailed {
-    #[allow(dead_code)]
     pub(crate) err: Arc<Error>,
 }
 
