@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::{
-    Date32Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
+    Date32Type, Date64Type, Decimal128Type, DurationMicrosecondType, DurationMillisecondType,
     DurationNanosecondType, DurationSecondType, Float32Type, Float64Type, Int8Type, Int16Type,
     Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
     Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
@@ -223,9 +223,33 @@ fn encode_array(
             let array = array.into_iter().collect::<Vec<_>>();
             builder.encode_field(&array)
         }
-        DataType::Date32 => {
-            let array = array.as_primitive::<Date32Type>();
-            let array = array
+        DataType::LargeUtf8 => {
+            let array = array.as_string::<i64>();
+            let array = array.into_iter().collect::<Vec<_>>();
+            builder.encode_field(&array)
+        }
+        DataType::Utf8View => {
+            let array = array.as_string_view();
+            let array = array.into_iter().collect::<Vec<_>>();
+            builder.encode_field(&array)
+        }
+        DataType::Date32 | DataType::Date64 => {
+            let iter: Box<dyn Iterator<Item = Option<i32>>> =
+                if matches!(array.data_type(), DataType::Date32) {
+                    let array = array.as_primitive::<Date32Type>();
+                    Box::new(array.into_iter())
+                } else {
+                    let array = array.as_primitive::<Date64Type>();
+                    // `Date64` values are milliseconds representation of `Date32` values, according
+                    // to its specification. So we convert them to `Date32` values to process the
+                    // `Date64` array unified with `Date32` array.
+                    Box::new(
+                        array
+                            .into_iter()
+                            .map(|x| x.map(|i| (i / 86_400_000) as i32)),
+                    )
+                };
+            let array = iter
                 .into_iter()
                 .map(|v| match v {
                     None => Ok(None),
@@ -286,25 +310,34 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
             builder.encode_field(&array)
         }
-        DataType::Time32(time_unit) => {
-            let array = match time_unit {
+        DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
+            let iter: Box<dyn Iterator<Item = Option<Time>>> = match time_unit {
                 TimeUnit::Second => {
                     let array = array.as_primitive::<Time32SecondType>();
-                    array
-                        .into_iter()
-                        .map(|v| v.map(|i| Time::new_second(i as i64)))
-                        .collect::<Vec<_>>()
+                    Box::new(
+                        array
+                            .into_iter()
+                            .map(|v| v.map(|i| Time::new_second(i as i64))),
+                    )
                 }
                 TimeUnit::Millisecond => {
                     let array = array.as_primitive::<Time32MillisecondType>();
-                    array
-                        .into_iter()
-                        .map(|v| v.map(|i| Time::new_millisecond(i as i64)))
-                        .collect::<Vec<_>>()
+                    Box::new(
+                        array
+                            .into_iter()
+                            .map(|v| v.map(|i| Time::new_millisecond(i as i64))),
+                    )
                 }
-                _ => unreachable!("`DataType::Time32` has only second and millisecond time units"),
+                TimeUnit::Microsecond => {
+                    let array = array.as_primitive::<Time64MicrosecondType>();
+                    Box::new(array.into_iter().map(|v| v.map(Time::new_microsecond)))
+                }
+                TimeUnit::Nanosecond => {
+                    let array = array.as_primitive::<Time64NanosecondType>();
+                    Box::new(array.into_iter().map(|v| v.map(Time::new_nanosecond)))
+                }
             };
-            let array = array
+            let array = iter
                 .into_iter()
                 .map(|v| v.and_then(|v| v.to_chrono_time()))
                 .collect::<Vec<Option<NaiveTime>>>();
@@ -515,9 +548,18 @@ impl RecordBatchRowIterator {
                         &self.query_ctx,
                     )?;
                 }
-                DataType::Date32 => {
-                    let array = column.as_primitive::<Date32Type>();
-                    let v = Date::new(array.value(i));
+                DataType::Date32 | DataType::Date64 => {
+                    let v = if matches!(column.data_type(), DataType::Date32) {
+                        let array = column.as_primitive::<Date32Type>();
+                        array.value(i)
+                    } else {
+                        let array = column.as_primitive::<Date64Type>();
+                        // `Date64` values are milliseconds representation of `Date32` values,
+                        // according to its specification. So we convert the `Date64` value here to
+                        // the `Date32` value to process them unified.
+                        (array.value(i) / 86_400_000) as i32
+                    };
+                    let v = Date::new(v);
                     let date = v.to_chrono_date().map(|v| {
                         let (style, order) =
                             *self.query_ctx.configuration_parameter().pg_datetime_style();
@@ -608,7 +650,7 @@ impl RecordBatchRowIterator {
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
                 }
-                DataType::Time32(time_unit) => {
+                DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
                     let v = match time_unit {
                         TimeUnit::Second => {
                             let array = column.as_primitive::<Time32SecondType>();
@@ -618,14 +660,6 @@ impl RecordBatchRowIterator {
                             let array = column.as_primitive::<Time32MillisecondType>();
                             Time::new_millisecond(array.value(i) as i64)
                         }
-                        _ => unreachable!(
-                            "`DataType::Time32` has only second and millisecond time units"
-                        ),
-                    };
-                    encoder.encode_field(&v.to_chrono_time())?;
-                }
-                DataType::Time64(time_unit) => {
-                    let v = match time_unit {
                         TimeUnit::Microsecond => {
                             let array = column.as_primitive::<Time64MicrosecondType>();
                             Time::new_microsecond(array.value(i))
@@ -634,9 +668,6 @@ impl RecordBatchRowIterator {
                             let array = column.as_primitive::<Time64NanosecondType>();
                             Time::new_nanosecond(array.value(i))
                         }
-                        _ => unreachable!(
-                            "`DataType::Time64` has only microsecond and nanosecond time units"
-                        ),
                     };
                     encoder.encode_field(&v.to_chrono_time())?;
                 }
