@@ -26,6 +26,9 @@ max_concurrent_queries = 0
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
 
+## Enable the builtin `numbers` table. Default: true
+#+ enable_numbers_table = true
+
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
