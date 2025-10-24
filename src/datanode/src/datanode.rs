@@ -518,6 +518,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
+                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -560,6 +561,7 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
+                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
