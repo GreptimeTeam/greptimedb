@@ -55,6 +55,8 @@ impl Display for RegionIdent {
 /// The result of downgrade leader region.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DowngradeRegionReply {
+    /// The [RegionId].
+    /// For compatibility, it is defaulted to [RegionId::new(0, 0)].
     #[serde(default)]
     pub region_id: RegionId,
     /// Returns the `last_entry_id` if available.
