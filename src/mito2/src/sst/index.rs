@@ -1429,7 +1429,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1473,7 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_sst_exist() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let region_id = metadata.region_id;
@@ -1541,7 +1541,7 @@ mod tests {
 
     async fn schedule_index_build_task_with_mode(build_mode: IndexBuildMode) {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1632,7 +1632,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_no_index() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let mut metadata = sst_region_metadata();
         // Unset indexes in metadata to simulate no index scenario.
         metadata.column_metadatas.iter_mut().for_each(|col| {
@@ -1691,7 +1691,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_with_write_cache() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1768,5 +1768,146 @@ mod tests {
         // The write cache should contain the uploaded index file.
         let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
         assert!(write_cache.file_cache().contains_key(&index_key));
+    }
+
+    async fn create_mock_task_for_schedule(
+        env: &SchedulerEnv,
+        file_id: FileId,
+        region_id: RegionId,
+        reason: IndexBuildType,
+    ) -> IndexBuildTask {
+        let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
+        let indexer_builder = mock_indexer_builder(metadata, env).await;
+        let (tx, _rx) = mpsc::channel(4);
+        let (result_tx, _result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
+
+        IndexBuildTask {
+            file_meta: FileMeta {
+                region_id,
+                file_id,
+                file_size: 100,
+                ..Default::default()
+            },
+            reason,
+            access_layer: env.access_layer.clone(),
+            manifest_ctx,
+            write_cache: None,
+            file_purger,
+            indexer_builder,
+            request_sender: tx,
+            result_sender: result_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_comprehensive() {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(2);
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let file_purger = Arc::new(NoopFilePurger {});
+        
+        // Prepare multiple files for testing
+        let file_id1 = FileId::random();
+        let file_id2 = FileId::random();
+        let file_id3 = FileId::random();
+        let file_id4 = FileId::random();
+        let file_id5 = FileId::random();
+        
+        let mut files = HashMap::new();
+        for file_id in [file_id1, file_id2, file_id3, file_id4, file_id5] {
+            files.insert(file_id, FileMeta {
+                region_id,
+                file_id,
+                file_size: 100,
+                ..Default::default()
+            });
+        }
+        
+        let version_control = mock_version_control(metadata, file_purger, files).await;
+        
+        // Test 1: Basic scheduling
+        let task1 = create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        assert!(scheduler.schedule_build(&version_control, task1).is_ok());
+        assert!(scheduler.region_status.contains_key(&region_id));
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1);
+        assert!(status.building_files.contains(&file_id1));
+        
+        // Test 2: Duplicate file scheduling (should be skipped)
+        let task1_dup = create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        scheduler.schedule_build(&version_control, task1_dup).unwrap();
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1); // Still only one
+        
+        // Test 3: Fill up to limit (2 building tasks)
+        let task2 = create_mock_task_for_schedule(&env, file_id2, region_id, IndexBuildType::Flush).await;
+        scheduler.schedule_build(&version_control, task2).unwrap();
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2); // Reached limit
+        assert_eq!(status.pending_tasks.len(), 0);
+        
+        // Test 4: Add tasks with different priorities to pending queue
+        // Now all new tasks will be pending since we reached the limit
+        let task3 = create_mock_task_for_schedule(&env, file_id3, region_id, IndexBuildType::Compact).await;
+        let task4 = create_mock_task_for_schedule(&env, file_id4, region_id, IndexBuildType::SchemaChange).await;
+        let task5 = create_mock_task_for_schedule(&env, file_id5, region_id, IndexBuildType::Manual).await;
+        
+        scheduler.schedule_build(&version_control, task3).unwrap();
+        scheduler.schedule_build(&version_control, task4).unwrap();
+        scheduler.schedule_build(&version_control, task5).unwrap();
+        
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2); // Still at limit
+        assert_eq!(status.pending_tasks.len(), 3); // Three pending
+        
+        // Test 5: Task completion triggers scheduling next highest priority task (Manual)
+        scheduler.on_task_stopped(region_id, file_id1, &version_control);
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert!(!status.building_files.contains(&file_id1));
+        assert_eq!(status.building_files.len(), 2); // Should schedule next task
+        assert_eq!(status.pending_tasks.len(), 2); // One less pending
+        // The highest priority task (Manual) should now be building
+        assert!(status.building_files.contains(&file_id5));
+        
+        // Test 6: Complete another task, should schedule SchemaChange (second highest priority)
+        scheduler.on_task_stopped(region_id, file_id2, &version_control);
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2);
+        assert_eq!(status.pending_tasks.len(), 1); // One less pending
+        assert!(status.building_files.contains(&file_id4)); // SchemaChange should be building
+        
+        // Test 7: Complete remaining tasks and cleanup
+        scheduler.on_task_stopped(region_id, file_id5, &version_control);
+        scheduler.on_task_stopped(region_id, file_id4, &version_control);
+        
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1); // Last task (Compact) should be building
+        assert_eq!(status.pending_tasks.len(), 0);
+        assert!(status.building_files.contains(&file_id3));
+        
+        scheduler.on_task_stopped(region_id, file_id3, &version_control);
+        
+        // Region should be removed when all tasks complete
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        
+        // Test 8: Region dropped with pending tasks
+        let task6 = create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        let task7 = create_mock_task_for_schedule(&env, file_id2, region_id, IndexBuildType::Flush).await;
+        let task8 = create_mock_task_for_schedule(&env, file_id3, region_id, IndexBuildType::Manual).await;
+        
+        scheduler.schedule_build(&version_control, task6).unwrap();
+        scheduler.schedule_build(&version_control, task7).unwrap();
+        scheduler.schedule_build(&version_control, task8).unwrap();
+        
+        assert!(scheduler.region_status.contains_key(&region_id));
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2);
+        assert_eq!(status.pending_tasks.len(), 1);
+        
+        scheduler.on_region_dropped(region_id).await;
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 }
