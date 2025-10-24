@@ -240,6 +240,24 @@ impl ExecutionPlan for PartSortExec {
 
         Ok(FilterDescription::new().with_child(child))
     }
+
+    fn reset_state(self: Arc<Self>) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        // shared dynamic filter needs to be reset
+        let new_filter = self
+            .limit
+            .is_some()
+            .then(|| Self::create_filter(self.expression.expr.clone()));
+
+        Ok(Arc::new(Self {
+            expression: self.expression.clone(),
+            limit: self.limit,
+            input: self.input.clone(),
+            metrics: self.metrics.clone(),
+            partition_ranges: self.partition_ranges.clone(),
+            properties: self.properties.clone(),
+            filter: new_filter,
+        }))
+    }
 }
 
 enum PartSortBuffer {
