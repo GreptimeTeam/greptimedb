@@ -43,7 +43,8 @@ use store_api::storage::{ColumnId, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
-    self, ComputeArrowSnafu, ConvertVectorSnafu, EncodeSnafu, PrimaryKeyLengthMismatchSnafu, Result,
+    self, ComputeArrowSnafu, ConvertVectorSnafu, DataTypeMismatchSnafu, EncodeSnafu,
+    PrimaryKeyLengthMismatchSnafu, Result,
 };
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::builder::{FieldBuilder, StringBuilder};
@@ -192,7 +193,7 @@ impl TimeSeriesMemtable {
             .context(EncodeSnafu)?;
 
         let (key_allocated, value_allocated) =
-            self.series_set.push_to_series(primary_key_encoded, &kv);
+            self.series_set.push_to_series(primary_key_encoded, &kv)?;
         stats.key_bytes += key_allocated;
         stats.value_bytes += value_allocated;
 
@@ -423,24 +424,24 @@ impl SeriesSet {
 
 impl SeriesSet {
     /// Push [KeyValue] to SeriesSet with given primary key and return key/value allocated memory size.
-    fn push_to_series(&self, primary_key: Vec<u8>, kv: &KeyValue) -> (usize, usize) {
+    fn push_to_series(&self, primary_key: Vec<u8>, kv: &KeyValue) -> Result<(usize, usize)> {
         if let Some(series) = self.series.read().unwrap().0.get(&primary_key) {
             let value_allocated = series.write().unwrap().push(
                 kv.timestamp(),
                 kv.sequence(),
                 kv.op_type(),
                 kv.fields(),
-            );
-            return (0, value_allocated);
+            )?;
+            return Ok((0, value_allocated));
         };
 
         let mut indices = self.series.write().unwrap();
-        match indices.0.entry(primary_key) {
+        Ok(match indices.0.entry(primary_key) {
             Entry::Vacant(v) => {
                 let key_len = v.key().len();
                 let mut series = Series::new(&self.region_metadata);
                 let value_allocated =
-                    series.push(kv.timestamp(), kv.sequence(), kv.op_type(), kv.fields());
+                    series.push(kv.timestamp(), kv.sequence(), kv.op_type(), kv.fields())?;
                 v.insert(Arc::new(RwLock::new(series)));
                 (key_len, value_allocated)
             }
@@ -451,10 +452,10 @@ impl SeriesSet {
                     kv.sequence(),
                     kv.op_type(),
                     kv.fields(),
-                );
+                )?;
                 (0, value_allocated)
             }
-        }
+        })
     }
 
     #[cfg(test)]
@@ -756,7 +757,7 @@ impl Series {
         sequence: u64,
         op_type: OpType,
         values: impl Iterator<Item = ValueRef<'a>>,
-    ) -> usize {
+    ) -> Result<usize> {
         // + 10 to avoid potential reallocation.
         if self.active.len() + 10 > self.capacity {
             let region_metadata = self.region_metadata.clone();
@@ -892,7 +893,7 @@ impl ValueBuilder {
         sequence: u64,
         op_type: u8,
         fields: impl Iterator<Item = ValueRef<'a>>,
-    ) -> usize {
+    ) -> Result<usize> {
         #[cfg(debug_assertions)]
         let fields = {
             let field_vec = fields.collect::<Vec<_>>();
@@ -922,14 +923,16 @@ impl ValueBuilder {
                             )
                         };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.push(field_value);
+                    mutable_vector
+                        .push(field_value)
+                        .context(DataTypeMismatchSnafu)?;
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
             }
         }
 
-        size
+        Ok(size)
     }
 
     /// Checks if current value builder have sufficient space to accommodate `fields`.
@@ -1367,11 +1370,11 @@ mod tests {
     }
 
     #[test]
-    fn test_series() {
+    fn test_series() -> Result<()> {
         let region_metadata = schema_for_test();
         let mut series = Series::new(&region_metadata);
-        series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1));
-        series.push(ts_value_ref(2), 0, OpType::Put, field_value_ref(2, 10.2));
+        series.push(ts_value_ref(1), 0, OpType::Put, field_value_ref(1, 10.1))?;
+        series.push(ts_value_ref(2), 0, OpType::Put, field_value_ref(2, 10.2))?;
         assert_eq!(2, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
 
@@ -1379,10 +1382,11 @@ mod tests {
         check_values(values, &[(1, 0, 1, 1, 10.1), (2, 0, 1, 2, 10.2)]);
         assert_eq!(0, series.active.timestamp.len());
         assert_eq!(1, series.frozen.len());
+        Ok(())
     }
 
     #[test]
-    fn test_series_with_nulls() {
+    fn test_series_with_nulls() -> Result<()> {
         let region_metadata = schema_for_test();
         let mut series = Series::new(&region_metadata);
         // col1: NULL 1 2 3
@@ -1392,20 +1396,20 @@ mod tests {
             0,
             OpType::Put,
             vec![ValueRef::Null, ValueRef::Null].into_iter(),
-        );
+        )?;
         series.push(
             ts_value_ref(1),
             0,
             OpType::Put,
             vec![ValueRef::Int64(1), ValueRef::Null].into_iter(),
-        );
-        series.push(ts_value_ref(1), 2, OpType::Put, field_value_ref(2, 10.2));
+        )?;
+        series.push(ts_value_ref(1), 2, OpType::Put, field_value_ref(2, 10.2))?;
         series.push(
             ts_value_ref(1),
             3,
             OpType::Put,
             vec![ValueRef::Int64(2), ValueRef::Null].into_iter(),
-        );
+        )?;
         assert_eq!(4, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
 
@@ -1414,6 +1418,7 @@ mod tests {
         assert_eq!(values.fields[1].null_count(), 3);
         assert_eq!(0, series.active.timestamp.len());
         assert_eq!(1, series.frozen.len());
+        Ok(())
     }
 
     fn check_value(batch: &Batch, expect: Vec<Vec<Value>>) {
@@ -1539,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_series_set_concurrency() {
+    fn test_series_set_concurrency() -> Result<()> {
         let schema = schema_for_test();
         let row_codec = Arc::new(DensePrimaryKeyCodec::with_fields(
             schema
@@ -1589,13 +1594,14 @@ mod tests {
                         },
                     )
                     .unwrap();
-                    set.push_to_series(primary_key, &kvs.iter().next().unwrap());
+                    set.push_to_series(primary_key, &kvs.iter().next().unwrap())?;
                 }
+                Ok(())
             });
             handles.push(handle);
         }
         for h in handles {
-            h.join().unwrap();
+            h.join().unwrap()?;
         }
 
         let mut timestamps = Vec::with_capacity(concurrency * 100);
@@ -1638,6 +1644,7 @@ mod tests {
 
         assert_eq!(timestamps, sequences);
         assert_eq!(v0, timestamps);
+        Ok(())
     }
 
     #[test]
