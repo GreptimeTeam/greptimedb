@@ -19,15 +19,15 @@ max_concurrent_queries = 0
 ## @toml2docs:none-default
 #+ max_in_flight_write_bytes = "500MB"
 
+## Enable the builtin `numbers` table. Enabled by default.
+#+ enable_numbers_table = true
+
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
-
-## Enable the builtin `numbers` table. Default: true
-#+ enable_numbers_table = true
 
 ## The HTTP server options.
 [http]
