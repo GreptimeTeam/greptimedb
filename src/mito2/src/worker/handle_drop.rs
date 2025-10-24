@@ -84,7 +84,9 @@ where
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_dropped(region_id);
         // notifies index build scheduler.
-        self.index_build_scheduler.on_region_dropped(region_id).await;
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
 
         // Marks region version as dropped
         region

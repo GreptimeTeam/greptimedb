@@ -220,7 +220,7 @@ impl<S> RegionWorkerLoop<S> {
             &[],
             region.file_purger.clone(),
         );
-        
+
         for file_meta in &request.edit.files_to_add {
             self.listener
                 .on_index_build_success(RegionFileId::new(region_id, file_meta.file_id))

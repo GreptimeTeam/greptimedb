@@ -498,7 +498,10 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
-            index_build_scheduler: IndexBuildScheduler::new(self.index_build_job_pool, self.config.max_background_index_builds),
+            index_build_scheduler: IndexBuildScheduler::new(
+                self.index_build_job_pool,
+                self.config.max_background_index_builds,
+            ),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,

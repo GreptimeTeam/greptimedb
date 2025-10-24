@@ -674,7 +674,7 @@ impl ParquetReaderBuilder {
             )
         });
         let apply_res = index_applier
-           .apply_coarse(self.file_handle.index_file_id(), Some(file_size_hint), rgs)
+            .apply_coarse(self.file_handle.index_file_id(), Some(file_size_hint), rgs)
             .await;
         let mut selection = match apply_res {
             Ok(Some(apply_output)) => {
