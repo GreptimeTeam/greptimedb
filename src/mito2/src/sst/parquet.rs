@@ -758,6 +758,7 @@ mod tests {
                 file_size: info.file_size,
                 available_indexes: info.index_metadata.build_available_indexes(),
                 index_file_size: info.index_metadata.file_size,
+                index_file_id: None,
                 num_row_groups: info.num_row_groups,
                 num_rows: info.num_rows as u64,
                 sequence: None,
