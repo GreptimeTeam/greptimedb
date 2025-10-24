@@ -14,11 +14,10 @@
 
 use std::collections::HashMap;
 
-use datatypes::schema::column_schema::JSON_STRUCTURE_SETTINGS_KEY;
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
-    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY, SkippingIndexOptions,
-    SkippingIndexType,
+    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, JSON_STRUCTURE_SETTINGS_KEY,
+    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
