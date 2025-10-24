@@ -882,9 +882,8 @@ fn spawn_cache_fill_task(
             region_id, files_to_download, files_skipped, parallelism
         );
 
-        // Set the total files gauge and reset the downloaded files gauge
-        CACHE_FILL_TOTAL_FILES.set(files_to_download);
-        CACHE_FILL_DOWNLOADED_FILES.set(0);
+        // Increment the total files counter
+        CACHE_FILL_TOTAL_FILES.inc_by(files_to_download as u64);
 
         // Second pass: download the files in parallel
         let mut files_downloaded = 0;
@@ -933,7 +932,7 @@ fn spawn_cache_fill_task(
             // Count successful downloads and update metric
             let chunk_downloaded = results.iter().filter(|&&success| success).count() as i64;
             files_downloaded += chunk_downloaded;
-            CACHE_FILL_DOWNLOADED_FILES.set(files_downloaded);
+            CACHE_FILL_DOWNLOADED_FILES.inc_by(chunk_downloaded as u64);
         }
 
         info!(
