@@ -28,7 +28,7 @@ use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+    DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, ErrorHandler, Type};
@@ -160,25 +160,16 @@ where
     let pg_schema = Arc::new(schema_to_pg(schema.as_ref(), field_format).map_err(convert_err)?);
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
-        .map(|record_batch_result| match record_batch_result {
-            Ok(rb) => stream::iter(
-                // collect rows from a single recordbatch into vector to avoid
-                // borrowing it
-                rb.rows().map(Ok).collect::<Vec<_>>(),
-            )
+        .map(move |result| match result {
+            Ok(record_batch) => stream::iter(RecordBatchRowIterator::new(
+                query_ctx.clone(),
+                pg_schema_ref.clone(),
+                record_batch,
+            ))
             .boxed(),
             Err(e) => stream::once(future::err(convert_err(e))).boxed(),
         })
-        .flatten() // flatten into stream<result<row>>
-        .map(move |row| {
-            row.and_then(|row| {
-                let mut encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                for (value, column) in row.into_iter().zip(schema.column_schemas()) {
-                    encode_value(&query_ctx, value, &mut encoder, &column.data_type)?;
-                }
-                encoder.finish()
-            })
-        });
+        .flatten();
 
     Ok(Response::Query(QueryResponse::new(
         pg_schema,
