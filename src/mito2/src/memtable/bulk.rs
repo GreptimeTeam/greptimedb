@@ -243,7 +243,6 @@ pub struct BulkMemtable {
     max_sequence: AtomicU64,
     num_rows: AtomicUsize,
     /// Cached flat SST arrow schema for memtable compaction.
-    #[allow(dead_code)]
     flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
@@ -637,7 +636,6 @@ impl IterBuilder for BulkRangeIterBuilder {
 
 /// Iterator builder for encoded bulk range
 struct EncodedBulkRangeIterBuilder {
-    #[allow(dead_code)]
     file_id: FileId,
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
@@ -679,7 +677,6 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 struct BulkPartWrapper {
     part: BulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,
@@ -688,7 +685,6 @@ struct BulkPartWrapper {
 struct EncodedPartWrapper {
     part: EncodedBulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,

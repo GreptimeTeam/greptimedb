@@ -657,7 +657,6 @@ pub(crate) fn scan_mem_ranges(
 }
 
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
-#[allow(dead_code)]
 pub(crate) fn scan_flat_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -709,7 +708,6 @@ pub(crate) async fn scan_file_ranges(
 }
 
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
-#[allow(dead_code)]
 pub(crate) async fn scan_flat_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -851,7 +849,6 @@ pub(crate) async fn maybe_scan_other_ranges(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
