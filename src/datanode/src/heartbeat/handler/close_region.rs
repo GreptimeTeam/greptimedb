@@ -12,60 +12,64 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::RegionIdent;
-use common_meta::instruction::{InstructionReply, SimpleReply};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_telemetry::warn;
 use futures::future::join_all;
-use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::storage::RegionId;
 
 use crate::error;
-use crate::heartbeat::handler::HandlerContext;
+use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
-impl HandlerContext {
-    pub(crate) fn handle_close_regions_instruction(
-        self,
-        region_idents: Vec<RegionIdent>,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let region_ids = region_idents
-                .into_iter()
-                .map(|region_ident| Self::region_ident_to_region_id(&region_ident))
-                .collect::<Vec<_>>();
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CloseRegionsHandler;
 
-            let futs = region_ids.iter().map(|region_id| {
-                self.region_server
-                    .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
-            });
+#[async_trait::async_trait]
+impl InstructionHandler for CloseRegionsHandler {
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Instruction,
+    ) -> Option<InstructionReply> {
+        // Safety: must be `Instruction::CloseRegions` instruction.
+        let region_idents = instruction.into_close_regions().unwrap();
+        let region_ids = region_idents
+            .into_iter()
+            .map(|region_ident| RegionId::new(region_ident.table_id, region_ident.region_number))
+            .collect::<Vec<_>>();
 
-            let results = join_all(futs).await;
+        let futs = region_ids.iter().map(|region_id| {
+            ctx.region_server
+                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+        });
 
-            let mut errors = vec![];
-            for (region_id, result) in region_ids.into_iter().zip(results.into_iter()) {
-                match result {
-                    Ok(_) => (),
-                    Err(error::Error::RegionNotFound { .. }) => {
-                        warn!(
-                            "Received a close regions instruction from meta, but target region:{} is not found.",
-                            region_id
-                        );
-                    }
-                    Err(err) => errors.push(format!("region:{region_id}: {err:?}")),
+        let results = join_all(futs).await;
+
+        let mut errors = vec![];
+        for (region_id, result) in region_ids.into_iter().zip(results.into_iter()) {
+            match result {
+                Ok(_) => (),
+                Err(error::Error::RegionNotFound { .. }) => {
+                    warn!(
+                        "Received a close regions instruction from meta, but target region:{} is not found.",
+                        region_id
+                    );
                 }
+                Err(err) => errors.push(format!("region:{region_id}: {err:?}")),
             }
+        }
 
-            if errors.is_empty() {
-                return Some(InstructionReply::CloseRegions(SimpleReply {
-                    result: true,
-                    error: None,
-                }));
-            }
+        if errors.is_empty() {
+            return Some(InstructionReply::CloseRegions(SimpleReply {
+                result: true,
+                error: None,
+            }));
+        }
 
-            Some(InstructionReply::CloseRegions(SimpleReply {
-                result: false,
-                error: Some(errors.join("; ")),
-            }))
-        })
+        Some(InstructionReply::CloseRegions(SimpleReply {
+            result: false,
+            error: Some(errors.join("; ")),
+        }))
     }
 }
 
