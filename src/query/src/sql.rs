@@ -34,7 +34,7 @@ use common_datasource::util::find_dir_and_filename;
 use common_meta::SchemaOptions;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_query::Output;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_query::prelude::greptime_timestamp;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_time::Timestamp;
@@ -1195,14 +1195,14 @@ pub fn file_column_schemas_to_table(
 
     let timestamp_type = ConcreteDataType::timestamp_millisecond_datatype();
     let default_zero = Value::Timestamp(Timestamp::new_millisecond(0));
-    let timestamp_column_schema = ColumnSchema::new(GREPTIME_TIMESTAMP, timestamp_type, false)
+    let timestamp_column_schema = ColumnSchema::new(greptime_timestamp(), timestamp_type, false)
         .with_time_index(true)
         .with_default_constraint(Some(ColumnDefaultConstraint::Value(default_zero)))
         .unwrap();
 
     if let Some(column_schema) = column_schemas
         .iter_mut()
-        .find(|column_schema| column_schema.name == GREPTIME_TIMESTAMP)
+        .find(|column_schema| column_schema.name == greptime_timestamp())
     {
         // Replace the column schema with the default one
         *column_schema = timestamp_column_schema;
@@ -1210,7 +1210,7 @@ pub fn file_column_schemas_to_table(
         column_schemas.push(timestamp_column_schema);
     }
 
-    (column_schemas, GREPTIME_TIMESTAMP.to_string())
+    (column_schemas, greptime_timestamp().to_string())
 }
 
 /// This function checks if the column schemas from a file can be matched with

@@ -110,6 +110,7 @@ mod tests {
     use std::collections::HashMap;
 
     use api::v1::SemanticType;
+    use common_query::prelude::greptime_timestamp;
     use common_telemetry::info;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -243,7 +244,7 @@ mod tests {
             .unwrap();
         assert_eq!(semantic_type, SemanticType::Tag);
         let timestamp_index = metadata_region
-            .column_semantic_type(physical_region_id, logical_region_id, "greptime_timestamp")
+            .column_semantic_type(physical_region_id, logical_region_id, greptime_timestamp())
             .await
             .unwrap()
             .unwrap();

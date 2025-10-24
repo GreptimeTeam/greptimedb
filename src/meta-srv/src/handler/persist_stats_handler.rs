@@ -77,6 +77,7 @@ struct PersistRegionStat<'a> {
     sst_size: u64,
     write_bytes_delta: u64,
     #[col(
+        // This col name is for the information schema table, so we don't touch it
         name = "greptime_timestamp",
         semantic = "Timestamp",
         datatype = "TimestampMillisecond"

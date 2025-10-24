@@ -27,6 +27,7 @@ use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
+use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
@@ -59,9 +60,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
-    MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
+    GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -220,6 +221,9 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        set_default_prefix(self.opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(BuildDatanodeSnafu)?;
 
         let meta_client = self.meta_client.take();
 

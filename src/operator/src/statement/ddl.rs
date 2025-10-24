@@ -26,13 +26,13 @@ use api::v1::{
 };
 use catalog::CatalogManagerRef;
 use chrono::Utc;
+use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::NAME_PATTERN;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
@@ -52,14 +52,12 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
-use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
-use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -95,10 +93,6 @@ use crate::error::{
 use crate::expr_helper;
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-
-lazy_static! {
-    pub static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
-}
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {

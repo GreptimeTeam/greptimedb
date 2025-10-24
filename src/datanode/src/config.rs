@@ -66,6 +66,7 @@ impl Default for StorageConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
+    pub default_column_prefix: Option<String>,
     pub workload_types: Vec<DatanodeWorkloadType>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -119,6 +120,7 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             node_id: None,
+            default_column_prefix: None,
             workload_types: vec![DatanodeWorkloadType::Hybrid],
             require_lease_before_startup: false,
             init_regions_in_background: false,

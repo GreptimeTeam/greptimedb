@@ -165,6 +165,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build datanode"))]
+    BuildDatanode {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to build http client"))]
     BuildHttpClient {
         #[snafu(implicit)]
@@ -429,7 +436,8 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | TomlFormat { .. } => StatusCode::InvalidArguments,
+            | TomlFormat { .. }
+            | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
             | Unexpected { .. }

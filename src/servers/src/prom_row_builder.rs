@@ -20,7 +20,7 @@ use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
@@ -114,15 +114,18 @@ impl Default for TableBuilder {
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
-        col_indexes.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-        col_indexes.insert(GREPTIME_VALUE.to_string(), 1);
+        col_indexes.insert(greptime_timestamp().to_string(), 0);
+        col_indexes.insert(greptime_value().to_string(), 1);
 
         let mut schema = Vec::with_capacity(cols);
         schema.push(time_index_column_schema(
-            GREPTIME_TIMESTAMP,
+            greptime_timestamp(),
             ColumnDataType::TimestampMillisecond,
         ));
-        schema.push(field_column_schema(GREPTIME_VALUE, ColumnDataType::Float64));
+        schema.push(field_column_schema(
+            greptime_value(),
+            ColumnDataType::Float64,
+        ));
 
         Self {
             schema,

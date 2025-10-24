@@ -24,7 +24,7 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
@@ -48,7 +48,6 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::{PipelineContext, truthy, unwrap_or_continue_if_err};
 
-const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
@@ -138,10 +137,7 @@ impl GreptimeTransformer {
         let default = None;
 
         let transform = Transform {
-            fields: Fields::one(Field::new(
-                DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                None,
-            )),
+            fields: Fields::one(Field::new(greptime_timestamp().to_string(), None)),
             type_,
             default,
             index: Some(Index::Time),
@@ -347,7 +343,7 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
         Channel::Prometheus => {
             let ts = values
                 .as_object()
-                .and_then(|m| m.get(GREPTIME_TIMESTAMP))
+                .and_then(|m| m.get(greptime_timestamp()))
                 .and_then(|ts| ts.try_into_i64().ok())
                 .unwrap_or_default();
             Ok(Some(ValueData::TimestampMillisecondValue(ts)))
@@ -395,7 +391,7 @@ pub(crate) fn values_to_row(
     // skip ts column
     let ts_column_name = custom_ts
         .as_ref()
-        .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+        .map_or(greptime_timestamp(), |ts| ts.get_column_name());
 
     let values = values.into_object().context(ValueMustBeMapSnafu)?;
 
@@ -416,7 +412,7 @@ pub(crate) fn values_to_row(
 }
 
 fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
-    if p_ctx.channel == Channel::Prometheus && column_name != GREPTIME_VALUE {
+    if p_ctx.channel == Channel::Prometheus && column_name != greptime_value() {
         SemanticType::Tag as i32
     } else {
         SemanticType::Field as i32
@@ -563,7 +559,7 @@ fn identity_pipeline_inner(
     schema_info.schema.push(ColumnSchema {
         column_name: custom_ts
             .map(|ts| ts.get_column_name().to_string())
-            .unwrap_or_else(|| DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string()),
+            .unwrap_or_else(|| greptime_timestamp().to_string()),
         datatype: custom_ts.map(|c| c.get_datatype()).unwrap_or_else(|| {
             if pipeline_ctx.channel == Channel::Prometheus {
                 ColumnDataType::TimestampMillisecond

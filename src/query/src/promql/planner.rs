@@ -22,7 +22,7 @@ use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
-use common_query::prelude::GREPTIME_VALUE;
+use common_query::prelude::greptime_value;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -2576,7 +2576,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
-        self.ctx.field_columns = vec![GREPTIME_VALUE.to_string()];
+        self.ctx.field_columns = vec![greptime_value().to_string()];
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
                 EmptyMetric::new(
@@ -2584,7 +2584,7 @@ impl PromPlanner {
                     self.ctx.end,
                     self.ctx.interval,
                     SPECIAL_TIME_FUNCTION.to_string(),
-                    GREPTIME_VALUE.to_string(),
+                    greptime_value().to_string(),
                     Some(lit),
                 )
                 .context(DataFusionPlanningSnafu)?,
@@ -3433,6 +3433,7 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -3543,14 +3544,14 @@ mod test {
             }
             columns.push(
                 ColumnSchema::new(
-                    "greptime_timestamp".to_string(),
+                    greptime_timestamp().to_string(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 )
                 .with_time_index(true),
             );
             columns.push(ColumnSchema::new(
-                "greptime_value".to_string(),
+                greptime_value().to_string(),
                 ConcreteDataType::float64_datatype(),
                 true,
             ));

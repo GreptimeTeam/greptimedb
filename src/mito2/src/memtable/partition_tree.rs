@@ -384,6 +384,7 @@ mod tests {
     use api::v1::helper::{field_column_schema, row, tag_column_schema, time_index_column_schema};
     use api::v1::value::ValueData;
     use api::v1::{Mutation, OpType, Rows, SemanticType};
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
     use datafusion_common::Column;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
@@ -694,7 +695,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_timestamp",
+                    greptime_timestamp(),
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 ),
@@ -703,7 +704,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "greptime_value",
+                    greptime_value(),
                     ConcreteDataType::float64_datatype(),
                     true,
                 ),
