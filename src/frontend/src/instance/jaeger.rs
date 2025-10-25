@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{TRACE_TABLE_NAME, trace_services_table_name};
+use common_catalog::consts::{
+    TRACE_TABLE_NAME, trace_operations_table_name, trace_services_table_name,
+};
 use common_function::function::FunctionRef;
 use common_function::scalars::json::json_get::{
     JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
@@ -76,8 +78,6 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
-        start_time: Option<i64>,
-        end_time: Option<i64>,
     ) -> ServerResult<Output> {
         let mut filters = vec![col(SERVICE_NAME_COLUMN).eq(lit(service_name))];
 
@@ -89,16 +89,6 @@ impl JaegerQueryHandler for Instance {
             ))));
         }
 
-        if let Some(start_time) = start_time {
-            // Microseconds to nanoseconds.
-            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time * 1_000)));
-        }
-
-        if let Some(end_time) = end_time {
-            // Microseconds to nanoseconds.
-            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
-        }
-
         // It's equivalent to the following SQL query:
         //
         // ```
@@ -107,8 +97,6 @@ impl JaegerQueryHandler for Instance {
         //   {db}.{trace_table}
         // WHERE
         //   service_name = '{service_name}' AND
-        //   timestamp >= {start_time} AND
-        //   timestamp <= {end_time} AND
         //   span_kind = '{span_kind}'
         // ORDER BY
         //   span_name ASC
@@ -301,12 +289,18 @@ async fn query_trace_table(
         .unwrap_or(TRACE_TABLE_NAME);
 
     // If only select services, use the trace services table.
+    // If querying operations (distinct by span_name and span_kind), use the trace operations table.
     let table_name = {
         if match selects.as_slice() {
             [SelectExpr::Expression(x)] => x == &col(SERVICE_NAME_COLUMN),
             _ => false,
         } {
             &trace_services_table_name(trace_table_name)
+        } else if !distincts.is_empty()
+            && distincts.contains(&col(SPAN_NAME_COLUMN))
+            && distincts.contains(&col(SPAN_KIND_COLUMN))
+        {
+            &trace_operations_table_name(trace_table_name)
         } else {
             trace_table_name
         }
