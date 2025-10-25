@@ -71,6 +71,15 @@ curl -X POST localhost:4000/debug/prof/mem/activate
 
 # Deactivate heap profiling
 curl -X POST localhost:4000/debug/prof/mem/deactivate
+
+# Activate gdump feature that dumps memory profiling data every time virtual memory usage exceeds previous maximum value.
+curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=true'
+
+# Deactivate gdump.
+curl -X POST localhost:4000/debug/prof/mem/gdump -d 'activate=false'
+
+# Retrieve current gdump status.
+curl -X GET localhost:4000/debug/prof/mem/gdump
 ```
 
 ### Dump memory profiling data
