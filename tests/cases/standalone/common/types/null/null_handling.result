@@ -65,14 +65,14 @@ SELECT i, i + 1, i * 2, i - 5 FROM null_test ORDER BY ts;
 -- Test NULL in string operations
 SELECT s, CONCAT(s, ' test'), UPPER(s), LENGTH(s) FROM null_test ORDER BY ts;
 
-+-------+-----------------------------------+--------------------+-------------------------------+
-| s     | concat(null_test.s,Utf8(" test")) | upper(null_test.s) | character_length(null_test.s) |
-+-------+-----------------------------------+--------------------+-------------------------------+
-| hello | hello test                        | HELLO              | 5                             |
-| world | world test                        | WORLD              | 5                             |
-|       |  test                             |                    |                               |
-|       |  test                             |                    |                               |
-+-------+-----------------------------------+--------------------+-------------------------------+
++-------+-----------------------------------+--------------------+---------------------+
+| s     | concat(null_test.s,Utf8(" test")) | upper(null_test.s) | length(null_test.s) |
++-------+-----------------------------------+--------------------+---------------------+
+| hello | hello test                        | HELLO              | 5                   |
+| world | world test                        | WORLD              | 5                   |
+|       |  test                             |                    |                     |
+|       |  test                             |                    |                     |
++-------+-----------------------------------+--------------------+---------------------+
 
 -- Test NULL with COALESCE
 SELECT i, s, COALESCE(i, -1), COALESCE(s, 'missing') FROM null_test ORDER BY ts;

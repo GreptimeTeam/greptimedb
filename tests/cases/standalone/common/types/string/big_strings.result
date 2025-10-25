@@ -17,14 +17,14 @@ Affected Rows: 4
 -- Test length of big strings
 SELECT "id", LENGTH(s) FROM big_strings ORDER BY "id";
 
-+----+---------------------------------+
-| id | character_length(big_strings.s) |
-+----+---------------------------------+
-| 1  | 100                             |
-| 2  | 650                             |
-| 3  | 1100                            |
-| 4  | 1000                            |
-+----+---------------------------------+
++----+-----------------------+
+| id | length(big_strings.s) |
++----+-----------------------+
+| 1  | 100                   |
+| 2  | 650                   |
+| 3  | 1100                  |
+| 4  | 1000                  |
++----+-----------------------+
 
 -- Test substring operations on big strings
 SELECT "id", SUBSTRING(s, 1, 20) FROM big_strings ORDER BY "id";
@@ -52,11 +52,11 @@ SELECT "id", RIGHT(s, 10) FROM big_strings ORDER BY "id";
 -- Test concatenation with big strings
 SELECT "id", LENGTH(s || s) FROM big_strings WHERE "id" = 1;
 
-+----+--------------------------------------------------+
-| id | character_length(big_strings.s || big_strings.s) |
-+----+--------------------------------------------------+
-| 1  | 200                                              |
-+----+--------------------------------------------------+
++----+----------------------------------------+
+| id | length(big_strings.s || big_strings.s) |
++----+----------------------------------------+
+| 1  | 200                                    |
++----+----------------------------------------+
 
 -- Test pattern matching on big strings
 SELECT "id", s LIKE '%World%' FROM big_strings ORDER BY "id";
@@ -82,12 +82,12 @@ SELECT COUNT(*) FROM big_strings WHERE s = REPEAT('a', 100);
 -- Test UPPER/LOWER on big strings
 SELECT "id", LENGTH(UPPER(s)) FROM big_strings WHERE "id" <= 2 ORDER BY "id";
 
-+----+----------------------------------------+
-| id | character_length(upper(big_strings.s)) |
-+----+----------------------------------------+
-| 1  | 100                                    |
-| 2  | 650                                    |
-+----+----------------------------------------+
++----+------------------------------+
+| id | length(upper(big_strings.s)) |
++----+------------------------------+
+| 1  | 100                          |
+| 2  | 650                          |
++----+------------------------------+
 
 -- Test trimming big strings
 CREATE TABLE padded_strings(s VARCHAR, ts TIMESTAMP TIME INDEX);
@@ -100,11 +100,11 @@ Affected Rows: 1
 
 SELECT LENGTH(s), LENGTH(TRIM(s)) FROM padded_strings;
 
-+------------------------------------+-------------------------------------------+
-| character_length(padded_strings.s) | character_length(btrim(padded_strings.s)) |
-+------------------------------------+-------------------------------------------+
-| 406                                | 400                                       |
-+------------------------------------+-------------------------------------------+
++--------------------------+---------------------------------+
+| length(padded_strings.s) | length(btrim(padded_strings.s)) |
++--------------------------+---------------------------------+
+| 406                      | 400                             |
++--------------------------+---------------------------------+
 
 DROP TABLE big_strings;
 

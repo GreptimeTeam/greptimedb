@@ -171,11 +171,11 @@ SELECT REVERSE(UPPER('hello'));
 
 SELECT LENGTH(REVERSE('hello world'));
 
-+------------------------------------------------+
-| character_length(reverse(Utf8("hello world"))) |
-+------------------------------------------------+
-| 11                                             |
-+------------------------------------------------+
++--------------------------------------+
+| length(reverse(Utf8("hello world"))) |
++--------------------------------------+
+| 11                                   |
++--------------------------------------+
 
 -- Double REVERSE (should return original)
 SELECT REVERSE(REVERSE('hello world'));
