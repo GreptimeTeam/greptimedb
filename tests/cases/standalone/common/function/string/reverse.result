@@ -1,0 +1,200 @@
+-- String REVERSE function tests
+-- Basic REVERSE function
+SELECT REVERSE('hello');
+
++------------------------+
+| reverse(Utf8("hello")) |
++------------------------+
+| olleh                  |
++------------------------+
+
+SELECT REVERSE('world');
+
++------------------------+
+| reverse(Utf8("world")) |
++------------------------+
+| dlrow                  |
++------------------------+
+
+SELECT REVERSE('');
+
++-------------------+
+| reverse(Utf8("")) |
++-------------------+
+|                   |
++-------------------+
+
+SELECT REVERSE(NULL);
+
++---------------+
+| reverse(NULL) |
++---------------+
+|               |
++---------------+
+
+-- REVERSE with numbers and special characters
+SELECT REVERSE('12345');
+
++------------------------+
+| reverse(Utf8("12345")) |
++------------------------+
+| 54321                  |
++------------------------+
+
+SELECT REVERSE('hello!');
+
++-------------------------+
+| reverse(Utf8("hello!")) |
++-------------------------+
+| !olleh                  |
++-------------------------+
+
+SELECT REVERSE('a!@#$%b');
+
++--------------------------+
+| reverse(Utf8("a!@#$%b")) |
++--------------------------+
+| b%$#@!a                  |
++--------------------------+
+
+-- REVERSE with palindromes
+SELECT REVERSE('radar');
+
++------------------------+
+| reverse(Utf8("radar")) |
++------------------------+
+| radar                  |
++------------------------+
+
+SELECT REVERSE('madam');
+
++------------------------+
+| reverse(Utf8("madam")) |
++------------------------+
+| madam                  |
++------------------------+
+
+SELECT REVERSE('racecar');
+
++--------------------------+
+| reverse(Utf8("racecar")) |
++--------------------------+
+| racecar                  |
++--------------------------+
+
+-- Test with table data
+CREATE TABLE reverse_test(s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO reverse_test VALUES
+    ('hello', 1000),
+    ('world', 2000),
+    ('12345', 3000),
+    ('radar', 4000),
+    ('', 5000),
+    (NULL, 6000);
+
+Affected Rows: 6
+
+SELECT s, REVERSE(s) FROM reverse_test ORDER BY ts;
+
++-------+-------------------------+
+| s     | reverse(reverse_test.s) |
++-------+-------------------------+
+| hello | olleh                   |
+| world | dlrow                   |
+| 12345 | 54321                   |
+| radar | radar                   |
+|       |                         |
+|       |                         |
++-------+-------------------------+
+
+-- Unicode REVERSE
+SELECT REVERSE('世界');
+
++-----------------------+
+| reverse(Utf8("世界")) |
++-----------------------+
+| 界世                  |
++-----------------------+
+
+SELECT REVERSE('café');
+
++-----------------------+
+| reverse(Utf8("café")) |
++-----------------------+
+| éfac                  |
++-----------------------+
+
+SELECT REVERSE('🚀🌟');
+
++-----------------------+
+| reverse(Utf8("🚀🌟")) |
++-----------------------+
+| 🌟🚀                  |
++-----------------------+
+
+-- REVERSE with spaces
+SELECT REVERSE('hello world');
+
++------------------------------+
+| reverse(Utf8("hello world")) |
++------------------------------+
+| dlrow olleh                  |
++------------------------------+
+
+SELECT REVERSE('  spaces  ');
+
++-----------------------------+
+| reverse(Utf8("  spaces  ")) |
++-----------------------------+
+|   secaps                    |
++-----------------------------+
+
+-- Combining REVERSE with other functions
+SELECT UPPER(REVERSE('hello'));
+
++-------------------------------+
+| upper(reverse(Utf8("hello"))) |
++-------------------------------+
+| OLLEH                         |
++-------------------------------+
+
+SELECT REVERSE(UPPER('hello'));
+
++-------------------------------+
+| reverse(upper(Utf8("hello"))) |
++-------------------------------+
+| OLLEH                         |
++-------------------------------+
+
+SELECT LENGTH(REVERSE('hello world'));
+
++--------------------------------------+
+| length(reverse(Utf8("hello world"))) |
++--------------------------------------+
+| 11                                   |
++--------------------------------------+
+
+-- Double REVERSE (should return original)
+SELECT REVERSE(REVERSE('hello world'));
+
++---------------------------------------+
+| reverse(reverse(Utf8("hello world"))) |
++---------------------------------------+
+| hello world                           |
++---------------------------------------+
+
+SELECT REVERSE(REVERSE('中文测试'));
+
++------------------------------------+
+| reverse(reverse(Utf8("中文测试"))) |
++------------------------------------+
+| 中文测试                           |
++------------------------------------+
+
+DROP TABLE reverse_test;
+
+Affected Rows: 0
+
