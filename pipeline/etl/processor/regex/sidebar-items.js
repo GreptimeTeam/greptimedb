@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PATTERNS_NAME","PROCESSOR_REGEX"],"fn":["generate_key","get_regex_group_names"],"struct":["GROUPS_NAME_REGEX","GroupRegex","RegexProcessor"]};

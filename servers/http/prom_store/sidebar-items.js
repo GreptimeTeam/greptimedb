@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ENCODING","PHYSICAL_TABLE_PARAM","VM_ENCODING","VM_PROTO_VERSION"],"fn":["decode_remote_read_request","decode_remote_write_request","remote_read","remote_write","try_decompress"],"struct":["PROM_WRITE_REQUEST_POOL","PromStoreState","RemoteWriteQuery"]};

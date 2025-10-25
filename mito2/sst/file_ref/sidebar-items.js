@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["FileRef","FileReferenceManager","TableFileRefs","TableFileRefsManifest"],"type":["FileReferenceManagerRef"]};

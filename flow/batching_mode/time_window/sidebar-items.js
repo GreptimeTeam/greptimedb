@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TEST_TIMESTAMP"],"fn":["binary_search_expr","calc_expr_time_window_lower_bound","columnar_to_ts_vector","create_df_schema_for_ts_column","eval_phy_time_window_expr","find_time_window_expr","probe_expr_time_window_upper_bound","to_phy_expr"],"struct":["TimeWindowExpr"]};

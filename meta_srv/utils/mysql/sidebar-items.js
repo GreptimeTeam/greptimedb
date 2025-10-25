@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_mysql_pool","setup_mysql_options"]};

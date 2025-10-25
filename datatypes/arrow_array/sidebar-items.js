@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"type":["BinaryArray","LargeStringArray","MutableBinaryArray","MutableLargeStringArray","MutableStringArray","StringArray"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VALID_ASCII_TOKEN"],"struct":["Analyzer","ChineseTokenizer","EnglishTokenizer","JIEBA"],"trait":["Tokenizer"]};
