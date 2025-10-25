@@ -150,4 +150,9 @@ pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
 pub fn trace_services_table_name(trace_table_name: &str) -> String {
     format!("{}_services", trace_table_name)
 }
+
+/// Generate the trace operations table name from the trace table name by adding `_operations` suffix.
+pub fn trace_operations_table_name(trace_table_name: &str) -> String {
+    format!("{}_operations", trace_table_name)
+}
 // ---- End of special table and fields ----

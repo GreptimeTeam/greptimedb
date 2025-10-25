@@ -198,8 +198,6 @@ pub trait JaegerQueryHandler {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
-        start_time: Option<i64>,
-        end_time: Option<i64>,
     ) -> Result<Output>;
 
     /// Retrieves a trace by its unique identifier.

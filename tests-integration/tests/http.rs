@@ -25,7 +25,8 @@ use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use chrono::Utc;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME, trace_services_table_name,
+    DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME, trace_operations_table_name,
+    trace_services_table_name,
 };
 use common_error::status_code::StatusCode as ErrorCode;
 use common_frontend::slow_query_event::{
@@ -48,7 +49,6 @@ use servers::http::header::constants::{
     GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
-use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -4496,6 +4496,19 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     )
     .await;
 
+    // Validate operations table
+    let expected = r#"[["telemetrygen","SPAN_KIND_CLIENT","lets-go"],["telemetrygen","SPAN_KIND_SERVER","okey-dokey-0"]]"#;
+    validate_data(
+        "otlp_traces_operations",
+        &client,
+        &format!(
+            "select service_name, span_kind, span_name from {} order by span_kind, span_name;",
+            trace_operations_table_name(TRACE_TABLE_NAME)
+        ),
+        expected,
+    )
+    .await;
+
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23",null,"SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179",null,"SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
@@ -4606,6 +4619,19 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         &format!(
             "select service_name from {};",
             trace_services_table_name(trace_table_name)
+        ),
+        expected,
+    )
+    .await;
+
+    // Validate operations table
+    let expected = r#"[["telemetrygen","SPAN_KIND_CLIENT","lets-go"],["telemetrygen","SPAN_KIND_SERVER","okey-dokey-0"]]"#;
+    validate_data(
+        "otlp_traces_operations_v1",
+        &client,
+        &format!(
+            "select service_name, span_kind, span_name from {} order by span_kind, span_name;",
+            trace_operations_table_name(trace_table_name)
         ),
         expected,
     )
@@ -6017,7 +6043,6 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let res = client
         .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
         .header("x-greptime-trace-table-name", trace_table_name)
-        .header(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER, "3 days")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -6025,11 +6050,19 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     {
         "data": [
             {
+                "name": "access-mysql",
+                "spanKind": "server"
+            },
+            {
                 "name": "access-pg",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-redis",
                 "spanKind": "server"
             }
         ],
-        "total": 1,
+        "total": 3,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -6050,9 +6083,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     {
         "data": [
             "access-mysql",
+            "access-pg",
             "access-redis"
         ],
-        "total": 2,
+        "total": 3,
         "limit": 0,
         "offset": 0,
         "errors": []

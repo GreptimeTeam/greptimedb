@@ -29,7 +29,8 @@ use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
-    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_services_table_name,
+    TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
+    trace_services_table_name,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -618,8 +619,10 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == trace_services_table_name(trace_table_name) {
-                        // Disable append mode for trace services table since it requires upsert behavior.
+                    if create_table.table_name == trace_services_table_name(trace_table_name)
+                        || create_table.table_name == trace_operations_table_name(trace_table_name)
+                    {
+                        // Disable append mode for auxiliary tables (services/operations) since they require upsert behavior.
                         create_table
                             .table_options
                             .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
