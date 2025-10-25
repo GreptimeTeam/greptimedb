@@ -14,12 +14,14 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 use crate::expr::PartitionExpr;
 use crate::overlap::associate_from_to;
 
 /// Indices are into the original input arrays (array of [`PartitionExpr`]). A connected component.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepartitionSubtask {
     pub from_expr_indices: Vec<usize>,
     pub to_expr_indices: Vec<usize>,
