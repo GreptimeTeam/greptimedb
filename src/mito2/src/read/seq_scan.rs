@@ -632,8 +632,12 @@ impl RegionScanner for SeqScan {
         Ok(())
     }
 
-    fn has_predicate(&self) -> bool {
-        let predicate = self.stream_ctx.input.predicate();
+    fn has_predicate_without_region(&self) -> bool {
+        let predicate = self
+            .stream_ctx
+            .input
+            .predicate_group()
+            .predicate_without_region();
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 

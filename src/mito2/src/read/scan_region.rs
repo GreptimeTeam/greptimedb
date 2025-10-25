@@ -1106,9 +1106,8 @@ impl ScanInput {
         rows
     }
 
-    /// Returns table predicate of all exprs.
-    pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate.predicate()
+    pub(crate) fn predicate_group(&self) -> &PredicateGroup {
+        &self.predicate
     }
 
     /// Returns number of memtables to scan.

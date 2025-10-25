@@ -444,8 +444,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
-    /// Check if there is any predicate that may be executed in this scanner.
-    fn has_predicate(&self) -> bool;
+    /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
+    fn has_predicate_without_region(&self) -> bool;
 
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
@@ -857,7 +857,7 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(result.unwrap())
     }
 
-    fn has_predicate(&self) -> bool {
+    fn has_predicate_without_region(&self) -> bool {
         false
     }
 

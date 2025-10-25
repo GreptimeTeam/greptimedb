@@ -335,25 +335,26 @@ impl ExecutionPlan for RegionScanExec {
             return Ok(Statistics::new_unknown(self.schema().as_ref()));
         }
 
-        let statistics = if self.append_mode && !self.scanner.lock().unwrap().has_predicate() {
-            let column_statistics = self
-                .arrow_schema
-                .fields
-                .iter()
-                .map(|_| ColumnStatistics {
-                    distinct_count: Precision::Exact(self.total_rows),
-                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
-                    ..Default::default()
-                })
-                .collect();
-            Statistics {
-                num_rows: Precision::Exact(self.total_rows),
-                total_byte_size: Default::default(),
-                column_statistics,
-            }
-        } else {
-            Statistics::new_unknown(&self.arrow_schema)
-        };
+        let statistics =
+            if self.append_mode && !self.scanner.lock().unwrap().has_predicate_without_region() {
+                let column_statistics = self
+                    .arrow_schema
+                    .fields
+                    .iter()
+                    .map(|_| ColumnStatistics {
+                        distinct_count: Precision::Exact(self.total_rows),
+                        null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                        ..Default::default()
+                    })
+                    .collect();
+                Statistics {
+                    num_rows: Precision::Exact(self.total_rows),
+                    total_byte_size: Default::default(),
+                    column_statistics,
+                }
+            } else {
+                Statistics::new_unknown(&self.arrow_schema)
+            };
         Ok(statistics)
     }
 
