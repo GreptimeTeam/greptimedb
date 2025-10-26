@@ -71,6 +71,7 @@ impl<S> RegionWorkerLoop<S> {
             file_meta: file.meta_ref().clone(),
             reason: build_type,
             access_layer: access_layer.clone(),
+            listener: self.listener.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             write_cache: self.cache_manager.write_cache().cloned(),
             file_purger: file.file_purger(),
@@ -172,9 +173,6 @@ impl<S> RegionWorkerLoop<S> {
             let _ = self
                 .index_build_scheduler
                 .schedule_build(&region.version_control, task);
-            self.listener
-                .on_index_build_begin(RegionFileId::new(region_id, file_handle.meta_ref().file_id))
-                .await;
         }
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
@@ -212,7 +210,7 @@ impl<S> RegionWorkerLoop<S> {
         );
         for file_meta in &request.edit.files_to_add {
             self.listener
-                .on_index_build_success(RegionFileId::new(region_id, file_meta.file_id))
+                .on_index_build_finish(RegionFileId::new(region_id, file_meta.file_id))
                 .await;
         }
     }

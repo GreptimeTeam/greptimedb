@@ -32,6 +32,7 @@ use crate::error::{
 use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
+use crate::util::OptionValue;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -166,7 +167,20 @@ impl Display for Column {
             return Ok(());
         }
 
-        write!(f, "{}", self.column_def)?;
+        write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
+        if let Some(options) = &self.extensions.json_datatype_options {
+            write!(
+                f,
+                "({})",
+                options
+                    .entries()
+                    .map(|(k, v)| format!("{k} = {v}"))
+                    .join(COMMA_SEP)
+            )?;
+        }
+        for option in &self.column_def.options {
+            write!(f, " {option}")?;
+        }
 
         if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
             if !fulltext_options.is_empty() {
@@ -250,6 +264,34 @@ impl ColumnExtensions {
                 .fail(),
             })
             .transpose()
+    }
+
+    pub fn set_json_structure_settings(&mut self, settings: JsonStructureSettings) {
+        let mut map = OptionMap::default();
+
+        let format = match settings {
+            JsonStructureSettings::Structured(_) => JSON_FORMAT_FULL_STRUCTURED,
+            JsonStructureSettings::PartialUnstructuredByKey { .. } => JSON_FORMAT_PARTIAL,
+            JsonStructureSettings::UnstructuredRaw => JSON_FORMAT_RAW,
+        };
+        map.insert(JSON_OPT_FORMAT.to_string(), format.to_string());
+
+        if let JsonStructureSettings::PartialUnstructuredByKey {
+            fields: _,
+            unstructured_keys,
+        } = settings
+        {
+            let value = OptionValue::from(
+                unstructured_keys
+                    .iter()
+                    .map(|x| x.as_str())
+                    .sorted()
+                    .collect::<Vec<_>>(),
+            );
+            map.insert_options(JSON_OPT_UNSTRUCTURED_KEYS, value);
+        }
+
+        self.json_datatype_options = Some(map);
     }
 }
 

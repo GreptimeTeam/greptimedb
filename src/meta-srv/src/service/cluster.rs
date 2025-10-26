@@ -97,8 +97,10 @@ impl Metasrv {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
-            cpus: self.resource_spec().cpus as u32,
-            memory_bytes: self.resource_spec().memory.unwrap_or_default().as_bytes(),
+            total_cpu_millicores: self.resource_stat().get_total_cpu_millicores(),
+            total_memory_bytes: self.resource_stat().get_total_memory_bytes(),
+            cpu_usage_millicores: self.resource_stat().get_cpu_usage_millicores(),
+            memory_usage_bytes: self.resource_stat().get_memory_usage_bytes(),
             hostname: hostname::get()
                 .unwrap_or_default()
                 .to_string_lossy()

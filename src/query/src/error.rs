@@ -353,6 +353,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    Datatypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -406,9 +413,10 @@ impl ErrorExt for Error {
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
             GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
-            GetFulltextOptions { source, .. } | GetSkippingIndexOptions { source, .. } => {
-                source.status_code()
-            }
+
+            GetFulltextOptions { source, .. }
+            | GetSkippingIndexOptions { source, .. }
+            | Datatypes { source, .. } => source.status_code(),
         }
     }
 

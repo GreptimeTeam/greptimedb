@@ -32,10 +32,36 @@ use crate::system::define_nullary_udf;
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
 const CURRENT_SCHEMAS_FUNCTION_NAME: &str = "current_schemas";
 const SESSION_USER_FUNCTION_NAME: &str = "session_user";
+const CURRENT_DATABASE_FUNCTION_NAME: &str = "current_database";
 
 define_nullary_udf!(CurrentSchemaFunction);
 define_nullary_udf!(CurrentSchemasFunction);
 define_nullary_udf!(SessionUserFunction);
+define_nullary_udf!(CurrentDatabaseFunction);
+
+impl Function for CurrentDatabaseFunction {
+    fn name(&self) -> &str {
+        CURRENT_DATABASE_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+        Ok(DataType::Utf8View)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let func_ctx = find_function_context(&args)?;
+        let db = func_ctx.query_ctx.current_catalog().to_string();
+
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
+    }
+}
 
 // Though "current_schema" can be aliased to "database", to not cause any breaking changes,
 // we are not doing it: not until https://github.com/apache/datafusion/issues/17469 is resolved.
@@ -141,6 +167,7 @@ impl PGCatalogFunction {
         registry.register_scalar(CurrentSchemaFunction::default());
         registry.register_scalar(CurrentSchemasFunction::default());
         registry.register_scalar(SessionUserFunction::default());
+        registry.register_scalar(CurrentDatabaseFunction::default());
         registry.register(pg_catalog::format_type::create_format_type_udf());
         registry.register(pg_catalog::create_pg_get_partkeydef_udf());
         registry.register(pg_catalog::has_privilege_udf::create_has_privilege_udf(

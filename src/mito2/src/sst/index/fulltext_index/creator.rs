@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use api::v1::SemanticType;
 use common_telemetry::warn;
 use datatypes::arrow::array::{Array, LargeStringArray, StringArray};
 use datatypes::arrow::datatypes::DataType;
@@ -69,6 +70,17 @@ impl FulltextIndexer {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
+            // Tag columns don't support fulltext index now.
+            // If we need to support fulltext index for tag columns, we also need to parse
+            // the codec and handle sparse encoding for flat format specially.
+            if column.semantic_type == SemanticType::Tag {
+                common_telemetry::debug!(
+                    "Skip creating fulltext index for tag column {}",
+                    column.column_schema.name
+                );
+                continue;
+            }
+
             let options = column
                 .column_schema
                 .fulltext_options()

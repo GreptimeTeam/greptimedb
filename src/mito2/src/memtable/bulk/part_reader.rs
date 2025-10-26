@@ -13,12 +13,10 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
-use std::ops::BitAnd;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use datatypes::arrow::array::BooleanArray;
-use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
@@ -30,7 +28,7 @@ use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::sst::parquet::flat_format::sequence_column_index;
-use crate::sst::parquet::reader::{MaybeFilter, RowGroupReaderContext};
+use crate::sst::parquet::reader::RowGroupReaderContext;
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
@@ -191,38 +189,13 @@ fn apply_combined_filters(
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;
 
-    // First, apply predicate filters.
+    // First, apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
-        let num_rows = record_batch.num_rows();
-        let mut mask = BooleanBuffer::new_set(num_rows);
-
-        // Run filter one by one and combine them result, similar to RangeBase::precise_filter
-        for filter_ctx in &context.base.filters {
-            let filter = match filter_ctx.filter() {
-                MaybeFilter::Filter(f) => f,
-                // Column matches.
-                MaybeFilter::Matched => continue,
-                // Column doesn't match, filter the entire batch.
-                MaybeFilter::Pruned => return Ok(None),
-            };
-
-            // Safety: We checked the format type in new().
-            let Some(column_index) = context
-                .read_format()
-                .as_flat()
-                .unwrap()
-                .projected_index_by_id(filter_ctx.column_id())
-            else {
-                continue;
-            };
-            let array = record_batch.column(column_index);
-            let result = filter
-                .evaluate_array(array)
-                .context(crate::error::RecordBatchSnafu)?;
-
-            mask = mask.bitand(&result);
-        }
-        // Convert the mask to BooleanArray
+        let predicate_mask = context.base.compute_filter_mask_flat(&record_batch)?;
+        // If predicate filters out the entire batch, return None early
+        let Some(mask) = predicate_mask else {
+            return Ok(None);
+        };
         combined_filter = Some(BooleanArray::from(mask));
     }
 

@@ -12,18 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::{info, warn};
-use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCatchupRequest, RegionRequest, ReplayCheckpoint};
 
-use crate::heartbeat::handler::HandlerContext;
+use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 use crate::heartbeat::task_tracker::WaitResult;
 
-impl HandlerContext {
-    pub(crate) fn handle_upgrade_region_instruction(
-        self,
-        UpgradeRegion {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpgradeRegionsHandler;
+
+#[async_trait::async_trait]
+impl InstructionHandler for UpgradeRegionsHandler {
+    async fn handle(
+        &self,
+        ctx: &HandlerContext,
+        instruction: Instruction,
+    ) -> Option<InstructionReply> {
+        let UpgradeRegion {
             region_id,
             last_entry_id,
             metadata_last_entry_id,
@@ -31,116 +37,116 @@ impl HandlerContext {
             location_id,
             replay_entry_id,
             metadata_replay_entry_id,
-        }: UpgradeRegion,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let Some(writable) = self.region_server.is_region_leader(region_id) else {
-                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready: false,
-                    exists: false,
-                    error: None,
-                }));
-            };
+        } = instruction.into_upgrade_regions().unwrap();
 
-            if writable {
-                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+        let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
+            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                ready: false,
+                exists: false,
+                error: None,
+            }));
+        };
+
+        if writable {
+            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                ready: true,
+                exists: true,
+                error: None,
+            }));
+        }
+
+        let region_server_moved = ctx.region_server.clone();
+
+        let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
+            (Some(entry_id), metadata_entry_id) => Some(ReplayCheckpoint {
+                entry_id,
+                metadata_entry_id,
+            }),
+            _ => None,
+        };
+
+        // The catchup task is almost zero cost if the inside region is writable.
+        // Therefore, it always registers a new catchup task.
+        let register_result = ctx
+            .catchup_tasks
+            .try_register(
+                region_id,
+                Box::pin(async move {
+                    info!(
+                        "Executing region: {region_id} catchup to: last entry id {last_entry_id:?}"
+                    );
+                    region_server_moved
+                        .handle_request(
+                            region_id,
+                            RegionRequest::Catchup(RegionCatchupRequest {
+                                set_writable: true,
+                                entry_id: last_entry_id,
+                                metadata_entry_id: metadata_last_entry_id,
+                                location_id,
+                                checkpoint,
+                            }),
+                        )
+                        .await?;
+
+                    Ok(())
+                }),
+            )
+            .await;
+
+        if register_result.is_busy() {
+            warn!("Another catchup task is running for the region: {region_id}");
+        }
+
+        // Returns immediately
+        let Some(replay_timeout) = replay_timeout else {
+            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                ready: false,
+                exists: true,
+                error: None,
+            }));
+        };
+
+        // We don't care that it returns a newly registered or running task.
+        let mut watcher = register_result.into_watcher();
+        let result = ctx.catchup_tasks.wait(&mut watcher, replay_timeout).await;
+
+        match result {
+            WaitResult::Timeout => Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                ready: false,
+                exists: true,
+                error: None,
+            })),
+            WaitResult::Finish(Ok(_)) => {
+                Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: true,
                     exists: true,
                     error: None,
-                }));
+                }))
             }
-
-            let region_server_moved = self.region_server.clone();
-
-            let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
-                (Some(entry_id), metadata_entry_id) => Some(ReplayCheckpoint {
-                    entry_id,
-                    metadata_entry_id,
-                }),
-                _ => None,
-            };
-
-            // The catchup task is almost zero cost if the inside region is writable.
-            // Therefore, it always registers a new catchup task.
-            let register_result = self
-                .catchup_tasks
-                .try_register(
-                    region_id,
-                    Box::pin(async move {
-                        info!("Executing region: {region_id} catchup to: last entry id {last_entry_id:?}");
-                        region_server_moved
-                            .handle_request(
-                                region_id,
-                                RegionRequest::Catchup(RegionCatchupRequest {
-                                    set_writable: true,
-                                    entry_id: last_entry_id,
-                                    metadata_entry_id: metadata_last_entry_id,
-                                    location_id,
-                                    checkpoint,
-                                }),
-                            )
-                            .await?;
-
-                        Ok(())
-                    }),
-                )
-                .await;
-
-            if register_result.is_busy() {
-                warn!("Another catchup task is running for the region: {region_id}");
-            }
-
-            // Returns immediately
-            let Some(replay_timeout) = replay_timeout else {
-                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+            WaitResult::Finish(Err(err)) => {
+                Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: true,
-                    error: None,
-                }));
-            };
-
-            // We don't care that it returns a newly registered or running task.
-            let mut watcher = register_result.into_watcher();
-            let result = self.catchup_tasks.wait(&mut watcher, replay_timeout).await;
-
-            match result {
-                WaitResult::Timeout => Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready: false,
-                    exists: true,
-                    error: None,
-                })),
-                WaitResult::Finish(Ok(_)) => {
-                    Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                        ready: true,
-                        exists: true,
-                        error: None,
-                    }))
-                }
-                WaitResult::Finish(Err(err)) => {
-                    Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                        ready: false,
-                        exists: true,
-                        error: Some(format!("{err:?}")),
-                    }))
-                }
+                    error: Some(format!("{err:?}")),
+                }))
             }
-        })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::time::Duration;
 
-    use common_meta::instruction::{InstructionReply, UpgradeRegion};
+    use common_meta::instruction::{Instruction, UpgradeRegion};
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
     use crate::error;
-    use crate::heartbeat::handler::HandlerContext;
+    use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
+    use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[tokio::test]
@@ -155,20 +161,20 @@ mod tests {
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
         for replay_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_upgrade_region_instruction(UpgradeRegion {
-                    region_id,
-                    replay_timeout,
-                    ..Default::default()
-                })
+            let reply = UpgradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::UpgradeRegion(UpgradeRegion {
+                        region_id,
+                        replay_timeout,
+                        ..Default::default()
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-                assert!(!reply.exists);
-                assert!(reply.error.is_none());
-            }
+            let reply = reply.unwrap().expect_upgrade_region_reply();
+            assert!(!reply.exists);
+            assert!(reply.error.is_none());
         }
     }
 
@@ -192,21 +198,21 @@ mod tests {
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
         for replay_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_upgrade_region_instruction(UpgradeRegion {
-                    region_id,
-                    replay_timeout,
-                    ..Default::default()
-                })
+            let reply = UpgradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::UpgradeRegion(UpgradeRegion {
+                        region_id,
+                        replay_timeout,
+                        ..Default::default()
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-                assert!(reply.ready);
-                assert!(reply.exists);
-                assert!(reply.error.is_none());
-            }
+            let reply = reply.unwrap().expect_upgrade_region_reply();
+            assert!(reply.ready);
+            assert!(reply.exists);
+            assert!(reply.error.is_none());
         }
     }
 
@@ -230,21 +236,21 @@ mod tests {
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
         for replay_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_upgrade_region_instruction(UpgradeRegion {
-                    region_id,
-                    replay_timeout,
-                    ..Default::default()
-                })
+            let reply = UpgradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::UpgradeRegion(UpgradeRegion {
+                        region_id,
+                        replay_timeout,
+                        ..Default::default()
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-                assert!(!reply.ready);
-                assert!(reply.exists);
-                assert!(reply.error.is_none());
-            }
+            let reply = reply.unwrap().expect_upgrade_region_reply();
+            assert!(!reply.ready);
+            assert!(reply.exists);
+            assert!(reply.error.is_none());
         }
     }
 
@@ -271,40 +277,41 @@ mod tests {
         let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         for replay_timeout in waits {
-            let reply = handler_context
-                .clone()
-                .handle_upgrade_region_instruction(UpgradeRegion {
-                    region_id,
-                    replay_timeout,
-                    ..Default::default()
-                })
+            let reply = UpgradeRegionsHandler
+                .handle(
+                    &handler_context,
+                    Instruction::UpgradeRegion(UpgradeRegion {
+                        region_id,
+                        replay_timeout,
+                        ..Default::default()
+                    }),
+                )
                 .await;
-            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-                assert!(!reply.ready);
-                assert!(reply.exists);
-                assert!(reply.error.is_none());
-            }
-        }
-
-        let timer = Instant::now();
-        let reply = handler_context
-            .handle_upgrade_region_instruction(UpgradeRegion {
-                region_id,
-                replay_timeout: Some(Duration::from_millis(500)),
-                ..Default::default()
-            })
-            .await;
-        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
-        // Must less than 300 ms.
-        assert!(timer.elapsed().as_millis() < 300);
-
-        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-            assert!(reply.ready);
+            let reply = reply.unwrap().expect_upgrade_region_reply();
+            assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
         }
+
+        let timer = Instant::now();
+        let reply = UpgradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::UpgradeRegion(UpgradeRegion {
+                    region_id,
+                    replay_timeout: Some(Duration::from_millis(500)),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        // Must less than 300 ms.
+        assert!(timer.elapsed().as_millis() < 300);
+
+        let reply = reply.unwrap().expect_upgrade_region_reply();
+        assert!(reply.ready);
+        assert!(reply.exists);
+        assert!(reply.error.is_none());
     }
 
     #[tokio::test]
@@ -329,37 +336,37 @@ mod tests {
 
         let handler_context = HandlerContext::new_for_test(mock_region_server);
 
-        let reply = handler_context
-            .clone()
-            .handle_upgrade_region_instruction(UpgradeRegion {
-                region_id,
-                ..Default::default()
-            })
+        let reply = UpgradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::UpgradeRegion(UpgradeRegion {
+                    region_id,
+                    ..Default::default()
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
         // It didn't wait for handle returns; it had no idea about the error.
-        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-            assert!(!reply.ready);
-            assert!(reply.exists);
-            assert!(reply.error.is_none());
-        }
+        let reply = reply.unwrap().expect_upgrade_region_reply();
+        assert!(!reply.ready);
+        assert!(reply.exists);
+        assert!(reply.error.is_none());
 
-        let reply = handler_context
-            .clone()
-            .handle_upgrade_region_instruction(UpgradeRegion {
-                region_id,
-                replay_timeout: Some(Duration::from_millis(200)),
-                ..Default::default()
-            })
+        let reply = UpgradeRegionsHandler
+            .handle(
+                &handler_context,
+                Instruction::UpgradeRegion(UpgradeRegion {
+                    region_id,
+                    replay_timeout: Some(Duration::from_millis(200)),
+                    ..Default::default()
+                }),
+            )
             .await;
-        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
-            assert!(!reply.ready);
-            assert!(reply.exists);
-            assert!(reply.error.is_some());
-            assert!(reply.error.unwrap().contains("mock_error"));
-        }
+        let reply = reply.unwrap().expect_upgrade_region_reply();
+        assert!(!reply.ready);
+        assert!(reply.exists);
+        assert!(reply.error.is_some());
+        assert!(reply.error.unwrap().contains("mock_error"));
     }
 }

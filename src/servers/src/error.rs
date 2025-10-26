@@ -20,6 +20,7 @@ use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http};
 use base64::DecodeError;
+use common_base::readable_size::ReadableSize;
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -160,6 +161,18 @@ pub enum Error {
     #[snafu(display("Invalid request parameter: {}", reason))]
     InvalidParameter {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Too many concurrent large requests, limit: {}, request size: {}",
+        ReadableSize(*limit as u64),
+        ReadableSize(*request_size as u64)
+    ))]
+    TooManyConcurrentRequests {
+        limit: usize,
+        request_size: usize,
         #[snafu(implicit)]
         location: Location,
     },
@@ -728,6 +741,8 @@ impl ErrorExt for Error {
             DumpProfileData { source, .. } => source.status_code(),
 
             InvalidUtf8Value { .. } | InvalidHeaderValue { .. } => StatusCode::InvalidArguments,
+
+            TooManyConcurrentRequests { .. } => StatusCode::RuntimeResourcesExhausted,
 
             ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),

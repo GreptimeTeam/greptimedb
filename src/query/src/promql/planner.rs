@@ -2464,6 +2464,7 @@ impl PromPlanner {
                         window_frame: WindowFrame::new(Some(true)),
                         null_treatment: None,
                         distinct: false,
+                        filter: None,
                     },
                 }))
             })

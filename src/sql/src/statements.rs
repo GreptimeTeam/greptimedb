@@ -49,8 +49,8 @@ use crate::ast::{
 };
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
-    SqlCommonSnafu,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
+    SetSkippingIndexOptionSnafu, SqlCommonSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -143,6 +143,18 @@ pub fn column_to_schema(
     }
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
+
+    if matches!(column.data_type(), SqlDataType::JSON) {
+        let settings = column
+            .extensions
+            .build_json_structure_settings()?
+            .unwrap_or_default();
+        column_schema
+            .with_json_structure_settings(&settings)
+            .with_context(|_| SetJsonStructureSettingsSnafu {
+                value: format!("{settings:?}"),
+            })?;
+    }
 
     Ok(column_schema)
 }

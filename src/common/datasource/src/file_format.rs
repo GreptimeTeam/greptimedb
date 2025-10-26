@@ -33,7 +33,7 @@ use bytes::{Buf, Bytes};
 use datafusion::datasource::physical_plan::FileOpenFuture;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -179,7 +179,7 @@ pub fn open_with_decoder<T: ArrowDecoder, F: Fn() -> DataFusionResult<T>>(
             Poll::Ready(decoder.flush().transpose())
         });
 
-        Ok(stream.boxed())
+        Ok(stream.map_err(Into::into).boxed())
     }))
 }
 

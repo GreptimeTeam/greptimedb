@@ -431,6 +431,7 @@ mod tests {
             num_row_groups: 1,
             sequence: NonZeroU64::new(1),
             partition_expr,
+            num_series: 1,
         }
     }
 

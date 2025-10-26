@@ -25,7 +25,10 @@ pub trait ObjectNamePartExt {
 
 impl ObjectNamePartExt for ObjectNamePart {
     fn to_string_unquoted(&self) -> String {
-        let ObjectNamePart::Identifier(ident) = self;
+        let ObjectNamePart::Identifier(ident) = self else {
+            // If it's not an ident, just return it as a string.
+            return self.to_string();
+        };
         ident.value.clone()
     }
 }

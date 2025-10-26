@@ -236,6 +236,7 @@ mod tests {
                     num_row_groups: 0,
                     sequence: None,
                     partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );
@@ -302,6 +303,7 @@ mod tests {
                     num_row_groups: 1,
                     sequence: NonZeroU64::new(4096),
                     partition_expr: None,
+                    num_series: 0,
                 },
                 file_purger,
             );

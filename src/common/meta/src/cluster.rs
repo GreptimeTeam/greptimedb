@@ -120,10 +120,16 @@ pub struct NodeInfo {
     pub start_time_ms: u64,
     // The node build cpus
     #[serde(default)]
-    pub cpus: u32,
+    pub total_cpu_millicores: i64,
     // The node build memory bytes
     #[serde(default)]
-    pub memory_bytes: u64,
+    pub total_memory_bytes: i64,
+    // The node build cpu usage millicores
+    #[serde(default)]
+    pub cpu_usage_millicores: i64,
+    // The node build memory usage bytes
+    #[serde(default)]
+    pub memory_usage_bytes: i64,
     // The node build hostname
     #[serde(default)]
     pub hostname: String,
@@ -333,8 +339,10 @@ mod tests {
             version: "".to_string(),
             git_commit: "".to_string(),
             start_time_ms: 1,
-            cpus: 0,
-            memory_bytes: 0,
+            total_cpu_millicores: 0,
+            total_memory_bytes: 0,
+            cpu_usage_millicores: 0,
+            memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
         };
 

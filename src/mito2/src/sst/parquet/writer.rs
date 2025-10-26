@@ -57,7 +57,9 @@ use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index}
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions};
+use crate::sst::{
+    DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
+};
 
 /// Parquet SST writer.
 pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
@@ -176,7 +178,7 @@ where
     ) -> Result<()> {
         // maybe_init_writer will re-create a new file.
         if let Some(mut current_writer) = mem::take(&mut self.writer) {
-            let stats = mem::take(stats);
+            let mut stats = mem::take(stats);
             // At least one row has been written.
             assert!(stats.num_rows > 0);
 
@@ -211,6 +213,7 @@ where
 
             // convert FileMetaData to ParquetMetaData
             let parquet_metadata = parse_parquet_metadata(file_meta)?;
+            let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
@@ -219,6 +222,7 @@ where
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
                 index_metadata: index_output,
+                num_series,
             });
             self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)
@@ -496,6 +500,8 @@ struct SourceStats {
     num_rows: usize,
     /// Time range of fetched batches.
     time_range: Option<(Timestamp, Timestamp)>,
+    /// Series estimator for computing num_series.
+    series_estimator: SeriesEstimator,
 }
 
 impl SourceStats {
@@ -505,6 +511,7 @@ impl SourceStats {
         }
 
         self.num_rows += batch.num_rows();
+        self.series_estimator.update(batch);
         // Safety: batch is not empty.
         let (min_in_batch, max_in_batch) = (
             batch.first_timestamp().unwrap(),
@@ -524,6 +531,7 @@ impl SourceStats {
         }
 
         self.num_rows += record_batch.num_rows();
+        self.series_estimator.update_flat(record_batch);
 
         // Get the timestamp column by index
         let time_index_col_idx = time_index_column_index(record_batch.num_columns());

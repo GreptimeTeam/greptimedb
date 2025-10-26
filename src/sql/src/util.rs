@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
+use itertools::Itertools;
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
@@ -131,6 +132,22 @@ impl From<Vec<&str>> for OptionValue {
     }
 }
 
+impl Display for OptionValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(s) = self.as_string() {
+            write!(f, "'{s}'")
+        } else if let Some(s) = self.as_list() {
+            write!(
+                f,
+                "[{}]",
+                s.into_iter().map(|x| format!("'{x}'")).join(", ")
+            )
+        } else {
+            write!(f, "'{}'", self.0)
+        }
+    }
+}
+
 pub fn parse_option_string(option: SqlOption) -> Result<(String, OptionValue)> {
     let SqlOption::KeyValue { key, value } = option else {
         return InvalidSqlSnafu {
@@ -194,7 +211,7 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectNa
             extract_tables_from_set_expr(left, names);
             extract_tables_from_set_expr(right, names);
         }
-        SetExpr::Values(_) | SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Table(_) => {}
+        _ => {}
     };
 }
 

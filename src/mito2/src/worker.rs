@@ -1220,10 +1220,10 @@ impl WorkerListener {
         }
     }
 
-    pub(crate) async fn on_index_build_success(&self, _region_file_id: RegionFileId) {
+    pub(crate) async fn on_index_build_finish(&self, _region_file_id: RegionFileId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
-            listener.on_index_build_success(_region_file_id).await;
+            listener.on_index_build_finish(_region_file_id).await;
         }
     }
 
@@ -1231,6 +1231,13 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_index_build_begin(_region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn on_index_build_abort(&self, _region_file_id: RegionFileId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_index_build_abort(_region_file_id).await;
         }
     }
 }

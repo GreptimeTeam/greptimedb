@@ -26,10 +26,13 @@ use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, info, warn};
+use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::index::IndexValuesCodec;
+use mito_codec::row_converter::CompositeValues;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};
@@ -40,7 +43,7 @@ use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, Regio
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::error::{BuildIndexAsyncSnafu, Error, Result};
+use crate::error::{BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
@@ -57,6 +60,9 @@ use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::flat_format::primary_key_column_index;
+use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::worker::WorkerListener;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
@@ -446,6 +452,7 @@ pub struct IndexBuildTask {
     pub file_meta: FileMeta,
     pub reason: IndexBuildType,
     pub access_layer: AccessLayerRef,
+    pub(crate) listener: WorkerListener,
     pub(crate) manifest_ctx: ManifestContextRef,
     pub write_cache: Option<WriteCacheRef>,
     pub file_purger: FilePurgerRef,
@@ -481,6 +488,12 @@ impl IndexBuildTask {
     }
 
     async fn do_index_build(&mut self, version_control: VersionControlRef) {
+        self.listener
+            .on_index_build_begin(RegionFileId::new(
+                self.file_meta.region_id,
+                self.file_meta.file_id,
+            ))
+            .await;
         match self.index_build(version_control).await {
             Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
@@ -535,6 +548,12 @@ impl IndexBuildTask {
         if !self.check_sst_file_exists(&version_control).await {
             // Calls abort to clean up index files.
             indexer.abort().await;
+            self.listener
+                .on_index_build_abort(RegionFileId::new(
+                    self.file_meta.region_id,
+                    self.file_meta.file_id,
+                ))
+                .await;
             return Ok(IndexBuildOutcome::Aborted(format!(
                 "SST file not found during index build, region: {}, file_id: {}",
                 self.file_meta.region_id, self.file_meta.file_id
@@ -570,6 +589,12 @@ impl IndexBuildTask {
             if !self.check_sst_file_exists(&version_control).await {
                 // Calls abort to clean up index files.
                 indexer.abort().await;
+                self.listener
+                    .on_index_build_abort(RegionFileId::new(
+                        self.file_meta.region_id,
+                        self.file_meta.file_id,
+                    ))
+                    .await;
                 return Ok(IndexBuildOutcome::Aborted(format!(
                     "SST file not found during index build, region: {}, file_id: {}",
                     self.file_meta.region_id, self.file_meta.file_id
@@ -696,6 +721,56 @@ impl IndexBuildScheduler {
         self.scheduler.schedule(job)?;
         Ok(())
     }
+}
+
+/// Decodes primary keys from a flat format RecordBatch.
+/// Returns a list of (decoded_pk_value, count) tuples where count is the number of occurrences.
+pub(crate) fn decode_primary_keys_with_counts(
+    batch: &RecordBatch,
+    codec: &IndexValuesCodec,
+) -> Result<Vec<(CompositeValues, usize)>> {
+    let primary_key_index = primary_key_column_index(batch.num_columns());
+    let pk_dict_array = batch
+        .column(primary_key_index)
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .context(InvalidRecordBatchSnafu {
+            reason: "Primary key column is not a dictionary array",
+        })?;
+    let pk_values_array = pk_dict_array
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .context(InvalidRecordBatchSnafu {
+            reason: "Primary key values are not binary array",
+        })?;
+    let keys = pk_dict_array.keys();
+
+    // Decodes primary keys and count consecutive occurrences
+    let mut result: Vec<(CompositeValues, usize)> = Vec::new();
+    let mut prev_key: Option<u32> = None;
+
+    for i in 0..keys.len() {
+        let current_key = keys.value(i);
+
+        // Checks if current key is the same as previous key
+        if let Some(prev) = prev_key
+            && prev == current_key
+        {
+            // Safety: We already have a key in the result vector.
+            result.last_mut().unwrap().1 += 1;
+            continue;
+        }
+
+        // New key, decodes it.
+        let pk_bytes = pk_values_array.value(current_key as usize);
+        let decoded_value = codec.decoder().decode(pk_bytes).context(DecodeSnafu)?;
+
+        result.push((decoded_value, 1));
+        prev_key = Some(current_key);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1137,6 +1212,7 @@ mod tests {
             },
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1187,6 +1263,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1254,6 +1331,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1350,6 +1428,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,
@@ -1430,6 +1509,7 @@ mod tests {
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: Some(write_cache.clone()),
             file_purger,
