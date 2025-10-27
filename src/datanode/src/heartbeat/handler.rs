@@ -120,7 +120,7 @@ pub enum InstructionHandlers {
     UpgradeRegions(UpgradeRegionsHandler),
 }
 
-macro_rules! impl_into_for_enum {
+macro_rules! impl_from_handler {
     ($($handler:ident => $variant:ident),*) => {
         $(
             impl From<$handler> for InstructionHandlers {
@@ -132,7 +132,7 @@ macro_rules! impl_into_for_enum {
     };
 }
 
-impl_into_for_enum!(
+impl_from_handler!(
     CloseRegionsHandler => CloseRegions,
     OpenRegionsHandler => OpenRegions,
     FlushRegionsHandler => FlushRegions,
