@@ -24,13 +24,16 @@ use crate::readable_size::ReadableSize;
 /// Examples:
 /// - Absolute size: "2GB", "4GiB", "512MB"
 /// - Percentage: "50%", "75%"
-/// - Unlimited: "0"
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// - Unlimited: "unlimited", "0"
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MemoryLimit {
     /// Absolute memory size.
     Size(ReadableSize),
     /// Percentage of total system memory (0.0 to 1.0).
     Percentage(f64),
+    /// No memory limit.
+    #[default]
+    Unlimited,
 }
 
 // Safe to implement Eq because percentage values are always in valid range (0.0-1.0)
@@ -39,7 +42,7 @@ impl Eq for MemoryLimit {}
 
 impl MemoryLimit {
     /// Resolve the memory limit to bytes based on total system memory.
-    /// Returns 0 if the limit is disabled (Size(0) or Percentage(0)).
+    /// Returns 0 if the limit is unlimited.
     pub fn resolve(&self, total_memory_bytes: u64) -> u64 {
         match self {
             MemoryLimit::Size(size) => size.as_bytes(),
@@ -50,21 +53,17 @@ impl MemoryLimit {
                     (total_memory_bytes as f64 * pct) as u64
                 }
             }
+            MemoryLimit::Unlimited => 0,
         }
     }
 
-    /// Returns true if this limit is disabled (0 bytes or 0%).
+    /// Returns true if this limit is unlimited.
     pub fn is_unlimited(&self) -> bool {
         match self {
             MemoryLimit::Size(size) => size.as_bytes() == 0,
             MemoryLimit::Percentage(pct) => *pct <= 0.0,
+            MemoryLimit::Unlimited => true,
         }
-    }
-}
-
-impl Default for MemoryLimit {
-    fn default() -> Self {
-        MemoryLimit::Size(ReadableSize(0))
     }
 }
 
@@ -73,6 +72,10 @@ impl FromStr for MemoryLimit {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+
+        if s.eq_ignore_ascii_case("unlimited") {
+            return Ok(MemoryLimit::Unlimited);
+        }
 
         if let Some(pct_str) = s.strip_suffix('%') {
             let pct = pct_str
@@ -87,7 +90,11 @@ impl FromStr for MemoryLimit {
             Ok(MemoryLimit::Percentage(pct / 100.0))
         } else {
             let size = ReadableSize::from_str(s)?;
-            Ok(MemoryLimit::Size(size))
+            if size.as_bytes() == 0 {
+                Ok(MemoryLimit::Unlimited)
+            } else {
+                Ok(MemoryLimit::Size(size))
+            }
         }
     }
 }
@@ -97,6 +104,7 @@ impl Display for MemoryLimit {
         match self {
             MemoryLimit::Size(size) => write!(f, "{}", size),
             MemoryLimit::Percentage(pct) => write!(f, "{}%", pct * 100.0),
+            MemoryLimit::Unlimited => write!(f, "unlimited"),
         }
     }
 }
@@ -134,10 +142,7 @@ mod tests {
             "512MB".parse::<MemoryLimit>().unwrap(),
             MemoryLimit::Size(ReadableSize(512 * 1024 * 1024))
         );
-        assert_eq!(
-            "0".parse::<MemoryLimit>().unwrap(),
-            MemoryLimit::Size(ReadableSize(0))
-        );
+        assert_eq!("0".parse::<MemoryLimit>().unwrap(), MemoryLimit::Unlimited);
     }
 
     #[test]
@@ -177,12 +182,14 @@ mod tests {
         );
         assert_eq!(MemoryLimit::Size(ReadableSize(0)).resolve(total), 0);
         assert_eq!(MemoryLimit::Percentage(0.0).resolve(total), 0);
+        assert_eq!(MemoryLimit::Unlimited.resolve(total), 0);
     }
 
     #[test]
     fn test_is_unlimited() {
         assert!(MemoryLimit::Size(ReadableSize(0)).is_unlimited());
         assert!(MemoryLimit::Percentage(0.0).is_unlimited());
+        assert!(MemoryLimit::Unlimited.is_unlimited());
         assert!(!MemoryLimit::Size(ReadableSize(1024)).is_unlimited());
         assert!(!MemoryLimit::Percentage(0.5).is_unlimited());
     }
@@ -212,5 +219,26 @@ mod tests {
     #[test]
     fn test_display_decimal_percentage() {
         assert_eq!(MemoryLimit::Percentage(0.205).to_string(), "20.5%");
+    }
+
+    #[test]
+    fn test_parse_unlimited() {
+        assert_eq!(
+            "unlimited".parse::<MemoryLimit>().unwrap(),
+            MemoryLimit::Unlimited
+        );
+        assert_eq!(
+            "UNLIMITED".parse::<MemoryLimit>().unwrap(),
+            MemoryLimit::Unlimited
+        );
+        assert_eq!(
+            "Unlimited".parse::<MemoryLimit>().unwrap(),
+            MemoryLimit::Unlimited
+        );
+    }
+
+    #[test]
+    fn test_display_unlimited() {
+        assert_eq!(MemoryLimit::Unlimited.to_string(), "unlimited");
     }
 }
