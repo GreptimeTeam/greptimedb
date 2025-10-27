@@ -59,14 +59,14 @@ impl JsonType {
     /// Make json type a struct type, by:
     /// - if the json is an object, its entries are mapped to struct fields, obviously;
     /// - if not, the json is one of bool, number, string or array, make it a special field called
-    ///   "plain" in a struct with only that field.
+    ///   "__plain" in a struct with only that field.
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Native(inner) => match inner.as_ref() {
                 ConcreteDataType::Struct(t) => t.clone(),
                 x => StructType::new(Arc::new(vec![StructField::new(
-                    "plain".to_string(),
+                    "__plain".to_string(),
                     x.clone(),
                     true,
                 )])),
