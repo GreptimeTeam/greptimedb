@@ -264,6 +264,16 @@ impl FileMeta {
     pub fn file_id(&self) -> RegionFileId {
         RegionFileId::new(self.region_id, self.file_id)
     }
+
+    /// Returns the cross-region index file id.
+    /// If the index file id is not set, returns the file id.
+    pub fn index_file_id(&self) -> RegionFileId {
+        if let Some(index_file_id) = self.index_file_id {
+            RegionFileId::new(self.region_id, index_file_id)
+        } else {
+            self.file_id()
+        }
+    }
 }
 
 /// Handle to a SST file.

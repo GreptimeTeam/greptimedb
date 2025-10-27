@@ -548,17 +548,7 @@ impl IndexBuildTask {
                     e; "Index build task failed, region: {}, file_id: {}",
                     self.file_meta.region_id, self.file_meta.file_id,
                 );
-                let worker_request = WorkerRequest::Background {
-                    region_id: self.file_meta.region_id,
-                    notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
-                        region_id: self.file_meta.region_id,
-                        file_id: self.file_meta.file_id,
-                    }),
-                };
-                let _ = self
-                    .request_sender
-                    .send(WorkerRequestWithTime::new(worker_request))
-                    .await;
+                self.on_failure(e.into()).await
             }
         }
         let worker_request = WorkerRequest::Background {
@@ -676,7 +666,8 @@ impl IndexBuildTask {
             }
 
             // Upload index file if write cache is enabled.
-            self.maybe_upload_index_file(index_output.clone()).await?;
+            self.maybe_upload_index_file(index_output.clone(), index_file_id)
+                .await?;
 
             let worker_request = match self.update_manifest(index_output, index_file_id).await {
                 Ok(edit) => {
@@ -706,14 +697,18 @@ impl IndexBuildTask {
         Ok(IndexBuildOutcome::Finished)
     }
 
-    async fn maybe_upload_index_file(&self, output: IndexOutput) -> Result<()> {
+    async fn maybe_upload_index_file(
+        &self,
+        output: IndexOutput,
+        index_file_id: FileId,
+    ) -> Result<()> {
         if let Some(write_cache) = &self.write_cache {
             let file_id = self.file_meta.file_id;
             let region_id = self.file_meta.region_id;
             let remote_store = self.access_layer.object_store();
             let mut upload_tracker = UploadTracker::new(region_id);
             let mut err = None;
-            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+            let puffin_key = IndexKey::new(region_id, index_file_id, FileType::Puffin);
             let puffin_path = RegionFilePathFactory::new(
                 self.access_layer.table_dir().to_string(),
                 self.access_layer.path_type(),
@@ -1806,6 +1801,7 @@ mod tests {
             },
             reason,
             access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
             manifest_ctx,
             write_cache: None,
             file_purger,

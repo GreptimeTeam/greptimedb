@@ -591,7 +591,8 @@ impl MitoRegion {
                 let region_id = self.region_id;
                 let origin_region_id = meta.region_id;
                 let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
-                    let index_file_path = index_file_path(table_dir, meta.file_id(), path_type);
+                    let index_file_path =
+                        index_file_path(table_dir, meta.index_file_id(), path_type);
                     (Some(index_file_path), Some(meta.index_file_size))
                 } else {
                     (None, None)
