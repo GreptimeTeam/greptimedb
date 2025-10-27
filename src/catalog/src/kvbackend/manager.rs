@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "testing", debug_assertions))]
 use common_catalog::consts::NUMBERS_TABLE_ID;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
@@ -47,7 +47,7 @@ use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::PartitionRules;
 use table::table::numbers::NUMBERS_TABLE_NAME;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "testing", debug_assertions))]
 use table::table::numbers::NumbersTable;
 use table::table_name::TableName;
 use tokio::sync::Semaphore;
@@ -588,11 +588,11 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => {
-                #[cfg(any(test, feature = "testing"))]
+                #[cfg(any(test, feature = "testing", debug_assertions))]
                 {
                     vec![NUMBERS_TABLE_NAME.to_string()]
                 }
-                #[cfg(not(any(test, feature = "testing")))]
+                #[cfg(not(any(test, feature = "testing", debug_assertions)))]
                 {
                     vec![]
                 }
@@ -614,11 +614,11 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(any(test, feature = "testing", debug_assertions))]
             {
                 table == NUMBERS_TABLE_NAME
             }
-            #[cfg(not(any(test, feature = "testing")))]
+            #[cfg(not(any(test, feature = "testing", debug_assertions)))]
             {
                 false
             }
@@ -667,11 +667,11 @@ impl SystemCatalog {
                 pg_catalog_provider.table(table_name)
             }
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(any(test, feature = "testing", debug_assertions))]
             {
                 Some(NumbersTable::table(NUMBERS_TABLE_ID))
             }
-            #[cfg(not(any(test, feature = "testing")))]
+            #[cfg(not(any(test, feature = "testing", debug_assertions)))]
             {
                 None
             }
