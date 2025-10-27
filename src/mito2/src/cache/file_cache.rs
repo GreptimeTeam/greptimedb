@@ -32,7 +32,7 @@ use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 
-use crate::cache::FILE_TYPE;
+use crate::cache::{FILE_TYPE, INDEX_TYPE};
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::parquet::helper::fetch_byte_ranges;
@@ -171,7 +171,7 @@ impl FileCache {
     /// The `WriteCache` should ensure the file is in the correct path.
     pub(crate) async fn put(&self, key: IndexKey, value: IndexValue) {
         CACHE_BYTES
-            .with_label_values(&[FILE_TYPE])
+            .with_label_values(&[key.file_type.metric_label()])
             .add(value.file_size.into());
         let index = self.memory_index(key.file_type);
         index.insert(key, value).await;
@@ -191,14 +191,18 @@ impl FileCache {
         // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
         let index = self.memory_index(key.file_type);
         if index.get(&key).await.is_none() {
-            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
             return None;
         }
 
         let file_path = self.cache_file_path(key);
         match self.get_reader(&file_path).await {
             Ok(Some(reader)) => {
-                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                CACHE_HIT
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
                 return Some(reader);
             }
             Err(e) => {
@@ -211,7 +215,9 @@ impl FileCache {
 
         // We removes the file from the index.
         index.remove(&key).await;
-        CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+        CACHE_MISS
+            .with_label_values(&[key.file_type.metric_label()])
+            .inc();
         None
     }
 
@@ -223,7 +229,9 @@ impl FileCache {
     ) -> Option<Vec<Bytes>> {
         let index = self.memory_index(key.file_type);
         if index.get(&key).await.is_none() {
-            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
             return None;
         }
 
@@ -233,7 +241,9 @@ impl FileCache {
         let bytes_result = fetch_byte_ranges(&file_path, self.local_store.clone(), ranges).await;
         match bytes_result {
             Ok(bytes) => {
-                CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                CACHE_HIT
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
                 Some(bytes)
             }
             Err(e) => {
@@ -243,7 +253,9 @@ impl FileCache {
 
                 // We removes the file from the index.
                 index.remove(&key).await;
-                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                CACHE_MISS
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
                 None
             }
         }
@@ -271,6 +283,7 @@ impl FileCache {
         // Use i64 for total_size to reduce the risk of overflow.
         // It is possible that the total size of the cache is larger than i32::MAX.
         let (mut total_size, mut total_keys) = (0i64, 0);
+        let (mut parquet_size, mut puffin_size) = (0i64, 0i64);
         while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
             let meta = entry.metadata();
             if !meta.is_file() {
@@ -288,11 +301,23 @@ impl FileCache {
             let file_size = meta.content_length() as u32;
             let index = self.memory_index(key.file_type);
             index.insert(key, IndexValue { file_size }).await;
-            total_size += i64::from(file_size);
+            let size = i64::from(file_size);
+            total_size += size;
             total_keys += 1;
+
+            // Track sizes separately for each file type
+            match key.file_type {
+                FileType::Parquet => parquet_size += size,
+                FileType::Puffin => puffin_size += size,
+            }
         }
         // The metrics is a signed int gauge so we can updates it finally.
-        CACHE_BYTES.with_label_values(&[FILE_TYPE]).add(total_size);
+        CACHE_BYTES
+            .with_label_values(&[FILE_TYPE])
+            .add(parquet_size);
+        CACHE_BYTES
+            .with_label_values(&[INDEX_TYPE])
+            .add(puffin_size);
 
         // Run all pending tasks of the moka cache so that the cache size is updated
         // and the eviction policy is applied.
@@ -353,7 +378,9 @@ impl FileCache {
 
             match metadata_loader.load().await {
                 Ok(metadata) => {
-                    CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
+                    CACHE_HIT
+                        .with_label_values(&[key.file_type.metric_label()])
+                        .inc();
                     Some(metadata)
                 }
                 Err(e) => {
@@ -365,12 +392,16 @@ impl FileCache {
                     }
                     // We removes the file from the index.
                     self.parquet_index.remove(&key).await;
-                    CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+                    CACHE_MISS
+                        .with_label_values(&[key.file_type.metric_label()])
+                        .inc();
                     None
                 }
             }
         } else {
-            CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+            CACHE_MISS
+                .with_label_values(&[key.file_type.metric_label()])
+                .inc();
             None
         }
     }
@@ -444,6 +475,14 @@ impl FileType {
         match self {
             FileType::Parquet => "parquet",
             FileType::Puffin => "puffin",
+        }
+    }
+
+    /// Returns the metric label for this file type.
+    fn metric_label(&self) -> &'static str {
+        match self {
+            FileType::Parquet => FILE_TYPE,
+            FileType::Puffin => INDEX_TYPE,
         }
     }
 }
