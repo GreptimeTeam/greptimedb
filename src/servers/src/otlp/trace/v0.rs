@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
-use common_catalog::consts::trace_services_table_name;
+use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
@@ -35,6 +35,9 @@ use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 24;
 
+// Use a timestamp(2100-01-01 00:00:00) as large as possible.
+const MAX_TIMESTAMP: i64 = 4102444800000000000;
+
 /// Convert SpanTraces to GreptimeDB row insert requests.
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn v0_to_grpc_insert_requests(
@@ -49,22 +52,39 @@ pub fn v0_to_grpc_insert_requests(
     let mut multi_table_writer = MultiTableData::default();
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
     let mut trace_services_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
+    let mut trace_operations_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
 
     let mut services = HashSet::new();
+    let mut operations = HashSet::new();
     for span in spans {
         if let Some(service_name) = &span.service_name {
             // Only insert the service name if it's not already in the set.
             if !services.contains(service_name) {
                 services.insert(service_name.clone());
             }
+
+            // Collect operations (service_name + span_name + span_kind).
+            let operation = (
+                service_name.clone(),
+                span.span_name.clone(),
+                span.span_kind.clone(),
+            );
+            if !operations.contains(&operation) {
+                operations.insert(operation);
+            }
         }
         write_span_to_row(&mut trace_writer, span)?;
     }
     write_trace_services_to_row(&mut trace_services_writer, services)?;
+    write_trace_operations_to_row(&mut trace_operations_writer, operations)?;
 
     multi_table_writer.add_table_data(
         trace_services_table_name(&table_name),
         trace_services_writer,
+    );
+    multi_table_writer.add_table_data(
+        trace_operations_table_name(&table_name),
+        trace_operations_writer,
     );
     multi_table_writer.add_table_data(table_name, trace_writer);
 
@@ -161,7 +181,7 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
         row_writer::write_ts_to_nanos(
             writer,
             TIMESTAMP_COLUMN,
-            Some(4102444800000000000), // Use a timestamp(2100-01-01 00:00:00) as large as possible.
+            Some(MAX_TIMESTAMP),
             Precision::Nanosecond,
             &mut row,
         )?;
@@ -173,6 +193,38 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
                 SERVICE_NAME_COLUMN,
                 Some(service_name),
             )),
+            &mut row,
+        )?;
+        writer.add_row(row);
+    }
+
+    Ok(())
+}
+
+fn write_trace_operations_to_row(
+    writer: &mut TableData,
+    operations: HashSet<(String, String, String)>,
+) -> Result<()> {
+    for (service_name, span_name, span_kind) in operations {
+        let mut row = writer.alloc_one_row();
+        // Write the timestamp as 0.
+        row_writer::write_ts_to_nanos(
+            writer,
+            TIMESTAMP_COLUMN,
+            Some(MAX_TIMESTAMP),
+            Precision::Nanosecond,
+            &mut row,
+        )?;
+
+        // Write the `service_name`, `span_name`, and `span_kind` columns.
+        row_writer::write_fields(
+            writer,
+            vec![
+                make_string_column_data(SERVICE_NAME_COLUMN, Some(service_name)),
+                make_string_column_data(SPAN_NAME_COLUMN, Some(span_name)),
+                make_string_column_data(SPAN_KIND_COLUMN, Some(span_kind)),
+            ]
+            .into_iter(),
             &mut row,
         )?;
         writer.add_row(row);
