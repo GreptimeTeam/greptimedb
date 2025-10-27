@@ -606,11 +606,11 @@ impl QueryMemoryTracker {
     /// # Note
     /// The callback is called after both successful `track()` and `release()` operations.
     /// It is called even when `limit == 0` (unlimited mode) to track actual usage.
-    pub fn with_update_callback<F>(mut self, callback: F) -> Self
+    pub fn with_on_update<F>(mut self, on_update: F) -> Self
     where
         F: Fn(usize) + Send + Sync + 'static,
     {
-        self.on_update = Some(Arc::new(callback));
+        self.on_update = Some(Arc::new(on_update));
         self
     }
 
@@ -619,11 +619,11 @@ impl QueryMemoryTracker {
     /// # Note
     /// This is only called when `track()` fails due to exceeding the limit.
     /// It is never called when `limit == 0` (unlimited mode).
-    pub fn with_reject_callback<F>(mut self, callback: F) -> Self
+    pub fn with_on_reject<F>(mut self, on_reject: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.on_reject = Some(Arc::new(callback));
+        self.on_reject = Some(Arc::new(on_reject));
         self
     }
 
@@ -632,7 +632,6 @@ impl QueryMemoryTracker {
         self.current.load(Ordering::Acquire)
     }
 
-    // Calculate privileged slots based on max_concurrent_queries.
     fn calculate_privileged_slots(max_concurrent_queries: usize) -> usize {
         if max_concurrent_queries == 0 {
             Self::DEFAULT_PRIVILEGED_SLOTS

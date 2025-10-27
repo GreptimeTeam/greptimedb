@@ -214,10 +214,10 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
             QueryMemoryTracker::new(scan_memory_limit, self.max_concurrent_queries)
-                .with_update_callback(|usage| {
+                .with_on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
-                .with_reject_callback(|| {
+                .with_on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
                 });
 
@@ -1278,10 +1278,10 @@ impl MitoEngine {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit, 0)
-            .with_update_callback(|usage| {
+            .with_on_update(|usage| {
                 SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
             })
-            .with_reject_callback(|| {
+            .with_on_reject(|| {
                 SCAN_REQUESTS_REJECTED_TOTAL.inc();
             });
         Ok(MitoEngine {
