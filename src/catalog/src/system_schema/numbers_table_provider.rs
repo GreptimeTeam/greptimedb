@@ -24,29 +24,16 @@ use table::table::numbers::NumbersTable;
 #[derive(Clone)]
 pub struct NumbersTableProvider;
 
+#[cfg(any(test, feature = "testing", debug_assertions))]
 impl NumbersTableProvider {
-    #[cfg(any(test, feature = "testing", debug_assertions))]
     pub(crate) fn table_exists(&self, name: &str) -> bool {
         name == NUMBERS_TABLE_NAME
     }
 
-    #[cfg(not(any(test, feature = "testing", debug_assertions)))]
-    pub(crate) fn table_exists(&self, _name: &str) -> bool {
-        false
-    }
-
     pub(crate) fn table_names(&self) -> Vec<String> {
-        #[cfg(any(test, feature = "testing", debug_assertions))]
-        {
-            vec![NUMBERS_TABLE_NAME.to_string()]
-        }
-        #[cfg(not(any(test, feature = "testing", debug_assertions)))]
-        {
-            vec![]
-        }
+        vec![NUMBERS_TABLE_NAME.to_string()]
     }
 
-    #[cfg(any(test, feature = "testing", debug_assertions))]
     pub(crate) fn table(&self, name: &str) -> Option<TableRef> {
         if name == NUMBERS_TABLE_NAME {
             Some(NumbersTable::table(NUMBERS_TABLE_ID))
@@ -54,8 +41,18 @@ impl NumbersTableProvider {
             None
         }
     }
+}
 
-    #[cfg(not(any(test, feature = "testing", debug_assertions)))]
+#[cfg(not(any(test, feature = "testing", debug_assertions)))]
+impl NumbersTableProvider {
+    pub(crate) fn table_exists(&self, _name: &str) -> bool {
+        false
+    }
+
+    pub(crate) fn table_names(&self) -> Vec<String> {
+        vec![]
+    }
+
     pub(crate) fn table(&self, _name: &str) -> Option<TableRef> {
         None
     }

@@ -554,7 +554,7 @@ pub(super) struct SystemCatalog {
     // system_schema_provider for default catalog
     pub(super) information_schema_provider: Arc<InformationSchemaProvider>,
     pub(super) pg_catalog_provider: Arc<PGCatalogProvider>,
-    pub(super) numbers_table_provider: Arc<NumbersTableProvider>,
+    pub(super) numbers_table_provider: NumbersTableProvider,
     pub(super) backend: KvBackendRef,
     pub(super) process_manager: Option<ProcessManagerRef>,
     #[cfg(feature = "enterprise")]

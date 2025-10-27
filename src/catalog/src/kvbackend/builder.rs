@@ -120,7 +120,7 @@ impl KvBackendCatalogManagerBuilder {
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
-                numbers_table_provider: Arc::new(NumbersTableProvider),
+                numbers_table_provider: NumbersTableProvider,
                 backend,
                 process_manager,
                 #[cfg(feature = "enterprise")]
