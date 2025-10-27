@@ -30,7 +30,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error};
-use crate::types::{StructField, StructType};
+use crate::types::{ListType, StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
 /// The configuration of JSON encoding
@@ -375,8 +375,8 @@ fn encode_json_value_with_context<'a>(
         }
         Json::Array(arr) => {
             let list_value = encode_json_array_with_context(arr, expected_type, context)?;
-            let data_type = list_value.datatype().clone();
-            Ok((Value::List(list_value), (*data_type).clone()))
+            let datatype = ConcreteDataType::List(ListType::new(list_value.datatype()));
+            Ok((Value::List(list_value), datatype))
         }
         Json::Object(obj) => {
             let struct_value = encode_json_object_with_context(obj, None, context)?;
