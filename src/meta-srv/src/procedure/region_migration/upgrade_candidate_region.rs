@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::ddl::utils::parse_region_wal_options;
-use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_meta::instruction::{
+    Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
+};
 use common_meta::lock_key::RemoteWalLock;
 use common_meta::wal_options_allocator::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -131,7 +133,7 @@ impl UpgradeCandidateRegion {
             None
         };
 
-        let upgrade_instruction = Instruction::UpgradeRegion(
+        let upgrade_instruction = Instruction::UpgradeRegions(vec![
             UpgradeRegion {
                 region_id,
                 last_entry_id,
@@ -143,7 +145,7 @@ impl UpgradeCandidateRegion {
             }
             .with_replay_entry_id(checkpoint.map(|c| c.entry_id))
             .with_metadata_replay_entry_id(checkpoint.and_then(|c| c.metadata_entry_id)),
-        );
+        ]);
 
         Ok(upgrade_instruction)
     }
@@ -193,11 +195,7 @@ impl UpgradeCandidateRegion {
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                let InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready,
-                    exists,
-                    error,
-                }) = reply
+                let InstructionReply::UpgradeRegions(UpgradeRegionsReply { replies }) = reply
                 else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
@@ -205,6 +203,13 @@ impl UpgradeCandidateRegion {
                     }
                     .fail();
                 };
+                // TODO(weny): handle multiple replies.
+                let UpgradeRegionReply {
+                    ready,
+                    exists,
+                    error,
+                    ..
+                } = &replies[0];
 
                 // Notes: The order of handling is important.
                 if error.is_some() {

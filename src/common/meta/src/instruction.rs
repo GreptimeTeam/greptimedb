@@ -507,13 +507,14 @@ pub enum Instruction {
     /// Closes regions.
     #[serde(deserialize_with = "single_or_multiple_from", alias = "CloseRegion")]
     CloseRegions(Vec<RegionIdent>),
-    /// Upgrades a region.
-    UpgradeRegion(UpgradeRegion),
+    /// Upgrades regions.
+    #[serde(deserialize_with = "single_or_multiple_from", alias = "UpgradeRegion")]
+    UpgradeRegions(Vec<UpgradeRegion>),
     #[serde(
         deserialize_with = "single_or_multiple_from",
         alias = "DowngradeRegion"
     )]
-    /// Downgrades a region.
+    /// Downgrades regions.
     DowngradeRegions(Vec<DowngradeRegion>),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
@@ -559,9 +560,9 @@ impl Instruction {
     }
 
     /// Converts the instruction into a [UpgradeRegion].
-    pub fn into_upgrade_regions(self) -> Option<UpgradeRegion> {
+    pub fn into_upgrade_regions(self) -> Option<Vec<UpgradeRegion>> {
         match self {
-            Self::UpgradeRegion(upgrade_region) => Some(upgrade_region),
+            Self::UpgradeRegions(upgrade_region) => Some(upgrade_region),
             _ => None,
         }
     }
@@ -584,6 +585,10 @@ impl Instruction {
 /// The reply of [UpgradeRegion].
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct UpgradeRegionReply {
+    /// The [RegionId].
+    /// For compatibility, it is defaulted to [RegionId::new(0, 0)].
+    #[serde(default)]
+    pub region_id: RegionId,
     /// Returns true if `last_entry_id` has been replayed to the latest.
     pub ready: bool,
     /// Indicates whether the region exists.
@@ -636,13 +641,50 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct UpgradeRegionsReply {
+    pub replies: Vec<UpgradeRegionReply>,
+}
+
+impl UpgradeRegionsReply {
+    pub fn new(replies: Vec<UpgradeRegionReply>) -> Self {
+        Self { replies }
+    }
+
+    pub fn single(reply: UpgradeRegionReply) -> Self {
+        Self::new(vec![reply])
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UpgradeRegionsCompat {
+    Single(UpgradeRegionReply),
+    Multiple(UpgradeRegionsReply),
+}
+
+fn upgrade_regions_compat_from<'de, D>(deserializer: D) -> Result<UpgradeRegionsReply, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let helper = UpgradeRegionsCompat::deserialize(deserializer)?;
+    Ok(match helper {
+        UpgradeRegionsCompat::Single(x) => UpgradeRegionsReply::new(vec![x]),
+        UpgradeRegionsCompat::Multiple(reply) => reply,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InstructionReply {
     #[serde(alias = "open_region")]
     OpenRegions(SimpleReply),
     #[serde(alias = "close_region")]
     CloseRegions(SimpleReply),
-    UpgradeRegion(UpgradeRegionReply),
+    #[serde(
+        deserialize_with = "upgrade_regions_compat_from",
+        alias = "UpgradeRegion"
+    )]
+    UpgradeRegions(UpgradeRegionsReply),
     #[serde(
         alias = "downgrade_region",
         deserialize_with = "downgrade_regions_compat_from"
@@ -658,9 +700,11 @@ impl Display for InstructionReply {
         match self {
             Self::OpenRegions(reply) => write!(f, "InstructionReply::OpenRegions({})", reply),
             Self::CloseRegions(reply) => write!(f, "InstructionReply::CloseRegions({})", reply),
-            Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
+            Self::UpgradeRegions(reply) => {
+                write!(f, "InstructionReply::UpgradeRegions({:?})", reply.replies)
+            }
             Self::DowngradeRegions(reply) => {
-                write!(f, "InstructionReply::DowngradeRegions({:?})", reply)
+                write!(f, "InstructionReply::DowngradeRegions({:?})", reply.replies)
             }
             Self::FlushRegions(reply) => write!(f, "InstructionReply::FlushRegions({})", reply),
             Self::GetFileRefs(reply) => write!(f, "InstructionReply::GetFileRefs({})", reply),
@@ -685,9 +729,9 @@ impl InstructionReply {
         }
     }
 
-    pub fn expect_upgrade_region_reply(self) -> UpgradeRegionReply {
+    pub fn expect_upgrade_regions_reply(self) -> Vec<UpgradeRegionReply> {
         match self {
-            Self::UpgradeRegion(reply) => reply,
+            Self::UpgradeRegions(reply) => reply.replies,
             _ => panic!("Expected UpgradeRegion reply"),
         }
     }

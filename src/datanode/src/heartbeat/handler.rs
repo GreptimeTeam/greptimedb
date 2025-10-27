@@ -114,7 +114,7 @@ impl RegionHeartbeatResponseHandler {
             )),
             Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
             Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
-            Instruction::UpgradeRegion(_) => Ok(Box::new(UpgradeRegionsHandler.into())),
+            Instruction::UpgradeRegions(_) => Ok(Box::new(UpgradeRegionsHandler.into())),
             Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
             Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
@@ -194,7 +194,7 @@ dispatch_instr!(
     OpenRegions => OpenRegions,
     FlushRegions => FlushRegions,
     DowngradeRegions => DowngradeRegions,
-    UpgradeRegion => UpgradeRegions,
+    UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
 );
@@ -334,10 +334,10 @@ mod tests {
         );
 
         // Upgrade region
-        let instruction = Instruction::UpgradeRegion(UpgradeRegion {
+        let instruction = Instruction::UpgradeRegions(vec![UpgradeRegion {
             region_id,
             ..Default::default()
-        });
+        }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
         );
