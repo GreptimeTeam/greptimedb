@@ -17,9 +17,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
+#[cfg(any(test, feature = "testing"))]
+use common_catalog::consts::NUMBERS_TABLE_ID;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-    PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -45,7 +46,9 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::PartitionRules;
-use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
+use table::table::numbers::NUMBERS_TABLE_NAME;
+#[cfg(any(test, feature = "testing"))]
+use table::table::numbers::NumbersTable;
 use table::table_name::TableName;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
@@ -585,7 +588,14 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => {
-                vec![NUMBERS_TABLE_NAME.to_string()]
+                #[cfg(any(test, feature = "testing"))]
+                {
+                    vec![NUMBERS_TABLE_NAME.to_string()]
+                }
+                #[cfg(not(any(test, feature = "testing")))]
+                {
+                    vec![]
+                }
             }
             _ => vec![],
         }
@@ -604,7 +614,14 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
-            table == NUMBERS_TABLE_NAME
+            #[cfg(any(test, feature = "testing"))]
+            {
+                table == NUMBERS_TABLE_NAME
+            }
+            #[cfg(not(any(test, feature = "testing")))]
+            {
+                false
+            }
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
         } else {
@@ -650,7 +667,14 @@ impl SystemCatalog {
                 pg_catalog_provider.table(table_name)
             }
         } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
-            Some(NumbersTable::table(NUMBERS_TABLE_ID))
+            #[cfg(any(test, feature = "testing"))]
+            {
+                Some(NumbersTable::table(NUMBERS_TABLE_ID))
+            }
+            #[cfg(not(any(test, feature = "testing")))]
+            {
+                None
+            }
         } else {
             None
         }
