@@ -126,9 +126,9 @@ async fn test_index_build_type_flush() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_memtables() == 1);
-    assert!(scanner.num_files() == 0);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 0);
+    assert_eq!(scanner.num_memtables(), 1);
+    assert_eq!(scanner.num_files(), 0);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     flush_region(&engine, region_id, None).await;
 
@@ -137,9 +137,9 @@ async fn test_index_build_type_flush() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_memtables() == 0);
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 0);
+    assert_eq!(scanner.num_memtables(), 0);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -155,7 +155,7 @@ async fn test_index_build_type_flush() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 2);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 2);
 }
 
 #[tokio::test]
@@ -206,7 +206,7 @@ async fn test_index_build_type_compact() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_files() == 4);
+    assert_eq!(scanner.num_files(), 4);
     assert!(num_of_index_files(&engine, &scanner, region_id).await < 4);
 
     // Note: Compaction have been implicitly triggered by the flush operations above.
@@ -219,7 +219,7 @@ async fn test_index_build_type_compact() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_files() == 2);
+    assert_eq!(scanner.num_files(), 2);
     // Compaction is an async task, so it may be finished at this moment.
     assert!(num_of_index_files(&engine, &scanner, region_id).await <= 2);
 
@@ -229,9 +229,9 @@ async fn test_index_build_type_compact() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_files() == 2);
+    assert_eq!(scanner.num_files(), 2);
     // Index files should be built.
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 2);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 2);
 }
 
 #[tokio::test]
@@ -276,8 +276,8 @@ async fn test_index_build_type_schema_change() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 0);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     // Set Index and make sure index file is built without flush or compaction.
     let set_index_request = RegionAlterRequest {
@@ -296,6 +296,6 @@ async fn test_index_build_type_schema_change() {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert!(scanner.num_files() == 1);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await == 1);
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
