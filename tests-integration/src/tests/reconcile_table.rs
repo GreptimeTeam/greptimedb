@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, OutputData};
 use common_meta::reconciliation::ResolveStrategy;
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
@@ -165,6 +167,8 @@ async fn test_reconcile_dropped_column() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now we should able to query table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
@@ -268,6 +272,8 @@ async fn test_reconcile_added_column() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now the column cloud_provider is available.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
@@ -342,6 +348,8 @@ async fn test_reconcile_modify_column_type() {
         "grpc_latencies",
     )
     .await;
+    // Try best effort to wait for the cache to be invalidated.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Now we can query the table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;

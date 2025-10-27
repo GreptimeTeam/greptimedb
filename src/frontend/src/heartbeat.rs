@@ -104,6 +104,9 @@ impl HeartbeatTask {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
                         debug!("Receiving heartbeat response: {:?}", resp);
+                        if let Some(message) = &resp.mailbox_message {
+                            info!("Received mailbox message: {message:?}");
+                        }
                         let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), resp);
                         if let Err(e) = capture_self.handle_response(ctx).await {
                             error!(e; "Error while handling heartbeat response");
