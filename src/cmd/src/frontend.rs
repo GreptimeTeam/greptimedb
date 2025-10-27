@@ -25,11 +25,13 @@ use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
@@ -333,6 +335,9 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
+        set_default_prefix(opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
 
         let meta_client_options = opts
             .meta_client

@@ -14,6 +14,7 @@
 
 mod common;
 
+use common_query::prelude::greptime_timestamp;
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
 use pipeline::{PipelineContext, setup_pipeline};
@@ -51,7 +52,7 @@ transform:
         make_string_column_schema("a".to_string()),
         make_string_column_schema("b".to_string()),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -99,7 +100,7 @@ transform:
         make_string_column_schema("a".to_string()),
         make_string_column_schema("b".to_string()),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -142,7 +143,7 @@ transform:
         make_string_column_schema("a".to_string()),
         make_string_column_schema("b".to_string()),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -185,7 +186,7 @@ transform:
         make_string_column_schema("key3".to_string()),
         make_string_column_schema("key5".to_string()),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),
@@ -236,7 +237,7 @@ transform:
     let expected_schema = vec![
         make_string_column_schema("key1".to_string()),
         common::make_column_schema(
-            "greptime_timestamp".to_string(),
+            greptime_timestamp().to_string(),
             ColumnDataType::TimestampNanosecond,
             SemanticType::Timestamp,
         ),

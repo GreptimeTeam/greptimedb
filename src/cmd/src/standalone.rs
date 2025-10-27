@@ -41,6 +41,7 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocatorRef, build_wal_options_allocator};
 use common_procedure::ProcedureManagerRef;
+use common_query::prelude::set_default_prefix;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
@@ -355,6 +356,10 @@ impl StartCommand {
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
+        set_default_prefix(opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
+
         opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();

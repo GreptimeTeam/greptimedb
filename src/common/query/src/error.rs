@@ -199,6 +199,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid character in prefix config: {}", prefix))]
+    InvalidColumnPrefix { prefix: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -227,7 +230,8 @@ impl ErrorExt for Error {
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
-            | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidFuncArgs { .. }
+            | Error::InvalidColumnPrefix { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
 

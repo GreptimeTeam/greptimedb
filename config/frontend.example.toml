@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
 ## The maximum in-flight write bytes.
 ## @toml2docs:none-default
 #+ max_in_flight_write_bytes = "500MB"

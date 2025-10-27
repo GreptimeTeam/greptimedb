@@ -2,6 +2,10 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
 ## Initialize all regions in the background during the startup.
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false

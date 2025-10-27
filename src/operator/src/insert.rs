@@ -37,7 +37,7 @@ use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
@@ -721,14 +721,14 @@ impl Inserter {
         // schema with timestamp and field column
         let default_schema = vec![
             ColumnSchema {
-                column_name: GREPTIME_TIMESTAMP.to_string(),
+                column_name: greptime_timestamp().to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
             },
             ColumnSchema {
-                column_name: GREPTIME_VALUE.to_string(),
+                column_name: greptime_value().to_string(),
                 datatype: ColumnDataType::Float64 as _,
                 semantic_type: SemanticType::Field as _,
                 datatype_extension: None,

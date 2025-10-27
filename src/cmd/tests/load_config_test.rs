@@ -48,6 +48,7 @@ fn test_load_datanode_example_config() {
     let expected = GreptimeOptions::<DatanodeOptions> {
         component: DatanodeOptions {
             node_id: Some(42),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -113,6 +114,7 @@ fn test_load_frontend_example_config() {
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -273,6 +275,7 @@ fn test_load_standalone_example_config() {
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
+            default_column_prefix: Some("greptime".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
