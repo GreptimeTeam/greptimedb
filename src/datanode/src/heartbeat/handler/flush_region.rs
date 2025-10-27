@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use common_meta::instruction::{
-    FlushErrorStrategy, FlushRegionReply, FlushStrategy, Instruction, InstructionReply,
+    FlushErrorStrategy, FlushRegionReply, FlushRegions, FlushStrategy, InstructionReply,
 };
 use common_telemetry::{debug, warn};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
@@ -28,13 +28,14 @@ pub struct FlushRegionsHandler;
 
 #[async_trait::async_trait]
 impl InstructionHandler for FlushRegionsHandler {
+    type Instruction = FlushRegions;
+
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
+        flush_regions: FlushRegions,
     ) -> Option<InstructionReply> {
         let start_time = Instant::now();
-        let flush_regions = instruction.into_flush_regions().unwrap();
         let strategy = flush_regions.strategy;
         let region_ids = flush_regions.region_ids;
         let error_strategy = flush_regions.error_strategy;
@@ -205,10 +206,7 @@ mod tests {
         // Async hint mode
         let flush_instruction = FlushRegions::async_batch(region_ids.clone());
         let reply = FlushRegionsHandler
-            .handle(
-                &handler_context,
-                Instruction::FlushRegions(flush_instruction),
-            )
+            .handle(&handler_context, flush_instruction)
             .await;
         assert!(reply.is_none()); // Hint mode returns no reply
         assert_eq!(*flushed_region_ids.read().unwrap(), region_ids);
@@ -218,10 +216,7 @@ mod tests {
         let not_found_region_ids = (0..2).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
         let flush_instruction = FlushRegions::async_batch(not_found_region_ids);
         let reply = FlushRegionsHandler
-            .handle(
-                &handler_context,
-                Instruction::FlushRegions(flush_instruction),
-            )
+            .handle(&handler_context, flush_instruction)
             .await;
         assert!(reply.is_none());
         assert!(flushed_region_ids.read().unwrap().is_empty());
@@ -247,10 +242,7 @@ mod tests {
 
         let flush_instruction = FlushRegions::sync_single(region_id);
         let reply = FlushRegionsHandler
-            .handle(
-                &handler_context,
-                Instruction::FlushRegions(flush_instruction),
-            )
+            .handle(&handler_context, flush_instruction)
             .await;
         let flush_reply = reply.unwrap().expect_flush_regions_reply();
         assert!(flush_reply.overall_success);
@@ -287,10 +279,7 @@ mod tests {
         let flush_instruction =
             FlushRegions::sync_batch(region_ids.clone(), FlushErrorStrategy::FailFast);
         let reply = FlushRegionsHandler
-            .handle(
-                &handler_context,
-                Instruction::FlushRegions(flush_instruction),
-            )
+            .handle(&handler_context, flush_instruction)
             .await;
         let flush_reply = reply.unwrap().expect_flush_regions_reply();
         assert!(!flush_reply.overall_success); // Should fail due to non-existent regions
@@ -321,10 +310,7 @@ mod tests {
         let flush_instruction =
             FlushRegions::sync_batch(region_ids.clone(), FlushErrorStrategy::TryAll);
         let reply = FlushRegionsHandler
-            .handle(
-                &handler_context,
-                Instruction::FlushRegions(flush_instruction),
-            )
+            .handle(&handler_context, flush_instruction)
             .await;
         let flush_reply = reply.unwrap().expect_flush_regions_reply();
         assert!(!flush_reply.overall_success); // Should fail due to one non-existent region

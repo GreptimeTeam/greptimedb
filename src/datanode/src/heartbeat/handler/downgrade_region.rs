@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
+    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, InstructionReply,
 };
 use common_telemetry::tracing::info;
 use common_telemetry::{error, warn};
@@ -156,13 +156,13 @@ impl DowngradeRegionsHandler {
 
 #[async_trait::async_trait]
 impl InstructionHandler for DowngradeRegionsHandler {
+    type Instruction = Vec<DowngradeRegion>;
+
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
+        downgrade_regions: Self::Instruction,
     ) -> Option<InstructionReply> {
-        // Safety: must be `Instruction::DowngradeRegion` instruction.
-        let downgrade_regions = instruction.into_downgrade_regions().unwrap();
         let futures = downgrade_regions
             .into_iter()
             .map(|downgrade_region| Self::handle_downgrade_region(ctx, downgrade_region));
@@ -263,10 +263,10 @@ mod tests {
             let reply = DowngradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::DowngradeRegions(vec![DowngradeRegion {
+                    vec![DowngradeRegion {
                         region_id,
                         flush_timeout,
-                    }]),
+                    }],
                 )
                 .await;
 
@@ -306,10 +306,10 @@ mod tests {
             let reply = DowngradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::DowngradeRegions(vec![DowngradeRegion {
+                    vec![DowngradeRegion {
                         region_id,
                         flush_timeout,
-                    }]),
+                    }],
                 )
                 .await;
 
@@ -341,10 +341,10 @@ mod tests {
         let reply = DowngradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::DowngradeRegions(vec![DowngradeRegion {
+                vec![DowngradeRegion {
                     region_id,
                     flush_timeout: Some(flush_timeout),
-                }]),
+                }],
             )
             .await;
 
@@ -380,10 +380,10 @@ mod tests {
             let reply = DowngradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::DowngradeRegions(vec![DowngradeRegion {
+                    vec![DowngradeRegion {
                         region_id,
                         flush_timeout,
-                    }]),
+                    }],
                 )
                 .await;
 
@@ -396,10 +396,10 @@ mod tests {
         let reply = DowngradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::DowngradeRegions(vec![DowngradeRegion {
+                vec![DowngradeRegion {
                     region_id,
                     flush_timeout: Some(Duration::from_millis(500)),
-                }]),
+                }],
             )
             .await;
         // Must less than 300 ms.
@@ -443,10 +443,10 @@ mod tests {
             let reply = DowngradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::DowngradeRegions(vec![DowngradeRegion {
+                    vec![DowngradeRegion {
                         region_id,
                         flush_timeout,
-                    }]),
+                    }],
                 )
                 .await;
             let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
@@ -458,10 +458,10 @@ mod tests {
         let reply = DowngradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::DowngradeRegions(vec![DowngradeRegion {
+                vec![DowngradeRegion {
                     region_id,
                     flush_timeout: Some(Duration::from_millis(500)),
-                }]),
+                }],
             )
             .await;
         // Must less than 300 ms.
@@ -487,10 +487,10 @@ mod tests {
         let reply = DowngradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::DowngradeRegions(vec![DowngradeRegion {
+                vec![DowngradeRegion {
                     region_id,
                     flush_timeout: None,
-                }]),
+                }],
             )
             .await;
         let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
@@ -518,10 +518,10 @@ mod tests {
         let reply = DowngradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::DowngradeRegions(vec![DowngradeRegion {
+                vec![DowngradeRegion {
                     region_id,
                     flush_timeout: None,
-                }]),
+                }],
             )
             .await;
         let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];

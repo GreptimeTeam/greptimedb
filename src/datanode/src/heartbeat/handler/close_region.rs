@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::RegionIdent;
+use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_telemetry::warn;
 use futures::future::join_all;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
@@ -26,13 +27,13 @@ pub struct CloseRegionsHandler;
 
 #[async_trait::async_trait]
 impl InstructionHandler for CloseRegionsHandler {
+    type Instruction = Vec<RegionIdent>;
+
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
+        region_idents: Self::Instruction,
     ) -> Option<InstructionReply> {
-        // Safety: must be `Instruction::CloseRegions` instruction.
-        let region_idents = instruction.into_close_regions().unwrap();
         let region_ids = region_idents
             .into_iter()
             .map(|region_ident| RegionId::new(region_ident.table_id, region_ident.region_number))
