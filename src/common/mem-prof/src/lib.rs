@@ -19,7 +19,7 @@ mod jemalloc;
 #[cfg(not(windows))]
 pub use jemalloc::{
     activate_heap_profile, deactivate_heap_profile, dump_flamegraph, dump_pprof, dump_profile,
-    is_heap_profile_active,
+    is_gdump_active, is_heap_profile_active, set_gdump_active,
 };
 
 #[cfg(windows)]
@@ -49,5 +49,15 @@ pub fn deactivate_heap_profile() -> error::Result<()> {
 
 #[cfg(windows)]
 pub fn is_heap_profile_active() -> error::Result<bool> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub fn is_gdump_active() -> error::Result<bool> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub fn set_gdump_active(_: bool) -> error::Result<()> {
     error::ProfilingNotSupportedSnafu.fail()
 }
