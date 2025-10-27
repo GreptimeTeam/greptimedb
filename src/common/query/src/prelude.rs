@@ -20,7 +20,7 @@ use snafu::ensure;
 pub use crate::columnar_value::ColumnarValue;
 use crate::error::{InvalidColumnPrefixSnafu, Result};
 
-/// Default timestamp column name.
+/// Default time index column name.
 static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
 
 /// Default value column name.
@@ -33,7 +33,7 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
         }
-        Some("") => {
+        Some(s) if s.trim().is_empty() => {
             // use "" to disable prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| "timestamp".to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| "value".to_string());

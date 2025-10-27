@@ -13,7 +13,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created timestamp and value columns. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
@@ -227,7 +227,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `default_timezone` | String | Unset | The default timezone of the server. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created timestamp and value columns. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
 | `max_in_flight_write_bytes` | String | Unset | The maximum in-flight write bytes. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
@@ -442,7 +442,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
-| `default_column_prefix` | String | Unset | The default column prefix for auto-created timestamp and value columns. |
+| `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |

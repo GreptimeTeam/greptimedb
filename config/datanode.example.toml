@@ -2,7 +2,7 @@
 ## @toml2docs:none-default
 node_id = 42
 
-## The default column prefix for auto-created timestamp and value columns.
+## The default column prefix for auto-created time index and value columns.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
