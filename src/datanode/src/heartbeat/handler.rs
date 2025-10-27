@@ -141,58 +141,54 @@ impl_from_handler!(
 );
 
 macro_rules! dispatch_instr {
-    ($self:expr, $ctx:expr, $instr:expr, $($instr_variant:ident => $handler_variant:ident),*) => {
-        match ($self, $instr) {
-            $(
-                (
-                    InstructionHandlers::$handler_variant(handler),
-                    Instruction::$instr_variant(instr),
-                ) => handler.handle($ctx, instr).await,
-            )*
-            // Safety: must be used in pairs with `build_handler`.
-            _ => unreachable!(),
+    (
+        $( $instr_variant:ident => $handler_variant:ident ),* $(,)?
+    ) => {
+        impl InstructionHandlers {
+            pub async fn handle(
+                &self,
+                ctx: &HandlerContext,
+                instruction: Instruction,
+            ) -> Option<InstructionReply> {
+                match (self, instruction) {
+                    $(
+                        (
+                            InstructionHandlers::$handler_variant(handler),
+                            Instruction::$instr_variant(instr),
+                        ) => handler.handle(ctx, instr).await,
+                    )*
+                    // Safety: must be used in pairs with `build_handler`.
+                    _ => unreachable!(),
+                }
+            }
+            /// Check whether this instruction is acceptable by any handler.
+            pub fn is_acceptable(instruction: &Instruction) -> bool {
+                matches!(
+                    instruction,
+                    $(
+                        Instruction::$instr_variant { .. }
+                    )|*
+                )
+            }
         }
     };
 }
 
-impl InstructionHandlers {
-    pub async fn handle(
-        &self,
-        ctx: &HandlerContext,
-        instruction: Instruction,
-    ) -> Option<InstructionReply> {
-        dispatch_instr!(
-            self,
-            ctx,
-            instruction,
-            CloseRegions => CloseRegions,
-            OpenRegions => OpenRegions,
-            FlushRegions => FlushRegions,
-            DowngradeRegions => DowngradeRegions,
-            UpgradeRegion => UpgradeRegions
-        )
-    }
-}
+dispatch_instr!(
+    CloseRegions => CloseRegions,
+    OpenRegions => OpenRegions,
+    FlushRegions => FlushRegions,
+    DowngradeRegions => DowngradeRegions,
+    UpgradeRegion => UpgradeRegions,
+);
 
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        matches!(ctx.incoming_message.as_ref(), |Some((
-            _,
-            Instruction::DowngradeRegions { .. },
-        ))| Some((
-            _,
-            Instruction::UpgradeRegion { .. }
-        )) | Some((
-            _,
-            Instruction::FlushRegions { .. }
-        )) | Some((
-            _,
-            Instruction::OpenRegions { .. }
-        )) | Some((
-            _,
-            Instruction::CloseRegions { .. }
-        )))
+        if let Some((_, instruction)) = ctx.incoming_message.as_ref() {
+            return InstructionHandlers::is_acceptable(instruction);
+        }
+        false
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
