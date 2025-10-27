@@ -79,6 +79,15 @@ FROM (
     SELECT '[4.0, 5.0, 6.0]' AS v
 );
 
+SELECT vec_to_string(vec_avg(v))
+FROM (
+    SELECT '[1.0, 2.0, 3.0]' AS v
+    UNION ALL
+    SELECT '[10.0, 11.0, 12.0]' AS v
+    UNION ALL
+    SELECT '[4.0, 5.0, 6.0]' AS v
+);
+
 SELECT vec_to_string(vec_product(v))
 FROM (
     SELECT '[1.0, 2.0, 3.0]' AS v
