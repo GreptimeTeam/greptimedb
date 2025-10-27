@@ -850,8 +850,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
@@ -906,8 +906,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
@@ -963,8 +963,8 @@ mod tests {
             object_store.clone(),
         )
         .predicate(Some(Predicate::new(preds)))
-        .inverted_index_applier(inverted_index_applier.clone())
-        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .inverted_index_appliers([inverted_index_applier.clone(), None])
+        .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
