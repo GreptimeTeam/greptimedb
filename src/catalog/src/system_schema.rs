@@ -14,6 +14,7 @@
 
 pub mod information_schema;
 mod memory_table;
+pub mod numbers_table_provider;
 pub mod pg_catalog;
 pub mod predicate;
 mod utils;

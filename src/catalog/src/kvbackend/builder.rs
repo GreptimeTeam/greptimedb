@@ -29,6 +29,7 @@ use crate::information_schema::{InformationExtensionRef, InformationSchemaProvid
 use crate::kvbackend::manager::{SystemCatalog, CATALOG_CACHE_MAX_CAPACITY};
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::process_manager::ProcessManagerRef;
+use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 
 pub struct KvBackendCatalogManagerBuilder {
@@ -119,6 +120,7 @@ impl KvBackendCatalogManagerBuilder {
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
+                numbers_table_provider: NumbersTableProvider,
                 backend,
                 process_manager,
                 #[cfg(feature = "enterprise")]
