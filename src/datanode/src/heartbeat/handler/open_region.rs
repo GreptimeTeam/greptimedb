@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
+use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_options_allocator::prepare_wal_options;
 use store_api::path_utils::table_dir;
 use store_api::region_request::{PathType, RegionOpenRequest};
@@ -26,13 +26,12 @@ pub struct OpenRegionsHandler {
 
 #[async_trait::async_trait]
 impl InstructionHandler for OpenRegionsHandler {
+    type Instruction = Vec<OpenRegion>;
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
+        open_regions: Self::Instruction,
     ) -> Option<InstructionReply> {
-        let open_regions = instruction.into_open_regions().unwrap();
-
         let requests = open_regions
             .into_iter()
             .map(|open_region| {

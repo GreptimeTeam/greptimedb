@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::{info, warn};
 use store_api::region_request::{RegionCatchupRequest, RegionRequest, ReplayCheckpoint};
 
@@ -24,12 +24,12 @@ pub struct UpgradeRegionsHandler;
 
 #[async_trait::async_trait]
 impl InstructionHandler for UpgradeRegionsHandler {
+    type Instruction = UpgradeRegion;
+
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
-    ) -> Option<InstructionReply> {
-        let UpgradeRegion {
+        UpgradeRegion {
             region_id,
             last_entry_id,
             metadata_last_entry_id,
@@ -37,8 +37,8 @@ impl InstructionHandler for UpgradeRegionsHandler {
             location_id,
             replay_entry_id,
             metadata_replay_entry_id,
-        } = instruction.into_upgrade_regions().unwrap();
-
+        }: UpgradeRegion,
+    ) -> Option<InstructionReply> {
         let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
             return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                 ready: false,
@@ -138,7 +138,7 @@ impl InstructionHandler for UpgradeRegionsHandler {
 mod tests {
     use std::time::Duration;
 
-    use common_meta::instruction::{Instruction, UpgradeRegion};
+    use common_meta::instruction::UpgradeRegion;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -164,11 +164,11 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::UpgradeRegion(UpgradeRegion {
+                    UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    }),
+                    },
                 )
                 .await;
 
@@ -201,11 +201,11 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::UpgradeRegion(UpgradeRegion {
+                    UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    }),
+                    },
                 )
                 .await;
 
@@ -239,11 +239,11 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::UpgradeRegion(UpgradeRegion {
+                    UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    }),
+                    },
                 )
                 .await;
 
@@ -280,11 +280,11 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    Instruction::UpgradeRegion(UpgradeRegion {
+                    UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    }),
+                    },
                 )
                 .await;
 
@@ -298,11 +298,11 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::UpgradeRegion(UpgradeRegion {
+                UpgradeRegion {
                     region_id,
                     replay_timeout: Some(Duration::from_millis(500)),
                     ..Default::default()
-                }),
+                },
             )
             .await;
         // Must less than 300 ms.
@@ -339,10 +339,10 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::UpgradeRegion(UpgradeRegion {
+                UpgradeRegion {
                     region_id,
                     ..Default::default()
-                }),
+                },
             )
             .await;
 
@@ -355,11 +355,11 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                Instruction::UpgradeRegion(UpgradeRegion {
+                UpgradeRegion {
                     region_id,
                     replay_timeout: Some(Duration::from_millis(200)),
                     ..Default::default()
-                }),
+                },
             )
             .await;
 

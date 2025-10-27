@@ -47,10 +47,11 @@ pub struct RegionHeartbeatResponseHandler {
 
 #[async_trait::async_trait]
 pub trait InstructionHandler: Send + Sync {
+    type Instruction;
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        instruction: Instruction,
+        instruction: Self::Instruction,
     ) -> Option<InstructionReply>;
 }
 
@@ -93,39 +94,101 @@ impl RegionHeartbeatResponseHandler {
         self
     }
 
-    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<dyn InstructionHandler>> {
+    fn build_handler(&self, instruction: &Instruction) -> MetaResult<Box<InstructionHandlers>> {
         match instruction {
-            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler)),
-            Instruction::OpenRegions(_) => Ok(Box::new(OpenRegionsHandler {
-                open_region_parallelism: self.open_region_parallelism,
-            })),
-            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler)),
-            Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler)),
-            Instruction::UpgradeRegion(_) => Ok(Box::new(UpgradeRegionsHandler)),
+            Instruction::CloseRegions(_) => Ok(Box::new(CloseRegionsHandler.into())),
+            Instruction::OpenRegions(_) => Ok(Box::new(
+                OpenRegionsHandler {
+                    open_region_parallelism: self.open_region_parallelism,
+                }
+                .into(),
+            )),
+            Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
+            Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
+            Instruction::UpgradeRegion(_) => Ok(Box::new(UpgradeRegionsHandler.into())),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
         }
     }
 }
 
+#[allow(clippy::enum_variant_names)]
+pub enum InstructionHandlers {
+    CloseRegions(CloseRegionsHandler),
+    OpenRegions(OpenRegionsHandler),
+    FlushRegions(FlushRegionsHandler),
+    DowngradeRegions(DowngradeRegionsHandler),
+    UpgradeRegions(UpgradeRegionsHandler),
+}
+
+macro_rules! impl_from_handler {
+    ($($handler:ident => $variant:ident),*) => {
+        $(
+            impl From<$handler> for InstructionHandlers {
+                fn from(handler: $handler) -> Self {
+                    InstructionHandlers::$variant(handler)
+                }
+            }
+        )*
+    };
+}
+
+impl_from_handler!(
+    CloseRegionsHandler => CloseRegions,
+    OpenRegionsHandler => OpenRegions,
+    FlushRegionsHandler => FlushRegions,
+    DowngradeRegionsHandler => DowngradeRegions,
+    UpgradeRegionsHandler => UpgradeRegions
+);
+
+macro_rules! dispatch_instr {
+    (
+        $( $instr_variant:ident => $handler_variant:ident ),* $(,)?
+    ) => {
+        impl InstructionHandlers {
+            pub async fn handle(
+                &self,
+                ctx: &HandlerContext,
+                instruction: Instruction,
+            ) -> Option<InstructionReply> {
+                match (self, instruction) {
+                    $(
+                        (
+                            InstructionHandlers::$handler_variant(handler),
+                            Instruction::$instr_variant(instr),
+                        ) => handler.handle(ctx, instr).await,
+                    )*
+                    // Safety: must be used in pairs with `build_handler`.
+                    _ => unreachable!(),
+                }
+            }
+            /// Check whether this instruction is acceptable by any handler.
+            pub fn is_acceptable(instruction: &Instruction) -> bool {
+                matches!(
+                    instruction,
+                    $(
+                        Instruction::$instr_variant { .. }
+                    )|*
+                )
+            }
+        }
+    };
+}
+
+dispatch_instr!(
+    CloseRegions => CloseRegions,
+    OpenRegions => OpenRegions,
+    FlushRegions => FlushRegions,
+    DowngradeRegions => DowngradeRegions,
+    UpgradeRegion => UpgradeRegions,
+);
+
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        matches!(ctx.incoming_message.as_ref(), |Some((
-            _,
-            Instruction::DowngradeRegions { .. },
-        ))| Some((
-            _,
-            Instruction::UpgradeRegion { .. }
-        )) | Some((
-            _,
-            Instruction::FlushRegions { .. }
-        )) | Some((
-            _,
-            Instruction::OpenRegions { .. }
-        )) | Some((
-            _,
-            Instruction::CloseRegions { .. }
-        )))
+        if let Some((_, instruction)) = ctx.incoming_message.as_ref() {
+            return InstructionHandlers::is_acceptable(instruction);
+        }
+        false
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
