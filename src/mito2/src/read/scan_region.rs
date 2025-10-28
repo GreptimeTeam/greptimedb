@@ -48,7 +48,7 @@ use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE
 use crate::error::{InvalidPartitionExprSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
-use crate::memtable::MemtableRange;
+use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -427,6 +427,10 @@ impl ScanRegion {
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
+        let filter_mode = pre_filter_mode(
+            self.version.options.append_mode,
+            self.version.options.merge_mode(),
+        );
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -445,7 +449,7 @@ impl ScanRegion {
                     self.request.memtable_min_sequence,
                     self.request.memtable_max_sequence,
                 ),
-                false,
+                RangesOptions::default().with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange
@@ -950,17 +954,6 @@ impl ScanInput {
         }
     }
 
-    fn pre_filter_mode(&self) -> PreFilterMode {
-        if self.append_mode {
-            return PreFilterMode::All;
-        }
-
-        match self.merge_mode {
-            MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
-            MergeMode::LastNonNull => PreFilterMode::SkipFields,
-        }
-    }
-
     /// Prunes a file to scan and returns the builder to build readers.
     pub async fn prune_file(
         &self,
@@ -968,7 +961,7 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
-        let filter_mode = self.pre_filter_mode();
+        let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -1170,6 +1163,17 @@ impl ScanInput {
     /// Returns SST file ids to scan.
     pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
+    }
+}
+
+fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
+    if append_mode {
+        return PreFilterMode::All;
+    }
+
+    match merge_mode {
+        MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+        MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
 }
 

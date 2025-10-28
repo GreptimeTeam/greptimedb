@@ -40,7 +40,9 @@ use crate::error::{
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges};
+use crate::memtable::{
+    BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
+};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
@@ -459,7 +461,12 @@ impl RegionFlushTask {
             flush_metrics.compact_memtable += compact_cost;
 
             // Sets `for_flush` flag to true.
-            let mem_ranges = mem.ranges(None, PredicateGroup::default(), None, true)?;
+            let mem_ranges = mem.ranges(
+                None,
+                PredicateGroup::default(),
+                None,
+                RangesOptions::for_flush(),
+            )?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();

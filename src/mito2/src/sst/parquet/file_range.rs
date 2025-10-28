@@ -295,8 +295,8 @@ impl FileRangeContext {
 }
 
 /// Mode to pre-filter columns in a range.
-#[derive(Clone, Copy)]
-pub(crate) enum PreFilterMode {
+#[derive(Debug, Clone, Copy)]
+pub enum PreFilterMode {
     /// Filters all columns.
     All,
     /// If the range doesn't contain delete op or doesn't have statistics, filters all columns.

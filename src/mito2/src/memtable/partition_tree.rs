@@ -44,7 +44,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
     MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    MemtableStats, PredicateGroup, RangesOptions,
 };
 use crate::region::options::MergeMode;
 
@@ -192,7 +192,7 @@ impl Memtable for PartitionTreeMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceRange>,
-        _for_flush: bool,
+        _options: RangesOptions,
     ) -> Result<MemtableRanges> {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {

@@ -44,6 +44,7 @@ use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
 use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::file_range::PreFilterMode;
 
 mod builder;
 pub mod bulk;
@@ -71,6 +72,41 @@ pub enum MemtableConfig {
     PartitionTree(PartitionTreeConfig),
     #[default]
     TimeSeries,
+}
+
+/// Options for querying ranges from a memtable.
+#[derive(Debug, Clone, Copy)]
+pub struct RangesOptions {
+    /// Whether the ranges are being queried for flush.
+    pub for_flush: bool,
+    /// Mode to pre-filter columns in ranges.
+    pub pre_filter_mode: PreFilterMode,
+}
+
+impl Default for RangesOptions {
+    fn default() -> Self {
+        Self {
+            for_flush: false,
+            pre_filter_mode: PreFilterMode::All,
+        }
+    }
+}
+
+impl RangesOptions {
+    /// Creates a new [RangesOptions] for flushing.
+    pub fn for_flush() -> Self {
+        Self {
+            for_flush: true,
+            pre_filter_mode: PreFilterMode::All,
+        }
+    }
+
+    /// Sets the pre-filter mode.
+    #[must_use]
+    pub fn with_pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
+        self.pre_filter_mode = pre_filter_mode;
+        self
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -191,14 +227,13 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Returns the ranges in the memtable.
     ///
-    /// The `for_flush` flag is true if the flush job calls this method for flush.
     /// The returned map contains the range id and the range after applying the predicate.
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceRange>,
-        for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.

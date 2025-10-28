@@ -20,7 +20,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
-use mito2::memtable::{KeyValues, Memtable, MemtableRanges};
+use mito2::memtable::{KeyValues, Memtable, MemtableRanges, RangesOptions};
 use mito2::read;
 use mito2::read::Source;
 use mito2::read::dedup::DedupReader;
@@ -127,7 +127,12 @@ fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
 
 async fn flush(mem: &SimpleBulkMemtable) {
     let MemtableRanges { ranges, .. } = mem
-        .ranges(None, PredicateGroup::default(), None, true)
+        .ranges(
+            None,
+            PredicateGroup::default(),
+            None,
+            RangesOptions::for_flush(),
+        )
         .unwrap();
 
     let mut source = if ranges.len() == 1 {

@@ -53,7 +53,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
     MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    MemtableStats, PredicateGroup, RangesOptions,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -305,7 +305,7 @@ impl Memtable for TimeSeriesMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceRange>,
-        _for_flush: bool,
+        _options: RangesOptions,
     ) -> Result<MemtableRanges> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
