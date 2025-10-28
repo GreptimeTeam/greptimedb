@@ -27,6 +27,7 @@ use store_api::storage::SequenceRange;
 use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::sequence_column_index;
 use crate::sst::parquet::reader::RowGroupReaderContext;
 
@@ -38,6 +39,8 @@ pub struct EncodedBulkPartIter {
     builder: MemtableRowGroupReaderBuilder,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
+    /// Cached skip_fields for current row group.
+    current_skip_fields: bool,
 }
 
 impl EncodedBulkPartIter {
@@ -58,16 +61,22 @@ impl EncodedBulkPartIter {
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
-        let init_reader = row_groups_to_read
-            .pop_front()
-            .map(|first_row_group| builder.build_row_group_reader(first_row_group, None))
-            .transpose()?;
+        let (init_reader, current_skip_fields) = match row_groups_to_read.pop_front() {
+            Some(first_row_group) => {
+                let skip_fields = builder.compute_skip_fields(&context, first_row_group);
+                let reader = builder.build_row_group_reader(first_row_group, None)?;
+                (Some(reader), skip_fields)
+            }
+            None => (None, false),
+        };
+
         Ok(Self {
             context,
             row_groups_to_read,
             current_reader: init_reader,
             builder,
             sequence,
+            current_skip_fields,
         })
     }
 
@@ -80,19 +89,34 @@ impl EncodedBulkPartIter {
 
         for batch in current {
             let batch = batch.context(DecodeArrowRowGroupSnafu)?;
-            if let Some(batch) = apply_combined_filters(&self.context, &self.sequence, batch)? {
+            if let Some(batch) = apply_combined_filters(
+                &self.context,
+                &self.sequence,
+                batch,
+                self.current_skip_fields,
+            )? {
                 return Ok(Some(batch));
             }
         }
 
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
+            // Compute skip_fields for this row group
+            self.current_skip_fields = self
+                .builder
+                .compute_skip_fields(&self.context, next_row_group);
+
             let next_reader = self.builder.build_row_group_reader(next_row_group, None)?;
             let current = self.current_reader.insert(next_reader);
 
             for batch in current {
                 let batch = batch.context(DecodeArrowRowGroupSnafu)?;
-                if let Some(batch) = apply_combined_filters(&self.context, &self.sequence, batch)? {
+                if let Some(batch) = apply_combined_filters(
+                    &self.context,
+                    &self.sequence,
+                    batch,
+                    self.current_skip_fields,
+                )? {
                     return Ok(Some(batch));
                 }
             }
@@ -152,8 +176,14 @@ impl BulkPartRecordBatchIter {
         // Apply projection first.
         let projected_batch = self.apply_projection(record_batch)?;
         // Apply combined filtering (both predicate and sequence filters)
+        // For BulkPartRecordBatchIter, we don't have row group information.
+        let skip_fields = match self.context.pre_filter_mode() {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => true,
+        };
         let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch)?
+            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
         else {
             return Ok(None);
         };
@@ -181,6 +211,7 @@ fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<SequenceRange>,
     record_batch: RecordBatch,
+    skip_fields: bool,
 ) -> error::Result<Option<RecordBatch>> {
     // Converts the format to the flat format first.
     let format = context.read_format().as_flat().unwrap();
@@ -191,10 +222,9 @@ fn apply_combined_filters(
 
     // First, apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
-        // BulkIterContext always uses PreFilterMode::All, so skip_fields should be false
         let predicate_mask = context
             .base
-            .compute_filter_mask_flat(&record_batch, false)?;
+            .compute_filter_mask_flat(&record_batch, skip_fields)?;
         // If predicate filters out the entire batch, return None early
         let Some(mask) = predicate_mask else {
             return Ok(None);

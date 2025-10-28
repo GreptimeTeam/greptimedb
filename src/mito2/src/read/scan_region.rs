@@ -68,6 +68,7 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
@@ -949,6 +950,17 @@ impl ScanInput {
         }
     }
 
+    fn pre_filter_mode(&self) -> PreFilterMode {
+        if self.append_mode {
+            return PreFilterMode::All;
+        }
+
+        match self.merge_mode {
+            MergeMode::LastRow => PreFilterMode::SkipFieldsOnDelete,
+            MergeMode::LastNonNull => PreFilterMode::SkipFields,
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     pub async fn prune_file(
         &self,
@@ -956,6 +968,7 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+        let filter_mode = self.pre_filter_mode();
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -968,6 +981,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
             .compaction(self.compaction)
+            .pre_filter_mode(filter_mode)
             .build_reader_input(reader_metrics)
             .await;
         let (mut file_range_ctx, selection) = match res {

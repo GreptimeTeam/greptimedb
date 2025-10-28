@@ -282,7 +282,7 @@ impl FileRangeContext {
             PreFilterMode::SkipFields => true,
             PreFilterMode::SkipFieldsOnDelete => {
                 // Check if this specific row group contains delete op
-                self.contains_delete(row_group_idx).unwrap_or(false)
+                self.contains_delete(row_group_idx).unwrap_or(true)
             }
         }
     }
@@ -299,8 +299,8 @@ impl FileRangeContext {
 pub(crate) enum PreFilterMode {
     /// Filters all columns.
     All,
-    /// If doesn't contain delete op, filters all columns.
-    /// Otherwise, skips fields.
+    /// If the range doesn't contain delete op or doesn't have statistics, filters all columns.
+    /// Otherwise, skips filtering fields.
     SkipFieldsOnDelete,
     /// Always skip fields.
     SkipFields,
