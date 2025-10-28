@@ -452,13 +452,13 @@ impl GcScheduler {
             table_tasks.push(task);
 
             // Limit concurrent table processing
-            if table_tasks.len() >= self.config.max_concurrent_tables {
-                if let Some(result) = table_tasks.next().await {
-                    let (success, regions) = Self::handle_table_result(result);
-                    processed_tables += 1;
-                    successful_tables += success;
-                    total_regions_processed += regions;
-                }
+            if table_tasks.len() >= self.config.max_concurrent_tables
+                && let Some(result) = table_tasks.next().await
+            {
+                let (success, regions) = Self::handle_table_result(result);
+                processed_tables += 1;
+                successful_tables += success;
+                total_regions_processed += regions;
             }
         }
 
