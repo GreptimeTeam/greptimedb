@@ -576,7 +576,7 @@ impl MetasrvBuilder {
             table_id_sequence,
             reconciliation_manager,
             topic_stats_registry,
-            resource_spec: Default::default(),
+            resource_stat: Arc::new(resource_stat),
             gc_ticker,
         })
     }

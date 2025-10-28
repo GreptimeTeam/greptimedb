@@ -652,7 +652,7 @@ impl GcScheduler {
         }
 
         // Send GetFileRefs instructions to each datanode
-        let mut all_file_refs = HashSet::new();
+        let mut all_file_refs = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
 
         for (peer, regions) in datanode_regions {

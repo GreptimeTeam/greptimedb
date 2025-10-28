@@ -529,7 +529,7 @@ pub struct Metasrv {
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
-    resource_spec: ResourceSpec,
+    resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
 
     plugins: Plugins,
