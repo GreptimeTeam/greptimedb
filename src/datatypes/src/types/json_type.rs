@@ -31,9 +31,11 @@ use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
 use crate::types::{ListType, StructField, StructType};
 use crate::value::Value;
+use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
+const JSON_PLAIN_FIELD_NAME: &str = "__plain__";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonFormat {
@@ -54,19 +56,23 @@ impl JsonType {
         Self { format }
     }
 
-    // TODO(LFC): remove "allow unused"
-    #[allow(unused)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            format: JsonFormat::Native(Box::new(ConcreteDataType::null_datatype())),
+        }
+    }
+
     /// Make json type a struct type, by:
     /// - if the json is an object, its entries are mapped to struct fields, obviously;
     /// - if not, the json is one of bool, number, string or array, make it a special field called
-    ///   "__plain" in a struct with only that field.
+    ///   [JSON_PLAIN_FIELD_NAME] in a struct with only that field.
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Native(inner) => match inner.as_ref() {
                 ConcreteDataType::Struct(t) => t.clone(),
                 x => StructType::new(Arc::new(vec![StructField::new(
-                    "__plain".to_string(),
+                    JSON_PLAIN_FIELD_NAME.to_string(),
                     x.clone(),
                     true,
                 )])),
@@ -74,8 +80,16 @@ impl JsonType {
         }
     }
 
-    // TODO(LFC): remove "allow unused"
-    #[allow(unused)]
+    /// Check if this json type is the special "plain" one.
+    /// See [JsonType::as_struct_type].
+    pub(crate) fn is_plain_json(&self) -> bool {
+        let JsonFormat::Native(box ConcreteDataType::Struct(t)) = &self.format else {
+            return true;
+        };
+        let fields = t.fields();
+        fields.len() == 1 && fields[0].name() == JSON_PLAIN_FIELD_NAME
+    }
+
     /// Try to merge this json type with others, error on datatype conflict.
     pub(crate) fn merge(&mut self, other: &JsonType) -> Result<()> {
         match (&self.format, &other.format) {
@@ -166,7 +180,10 @@ impl DataType for JsonType {
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(BinaryVectorBuilder::with_capacity(capacity))
+        match self.format {
+            JsonFormat::Jsonb => Box::new(BinaryVectorBuilder::with_capacity(capacity)),
+            JsonFormat::Native(_) => Box::new(JsonVectorBuilder::with_capacity(capacity)),
+        }
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {

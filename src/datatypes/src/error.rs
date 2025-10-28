@@ -266,6 +266,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to merge struct vector builder, reason: {reason}"))]
+    MergeStructVectorBuilder {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -307,7 +314,8 @@ impl ErrorExt for Error {
             | ConvertArrowArrayToScalars { .. }
             | ConvertScalarToArrowArray { .. }
             | ParseExtendedType { .. }
-            | InconsistentStructFieldsAndItems { .. } => StatusCode::Internal,
+            | InconsistentStructFieldsAndItems { .. }
+            | MergeStructVectorBuilder { .. } => StatusCode::Internal,
         }
     }
 

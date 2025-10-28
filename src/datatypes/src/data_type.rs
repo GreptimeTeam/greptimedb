@@ -277,6 +277,10 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Null(NullType))
     }
 
+    pub(crate) fn is_struct(&self) -> bool {
+        matches!(self, ConcreteDataType::Struct(_))
+    }
+
     /// Try to cast the type as a [`ListType`].
     pub fn as_list(&self) -> Option<&ListType> {
         match self {

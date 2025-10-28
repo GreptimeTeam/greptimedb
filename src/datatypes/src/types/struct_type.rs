@@ -46,6 +46,15 @@ impl TryFrom<&Fields> for StructType {
     }
 }
 
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        let value: Box<[StructField]> = Box::new(value);
+        Self {
+            fields: Arc::new(value.into_vec()),
+        }
+    }
+}
+
 impl DataType for StructType {
     fn name(&self) -> String {
         format!(
@@ -117,6 +126,11 @@ impl StructField {
             data_type,
             nullable,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_nullable(name: &str, data_type: ConcreteDataType) -> Self {
+        Self::new(name.to_string(), data_type, true)
     }
 
     pub fn name(&self) -> &str {

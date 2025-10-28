@@ -20,11 +20,11 @@ use arrow::compute::TakeOptions;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow_array::{Array, ArrayRef, StructArray};
 use datafusion_common::ScalarValue;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
-    ArrowComputeSnafu, ConversionSnafu, Error, InconsistentStructFieldsAndItemsSnafu, Result,
-    SerializeSnafu, UnsupportedOperationSnafu,
+    ArrowComputeSnafu, ConversionSnafu, Error, InconsistentStructFieldsAndItemsSnafu,
+    MergeStructVectorBuilderSnafu, Result, SerializeSnafu, UnsupportedOperationSnafu,
 };
 use crate::prelude::{ConcreteDataType, DataType, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
@@ -323,6 +323,97 @@ impl StructVectorBuilder {
         }
         self.null_buffer.append_null();
     }
+
+    /// Try to merge (and consume the data of) other struct vector builder into this one.
+    pub(crate) fn try_merge(&mut self, other: &mut StructVectorBuilder) -> Result<()> {
+        if let Some(other) = other.null_buffer.finish_cloned() {
+            self.null_buffer.append_buffer(&other)
+        } else {
+            self.null_buffer.append_n_non_nulls(other.len());
+        }
+
+        for (i, field) in self.fields.fields().iter().enumerate() {
+            let builder = &mut self.value_builders[i];
+
+            if let Some(j) = other
+                .fields
+                .fields()
+                .iter()
+                .position(|other| other.name() == field.name())
+            {
+                let other = &mut other.value_builders[j];
+                if field.data_type().is_struct() {
+                    let builder = builder
+                        .as_mut_any()
+                        .downcast_mut::<StructVectorBuilder>()
+                        // Safety: a struct datatype field must be corresponding to a struct vector builder.
+                        .unwrap();
+
+                    let other = other
+                        .as_mut_any()
+                        .downcast_mut::<StructVectorBuilder>()
+                        .with_context(|| MergeStructVectorBuilderSnafu {
+                            reason: format!(
+                                "expecting struct vector builder for field '{}' in other",
+                                field.name()
+                            ),
+                        })?;
+                    builder.try_merge(other)?;
+                } else {
+                    let vector = other.to_vector();
+                    builder.extend_slice_of(vector.as_ref(), 0, vector.len())?;
+                }
+            } else {
+                builder.push_nulls(other.len());
+            }
+        }
+        Ok(())
+    }
+
+    /// Same as [StructVectorBuilder::try_merge], but not consume the other builder's data.
+    pub(crate) fn try_merge_cloned(&mut self, other: &StructVectorBuilder) -> Result<()> {
+        if let Some(other) = other.null_buffer.finish_cloned() {
+            self.null_buffer.append_buffer(&other)
+        } else {
+            self.null_buffer.append_n_non_nulls(other.len());
+        }
+
+        for (i, field) in self.fields.fields().iter().enumerate() {
+            let builder = &mut self.value_builders[i];
+
+            if let Some(j) = other
+                .fields
+                .fields()
+                .iter()
+                .position(|other| other.name() == field.name())
+            {
+                let other = &other.value_builders[j];
+                if field.data_type().is_struct() {
+                    let Some(builder) = builder.as_mut_any().downcast_mut::<StructVectorBuilder>()
+                    else {
+                        // Safety: a struct datatype field must be corresponding to a struct vector builder.
+                        unreachable!()
+                    };
+                    let other = other
+                        .as_any()
+                        .downcast_ref::<StructVectorBuilder>()
+                        .with_context(|| MergeStructVectorBuilderSnafu {
+                            reason: format!(
+                                "expecting struct vector builder for field '{}' in other",
+                                field.name()
+                            ),
+                        })?;
+                    builder.try_merge_cloned(other)?;
+                } else {
+                    let vector = other.to_vector_cloned();
+                    builder.extend_slice_of(vector.as_ref(), 0, vector.len())?;
+                }
+            } else {
+                builder.push_nulls(other.len());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl MutableVector for StructVectorBuilder {
@@ -441,6 +532,7 @@ mod tests {
     use crate::types::StructField;
     use crate::value::ListValue;
     use crate::value::tests::*;
+    use crate::vectors::helper::pretty_print;
 
     #[test]
     fn test_struct_vector_builder() {
@@ -521,5 +613,122 @@ mod tests {
             ConcreteDataType::struct_datatype(root_type)
         );
         assert_eq!(vector.get(0), Value::Struct(root_value));
+    }
+
+    #[test]
+    fn test_merge_struct_vectors() -> Result<()> {
+        let struct_1 = StructType::from([
+            StructField::new_nullable("string", ConcreteDataType::string_datatype()),
+            StructField::new_nullable(
+                "list",
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype())),
+            ),
+        ]);
+        let struct_value = |s: Option<&str>, i: Option<i32>| -> StructValue {
+            let s = s.map(|s| Value::String(s.into())).unwrap_or(Value::Null);
+            let i = i
+                .map(|i| {
+                    Value::List(ListValue::new(
+                        vec![Value::Int32(i)],
+                        Arc::new(ConcreteDataType::int32_datatype()),
+                    ))
+                })
+                .unwrap_or(Value::Null);
+            StructValue::new(vec![s, i], struct_1.clone())
+        };
+        let mut builder_1 = StructVectorBuilder::with_type_and_capacity(struct_1.clone(), 10);
+        builder_1.push_struct_value(&struct_value(Some("a"), None))?;
+        builder_1.push_struct_value(&struct_value(None, Some(1)))?;
+        builder_1.push_struct_value(&struct_value(Some("b"), Some(2)))?;
+        builder_1.push_struct_value(&struct_value(None, None))?;
+        builder_1.push_null();
+        let expected = r#"Struct<"string": String, "list": List<Int32>>"#;
+        assert_eq!(builder_1.data_type().to_string(), expected);
+
+        let nested_struct = StructType::from([
+            StructField::new_nullable("int", ConcreteDataType::int64_datatype()),
+            StructField::new_nullable("bool", ConcreteDataType::boolean_datatype()),
+        ]);
+        let struct_2 = StructType::from([
+            StructField::new_nullable("float", ConcreteDataType::float64_datatype()),
+            StructField::new_nullable(
+                "nested",
+                ConcreteDataType::struct_datatype(nested_struct.clone()),
+            ),
+        ]);
+        let struct_value =
+            |f: Option<f64>, s: Option<(Option<i64>, Option<bool>)>| -> StructValue {
+                let f = f.map(|f| Value::Float64(f.into())).unwrap_or(Value::Null);
+                let s = s
+                    .map(|(i, b)| {
+                        let i = i.map(Value::Int64).unwrap_or(Value::Null);
+                        let b = b.map(Value::Boolean).unwrap_or(Value::Null);
+                        Value::Struct(StructValue::new(vec![i, b], nested_struct.clone()))
+                    })
+                    .unwrap_or(Value::Null);
+                StructValue::new(vec![f, s], struct_2.clone())
+            };
+        let mut builder_2 = StructVectorBuilder::with_type_and_capacity(struct_2.clone(), 10);
+        builder_2.push_struct_value(&struct_value(Some(1.0), None))?;
+        builder_2.push_struct_value(&struct_value(None, Some((Some(-1), None))))?;
+        builder_2.push_struct_value(&struct_value(None, Some((None, Some(false)))))?;
+        builder_2.push_struct_value(&struct_value(None, Some((Some(-2), Some(true)))))?;
+        builder_2.push_struct_value(&struct_value(None, Some((None, None))))?;
+        builder_2.push_null();
+        let expected =
+            r#"Struct<"float": Float64, "nested": Struct<"int": Int64, "bool": Boolean>>"#;
+        assert_eq!(builder_2.data_type().to_string(), expected);
+
+        let merged_struct = StructType::new(Arc::new(
+            std::iter::chain(struct_1.fields().iter(), struct_2.fields().iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        ));
+        let mut merge_cloned_builder =
+            StructVectorBuilder::with_type_and_capacity(merged_struct.clone(), 10);
+        let mut merged_builder = StructVectorBuilder::with_type_and_capacity(merged_struct, 10);
+        let expect = r#"Struct<"string": String, "list": List<Int32>, "float": Float64, "nested": Struct<"int": Int64, "bool": Boolean>>"#;
+        assert_eq!(merged_builder.data_type().to_string(), expect);
+
+        let expected = r#"
++-------------------------------------------+
+| StructVector                              |
++-------------------------------------------+
+| {string: a, list: , float: , nested: }    |
+| {string: , list: [1], float: , nested: }  |
+| {string: b, list: [2], float: , nested: } |
+| {string: , list: , float: , nested: }     |
+|                                           |
++-------------------------------------------+"#;
+        merge_cloned_builder.try_merge_cloned(&builder_1)?;
+        let vector = merge_cloned_builder.to_vector_cloned();
+        assert_eq!(pretty_print(vector), expected.trim());
+        merged_builder.try_merge(&mut builder_1)?;
+        let vector = merged_builder.to_vector_cloned();
+        assert_eq!(pretty_print(vector), expected.trim());
+
+        let expected = r#"
++------------------------------------------------------------+
+| StructVector                                               |
++------------------------------------------------------------+
+| {string: a, list: , float: , nested: }                     |
+| {string: , list: [1], float: , nested: }                   |
+| {string: b, list: [2], float: , nested: }                  |
+| {string: , list: , float: , nested: }                      |
+|                                                            |
+| {string: , list: , float: 1.0, nested: }                   |
+| {string: , list: , float: , nested: {int: -1, bool: }}     |
+| {string: , list: , float: , nested: {int: , bool: false}}  |
+| {string: , list: , float: , nested: {int: -2, bool: true}} |
+| {string: , list: , float: , nested: {int: , bool: }}       |
+|                                                            |
++------------------------------------------------------------+"#;
+        merge_cloned_builder.try_merge_cloned(&builder_2)?;
+        let vector = merge_cloned_builder.to_vector_cloned();
+        assert_eq!(pretty_print(vector), expected.trim());
+        merged_builder.try_merge(&mut builder_2)?;
+        let vector = merged_builder.to_vector_cloned();
+        assert_eq!(pretty_print(vector), expected.trim());
+        Ok(())
     }
 }
