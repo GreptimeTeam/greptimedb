@@ -26,6 +26,7 @@ use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
+use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
@@ -44,6 +45,33 @@ use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
+
+/// Checks if a row group contains delete operations by examining the min value of op_type column.
+///
+/// Returns `Ok(true)` if the row group contains delete operations, `Ok(false)` if it doesn't,
+/// or an error if the statistics are not present or cannot be decoded.
+pub(crate) fn row_group_contains_delete(
+    parquet_meta: &ParquetMetaData,
+    row_group_index: usize,
+    file_path: &str,
+) -> Result<bool> {
+    let row_group_metadata = &parquet_meta.row_groups()[row_group_index];
+
+    // safety: The last column of SST must be op_type
+    let column_metadata = &row_group_metadata.columns().last().unwrap();
+    let stats = column_metadata
+        .statistics()
+        .context(StatsNotPresentSnafu { file_path })?;
+    stats
+        .min_bytes_opt()
+        .context(StatsNotPresentSnafu { file_path })?
+        .try_into()
+        .map(i32::from_le_bytes)
+        .map(|min_op_type| min_op_type == OpType::Delete as i32)
+        .ok()
+        .context(DecodeStatsSnafu { file_path })
+}
+
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
 #[derive(Clone)]
@@ -178,6 +206,7 @@ impl FileRangeContext {
         filters: Vec<SimpleFilterContext>,
         read_format: ReadFormat,
         codec: Arc<dyn PrimaryKeyCodec>,
+        pre_filter_mode: PreFilterMode,
     ) -> Self {
         Self {
             reader_builder,
@@ -186,6 +215,7 @@ impl FileRangeContext {
                 read_format,
                 codec,
                 compat_batch: None,
+                pre_filter_mode,
             },
         }
     }
@@ -234,26 +264,20 @@ impl FileRangeContext {
     //// Decodes parquet metadata and finds if row group contains delete op.
     pub(crate) fn contains_delete(&self, row_group_index: usize) -> Result<bool> {
         let metadata = self.reader_builder.parquet_metadata();
-        let row_group_metadata = &metadata.row_groups()[row_group_index];
-
-        // safety: The last column of SST must be op_type
-        let column_metadata = &row_group_metadata.columns().last().unwrap();
-        let stats = column_metadata.statistics().context(StatsNotPresentSnafu {
-            file_path: self.reader_builder.file_path(),
-        })?;
-        stats
-            .min_bytes_opt()
-            .context(StatsNotPresentSnafu {
-                file_path: self.reader_builder.file_path(),
-            })?
-            .try_into()
-            .map(i32::from_le_bytes)
-            .map(|min_op_type| min_op_type == OpType::Delete as i32)
-            .ok()
-            .context(DecodeStatsSnafu {
-                file_path: self.reader_builder.file_path(),
-            })
+        row_group_contains_delete(metadata, row_group_index, self.reader_builder.file_path())
     }
+}
+
+/// Mode to pre-filter columns in a range.
+#[derive(Clone, Copy)]
+pub(crate) enum PreFilterMode {
+    /// Filters all columns.
+    All,
+    /// If doesn't contain delete op, filters all columns.
+    /// Otherwise, skips fields.
+    SkipFieldsOnDelete,
+    /// Always skip fields.
+    SkipFields,
 }
 
 /// Common fields for a range to read and filter batches.
@@ -266,6 +290,8 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
+    /// Mode to pre-filter columns.
+    pub(crate) pre_filter_mode: PreFilterMode,
 }
 
 impl RangeBase {

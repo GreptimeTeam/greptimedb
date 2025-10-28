@@ -55,7 +55,9 @@ use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
-use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
+use crate::sst::parquet::file_range::{
+    FileRangeContext, FileRangeContextRef, PreFilterMode, row_group_contains_delete,
+};
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
@@ -117,6 +119,8 @@ pub struct ParquetReaderBuilder {
     flat_format: bool,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// Mode to pre-filter columns.
+    pre_filter_mode: PreFilterMode,
 }
 
 impl ParquetReaderBuilder {
@@ -141,6 +145,7 @@ impl ParquetReaderBuilder {
             expected_metadata: None,
             flat_format: false,
             compaction: false,
+            pre_filter_mode: PreFilterMode::All,
         }
     }
 
@@ -215,6 +220,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Sets the pre-filter mode.
+    #[must_use]
+    pub(crate) fn pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
+        self.pre_filter_mode = pre_filter_mode;
         self
     }
 
@@ -321,7 +333,13 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
+        let context = FileRangeContext::new(
+            reader_builder,
+            filters,
+            read_format,
+            codec,
+            self.pre_filter_mode,
+        );
 
         metrics.build_cost += start.elapsed();
 
@@ -407,7 +425,16 @@ impl ParquetReaderBuilder {
 
         let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
 
-        self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
+        // Compute skip_fields once for all pruning operations
+        let skip_fields = self.compute_skip_fields(parquet_meta);
+
+        self.prune_row_groups_by_minmax(
+            read_format,
+            parquet_meta,
+            &mut output,
+            metrics,
+            skip_fields,
+        );
         if output.is_empty() {
             return output;
         }
@@ -418,6 +445,7 @@ impl ParquetReaderBuilder {
                 num_row_groups,
                 &mut output,
                 metrics,
+                skip_fields,
             )
             .await;
         if output.is_empty() {
@@ -429,14 +457,21 @@ impl ParquetReaderBuilder {
             num_row_groups,
             &mut output,
             metrics,
+            skip_fields,
         )
         .await;
         if output.is_empty() {
             return output;
         }
 
-        self.prune_row_groups_by_bloom_filter(row_group_size, parquet_meta, &mut output, metrics)
-            .await;
+        self.prune_row_groups_by_bloom_filter(
+            row_group_size,
+            parquet_meta,
+            &mut output,
+            metrics,
+            skip_fields,
+        )
+        .await;
         if output.is_empty() {
             return output;
         }
@@ -447,6 +482,7 @@ impl ParquetReaderBuilder {
                 parquet_meta,
                 &mut output,
                 metrics,
+                skip_fields,
             )
             .await;
         }
@@ -460,13 +496,20 @@ impl ParquetReaderBuilder {
         num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         if !self.file_handle.meta_ref().fulltext_index_available() {
             return false;
         }
 
         let mut pruned = false;
-        for index_applier in self.fulltext_index_appliers.iter().flatten() {
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.fulltext_index_appliers[..1]
+        } else {
+            &self.fulltext_index_appliers[..]
+        };
+        for index_applier in appliers.iter().flatten() {
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -521,13 +564,20 @@ impl ParquetReaderBuilder {
         num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
 
         let mut pruned = false;
-        for index_applier in self.inverted_index_appliers.iter().flatten() {
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.inverted_index_appliers[..1]
+        } else {
+            &self.inverted_index_appliers[..]
+        };
+        for index_applier in appliers.iter().flatten() {
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -578,13 +628,20 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         if !self.file_handle.meta_ref().bloom_filter_index_available() {
             return false;
         }
 
         let mut pruned = false;
-        for index_applier in self.bloom_filter_index_appliers.iter().flatten() {
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.bloom_filter_index_appliers[..1]
+        } else {
+            &self.bloom_filter_index_appliers[..]
+        };
+        for index_applier in appliers.iter().flatten() {
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -649,13 +706,20 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         if !self.file_handle.meta_ref().fulltext_index_available() {
             return false;
         }
 
         let mut pruned = false;
-        for index_applier in self.fulltext_index_appliers.iter().flatten() {
+        // If skip_fields is true, only apply the first applier (for tags).
+        let appliers = if skip_fields {
+            &self.fulltext_index_appliers[..1]
+        } else {
+            &self.fulltext_index_appliers[..]
+        };
+        for index_applier in appliers.iter().flatten() {
             let predicate_key = index_applier.predicate_key();
             // Fast path: return early if the result is in the cache.
             let cached = self
@@ -715,6 +779,25 @@ impl ParquetReaderBuilder {
         pruned
     }
 
+    /// Computes whether to skip field columns when building statistics based on PreFilterMode.
+    fn compute_skip_fields(&self, parquet_meta: &ParquetMetaData) -> bool {
+        match self.pre_filter_mode {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if any row group contains delete op
+                let file_path = self.file_handle.file_path(&self.file_dir, self.path_type);
+                (0..parquet_meta.num_row_groups()).any(|rg_idx| {
+                    row_group_contains_delete(parquet_meta, rg_idx, &file_path)
+                        .inspect_err(|e| {
+                            warn!(e; "Failed to decode min value of op_type, fallback to not skipping fields");
+                        })
+                        .unwrap_or(false)
+                })
+            }
+        }
+    }
+
     /// Prunes row groups by min-max index.
     fn prune_row_groups_by_minmax(
         &self,
@@ -722,6 +805,7 @@ impl ParquetReaderBuilder {
         parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        skip_fields: bool,
     ) -> bool {
         let Some(predicate) = &self.predicate else {
             return false;
@@ -735,7 +819,7 @@ impl ParquetReaderBuilder {
             row_groups,
             read_format,
             self.expected_metadata.clone(),
-            false,
+            skip_fields,
         );
         let prune_schema = self
             .expected_metadata

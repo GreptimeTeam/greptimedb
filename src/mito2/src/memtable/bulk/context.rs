@@ -24,7 +24,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::Result;
-use crate::sst::parquet::file_range::RangeBase;
+use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;
@@ -73,6 +73,7 @@ impl BulkIterContext {
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
+                pre_filter_mode: PreFilterMode::All,
             },
             predicate,
         })
