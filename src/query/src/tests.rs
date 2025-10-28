@@ -26,6 +26,7 @@ mod query_engine_test;
 mod time_range_filter_test;
 
 mod function;
+mod vec_avg_test;
 mod vec_product_test;
 mod vec_sum_test;
 
