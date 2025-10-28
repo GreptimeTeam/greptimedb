@@ -21,6 +21,8 @@ mod append_mode_test;
 #[cfg(test)]
 mod basic_test;
 #[cfg(test)]
+mod batch_catchup_test;
+#[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
 mod bump_committed_sequence_test;
