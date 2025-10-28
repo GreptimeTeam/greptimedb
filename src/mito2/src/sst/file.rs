@@ -406,7 +406,7 @@ pub async fn delete_files(
     region_id: RegionId,
     file_ids: &[FileId],
     delete_index: bool,
-    index_file_ids: &[Option<FileId>],
+    index_file_ids: &[FileId],
     access_layer: &AccessLayerRef,
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
@@ -420,12 +420,9 @@ pub async fn delete_files(
 
     for (idx, file_id) in file_ids.iter().enumerate() {
         let region_file_id = RegionFileId::new(region_id, *file_id);
-        let index_file_id = index_file_ids
-            .get(idx)
-            .and_then(|id| *id)
-            .map(|id| RegionFileId::new(region_id, id));
+        let index_file_id = RegionFileId::new(region_id, index_file_ids[idx]);
         match access_layer
-            .delete_sst(&region_file_id, index_file_id)
+            .delete_sst(&region_file_id, &index_file_id)
             .await
         {
             Ok(_) => {
@@ -445,12 +442,7 @@ pub async fn delete_files(
     );
 
     for (idx, file_id) in file_ids.iter().enumerate() {
-        let region_file_id = RegionFileId::new(region_id, *file_id);
-        let index_file_id = index_file_ids
-            .get(idx)
-            .and_then(|id| *id)
-            .map(|id| RegionFileId::new(region_id, id))
-            .unwrap_or(region_file_id);
+        let index_file_id = RegionFileId::new(region_id, index_file_ids[idx]);
 
         if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
             // Removes index file from the cache.

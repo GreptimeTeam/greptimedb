@@ -130,7 +130,7 @@ impl LocalFilePurger {
                 file_meta.region_id,
                 &[file_meta.file_id],
                 file_meta.exists_index(),
-                &[file_meta.index_file_id],
+                &[file_meta.index_file_id().file_id()],
                 &sst_layer,
                 &cache_manager,
             )

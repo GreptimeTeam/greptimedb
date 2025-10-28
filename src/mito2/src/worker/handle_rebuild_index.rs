@@ -175,7 +175,8 @@ impl<S> RegionWorkerLoop<S> {
             );
             let _ = self
                 .index_build_scheduler
-                .schedule_build(&region.version_control, task);
+                .schedule_build(&region.version_control, task)
+                .await;
         }
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {

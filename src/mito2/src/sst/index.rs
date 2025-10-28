@@ -444,26 +444,6 @@ impl IndexBuildType {
     }
 }
 
-impl PartialEq for IndexBuildType {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority() == other.priority()
-    }
-}
-
-impl Eq for IndexBuildType {}
-
-impl PartialOrd for IndexBuildType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for IndexBuildType {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority().cmp(&other.priority())
-    }
-}
-
 impl From<OperationType> for IndexBuildType {
     fn from(op_type: OperationType) -> Self {
         match op_type {
@@ -777,7 +757,7 @@ impl IndexBuildTask {
 
 impl PartialEq for IndexBuildTask {
     fn eq(&self, other: &Self) -> bool {
-        self.reason == other.reason
+        self.reason.priority() == other.reason.priority()
     }
 }
 
@@ -791,7 +771,7 @@ impl PartialOrd for IndexBuildTask {
 
 impl Ord for IndexBuildTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.reason.cmp(&other.reason)
+        self.reason.priority().cmp(&other.reason.priority())
     }
 }
 
@@ -837,7 +817,7 @@ impl IndexBuildScheduler {
         }
     }
 
-    pub(crate) fn schedule_build(
+    pub(crate) async fn schedule_build(
         &mut self,
         version_control: &VersionControlRef,
         task: IndexBuildTask,
@@ -848,11 +828,18 @@ impl IndexBuildScheduler {
             .or_insert_with(|| IndexBuildStatus::new(task.file_meta.region_id));
 
         if status.building_files.contains(&task.file_meta.file_id) {
-            // Index is already being built for this file, skip.
+            let region_file_id =
+                RegionFileId::new(task.file_meta.region_id, task.file_meta.file_id);
             debug!(
-                "Index is already being built for region {}, file {}, skipping.",
-                task.file_meta.region_id, task.file_meta.file_id
+                "Aborting index build task since index is already being built for region file {:?}",
+                region_file_id
             );
+            task.on_success(IndexBuildOutcome::Aborted(format!(
+                "Index is already being built for region file {:?}",
+                region_file_id
+            )))
+            .await;
+            task.listener.on_index_build_abort(region_file_id).await;
             return Ok(());
         }
 
@@ -1468,7 +1455,10 @@ mod tests {
         };
 
         // Schedule the build task and check result.
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
         match result_rx.recv().await.unwrap() {
             Ok(outcome) => {
                 if outcome == IndexBuildOutcome::Finished {
@@ -1518,7 +1508,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1586,7 +1579,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         let puffin_path = location::index_file_path(
             env.access_layer.table_dir(),
@@ -1683,7 +1679,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1764,7 +1763,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1844,7 +1846,12 @@ mod tests {
         // Test 1: Basic scheduling
         let task1 =
             create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
-        assert!(scheduler.schedule_build(&version_control, task1).is_ok());
+        assert!(
+            scheduler
+                .schedule_build(&version_control, task1)
+                .await
+                .is_ok()
+        );
         assert!(scheduler.region_status.contains_key(&region_id));
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 1);
@@ -1855,6 +1862,7 @@ mod tests {
             create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
         scheduler
             .schedule_build(&version_control, task1_dup)
+            .await
             .unwrap();
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 1); // Still only one
@@ -1862,7 +1870,10 @@ mod tests {
         // Test 3: Fill up to limit (2 building tasks)
         let task2 =
             create_mock_task_for_schedule(&env, file_id2, region_id, IndexBuildType::Flush).await;
-        scheduler.schedule_build(&version_control, task2).unwrap();
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 2); // Reached limit
         assert_eq!(status.pending_tasks.len(), 0);
@@ -1877,9 +1888,18 @@ mod tests {
         let task5 =
             create_mock_task_for_schedule(&env, file_id5, region_id, IndexBuildType::Manual).await;
 
-        scheduler.schedule_build(&version_control, task3).unwrap();
-        scheduler.schedule_build(&version_control, task4).unwrap();
-        scheduler.schedule_build(&version_control, task5).unwrap();
+        scheduler
+            .schedule_build(&version_control, task3)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task4)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task5)
+            .await
+            .unwrap();
 
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 2); // Still at limit
@@ -1923,9 +1943,18 @@ mod tests {
         let task8 =
             create_mock_task_for_schedule(&env, file_id3, region_id, IndexBuildType::Manual).await;
 
-        scheduler.schedule_build(&version_control, task6).unwrap();
-        scheduler.schedule_build(&version_control, task7).unwrap();
-        scheduler.schedule_build(&version_control, task8).unwrap();
+        scheduler
+            .schedule_build(&version_control, task6)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task7)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task8)
+            .await
+            .unwrap();
 
         assert!(scheduler.region_status.contains_key(&region_id));
         let status = scheduler.region_status.get(&region_id).unwrap();

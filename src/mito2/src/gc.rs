@@ -365,14 +365,15 @@ impl LocalGcWorker {
             unused_len, region_id
         );
 
-        let unused_index_files: Vec<Option<FileId>> = unused_files
+        let unused_index_files: Vec<FileId> = unused_files
             .iter()
-            .map(|file_id| {
+            .filter_map(|file_id| {
                 current_files
                     .get(file_id)
-                    .and_then(|meta| meta.index_file_id)
+                    .map(|meta| meta.index_file_id().file_id())
             })
             .collect();
+
         self.delete_files(region_id, &unused_files, &unused_index_files)
             .await?;
 
@@ -388,7 +389,7 @@ impl LocalGcWorker {
         &self,
         region_id: RegionId,
         file_ids: &[FileId],
-        index_file_ids: &[Option<FileId>],
+        index_file_ids: &[FileId],
     ) -> Result<()> {
         delete_files(
             region_id,
