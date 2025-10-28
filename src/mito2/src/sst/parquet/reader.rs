@@ -487,7 +487,9 @@ impl ParquetReaderBuilder {
                 .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
                 .await;
             let selection = match apply_res {
-                Ok(Some(res)) => RowGroupSelection::from_row_ids(res, row_group_size, num_row_groups),
+                Ok(Some(res)) => {
+                    RowGroupSelection::from_row_ids(res, row_group_size, num_row_groups)
+                }
                 Ok(None) => continue,
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
@@ -614,7 +616,9 @@ impl ParquetReaderBuilder {
                 .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
                 .await;
             let mut selection = match apply_res {
-                Ok(apply_output) => RowGroupSelection::from_row_ranges(apply_output, row_group_size),
+                Ok(apply_output) => {
+                    RowGroupSelection::from_row_ranges(apply_output, row_group_size)
+                }
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_BLOOM);
                     continue;
@@ -727,8 +731,12 @@ impl ParquetReaderBuilder {
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
-        let stats =
-            RowGroupPruningStats::new(row_groups, read_format, self.expected_metadata.clone());
+        let stats = RowGroupPruningStats::new(
+            row_groups,
+            read_format,
+            self.expected_metadata.clone(),
+            false,
+        );
         let prune_schema = self
             .expected_metadata
             .as_ref()

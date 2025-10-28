@@ -83,7 +83,7 @@ impl BulkIterContext {
         let region_meta = self.base.read_format.metadata();
         let row_groups = file_meta.row_groups();
         // expected_metadata is set to None since we always expect region metadata of memtable is up-to-date.
-        let stats = RowGroupPruningStats::new(row_groups, &self.base.read_format, None);
+        let stats = RowGroupPruningStats::new(row_groups, &self.base.read_format, None, false);
         if let Some(predicate) = self.predicate.as_ref() {
             predicate
                 .prune_with_stats(&stats, region_meta.schema.arrow_schema())
