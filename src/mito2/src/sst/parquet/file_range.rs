@@ -143,6 +143,9 @@ impl FileRange {
             false
         };
 
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
+
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
             let reader = RowGroupLastRowCachedReader::new(
@@ -151,12 +154,13 @@ impl FileRange {
                 self.context.reader_builder.cache_strategy().clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),
             );
-            PruneReader::new_with_last_row_reader(self.context.clone(), reader)
+            PruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
         } else {
             // Row group contains DELETE, fallback to default reader.
             PruneReader::new_with_row_group_reader(
                 self.context.clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),
+                skip_fields,
             )
         };
 
@@ -171,9 +175,15 @@ impl FileRange {
             .build(self.row_group_idx, self.row_selection.clone())
             .await?;
 
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
+
         let flat_row_group_reader = FlatRowGroupReader::new(self.context.clone(), parquet_reader);
-        let flat_prune_reader =
-            FlatPruneReader::new_with_row_group_reader(self.context.clone(), flat_row_group_reader);
+        let flat_prune_reader = FlatPruneReader::new_with_row_group_reader(
+            self.context.clone(),
+            flat_row_group_reader,
+            skip_fields,
+        );
 
         Ok(flat_prune_reader)
     }
@@ -252,13 +262,29 @@ impl FileRangeContext {
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
-    pub(crate) fn precise_filter(&self, input: Batch) -> Result<Option<Batch>> {
-        self.base.precise_filter(input)
+    pub(crate) fn precise_filter(&self, input: Batch, skip_fields: bool) -> Result<Option<Batch>> {
+        self.base.precise_filter(input, skip_fields)
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
-    pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
-        self.base.precise_filter_flat(input)
+    pub(crate) fn precise_filter_flat(
+        &self,
+        input: RecordBatch,
+        skip_fields: bool,
+    ) -> Result<Option<RecordBatch>> {
+        self.base.precise_filter_flat(input, skip_fields)
+    }
+
+    /// Determines whether to skip field filters based on PreFilterMode and row group delete status.
+    pub(crate) fn should_skip_fields(&self, row_group_idx: usize) -> bool {
+        match self.base.pre_filter_mode {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if this specific row group contains delete op
+                self.contains_delete(row_group_idx).unwrap_or(false)
+            }
+        }
     }
 
     //// Decodes parquet metadata and finds if row group contains delete op.
@@ -302,7 +328,15 @@ impl RangeBase {
     ///
     /// When a filter is referencing primary key column, this method will decode
     /// the primary key and put it into the batch.
-    pub(crate) fn precise_filter(&self, mut input: Batch) -> Result<Option<Batch>> {
+    ///
+    /// # Arguments
+    /// * `input` - The batch to filter
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
+    pub(crate) fn precise_filter(
+        &self,
+        mut input: Batch,
+        skip_fields: bool,
+    ) -> Result<Option<Batch>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
         // Run filter one by one and combine them result
@@ -357,6 +391,10 @@ impl RangeBase {
                     }
                 }
                 SemanticType::Field => {
+                    // Skip field filters if skip_fields is true
+                    if skip_fields {
+                        continue;
+                    }
                     // Safety: Input is Batch so we are using primary key format.
                     let Some(field_index) = self
                         .read_format
@@ -387,8 +425,16 @@ impl RangeBase {
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     ///
     /// It assumes all necessary tags are already decoded from the primary key.
-    pub(crate) fn precise_filter_flat(&self, input: RecordBatch) -> Result<Option<RecordBatch>> {
-        let mask = self.compute_filter_mask_flat(&input)?;
+    ///
+    /// # Arguments
+    /// * `input` - The RecordBatch to filter
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
+    pub(crate) fn precise_filter_flat(
+        &self,
+        input: RecordBatch,
+        skip_fields: bool,
+    ) -> Result<Option<RecordBatch>> {
+        let mask = self.compute_filter_mask_flat(&input, skip_fields)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mask) = mask else {
@@ -409,9 +455,14 @@ impl RangeBase {
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
+    ///
+    /// # Arguments
+    /// * `input` - The RecordBatch to compute mask for
+    /// * `skip_fields` - Whether to skip field filters based on PreFilterMode and row group delete status
     pub(crate) fn compute_filter_mask_flat(
         &self,
         input: &RecordBatch,
+        skip_fields: bool,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
@@ -436,6 +487,11 @@ impl RangeBase {
                 // Column doesn't match, filter the entire batch.
                 MaybeFilter::Pruned => return Ok(None),
             };
+
+            // Skip field filters if skip_fields is true
+            if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
+                continue;
+            }
 
             // Get the column directly by its projected index
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());

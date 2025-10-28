@@ -191,7 +191,10 @@ fn apply_combined_filters(
 
     // First, apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
-        let predicate_mask = context.base.compute_filter_mask_flat(&record_batch)?;
+        // BulkIterContext always uses PreFilterMode::All, so skip_fields should be false
+        let predicate_mask = context
+            .base
+            .compute_filter_mask_flat(&record_batch, false)?;
         // If predicate filters out the entire batch, return None early
         let Some(mask) = predicate_mask else {
             return Ok(None);

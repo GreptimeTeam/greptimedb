@@ -1251,10 +1251,12 @@ impl BatchReader for ParquetReader {
                 .await?;
 
             // Resets the parquet reader.
-            reader.reset_source(Source::RowGroup(RowGroupReader::new(
-                self.context.clone(),
-                parquet_reader,
-            )));
+            // Compute skip_fields for this row group
+            let skip_fields = self.context.should_skip_fields(row_group_idx);
+            reader.reset_source(
+                Source::RowGroup(RowGroupReader::new(self.context.clone(), parquet_reader)),
+                skip_fields,
+            );
             if let Some(batch) = reader.next_batch().await? {
                 return Ok(Some(batch));
             }
@@ -1307,9 +1309,12 @@ impl ParquetReader {
                 .reader_builder()
                 .build(row_group_idx, Some(row_selection))
                 .await?;
+            // Compute skip_fields once for this row group
+            let skip_fields = context.should_skip_fields(row_group_idx);
             ReaderState::Readable(PruneReader::new_with_row_group_reader(
                 context.clone(),
                 RowGroupReader::new(context.clone(), parquet_reader),
+                skip_fields,
             ))
         } else {
             ReaderState::Exhausted(ReaderMetrics::default())
