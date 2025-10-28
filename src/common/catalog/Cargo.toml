@@ -8,5 +8,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+const_format.workspace = true
 
 [dev-dependencies]
