@@ -16,28 +16,41 @@ mod context;
 mod group;
 mod plan;
 
-use common_catalog::format_full_table_name;
+use std::collections::HashMap;
+
 use common_meta::ddl::DdlContext;
-use common_meta::ddl::utils::map_to_procedure_error;
-use common_meta::error::{self, Result as MetaResult};
+use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock};
-use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureWithId, Status};
+use common_procedure::error::{Error as ProcedureError, Result as ProcedureResult, ToJsonSnafu};
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, ProcedureId, ProcedureWithId, Status,
+};
+use common_telemetry::error;
 use partition::expr::PartitionExpr;
-use partition::subtask;
+use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
-use serde_json;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::TableId;
 use strum::AsRefStr;
-use table::table_reference::TableReference;
 use uuid::Uuid;
 
-use self::context::RepartitionContext;
+use self::context::{GroupManifestSummary, RepartitionContext};
 use self::group::RepartitionGroupProcedure;
-use self::plan::{
-    PartitionRuleDiff, PlanEntry, PlanGroupId, RegionDescriptor, RepartitionPlan, ResourceDemand,
-};
+use self::plan::{PlanEntry, PlanGroupId, RegionDescriptor, RepartitionPlan, ResourceDemand};
+use crate::error::{self, Result};
+
+/// Task payload passed from the DDL entry point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepartitionTask {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub table_id: TableId,
+    /// Partition expressions representing the source regions.
+    pub from_exprs: Vec<PartitionExpr>,
+    /// Partition expressions representing the target regions.
+    pub into_exprs: Vec<PartitionExpr>,
+}
 
 /// Procedure that orchestrates the repartition flow.
 pub struct RepartitionProcedure {
@@ -49,7 +62,8 @@ pub struct RepartitionProcedure {
 impl RepartitionProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::Repartition";
 
-    pub fn new(task: RepartitionTask, context: DdlContext) -> MetaResult<Self> {
+    /// Constructs a new procedure instance from a task payload.
+    pub fn new(task: RepartitionTask, context: DdlContext) -> Result<Self> {
         let group_context = RepartitionContext::new(&context);
         Ok(Self {
             context,
@@ -58,17 +72,8 @@ impl RepartitionProcedure {
         })
     }
 
-    pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
-        let data: RepartitionData = serde_json::from_str(json).context(FromJsonSnafu)?;
-        let group_context = RepartitionContext::new(&context);
-        Ok(Self {
-            context,
-            group_context,
-            data,
-        })
-    }
-
-    async fn on_prepare(&mut self) -> MetaResult<Status> {
+    /// Builds the repartition plan if we have not done so yet.
+    async fn on_prepare(&mut self) -> Result<Status> {
         if self.data.plan.is_none() {
             self.build_plan().await?;
         }
@@ -77,15 +82,14 @@ impl RepartitionProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn on_allocate_resources(&mut self) -> MetaResult<Status> {
+    /// Allocates target regions and decides whether the procedure can proceed.
+    async fn on_allocate_resources(&mut self) -> Result<Status> {
         if !self.data.resource_allocated {
-            let demand = self.data.resource_demand.unwrap_or_default();
-            let allocated = self.allocate_resources(demand).await?;
+            let allocated = self.allocate_resources().await?;
             if !allocated {
                 if let Some(plan) = &self.data.plan {
-                    self.data
-                        .failed_groups
-                        .extend(plan.entries.iter().map(|entry| entry.group_id));
+                    let failed_groups = plan.entries.iter().map(|entry| entry.group_id);
+                    self.data.failed_groups.extend(failed_groups);
                 }
                 self.data.state = RepartitionState::Finalize;
                 return Ok(Status::executing(true));
@@ -97,7 +101,8 @@ impl RepartitionProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn on_dispatch_subprocedures(&mut self) -> MetaResult<Status> {
+    /// Spawns group subprocedures for every pending plan entry.
+    async fn on_dispatch_subprocedures(&mut self) -> Result<Status> {
         let plan = match self.data.plan.as_ref() {
             Some(plan) => plan,
             None => {
@@ -106,243 +111,289 @@ impl RepartitionProcedure {
             }
         };
 
-        let groups_to_schedule: Vec<PlanGroupId> = plan
+        let entries_to_schedule: Vec<PlanEntry> = plan
             .entries
             .iter()
             .filter(|entry| {
                 !self.data.succeeded_groups.contains(&entry.group_id)
                     && !self.data.failed_groups.contains(&entry.group_id)
             })
-            .map(|entry| entry.group_id)
+            .cloned()
             .collect();
 
-        if groups_to_schedule.is_empty() {
+        if entries_to_schedule.is_empty() {
             self.data.state = RepartitionState::Finalize;
             return Ok(Status::executing(true));
         }
 
-        let subprocedures = self.spawn_group_procedures(plan, &groups_to_schedule);
+        let groups_to_schedule: Vec<PlanGroupId> = entries_to_schedule
+            .iter()
+            .map(|entry| entry.group_id)
+            .collect();
+
+        let subprocedures = self.spawn_group_procedures(
+            plan.table_id,
+            plan.route_snapshot.clone(),
+            entries_to_schedule,
+        );
         self.data.pending_groups = groups_to_schedule;
         self.data.state = RepartitionState::CollectSubprocedures;
 
         Ok(Status::suspended(subprocedures, true))
     }
 
-    async fn on_collect_subprocedures(&mut self, _ctx: &ProcedureContext) -> MetaResult<Status> {
-        self.data
-            .succeeded_groups
-            .append(&mut self.data.pending_groups);
+    /// Records the list of subprocedures that finished and move to finalisation.
+    async fn on_collect_subprocedures(&mut self, ctx: &ProcedureContext) -> Result<Status> {
+        let pending = std::mem::take(&mut self.data.pending_groups);
+        let mut first_error: Option<error::Error> = None;
+        let mut succeeded = Vec::new();
 
+        for group_id in pending {
+            let procedure_id = match self.data.group_subprocedures.remove(&group_id) {
+                Some(id) => id,
+                None => {
+                    let err = error::RepartitionSubprocedureUnknownSnafu { group_id }.build();
+                    self.data.failed_groups.push(group_id);
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    continue;
+                }
+            };
+
+            let state_opt = ctx.provider.procedure_state(procedure_id).await.context(
+                error::RepartitionSubprocedureStateFetchSnafu {
+                    group_id,
+                    procedure_id,
+                },
+            )?;
+
+            let state = match state_opt {
+                Some(state) => state,
+                None => {
+                    let err = error::RepartitionSubprocedureStateMissingSnafu {
+                        group_id,
+                        procedure_id,
+                    }
+                    .build();
+                    self.data.failed_groups.push(group_id);
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    continue;
+                }
+            };
+
+            if state.is_done() {
+                succeeded.push(group_id);
+                continue;
+            }
+
+            let reason = state
+                .error()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| format!("subprocedure state {}", state.as_str_name()));
+            let err = error::RepartitionSubprocedureFailedSnafu {
+                group_id,
+                procedure_id,
+                reason,
+            }
+            .build();
+            self.data.failed_groups.push(group_id);
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+
+        self.data.succeeded_groups.extend(succeeded);
         self.data.state = RepartitionState::Finalize;
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
         Ok(Status::executing(true))
     }
 
-    async fn on_finalize(&mut self) -> MetaResult<Status> {
+    /// Builds the summary that will be returned to the caller.
+    async fn on_finalize(&mut self) -> Result<Status> {
+        self.deallocate_resources().await?;
+
         self.data.summary = Some(RepartitionSummary {
             succeeded_groups: self.data.succeeded_groups.clone(),
             failed_groups: self.data.failed_groups.clone(),
+            manifest_summaries: self.group_context.manifest_summaries(),
         });
+        self.group_context.clear_group_records();
         self.data.state = RepartitionState::Finished;
         Ok(Status::done())
     }
 
-    async fn build_plan(&mut self) -> MetaResult<()> {
+    /// Constructs the repartition plan from the task specification.
+    async fn build_plan(&mut self) -> Result<()> {
         let table_id = self.data.task.table_id;
-        let table_ref = self.data.task.table_ref();
-        let table_name_str =
-            format_full_table_name(table_ref.catalog, table_ref.schema, table_ref.table);
-
-        self.context
-            .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await?
-            .ok_or_else(|| {
-                error::TableNotFoundSnafu {
-                    table_name: table_name_str.clone(),
-                }
-                .build()
-            })?;
+        let from_exprs = &self.data.task.from_exprs;
+        let into_exprs = &self.data.task.into_exprs;
 
         let (physical_table_id, physical_route) = self
             .context
             .table_metadata_manager
             .table_route_manager()
             .get_physical_table_route(table_id)
-            .await?;
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
 
-        let from_exprs_json = self.data.task.from_exprs_json.clone();
-        let into_exprs_json = self.data.task.into_exprs_json.clone();
+        let src_descriptors = Self::source_region_descriptors(from_exprs, &physical_route)?;
+        let subtasks = subtask::create_subtasks(from_exprs, into_exprs)
+            .context(error::RepartitionCreateSubtasksSnafu)?;
+        let entries = Self::build_plan_entries(subtasks, &src_descriptors, into_exprs);
 
-        let from_exprs = Self::deserialize_partition_exprs(&from_exprs_json)?;
-        let into_exprs = Self::deserialize_partition_exprs(&into_exprs_json)?;
+        let demand = ResourceDemand::from_plan_entries(&entries);
+        let plan = RepartitionPlan::new(physical_table_id, entries, demand, physical_route.clone());
+        self.data.plan = Some(plan);
 
+        Ok(())
+    }
+
+    fn source_region_descriptors(
+        from_exprs: &[PartitionExpr],
+        physical_route: &PhysicalTableRouteValue,
+    ) -> Result<Vec<RegionDescriptor>> {
         let existing_regions = physical_route
             .region_routes
             .iter()
             .map(|route| (route.region.id, route.region.partition_expr()))
             .collect::<Vec<_>>();
 
-        let mut used_regions = vec![false; existing_regions.len()];
-        let mut source_descriptor_by_index = Vec::with_capacity(from_exprs_json.len());
-        for expr_json in &from_exprs_json {
-            let mut found = None;
-            for (idx, (region_id, expr)) in existing_regions.iter().enumerate() {
-                if !used_regions[idx] && expr == expr_json {
-                    found = Some((*region_id, expr.clone()));
-                    used_regions[idx] = true;
-                    break;
-                }
-            }
-
-            let (region_id, partition_expr_json) = found.ok_or_else(|| {
-                error::UnsupportedSnafu {
-                    operation: format!(
-                        "repartition source expression '{}' does not match any existing region",
-                        expr_json
-                    ),
-                }
-                .build()
-            })?;
-
-            source_descriptor_by_index.push(RegionDescriptor {
-                region_id: Some(region_id),
-                partition_expr_json,
-            });
-        }
-
-        let subtasks = subtask::create_subtasks(&from_exprs, &into_exprs).map_err(|err| {
-            error::UnsupportedSnafu {
-                operation: format!("create_subtasks failed: {err}"),
-            }
-            .build()
-        })?;
-
-        let mut plan = RepartitionPlan::empty(physical_table_id);
-        let mut diff = PartitionRuleDiff::default();
-        let mut demand = ResourceDemand::default();
-
-        for subtask in subtasks {
-            let group_id = Uuid::new_v4();
-
-            let sources = subtask
-                .from_expr_indices
-                .iter()
-                .map(|&idx| source_descriptor_by_index[idx].clone())
-                .collect::<Vec<_>>();
-
-            let targets = subtask
-                .to_expr_indices
-                .iter()
-                .enumerate()
-                .map(|(position, &idx)| {
-                    let reused_region = if subtask.from_expr_indices.len() == 1 {
-                        if position == 0 {
-                            sources.get(0).and_then(|descriptor| descriptor.region_id)
-                        } else {
-                            None
-                        }
-                    } else if subtask.to_expr_indices.len() == 1 {
-                        sources.first().and_then(|descriptor| descriptor.region_id)
-                    } else {
-                        sources
-                            .get(position)
-                            .and_then(|descriptor| descriptor.region_id)
-                    };
-
-                    RegionDescriptor {
-                        region_id: reused_region,
-                        partition_expr_json: into_exprs_json[idx].clone(),
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let entry = PlanEntry::new(group_id, subtask, sources, targets);
-            demand.add_entry(&entry);
-            diff.entries.push(group_id);
-            plan.entries.push(entry);
-        }
-
-        plan.resource_demand = demand;
-        plan.route_snapshot = physical_route.clone();
-        plan.plan_hash = format!(
-            "{}:{}->{}",
-            physical_table_id,
-            Self::expr_signature(&from_exprs_json),
-            Self::expr_signature(&into_exprs_json)
-        );
-
-        self.data.plan = Some(plan);
-        self.data.rule_diff = Some(diff);
-        self.data.resource_demand = Some(demand);
-
-        Ok(())
-    }
-
-    async fn allocate_resources(&self, _demand: ResourceDemand) -> MetaResult<bool> {
-        Ok(true)
-    }
-
-    fn spawn_group_procedures(
-        &self,
-        plan: &RepartitionPlan,
-        group_ids: &[PlanGroupId],
-    ) -> Vec<ProcedureWithId> {
-        group_ids
+        let descriptors = from_exprs
             .iter()
-            .filter_map(|group_id| {
-                plan.entries
+            .map(|expr| {
+                let expr_json = expr
+                    .as_json_str()
+                    .context(error::RepartitionSerializePartitionExprSnafu)?;
+
+                let matched_region_id = existing_regions
                     .iter()
-                    .find(|entry| entry.group_id == *group_id)
-                    .cloned()
+                    .find_map(|(region_id, existing_expr)| {
+                        (existing_expr == &expr_json).then_some(*region_id)
+                    })
+                    .with_context(|| error::RepartitionSourceExprMismatchSnafu {
+                        expr: expr_json,
+                    })?;
+
+                Ok(RegionDescriptor {
+                    region_id: Some(matched_region_id),
+                    partition_expr: expr.clone(),
+                })
             })
-            .map(|entry| {
-                let route_snapshot = plan.route_snapshot.region_routes.clone();
-                ProcedureWithId::with_random_id(Box::new(RepartitionGroupProcedure::new(
-                    entry,
-                    plan.table_id,
-                    route_snapshot,
-                    self.group_context.clone(),
-                )))
-            })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(descriptors)
     }
 
+    fn build_plan_entries(
+        subtasks: Vec<RepartitionSubtask>,
+        source_index: &[RegionDescriptor],
+        target_exprs: &[PartitionExpr],
+    ) -> Vec<PlanEntry> {
+        let plan_entries = subtasks
+            .into_iter()
+            .map(|subtask| {
+                let group_id = Uuid::new_v4();
+                let sources = subtask
+                    .from_expr_indices
+                    .iter()
+                    .map(|&idx| source_index[idx].clone())
+                    .collect::<Vec<_>>();
+
+                let targets = subtask
+                    .to_expr_indices
+                    .iter()
+                    .map(|&idx| RegionDescriptor {
+                        region_id: None, // will be assigned later
+                        partition_expr: target_exprs[idx].clone(),
+                    })
+                    .collect::<Vec<_>>();
+
+                PlanEntry::new(group_id, subtask, sources, targets)
+            })
+            .collect::<Vec<_>>();
+
+        plan_entries
+    }
+
+    /// Allocates resources required by the plan. Returning `false`
+    /// indicates that the procedure should abort.
+    async fn allocate_resources(&mut self) -> Result<bool> {
+        todo!("allocate resources");
+    }
+
+    async fn deallocate_resources(&mut self) -> Result<()> {
+        if !self.data.resource_allocated {
+            return Ok(());
+        }
+        self.data.resource_allocated = false;
+
+        todo!("deallocate resources");
+    }
+
+    /// Builds the child procedure list for the provided plan groups.
+    fn spawn_group_procedures(
+        &mut self,
+        table_id: TableId,
+        route_snapshot: PhysicalTableRouteValue,
+        entries: Vec<PlanEntry>,
+    ) -> Vec<ProcedureWithId> {
+        let mut id_map = HashMap::new();
+
+        let procedures = entries
+            .into_iter()
+            .map(|entry| {
+                let group_id = entry.group_id;
+                let group_procedure = RepartitionGroupProcedure::new(
+                    entry,
+                    table_id,
+                    route_snapshot.clone(),
+                    self.data.task.catalog_name.clone(),
+                    self.data.task.schema_name.clone(),
+                    self.group_context.clone(),
+                );
+                let procedure = ProcedureWithId::with_random_id(Box::new(group_procedure));
+                id_map.insert(group_id, procedure.id);
+                procedure
+            })
+            .collect::<Vec<_>>();
+
+        self.data.group_subprocedures = id_map;
+        procedures
+    }
+
+    /// Composes the set of locks required to safely mutate table metadata.
     fn table_lock_key(&self) -> Vec<common_procedure::StringKey> {
         let mut lock_key = Vec::with_capacity(3);
-        let table_ref = self.data.task.table_ref();
-        lock_key.push(CatalogLock::Read(table_ref.catalog).into());
-        lock_key.push(SchemaLock::read(table_ref.catalog, table_ref.schema).into());
+        let catalog = self.data.task.catalog_name.as_str();
+        let schema = self.data.task.schema_name.as_str();
+        lock_key.push(CatalogLock::Read(catalog).into());
+        lock_key.push(SchemaLock::read(catalog, schema).into());
         lock_key.push(TableLock::Write(self.data.task.table_id).into());
 
         lock_key
     }
 
-    fn deserialize_partition_exprs(exprs_json: &[String]) -> MetaResult<Vec<PartitionExpr>> {
-        exprs_json
-            .iter()
-            .map(|json| {
-                let expr = PartitionExpr::from_json_str(json).map_err(|err| {
-                    error::UnsupportedSnafu {
-                        operation: format!(
-                            "deserialize partition expression '{json}' failed: {err}"
-                        ),
-                    }
-                    .build()
-                })?;
+    async fn trigger_group_rollbacks(&mut self) {
+        if self.data.rollback_triggered {
+            return;
+        }
 
-                expr.ok_or_else(|| {
-                    error::UnsupportedSnafu {
-                        operation: format!("empty partition expression '{json}'"),
-                    }
-                    .build()
-                })
-            })
-            .collect()
-    }
-
-    fn expr_signature(exprs: &[String]) -> String {
-        exprs.join("|")
+        match self.group_context.rollback_registered_groups().await {
+            Ok(_) => {
+                self.data.rollback_triggered = true;
+            }
+            Err(err) => {
+                error!(err; "repartition: rollback of successful groups failed");
+                self.data.rollback_triggered = true;
+            }
+        }
     }
 }
 
@@ -363,7 +414,16 @@ impl Procedure for RepartitionProcedure {
             RepartitionState::Finished => Ok(Status::done()),
         };
 
-        status.map_err(map_to_procedure_error)
+        match status {
+            Ok(status) => Ok(status),
+            Err(err) => {
+                self.trigger_group_rollbacks().await;
+                if let Err(dealloc_err) = self.deallocate_resources().await {
+                    error!(dealloc_err; "repartition: deallocating resources after failure failed");
+                }
+                Err(map_repartition_error(err))
+            }
+        }
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -383,10 +443,6 @@ struct RepartitionData {
     #[serde(default)]
     plan: Option<RepartitionPlan>,
     #[serde(default)]
-    rule_diff: Option<PartitionRuleDiff>,
-    #[serde(default)]
-    resource_demand: Option<ResourceDemand>,
-    #[serde(default)]
     resource_allocated: bool,
     #[serde(default)]
     pending_groups: Vec<PlanGroupId>,
@@ -396,22 +452,36 @@ struct RepartitionData {
     failed_groups: Vec<PlanGroupId>,
     #[serde(default)]
     summary: Option<RepartitionSummary>,
+    #[serde(default)]
+    rollback_triggered: bool,
+    #[serde(default)]
+    group_subprocedures: HashMap<PlanGroupId, ProcedureId>,
 }
 
 impl RepartitionData {
+    /// Initialise the procedure data for a fresh run.
     fn new(task: RepartitionTask) -> Self {
         Self {
             state: RepartitionState::Prepare,
             task,
             plan: None,
-            rule_diff: None,
-            resource_demand: None,
             resource_allocated: false,
             pending_groups: Vec::new(),
             succeeded_groups: Vec::new(),
             failed_groups: Vec::new(),
             summary: None,
+            rollback_triggered: false,
+            group_subprocedures: HashMap::new(),
         }
+    }
+}
+
+pub(super) fn map_repartition_error(err: error::Error) -> ProcedureError {
+    match (err.is_retryable(), err.need_clean_poisons()) {
+        (true, true) => ProcedureError::retry_later_and_clean_poisons(err),
+        (true, false) => ProcedureError::retry_later(err),
+        (false, true) => ProcedureError::external_and_clean_poisons(err),
+        (false, false) => ProcedureError::external(err),
     }
 }
 
@@ -426,31 +496,11 @@ enum RepartitionState {
     Finished,
 }
 
+/// Information returned to the caller after the procedure finishes.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RepartitionSummary {
     succeeded_groups: Vec<PlanGroupId>,
     failed_groups: Vec<PlanGroupId>,
-}
-
-/// Task payload passed from the DDL entry point.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepartitionTask {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-    /// Partition expressions of source regions (JSON encoded `PartitionExpr`).
-    pub from_exprs_json: Vec<String>,
-    /// Partition expressions of target regions (JSON encoded `PartitionExpr`).
-    pub into_exprs_json: Vec<String>,
-}
-
-impl RepartitionTask {
-    fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
-        }
-    }
+    #[serde(default)]
+    manifest_summaries: Vec<GroupManifestSummary>,
 }

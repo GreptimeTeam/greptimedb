@@ -24,7 +24,9 @@ use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
+    ApplyStagedManifestRequest, ListMetadataRequest, PauseRequest, PublishRegionRuleRequest,
+    RegionResponse as RegionResponseV1, RemapManifestRequest, ResumeRequest,
+    StageRegionRuleRequest, SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -83,6 +85,8 @@ use crate::error::{
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+
+const REMAP_STATS_EXTENSION_KEY: &str = "repartition.manifest.stats";
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -370,6 +374,24 @@ impl RegionServer {
         }
     }
 
+    /// Temporarily pauses compaction and snapshot related activities for the region.
+    ///
+    /// Currently a stub; real implementation will coordinate with region worker.
+    pub async fn pause_compaction_and_snapshot(&self, region_id: RegionId) -> Result<()> {
+        info!("pause_compaction_and_snapshot stub invoked for region {region_id}");
+        let _ = region_id;
+        Ok(())
+    }
+
+    /// Resumes compaction and snapshot related activities for the region.
+    ///
+    /// Currently a stub; real implementation will coordinate with region worker.
+    pub async fn resume_compaction_and_snapshot(&self, region_id: RegionId) -> Result<()> {
+        info!("resume_compaction_and_snapshot stub invoked for region {region_id}");
+        let _ = region_id;
+        Ok(())
+    }
+
     /// Stop the region server.
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await
@@ -538,6 +560,124 @@ impl RegionServer {
         Ok(response)
     }
 
+    async fn handle_pause_region_request(&self, request: &PauseRequest) -> Result<RegionResponse> {
+        let region_id = RegionId::from_u64(request.region_id);
+        let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!(
+            "RegionServer::handle_pause_region_request",
+            region_id = region_id.to_string()
+        ));
+
+        self.pause_compaction_and_snapshot(region_id)
+            .trace(span)
+            .await
+            .map(|_| RegionResponse::new(AffectedRows::default()))
+    }
+
+    async fn handle_resume_region_request(
+        &self,
+        request: &ResumeRequest,
+    ) -> Result<RegionResponse> {
+        let region_id = RegionId::from_u64(request.region_id);
+        let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!(
+            "RegionServer::handle_resume_region_request",
+            region_id = region_id.to_string()
+        ));
+
+        self.resume_compaction_and_snapshot(region_id)
+            .trace(span)
+            .await
+            .map(|_| RegionResponse::new(AffectedRows::default()))
+    }
+
+    async fn handle_stage_region_rule_request(
+        &self,
+        request: &StageRegionRuleRequest,
+    ) -> Result<RegionResponse> {
+        let region_id = RegionId::from_u64(request.region_id);
+        info!(
+            "Stage region rule for region {region_id} with version {}",
+            request.rule_version
+        );
+        match self
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(_) | SetRegionRoleStateResponse::NotFound => {
+                Ok(RegionResponse::new(AffectedRows::default()))
+            }
+            SetRegionRoleStateResponse::InvalidTransition(err) => {
+                Err(err).with_context(|_| HandleRegionRequestSnafu { region_id })
+            }
+        }
+    }
+
+    async fn handle_publish_region_rule_request(
+        &self,
+        request: &PublishRegionRuleRequest,
+    ) -> Result<RegionResponse> {
+        let region_id = RegionId::from_u64(request.region_id);
+        info!(
+            "Publish region rule for region {region_id} with version {}",
+            request.rule_version
+        );
+        match self
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(_) | SetRegionRoleStateResponse::NotFound => {
+                Ok(RegionResponse::new(AffectedRows::default()))
+            }
+            SetRegionRoleStateResponse::InvalidTransition(err) => {
+                Err(err).with_context(|_| HandleRegionRequestSnafu { region_id })
+            }
+        }
+    }
+
+    async fn handle_remap_manifest_request(
+        &self,
+        request: &RemapManifestRequest,
+    ) -> Result<RegionResponse> {
+        info!(
+            "received remap manifest request for table {} group {}",
+            request.table_id, request.group_id
+        );
+
+        let stats_json = serde_json::to_vec(&serde_json::json!({
+            "files_per_region": HashMap::<u64, usize>::new(),
+            "total_file_refs": 0u64,
+            "empty_regions": Vec::<u64>::new(),
+            "group_id": &request.group_id,
+        }))
+        .context(SerializeJsonSnafu)?;
+
+        let mut extensions = HashMap::new();
+        extensions.insert(REMAP_STATS_EXTENSION_KEY.to_string(), stats_json);
+
+        Ok(RegionResponse {
+            affected_rows: 0,
+            extensions,
+            metadata: Vec::new(),
+        })
+    }
+
+    async fn handle_apply_staged_manifest_request(
+        &self,
+        request: &ApplyStagedManifestRequest,
+    ) -> Result<RegionResponse> {
+        info!(
+            "received manifest apply request for table {} group {} publish={} regions {:?}",
+            request.table_id, request.group_id, request.publish, request.region_ids
+        );
+
+        Ok(RegionResponse {
+            affected_rows: 0,
+            extensions: HashMap::new(),
+            metadata: Vec::new(),
+        })
+    }
+
     /// Sync region manifest and registers new opened logical regions.
     pub async fn sync_region(
         &self,
@@ -568,6 +708,26 @@ impl RegionServerHandler for RegionServer {
             }
             region_request::Body::Sync(sync_request) => {
                 self.handle_sync_region_request(sync_request).await
+            }
+            region_request::Body::Pause(pause_request) => {
+                self.handle_pause_region_request(pause_request).await
+            }
+            region_request::Body::Resume(resume_request) => {
+                self.handle_resume_region_request(resume_request).await
+            }
+            region_request::Body::StageRegionRule(stage_request) => {
+                self.handle_stage_region_rule_request(stage_request).await
+            }
+            region_request::Body::PublishRegionRule(publish_request) => {
+                self.handle_publish_region_rule_request(publish_request)
+                    .await
+            }
+            region_request::Body::RemapManifest(remap_request) => {
+                self.handle_remap_manifest_request(remap_request).await
+            }
+            region_request::Body::ApplyStagedManifest(apply_request) => {
+                self.handle_apply_staged_manifest_request(apply_request)
+                    .await
             }
             region_request::Body::ListMetadata(list_metadata_request) => {
                 self.handle_list_metadata_request(list_metadata_request)

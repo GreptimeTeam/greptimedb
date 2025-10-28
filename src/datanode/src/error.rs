@@ -19,6 +19,7 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use mito2::remap_manifest::Error as RemapManifestError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
@@ -396,6 +397,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to remap manifests: {}", source))]
+    RemapManifest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: RemapManifestError,
+    },
+
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -469,6 +478,7 @@ impl ErrorExt for Error {
 
             ObjectStore { source, .. } => source.status_code(),
             BuildCacheStore { .. } => StatusCode::StorageUnavailable,
+            RemapManifest { .. } => StatusCode::Unexpected,
         }
     }
 

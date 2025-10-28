@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_meta::key::table_route::PhysicalTableRouteValue;
+use partition::expr::PartitionExpr;
 use partition::subtask::RepartitionSubtask;
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, TableId};
@@ -28,20 +29,23 @@ pub type PlanGroupId = Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepartitionPlan {
     pub table_id: TableId,
-    pub plan_hash: String,
     pub entries: Vec<PlanEntry>,
     pub resource_demand: ResourceDemand,
     pub route_snapshot: PhysicalTableRouteValue,
 }
 
 impl RepartitionPlan {
-    pub fn empty(table_id: TableId) -> Self {
+    pub fn new(
+        table_id: TableId,
+        entries: Vec<PlanEntry>,
+        resource_demand: ResourceDemand,
+        route_snapshot: PhysicalTableRouteValue,
+    ) -> Self {
         Self {
             table_id,
-            plan_hash: String::new(),
-            entries: Vec::new(),
-            resource_demand: ResourceDemand::default(),
-            route_snapshot: PhysicalTableRouteValue::default(),
+            entries,
+            resource_demand,
+            route_snapshot,
         }
     }
 }
@@ -55,6 +59,8 @@ pub struct PlanEntry {
 }
 
 impl PlanEntry {
+    /// Construct a plan entry consisting of the connected component returned by
+    /// the planner.
     pub fn new(
         group_id: PlanGroupId,
         subtask: RepartitionSubtask,
@@ -68,33 +74,22 @@ impl PlanEntry {
             targets,
         }
     }
-
-    pub fn implied_new_regions(&self) -> u32 {
-        self.targets
-            .iter()
-            .filter(|target| target.region_id.is_none())
-            .count() as u32
-    }
 }
 
+/// Metadata describing a region involved in the plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionDescriptor {
     pub region_id: Option<RegionId>,
-    pub partition_expr_json: String,
+    pub partition_expr: PartitionExpr,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct PartitionRuleDiff {
-    pub entries: Vec<PlanGroupId>,
-}
-
+/// Auxiliary information about resources required to execute the plan.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ResourceDemand {
-    pub new_regions: u32,
-}
+pub struct ResourceDemand {}
 
 impl ResourceDemand {
-    pub fn add_entry(&mut self, entry: &PlanEntry) {
-        self.new_regions = self.new_regions.saturating_add(entry.implied_new_regions());
+    pub fn from_plan_entries(_entries: &[PlanEntry]) -> Self {
+        // placeholder
+        Self {}
     }
 }
