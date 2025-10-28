@@ -1024,7 +1024,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
+                DdlRequest::Catchup((req, wal_entry_receiver)) => {
+                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver)
+                        .await
+                }
             };
 
             ddl.sender.send(res);

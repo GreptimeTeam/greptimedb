@@ -34,7 +34,9 @@ use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
+use crate::region_request::{
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
@@ -707,6 +709,30 @@ pub trait RegionEngine: Send + Sync {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let result = self
                     .handle_request(region_id, RegionRequest::Open(request))
+                    .await;
+                (region_id, result)
+            });
+        }
+
+        Ok(join_all(tasks).await)
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+        let mut tasks = Vec::with_capacity(requests.len());
+
+        for (region_id, request) in requests {
+            let semaphore_moved = semaphore.clone();
+
+            tasks.push(async move {
+                // Safety: semaphore must exist
+                let _permit = semaphore_moved.acquire().await.unwrap();
+                let result = self
+                    .handle_request(region_id, RegionRequest::Catchup(request))
                     .await;
                 (region_id, result)
             });
