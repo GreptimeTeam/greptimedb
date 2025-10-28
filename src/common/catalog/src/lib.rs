@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(const_option_ops)]
+#![feature(const_trait_impl)]
+
 use consts::DEFAULT_CATALOG_NAME;
 
 pub mod consts;

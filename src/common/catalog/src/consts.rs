@@ -16,9 +16,10 @@ pub const SYSTEM_CATALOG_NAME: &str = "system";
 pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
 pub const PG_CATALOG_NAME: &str = "pg_catalog";
 pub const SYSTEM_CATALOG_TABLE_NAME: &str = "system_catalog";
-pub const DEFAULT_CATALOG_NAME: &str = "greptime";
+pub const DEFAULT_CATALOG_NAME: &str = option_env!("DEFAULT_CATALOG_NAME").unwrap_or("greptime");
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
-pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = "greptime_private";
+pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str =
+    option_env!("DEFAULT_PRIVATE_SCHEMA_NAME").unwrap_or("greptime_private");
 
 /// Reserves [0,MIN_USER_FLOW_ID) for internal usage.
 /// User defined table id starts from this value.
