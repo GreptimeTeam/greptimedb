@@ -509,13 +509,17 @@ mod test {
     use std::collections::HashMap;
 
     use common_telemetry::info;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
+    use mito2::test_util::{kafka_log_store_factory, prepare_test_for_kafka_log_store};
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
         PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     };
 
     use super::*;
+    use crate::maybe_skip_kafka_log_store_integration_test;
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -695,5 +699,107 @@ mod test {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+    }
+
+    #[tokio::test]
+    async fn test_catchup_regions() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_log_store_integration_test!();
+        let kafka_log_store_factory = kafka_log_store_factory().unwrap();
+        let mito_env = mito2::test_util::TestEnv::new()
+            .await
+            .with_log_store_factory(kafka_log_store_factory.clone());
+        let env = TestEnv::with_mito_env(mito_env).await;
+        let topic = prepare_test_for_kafka_log_store(&kafka_log_store_factory)
+            .await
+            .unwrap();
+        let table_dir = |region_id| format!("table/{region_id}");
+        let mut physical_region_ids = vec![];
+        let mut logical_region_ids = vec![];
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: topic.clone(),
+        });
+        // Creates 3 physical regions
+        for i in 0..3 {
+            let physical_region_id = RegionId::new(1, i);
+            physical_region_ids.push(physical_region_id);
+            env.create_physical_region(
+                physical_region_id,
+                &table_dir(physical_region_id),
+                vec![(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                )],
+            )
+            .await;
+            // Creates 3 logical regions for each physical region
+            for j in 0..3 {
+                let logical_region_id = RegionId::new(1024 + i, j);
+                logical_region_ids.push(logical_region_id);
+                env.create_logical_region(physical_region_id, logical_region_id)
+                    .await;
+            }
+        }
+
+        let metric_engine = env.metric();
+        // Closes all regions
+        for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
+            metric_engine
+                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .await
+                .unwrap();
+        }
+
+        let mut options = HashMap::new();
+        options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&wal_options).unwrap(),
+        );
+        // Opens all regions and skip the wal
+        let requests = physical_region_ids
+            .iter()
+            .map(|region_id| {
+                (
+                    *region_id,
+                    RegionOpenRequest {
+                        engine: METRIC_ENGINE_NAME.to_string(),
+                        table_dir: table_dir(*region_id),
+                        path_type: PathType::Bare,
+                        options: options.clone(),
+                        skip_wal_replay: true,
+                        checkpoint: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        info!("Open batch regions");
+        metric_engine
+            .handle_batch_open_requests(2, requests)
+            .await
+            .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(!state.logical_regions().contains_key(logical_region));
+            }
+        }
+
+        let catch_requests = physical_region_ids
+            .iter()
+            .map(|region_id| {
+                (
+                    *region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        metric_engine
+            .handle_batch_catchup_requests(2, catch_requests)
+            .await
+            .unwrap();
     }
 }
