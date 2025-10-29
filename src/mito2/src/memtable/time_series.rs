@@ -922,7 +922,9 @@ impl ValueBuilder {
                             )
                         };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.push(field_value);
+                    mutable_vector
+                        .push(field_value)
+                        .unwrap_or_else(|e| panic!("unexpected: {e}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
