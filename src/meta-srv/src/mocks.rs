@@ -134,7 +134,7 @@ pub async fn mock(
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true);
-    let channel_manager = ChannelManager::with_config(config);
+    let channel_manager = ChannelManager::with_config(config, None);
 
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.

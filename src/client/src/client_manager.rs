@@ -74,7 +74,7 @@ impl FlownodeManager for NodeClients {
 impl NodeClients {
     pub fn new(config: ChannelConfig) -> Self {
         Self {
-            channel_manager: ChannelManager::with_config(config),
+            channel_manager: ChannelManager::with_config(config, None),
             clients: CacheBuilder::new(1024)
                 .time_to_live(Duration::from_secs(30 * 60))
                 .time_to_idle(Duration::from_secs(5 * 60))

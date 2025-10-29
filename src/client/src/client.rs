@@ -20,7 +20,9 @@ use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
 use arrow_flight::flight_service_client::FlightServiceClient;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager, ClientTlsOption};
+use common_grpc::channel_manager::{
+    ChannelConfig, ChannelManager, ClientTlsOption, load_tls_config,
+};
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
 use tonic::codec::CompressionEncoding;
@@ -94,8 +96,9 @@ impl Client {
         A: AsRef<[U]>,
     {
         let channel_config = ChannelConfig::default().client_tls_config(client_tls);
-        let channel_manager = ChannelManager::with_tls_config(channel_config)
+        let tls_config = load_tls_config(channel_config.client_tls.as_ref())
             .context(error::CreateTlsChannelSnafu)?;
+        let channel_manager = ChannelManager::with_config(channel_config, tls_config);
         Ok(Self::with_manager_and_urls(channel_manager, urls))
     }
 
