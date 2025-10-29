@@ -786,7 +786,7 @@ impl ParquetReaderBuilder {
             PreFilterMode::SkipFields => true,
             PreFilterMode::SkipFieldsOnDelete => {
                 // Check if any row group contains delete op
-                let file_path = self.file_handle.file_path(&self.file_dir, self.path_type);
+                let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
                 (0..parquet_meta.num_row_groups()).any(|rg_idx| {
                     row_group_contains_delete(parquet_meta, rg_idx, &file_path)
                         .inspect_err(|e| {
