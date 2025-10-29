@@ -67,7 +67,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::gc_scheduler::{GcSchedulerOptions, GcTickerRef};
+use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;

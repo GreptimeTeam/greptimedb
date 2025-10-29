@@ -25,7 +25,7 @@ pub mod election;
 pub mod error;
 pub mod events;
 mod failure_detector;
-pub mod gc_scheduler;
+pub mod gc;
 pub mod handler;
 pub mod key;
 pub mod metasrv;

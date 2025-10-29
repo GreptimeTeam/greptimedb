@@ -56,7 +56,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::gc_scheduler::GcScheduler;
+use crate::gc::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
