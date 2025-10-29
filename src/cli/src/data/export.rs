@@ -30,6 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
+use crate::data::default_database;
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, S3ConfigNotSetSnafu,
@@ -63,7 +64,7 @@ pub struct ExportCommand {
     output_dir: Option<String>,
 
     /// The name of the catalog to export.
-    #[clap(long, default_value = "greptime-*")]
+    #[clap(long, default_value_t = default_database())]
     database: String,
 
     /// Parallelism of the export.

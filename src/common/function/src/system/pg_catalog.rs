@@ -16,6 +16,9 @@ mod version;
 
 use std::sync::Arc;
 
+use common_catalog::consts::{
+    DEFAULT_PRIVATE_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+};
 use datafusion::arrow::array::{ArrayRef, StringArray, as_boolean_array};
 use datafusion::catalog::TableFunction;
 use datafusion::common::ScalarValue;
@@ -143,9 +146,9 @@ impl Function for CurrentSchemasFunction {
         let mut values = vec!["public"];
         // include implicit schemas
         if input.value(0) {
-            values.push("information_schema");
-            values.push("pg_catalog");
-            values.push("greptime_private");
+            values.push(INFORMATION_SCHEMA_NAME);
+            values.push(PG_CATALOG_NAME);
+            values.push(DEFAULT_PRIVATE_SCHEMA_NAME);
         }
 
         let list_array = SingleRowListArrayBuilder::new(Arc::new(StringArray::from(values)));

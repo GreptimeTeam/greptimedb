@@ -2033,6 +2033,9 @@ dependencies = [
 [[package]]
 name = "common-catalog"
 version = "0.18.0"
+dependencies = [
+ "const_format",
+]
 
 [[package]]
 name = "common-config"
