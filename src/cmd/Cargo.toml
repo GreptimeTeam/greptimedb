@@ -71,7 +71,6 @@ nu-ansi-term = "0.46"
 object-store.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
-pprof = "0.14.0"
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
@@ -92,6 +91,11 @@ tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing-appender.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.14", features = [
+    "flamegraph",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6"
