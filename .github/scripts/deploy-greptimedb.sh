@@ -115,6 +115,7 @@ function deploy_greptimedb_cluster_with_s3_storage() {
   helm upgrade --install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
     --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
+    --set initializer.tag=latest \
     --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
     --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     --set objectStorage.s3.bucket="$AWS_CI_TEST_BUCKET" \
