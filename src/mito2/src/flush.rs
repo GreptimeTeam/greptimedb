@@ -525,21 +525,19 @@ impl RegionFlushTask {
                 let source = Either::Left(source);
                 let write_request = self.new_write_request(version, max_sequence, source);
 
-                let (ssts_written, metrics) = self
+                let mut metrics = Metrics::new(WriteType::Flush);
+                let ssts_written = self
                     .access_layer
-                    .write_sst(write_request, &write_opts, WriteType::Flush)
+                    .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
                 }
 
-                common_telemetry::debug!(
+                debug!(
                     "Region {} flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
-                    self.region_id,
-                    num_mem_ranges,
-                    num_mem_rows,
-                    metrics
+                    self.region_id, num_mem_ranges, num_mem_rows, metrics
                 );
 
                 flush_metrics = flush_metrics.merge(metrics);
@@ -591,9 +589,11 @@ impl RegionFlushTask {
             let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                access_layer
-                    .write_sst(write_request, &write_opts, WriteType::Flush)
-                    .await
+                let mut metrics = Metrics::new(WriteType::Flush);
+                let ssts = access_layer
+                    .write_sst(write_request, &write_opts, &mut metrics)
+                    .await?;
+                Ok((ssts, metrics))
             });
             tasks.push(task);
         }

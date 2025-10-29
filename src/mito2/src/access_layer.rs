@@ -72,7 +72,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(write_type: WriteType) -> Self {
+    pub fn new(write_type: WriteType) -> Self {
         Self {
             write_type,
             iter_source: Default::default(),
@@ -255,12 +255,12 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
-        write_type: WriteType,
-    ) -> Result<(SstInfoArray, Metrics)> {
+        metrics: &mut Metrics,
+    ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
 
-        let (sst_info, metrics) = if let Some(write_cache) = cache_manager.write_cache() {
+        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -273,7 +273,7 @@ impl AccessLayer {
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
-                    write_type,
+                    metrics,
                 )
                 .await?
         } else {
@@ -303,11 +303,11 @@ impl AccessLayer {
                 request.index_config,
                 indexer_builder,
                 path_provider,
-                Metrics::new(write_type),
+                metrics,
             )
             .await
             .with_file_cleaner(cleaner);
-            let ssts = match request.source {
+            match request.source {
                 Either::Left(source) => {
                     writer
                         .write_all(source, request.max_sequence, write_opts)
@@ -316,9 +316,7 @@ impl AccessLayer {
                 Either::Right(flat_source) => {
                     writer.write_all_flat(flat_source, write_opts).await?
                 }
-            };
-            let metrics = writer.into_metrics();
-            (ssts, metrics)
+            }
         };
 
         // Put parquet metadata to cache manager.
@@ -333,7 +331,7 @@ impl AccessLayer {
             }
         }
 
-        Ok((sst_info, metrics))
+        Ok(sst_info)
     }
 
     /// Puts encoded SST bytes to the write cache (if enabled) and uploads it to the object store.

@@ -30,7 +30,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest, WriteType};
+use crate::access_layer::{
+    AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
+};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{PickerOutput, new_picker};
 use crate::compaction::{CompactionSstReaderBuilder, find_ttl};
@@ -387,7 +389,8 @@ impl Compactor for DefaultCompactor {
                     let reader = builder.build_sst_reader().await?;
                     either::Left(Source::Reader(reader))
                 };
-                let (sst_infos, metrics) = sst_layer
+                let mut metrics = Metrics::new(WriteType::Compaction);
+                let sst_infos = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
@@ -403,7 +406,7 @@ impl Compactor for DefaultCompactor {
                             bloom_filter_index_config,
                         },
                         &write_opts,
-                        WriteType::Compaction,
+                        &mut metrics,
                     )
                     .await?;
                 // Convert partition expression once outside the map
