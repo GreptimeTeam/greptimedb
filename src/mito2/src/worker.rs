@@ -62,7 +62,10 @@ use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
-use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
+use crate::region::{
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
+};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
     WorkerRequest, WorkerRequestWithTime,
@@ -496,6 +499,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
+            catchup_regions: Arc::new(CatchupRegions::default()),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
@@ -740,6 +744,8 @@ struct RegionWorkerLoop<S> {
     dropping_regions: RegionMapRef,
     /// Regions that are opening.
     opening_regions: OpeningRegionsRef,
+    /// Regions that are catching up.
+    catchup_regions: CatchupRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequestWithTime>,
     /// Request receiver.
@@ -1028,8 +1034,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Catchup((req, wal_entry_receiver)) => {
-                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver)
-                        .await
+                    self.handle_catchup_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
+                        .await;
+                    continue;
                 }
             };
 
