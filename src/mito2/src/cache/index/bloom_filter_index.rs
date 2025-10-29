@@ -64,6 +64,7 @@ fn bloom_filter_index_metadata_weight(
 ) -> u32 {
     let base = k.0.as_bytes().len()
         + std::mem::size_of::<ColumnId>()
+        + std::mem::size_of::<Tag>()
         + std::mem::size_of::<BloomFilterMeta>();
 
     let vec_estimated = meta.segment_loc_indices.len() * std::mem::size_of::<u64>()
