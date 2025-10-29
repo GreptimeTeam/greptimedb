@@ -202,7 +202,8 @@ mod test {
             ],
         };
 
-        let weight = bloom_filter_index_metadata_weight(&(file_id, column_id, tag), &Arc::new(meta.clone()));
+        let weight =
+            bloom_filter_index_metadata_weight(&(file_id, column_id, tag), &Arc::new(meta.clone()));
 
         let base = file_id.as_bytes().len()
             + std::mem::size_of::<ColumnId>()

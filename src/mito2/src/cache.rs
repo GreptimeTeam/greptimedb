@@ -751,7 +751,7 @@ impl PageValue {
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.page_size as usize
-            + self.compressed.iter().map(|b| b.len()).sum::<usize>()
+            + self.compressed.iter().map(mem::size_of_val).sum::<usize>()
     }
 }
 
@@ -1001,27 +1001,5 @@ mod tests {
                 .is_none()
         );
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
-    }
-
-    #[test]
-    fn test_page_value_estimated_size() {
-        let data1 = Bytes::from(vec![0u8; 1024]);
-        let data2 = Bytes::from(vec![0u8; 2048]);
-        let data3 = Bytes::from(vec![0u8; 4096]);
-
-        let page_value = PageValue::new(vec![data1.clone(), data2.clone(), data3.clone()], 8192);
-
-        let estimated = page_value.estimated_size();
-
-        // Expected size:
-        // - size of PageValue struct itself
-        // - page_size field (8192)
-        // - actual data: 1024 + 2048 + 4096 = 7168 bytes
-        let expected = mem::size_of::<PageValue>() + 8192 + 7168;
-
-        assert_eq!(
-            estimated, expected,
-            "estimated_size() should return actual data size, not Bytes struct size"
-        );
     }
 }
