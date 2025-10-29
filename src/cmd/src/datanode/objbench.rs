@@ -166,6 +166,7 @@ impl ObjbenchCommand {
             num_row_groups,
             sequence: None,
             partition_expr: None,
+            num_series: 0,
         };
         let src_handle = FileHandle::new(file_meta, new_noop_file_purger());
 
