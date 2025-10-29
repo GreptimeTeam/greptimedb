@@ -924,7 +924,7 @@ impl ValueBuilder {
                     mutable_vector.push_nulls(num_rows - 1);
                     mutable_vector
                         .push(field_value)
-                        .unwrap_or_else(|e| panic!("unexpected: {e}"));
+                        .unwrap_or_else(|e| panic!("unexpected field value: {e:?}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
