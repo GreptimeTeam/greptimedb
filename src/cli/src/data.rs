@@ -16,6 +16,7 @@ mod export;
 mod import;
 
 use clap::Subcommand;
+use client::DEFAULT_CATALOG_NAME;
 use common_error::ext::BoxedError;
 
 use crate::Tool;
@@ -36,4 +37,8 @@ impl DataCommand {
             DataCommand::Import(cmd) => cmd.build().await,
         }
     }
+}
+
+pub(crate) fn default_database() -> String {
+    format!("{DEFAULT_CATALOG_NAME}-*")
 }
