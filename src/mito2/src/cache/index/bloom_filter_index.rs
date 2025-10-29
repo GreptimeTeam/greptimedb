@@ -208,6 +208,7 @@ mod test {
 
         let base = file_id.as_bytes().len()
             + std::mem::size_of::<ColumnId>()
+            + std::mem::size_of::<Tag>()
             + std::mem::size_of::<BloomFilterMeta>();
         let expected_dynamic = meta.segment_loc_indices.len() * std::mem::size_of::<u64>()
             + meta.bloom_filter_locs.len() * std::mem::size_of::<BloomFilterLoc>();
