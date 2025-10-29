@@ -565,6 +565,10 @@ impl MitoRegion {
         Ok(())
     }
 
+    pub fn access_layer(&self) -> AccessLayerRef {
+        self.access_layer.clone()
+    }
+
     /// Returns the SST entries of the region.
     pub async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
         let table_dir = self.table_dir();

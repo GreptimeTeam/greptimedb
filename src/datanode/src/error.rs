@@ -322,6 +322,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to run gc for region {}", region_id))]
+    GcMitoEngine {
+        region_id: RegionId,
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid arguments for GC: {}", msg))]
+    InvalidGcArgs {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to list SST entries from storage"))]
     ListStorageSsts {
         #[snafu(implicit)]
@@ -446,9 +461,11 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
-                StatusCode::Internal
-            }
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | InvalidGcArgs { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -466,7 +483,7 @@ impl ErrorExt for Error {
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
-            BuildMitoEngine { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } | GcMitoEngine { source, .. } => source.status_code(),
             BuildMetricEngine { source, .. } => source.status_code(),
             ListStorageSsts { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
