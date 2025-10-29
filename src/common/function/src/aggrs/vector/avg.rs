@@ -32,6 +32,7 @@ use crate::scalars::vector::impl_conv::{
 #[derive(Debug, Default)]
 pub struct VectorAvg {
     avg: Option<OVector<f32, Dyn>>,
+    count: usize,
     has_null: bool,
 }
 
@@ -116,6 +117,7 @@ impl VectorAvg {
             if is_update {
                 self.has_null = true;
                 self.avg = None;
+                self.count = 0;
             }
             return Ok(());
         }
@@ -127,7 +129,13 @@ impl VectorAvg {
             let v_view = DVectorView::from_slice(&v, dims);
             sum += &v_view;
         }
-        *self.inner(dims) = sum / (len as f32);
+        if is_update {
+            *self.inner(dims) = sum / (len as f32);
+        } else {
+            let avg = self.inner(dims).clone();
+            *self.inner(dims) = (avg * self.count as f32 + sum) / ((self.count + len) as f32)
+        }
+        self.count += len;
 
         Ok(())
     }
