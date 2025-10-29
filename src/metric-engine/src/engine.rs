@@ -46,7 +46,9 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
     SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
@@ -138,6 +140,17 @@ impl RegionEngine for MetricEngine {
     ) -> Result<BatchResponses, BoxedError> {
         self.inner
             .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
             .await
             .map_err(BoxedError::new)
     }

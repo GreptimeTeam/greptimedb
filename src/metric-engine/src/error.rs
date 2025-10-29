@@ -50,6 +50,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to batch catchup mito region"))]
+    BatchCatchupMitoRegion {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("No open region result for region {}", region_id))]
     NoOpenRegionResult {
         region_id: RegionId,
@@ -361,7 +368,8 @@ impl ErrorExt for Error {
             | MitoFlushOperation { source, .. }
             | MitoDeleteOperation { source, .. }
             | MitoSyncOperation { source, .. }
-            | BatchOpenMitoRegion { source, .. } => source.status_code(),
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 
