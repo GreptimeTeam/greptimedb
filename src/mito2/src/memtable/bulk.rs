@@ -42,7 +42,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
     IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, PredicateGroup,
+    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -243,7 +243,6 @@ pub struct BulkMemtable {
     max_sequence: AtomicU64,
     num_rows: AtomicUsize,
     /// Cached flat SST arrow schema for memtable compaction.
-    #[allow(dead_code)]
     flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
@@ -331,19 +330,20 @@ impl Memtable for BulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
-        for_flush: bool,
+        options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
 
         // TODO(yingwen): Filter ranges by sequence.
-        let context = Arc::new(BulkIterContext::new(
+        let context = Arc::new(BulkIterContext::new_with_pre_filter_mode(
             self.metadata.clone(),
             projection,
             predicate.predicate().cloned(),
-            for_flush,
+            options.for_flush,
+            options.pre_filter_mode,
         )?);
 
         // Adds ranges for regular parts and encoded parts
@@ -637,7 +637,6 @@ impl IterBuilder for BulkRangeIterBuilder {
 
 /// Iterator builder for encoded bulk range
 struct EncodedBulkRangeIterBuilder {
-    #[allow(dead_code)]
     file_id: FileId,
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
@@ -679,7 +678,6 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 struct BulkPartWrapper {
     part: BulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,
@@ -688,7 +686,6 @@ struct BulkPartWrapper {
 struct EncodedPartWrapper {
     part: EncodedBulkPart,
     /// The unique file id for this part in memtable.
-    #[allow(dead_code)]
     file_id: FileId,
     /// Whether this part is currently being merged.
     merging: bool,
@@ -1192,7 +1189,12 @@ mod tests {
         assert_eq!(3000, max_ts.value());
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1234,7 +1236,10 @@ mod tests {
         let projection = vec![4u32];
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
-            .ranges(Some(&projection), predicate_group, None, false)
+            .ranges(
+                Some(&projection),
+                RangesOptions::default().with_predicate(predicate_group),
+            )
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1350,7 +1355,12 @@ mod tests {
         }
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
         assert_eq!(5, ranges.stats.num_rows);
@@ -1383,7 +1393,12 @@ mod tests {
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let sequence_filter = Some(SequenceRange::LtEq { max: 400 }); // Filters out rows with sequence > 400
         let ranges = memtable
-            .ranges(None, predicate_group, sequence_filter, false)
+            .ranges(
+                None,
+                RangesOptions::default()
+                    .with_predicate(predicate_group)
+                    .with_sequence(sequence_filter),
+            )
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
@@ -1415,7 +1430,12 @@ mod tests {
         memtable.compact(false).unwrap();
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         // Should have ranges for both bulk parts and encoded parts
         assert_eq!(3, ranges.ranges.len());

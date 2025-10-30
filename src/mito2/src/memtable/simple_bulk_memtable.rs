@@ -27,7 +27,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceRange};
+use store_api::storage::ColumnId;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -35,12 +35,11 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::Series;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
-    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::Batch;
 use crate::read::dedup::LastNonNullIter;
-use crate::read::scan_region::PredicateGroup;
 use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
@@ -223,7 +222,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceRange>,
+        sequence: Option<store_api::storage::SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build(None)?;
 
@@ -238,10 +237,10 @@ impl Memtable for SimpleBulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
-        _for_flush: bool,
+        options: RangesOptions,
     ) -> error::Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
         let values = self.series.read().unwrap().read_to_values();
@@ -412,7 +411,7 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::TimestampMillisecondVector;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{RegionId, SequenceNumber};
+    use store_api::storage::{RegionId, SequenceNumber, SequenceRange};
 
     use super::*;
     use crate::read;
@@ -617,9 +616,7 @@ mod tests {
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None, false)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -651,9 +648,7 @@ mod tests {
         memtable.write_one(kv).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None, false)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -694,9 +689,7 @@ mod tests {
         memtable.write_one(kvs.iter().next().unwrap()).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, PredicateGroup::default(), None, false)
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
         let mut reader = range.context.builder.build(None).unwrap();
@@ -910,9 +903,8 @@ mod tests {
                 raw_data: None,
             })
             .unwrap();
-        let MemtableRanges { ranges, .. } = memtable
-            .ranges(None, PredicateGroup::default(), None, false)
-            .unwrap();
+        let MemtableRanges { ranges, .. } =
+            memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = if ranges.len() == 1 {
             let only_range = ranges.into_values().next().unwrap();
             Source::Iter(only_range.build_iter().unwrap())

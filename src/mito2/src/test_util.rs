@@ -1068,6 +1068,19 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
         .collect()
 }
 
+/// Build rows with schema (string, ts_millis) in range `[start, end)`.
+/// `start`, `end` are in second resolution.
+pub fn build_delete_rows(start: usize, end: usize) -> Vec<Row> {
+    (start..end)
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
+        })
+        .collect()
+}
+
 /// Build rows with schema (string, f64, f64, ts_millis).
 /// - `key`: A string key that is common across all rows.
 /// - `timestamps`: Array of timestamp values.
