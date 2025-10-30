@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use client::DEFAULT_CATALOG_NAME;
 use common_query::{Output, OutputData};
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::TimestampMillisecondType;
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use frontend::instance::Instance;
 use itertools::Itertools;
@@ -224,9 +226,9 @@ async fn ensure_data_exists(tables: &[Table], instance: &Arc<Instance>) {
         let queried = record_batches
             .into_iter()
             .flat_map(|rb| {
-                rb.rows()
-                    .map(|row| row[0].as_timestamp().unwrap().value() as u64)
-                    .collect::<Vec<_>>()
+                let array = rb.column(0).to_arrow_array();
+                let array = array.as_primitive::<TimestampMillisecondType>();
+                array.iter().flatten().map(|x| x as u64).collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let inserted = table
