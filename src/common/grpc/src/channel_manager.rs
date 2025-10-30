@@ -251,9 +251,7 @@ impl ChannelManager {
 pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
     let path_config = match tls_option {
         Some(path_config) if path_config.enabled => path_config,
-        None | Some(_) => {
-            return Ok(None);
-        }
+        _ => return Ok(None),
     };
 
     let mut tls_config = ClientTlsConfig::new();
