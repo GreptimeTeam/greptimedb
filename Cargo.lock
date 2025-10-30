@@ -1938,7 +1938,6 @@ dependencies = [
  "moka",
  "nu-ansi-term",
  "object-store",
- "ordered-float 4.6.0",
  "parquet",
  "plugins",
  "pprof",

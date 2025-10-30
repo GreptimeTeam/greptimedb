@@ -104,7 +104,6 @@ tikv-jemallocator = "0.6"
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
-ordered-float.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true

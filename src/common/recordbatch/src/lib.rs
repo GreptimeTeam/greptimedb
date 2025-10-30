@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
+use common_base::readable_size::ReadableSize;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
@@ -689,15 +690,26 @@ impl QueryMemoryTracker {
                 if let Some(callback) = &self.on_reject {
                     callback();
                 }
-                error::ExceedMemoryLimitSnafu {
-                    requested: additional,
-                    global_used: current,
-                    stream_used: stream_tracked,
+                let msg = format!(
+                    "{} requested, {} used globally ({}%), {} used by this stream (privileged: {}), effective limit: {} ({}%), hard limit: {}",
+                    ReadableSize(additional as u64),
+                    ReadableSize(current as u64),
+                    if self.limit > 0 {
+                        current * 100 / self.limit
+                    } else {
+                        0
+                    },
+                    ReadableSize(stream_tracked as u64),
                     is_privileged,
-                    effective_limit,
-                    limit: self.limit,
-                }
-                .fail()
+                    ReadableSize(effective_limit as u64),
+                    if self.limit > 0 {
+                        effective_limit * 100 / self.limit
+                    } else {
+                        0
+                    },
+                    ReadableSize(self.limit as u64)
+                );
+                error::ExceedMemoryLimitSnafu { msg }.fail()
             }
         }
     }

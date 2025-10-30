@@ -75,7 +75,7 @@ fn test_load_datanode_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Percentage(0.5),
+                    scan_memory_limit: MemoryLimit::Percentage(50),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -85,7 +85,7 @@ fn test_load_datanode_example_config() {
                 }),
             ],
             query: QueryOptions {
-                memory_pool_size: MemoryLimit::Percentage(0.5),
+                memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
             },
             logging: LoggingOptions {
@@ -162,7 +162,7 @@ fn test_load_frontend_example_config() {
                 ..Default::default()
             },
             query: QueryOptions {
-                memory_pool_size: MemoryLimit::Percentage(0.5),
+                memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
             },
             ..Default::default()
@@ -252,7 +252,7 @@ fn test_load_flownode_example_config() {
             query: QueryOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
-                memory_pool_size: MemoryLimit::Percentage(0.5),
+                memory_pool_size: MemoryLimit::Percentage(50),
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -297,7 +297,7 @@ fn test_load_standalone_example_config() {
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Percentage(0.5),
+                    scan_memory_limit: MemoryLimit::Percentage(50),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -327,7 +327,7 @@ fn test_load_standalone_example_config() {
                 ..Default::default()
             },
             query: QueryOptions {
-                memory_pool_size: MemoryLimit::Percentage(0.5),
+                memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
             },
             ..Default::default()
