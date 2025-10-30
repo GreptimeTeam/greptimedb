@@ -125,9 +125,7 @@ fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
 }
 
 async fn flush(mem: &SimpleBulkMemtable) {
-    let MemtableRanges { ranges, .. } = mem
-        .ranges(None, RangesOptions::for_flush())
-        .unwrap();
+    let MemtableRanges { ranges, .. } = mem.ranges(None, RangesOptions::for_flush()).unwrap();
 
     let mut source = if ranges.len() == 1 {
         let only_range = ranges.into_values().next().unwrap();

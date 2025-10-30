@@ -616,9 +616,7 @@ mod tests {
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
 
-        let ranges = memtable
-            .ranges(None, RangesOptions::default())
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -650,9 +648,7 @@ mod tests {
         memtable.write_one(kv).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, RangesOptions::default())
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
             source.push(Source::Iter(r.build_iter().unwrap()));
@@ -693,9 +689,7 @@ mod tests {
         memtable.write_one(kvs.iter().next().unwrap()).unwrap();
         memtable.freeze().unwrap();
 
-        let ranges = memtable
-            .ranges(None, RangesOptions::default())
-            .unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
         let mut reader = range.context.builder.build(None).unwrap();
@@ -909,9 +903,8 @@ mod tests {
                 raw_data: None,
             })
             .unwrap();
-        let MemtableRanges { ranges, .. } = memtable
-            .ranges(None, RangesOptions::default())
-            .unwrap();
+        let MemtableRanges { ranges, .. } =
+            memtable.ranges(None, RangesOptions::default()).unwrap();
         let mut source = if ranges.len() == 1 {
             let only_range = ranges.into_values().next().unwrap();
             Source::Iter(only_range.build_iter().unwrap())
