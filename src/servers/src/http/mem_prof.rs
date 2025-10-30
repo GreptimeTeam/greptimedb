@@ -39,6 +39,14 @@ pub struct MemPprofQuery {
     output: Output,
 }
 
+pub async fn bytes_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    let dump = bytes::GLOBAL_TRACER
+        .get_or_init(|| bytes::BytesTracer::new().0)
+        .collector
+        .render_flamegraph()?;
+    Ok((StatusCode::OK, dump))
+}
+
 #[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
 pub async fn mem_prof_handler(

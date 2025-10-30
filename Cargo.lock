@@ -1336,9 +1336,12 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "bytes"
 version = "1.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+source = "git+https://github.com/discord9/bytes?rev=8283523a2f87da31aa12a6ebd5090eb14aef1cfd#8283523a2f87da31aa12a6ebd5090eb14aef1cfd"
 dependencies = [
+ "backtrace",
+ "crossbeam-channel",
+ "inferno 0.12.2",
+ "quanta",
  "serde",
 ]
 
@@ -10096,6 +10099,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quanta"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3ab5a9d756f0d97bdc89019bd2e4ea098cf9cde50ee7564dde6b81ccc8f06c7"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "once_cell",
+ "raw-cpuid",
+ "wasi 0.11.1+wasi-snapshot-preview1",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
 name = "query"
 version = "0.18.0"
 dependencies = [
@@ -10392,6 +10410,15 @@ dependencies = [
  "clocksource",
  "parking_lot 0.12.4",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags 2.9.1",
 ]
 
 [[package]]

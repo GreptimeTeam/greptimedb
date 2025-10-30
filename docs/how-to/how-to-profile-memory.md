@@ -92,6 +92,9 @@ curl -X POST localhost:4000/debug/prof/mem > greptime.hprof
 curl -X POST "localhost:4000/debug/prof/mem?output=flamegraph" > greptime.svg
 # or output pprof format
 curl -X POST "localhost:4000/debug/prof/mem?output=proto" > greptime.pprof
+
+
+curl -X POST "localhost:4000/debug/prof/bytes" > greptime.svg
 ```
 
 You can periodically dump profiling data and compare them to find the delta memory usage.
