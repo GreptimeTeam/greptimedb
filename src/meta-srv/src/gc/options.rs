@@ -30,7 +30,7 @@ pub struct GcSchedulerOptions {
     /// files from datanodes will never be deleted.
     ///
     /// TODO(discord9): If `enabled` is set to false, datanode side should also use `LocalFilePurger` instead of `ObjectStoreFilePurger`, maybe add some check?
-    pub enabled: bool,
+    pub enable: bool,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -65,7 +65,7 @@ pub struct GcSchedulerOptions {
 impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enable: true,
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),

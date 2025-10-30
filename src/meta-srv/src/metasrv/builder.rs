@@ -458,7 +458,7 @@ impl MetasrvBuilder {
             None
         };
 
-        let gc_ticker = if options.gc.enabled {
+        let gc_ticker = if options.gc.enable {
             let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
                 table_metadata_manager.clone(),
                 meta_peer_client.clone(),
