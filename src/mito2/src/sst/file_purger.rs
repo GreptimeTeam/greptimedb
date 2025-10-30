@@ -128,9 +128,8 @@ impl LocalFilePurger {
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = delete_files(
                 file_meta.region_id,
-                &[file_meta.file_id],
+                &[(file_meta.file_id, file_meta.index_file_id().file_id())],
                 file_meta.exists_index(),
-                &[file_meta.index_file_id().file_id()],
                 &sst_layer,
                 &cache_manager,
             )

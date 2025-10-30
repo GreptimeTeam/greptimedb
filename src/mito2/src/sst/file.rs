@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::tracing_subscriber::filter::FilterId;
 use common_telemetry::{error, info};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
@@ -404,25 +405,26 @@ impl FileHandleInner {
 /// Delete
 pub async fn delete_files(
     region_id: RegionId,
-    file_ids: &[FileId],
+    file_ids: &[(FileId, FileId)],
     delete_index: bool,
-    index_file_ids: &[FileId],
     access_layer: &AccessLayerRef,
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
     // Remove meta of the file from cache.
     if let Some(cache) = &cache_manager {
-        for file_id in file_ids {
+        for (file_id, _) in file_ids {
             cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
         }
     }
     let mut deleted_files = Vec::with_capacity(file_ids.len());
 
-    for (idx, file_id) in file_ids.iter().enumerate() {
+    for (file_id, index_file_id) in file_ids {
         let region_file_id = RegionFileId::new(region_id, *file_id);
-        let index_file_id = RegionFileId::new(region_id, index_file_ids[idx]);
         match access_layer
-            .delete_sst(&region_file_id, &index_file_id)
+            .delete_sst(
+                &RegionFileId::new(region_id, *file_id),
+                &RegionFileId::new(region_id, *index_file_id),
+            )
             .await
         {
             Ok(_) => {
@@ -441,18 +443,12 @@ pub async fn delete_files(
         deleted_files
     );
 
-    for (idx, file_id) in file_ids.iter().enumerate() {
-        let index_file_id = RegionFileId::new(region_id, index_file_ids[idx]);
-
+    for (file_id, index_file_id) in file_ids {
         if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
             // Removes index file from the cache.
             if delete_index {
                 write_cache
-                    .remove(IndexKey::new(
-                        region_id,
-                        index_file_id.file_id(),
-                        FileType::Puffin,
-                    ))
+                    .remove(IndexKey::new(region_id, *index_file_id, FileType::Puffin))
                     .await;
             }
 
@@ -465,11 +461,11 @@ pub async fn delete_files(
         // Purges index content in the stager.
         if let Err(e) = access_layer
             .puffin_manager_factory()
-            .purge_stager(index_file_id)
+            .purge_stager(RegionFileId::new(region_id, *index_file_id))
             .await
         {
             error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_id, region_id);
+                    index_file_id, region_id);
         }
     }
     Ok(())

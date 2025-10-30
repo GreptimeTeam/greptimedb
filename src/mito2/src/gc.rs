@@ -374,7 +374,19 @@ impl LocalGcWorker {
             })
             .collect();
 
-        self.delete_files(region_id, &unused_files, &unused_index_files)
+        info!(
+            "Found {} unused index files to delete for region {}",
+            unused_index_files.len(),
+            region_id
+        );
+
+        let file_pairs: Vec<(FileId, FileId)> = unused_files
+            .iter()
+            .zip(unused_index_files.iter())
+            .map(|(file_id, index_file_id)| (*file_id, *index_file_id))
+            .collect();
+
+        self.delete_files(region_id, &file_pairs)
             .await?;
 
         debug!(
@@ -388,14 +400,12 @@ impl LocalGcWorker {
     async fn delete_files(
         &self,
         region_id: RegionId,
-        file_ids: &[FileId],
-        index_file_ids: &[FileId],
+        file_ids: &[(FileId,FileId)],
     ) -> Result<()> {
         delete_files(
             region_id,
             file_ids,
             true,
-            index_file_ids,
             &self.access_layer,
             &self.cache_manager,
         )
