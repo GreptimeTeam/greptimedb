@@ -365,26 +365,20 @@ impl LocalGcWorker {
             unused_len, region_id
         );
 
-        let unused_index_files: Vec<FileId> = unused_files
+        let file_pairs: Vec<(FileId, FileId)> = unused_files
             .iter()
             .filter_map(|file_id| {
                 current_files
                     .get(file_id)
-                    .map(|meta| meta.index_file_id().file_id())
+                    .map(|meta| (meta.file_id().file_id(), meta.index_file_id().file_id()))
             })
             .collect();
 
         info!(
             "Found {} unused index files to delete for region {}",
-            unused_index_files.len(),
+            file_pairs.len(),
             region_id
         );
-
-        let file_pairs: Vec<(FileId, FileId)> = unused_files
-            .iter()
-            .zip(unused_index_files.iter())
-            .map(|(file_id, index_file_id)| (*file_id, *index_file_id))
-            .collect();
 
         self.delete_files(region_id, &file_pairs).await?;
 
