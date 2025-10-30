@@ -250,7 +250,7 @@ pub struct UpgradeRegion {
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
-    pub replay_timeout: Option<Duration>,
+    pub replay_timeout: Duration,
     /// The hint for replaying memtable.
     #[serde(default)]
     pub location_id: Option<u64>,
@@ -797,7 +797,7 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             last_entry_id: None,
             metadata_last_entry_id: None,
-            replay_timeout: Some(Duration::from_millis(1000)),
+            replay_timeout: Duration::from_millis(1000),
             location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
@@ -892,7 +892,7 @@ mod tests {
             region_id: RegionId::new(1024, 1),
             last_entry_id: None,
             metadata_last_entry_id: None,
-            replay_timeout: Some(Duration::from_millis(1000)),
+            replay_timeout: Duration::from_millis(1000),
             location_id: None,
             replay_entry_id: None,
             metadata_replay_entry_id: None,
