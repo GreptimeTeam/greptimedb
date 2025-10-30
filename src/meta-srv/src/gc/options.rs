@@ -65,7 +65,7 @@ pub struct GcSchedulerOptions {
 impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
-            enable: true,
+            enable: false,
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
