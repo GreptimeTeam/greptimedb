@@ -124,10 +124,10 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            // expect long running queries to be finished within a reasonable time
-            lingering_time: Duration::from_secs(60 * 5),
-            // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
-            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
+            // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
+            lingering_time: Duration::from_secs(60),
+            // 1 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
+            unknown_file_lingering_time: Duration::from_secs(60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
         }

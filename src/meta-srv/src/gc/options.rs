@@ -70,9 +70,9 @@ impl Default for GcSchedulerOptions {
             min_region_size_threshold: 100 * 1024 * 1024, // 100MB
             sst_count_weight: 1.0,
             file_removal_rate_weight: 0.5,
-            gc_cooldown_period: Duration::from_secs(60 * 30), // 30 minutes
-            regions_per_table_threshold: 20,                  // Select top 20 regions per table
-            mailbox_timeout: Duration::from_secs(60),         // 60 seconds
+            gc_cooldown_period: Duration::from_secs(60 * 5), // 5 minutes
+            regions_per_table_threshold: 20,                 // Select top 20 regions per table
+            mailbox_timeout: Duration::from_secs(60),        // 60 seconds
             // Perform full file listing every 24 hours to find orphan files
             full_file_listing_interval: Duration::from_secs(60 * 60 * 24),
             // Clean up stale tracker entries every 6 hours
