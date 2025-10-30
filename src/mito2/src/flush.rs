@@ -51,7 +51,6 @@ use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::scan_region::PredicateGroup;
 use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
@@ -461,12 +460,7 @@ impl RegionFlushTask {
             flush_metrics.compact_memtable += compact_cost;
 
             // Sets `for_flush` flag to true.
-            let mem_ranges = mem.ranges(
-                None,
-                PredicateGroup::default(),
-                None,
-                RangesOptions::for_flush(),
-            )?;
+            let mem_ranges = mem.ranges(None, RangesOptions::for_flush())?;
             let num_mem_ranges = mem_ranges.ranges.len();
             let num_mem_rows = mem_ranges.stats.num_rows();
             let memtable_id = mem.id();

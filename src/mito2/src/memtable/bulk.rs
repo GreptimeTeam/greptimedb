@@ -42,8 +42,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
     IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, PredicateGroup,
-    RangesOptions,
+    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -331,10 +330,10 @@ impl Memtable for BulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
         options: RangesOptions,
     ) -> Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let mut ranges = BTreeMap::new();
         let mut range_id = 0;
 
@@ -1191,7 +1190,10 @@ mod tests {
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
-            .ranges(None, predicate_group, None, RangesOptions::default())
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
             .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1236,9 +1238,7 @@ mod tests {
         let ranges = memtable
             .ranges(
                 Some(&projection),
-                predicate_group,
-                None,
-                RangesOptions::default(),
+                RangesOptions::default().with_predicate(predicate_group),
             )
             .unwrap();
 
@@ -1356,7 +1356,10 @@ mod tests {
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
-            .ranges(None, predicate_group, None, RangesOptions::default())
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
             .unwrap();
 
         assert_eq!(3, ranges.ranges.len());
@@ -1392,9 +1395,9 @@ mod tests {
         let ranges = memtable
             .ranges(
                 None,
-                predicate_group,
-                sequence_filter,
-                RangesOptions::default(),
+                RangesOptions::default()
+                    .with_predicate(predicate_group)
+                    .with_sequence(sequence_filter),
             )
             .unwrap();
 
@@ -1428,7 +1431,10 @@ mod tests {
 
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
         let ranges = memtable
-            .ranges(None, predicate_group, None, RangesOptions::default())
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
             .unwrap();
 
         // Should have ranges for both bulk parts and encoded parts

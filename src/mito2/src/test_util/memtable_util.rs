@@ -97,8 +97,6 @@ impl Memtable for EmptyMemtable {
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
-        _predicate: PredicateGroup,
-        _sequence: Option<SequenceRange>,
         _options: RangesOptions,
     ) -> Result<MemtableRanges> {
         Ok(MemtableRanges::default())

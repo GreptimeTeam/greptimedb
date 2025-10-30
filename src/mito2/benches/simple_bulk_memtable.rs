@@ -25,7 +25,6 @@ use mito2::read;
 use mito2::read::Source;
 use mito2::read::dedup::DedupReader;
 use mito2::read::merge::MergeReaderBuilder;
-use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -127,12 +126,7 @@ fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
 
 async fn flush(mem: &SimpleBulkMemtable) {
     let MemtableRanges { ranges, .. } = mem
-        .ranges(
-            None,
-            PredicateGroup::default(),
-            None,
-            RangesOptions::for_flush(),
-        )
+        .ranges(None, RangesOptions::for_flush())
         .unwrap();
 
     let mut source = if ranges.len() == 1 {

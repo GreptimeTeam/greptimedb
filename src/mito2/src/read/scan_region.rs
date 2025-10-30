@@ -444,12 +444,13 @@ impl ScanRegion {
             }
             let ranges_in_memtable = m.ranges(
                 Some(mapper.column_ids()),
-                predicate.clone(),
-                SequenceRange::new(
-                    self.request.memtable_min_sequence,
-                    self.request.memtable_max_sequence,
-                ),
-                RangesOptions::default().with_pre_filter_mode(filter_mode),
+                RangesOptions::default()
+                    .with_predicate(predicate.clone())
+                    .with_sequence(SequenceRange::new(
+                        self.request.memtable_min_sequence,
+                        self.request.memtable_max_sequence,
+                    ))
+                    .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
                 // todo: we should add stats to MemtableRange

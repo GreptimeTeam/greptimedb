@@ -75,12 +75,16 @@ pub enum MemtableConfig {
 }
 
 /// Options for querying ranges from a memtable.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct RangesOptions {
     /// Whether the ranges are being queried for flush.
     pub for_flush: bool,
     /// Mode to pre-filter columns in ranges.
     pub pre_filter_mode: PreFilterMode,
+    /// Predicate to filter the data.
+    pub predicate: PredicateGroup,
+    /// Sequence range to filter the data.
+    pub sequence: Option<SequenceRange>,
 }
 
 impl Default for RangesOptions {
@@ -88,6 +92,8 @@ impl Default for RangesOptions {
         Self {
             for_flush: false,
             pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
         }
     }
 }
@@ -98,6 +104,8 @@ impl RangesOptions {
         Self {
             for_flush: true,
             pre_filter_mode: PreFilterMode::All,
+            predicate: PredicateGroup::default(),
+            sequence: None,
         }
     }
 
@@ -105,6 +113,20 @@ impl RangesOptions {
     #[must_use]
     pub fn with_pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
         self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets the predicate.
+    #[must_use]
+    pub fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.predicate = predicate;
+        self
+    }
+
+    /// Sets the sequence range.
+    #[must_use]
+    pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
+        self.sequence = sequence;
         self
     }
 }
@@ -231,8 +253,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
         options: RangesOptions,
     ) -> Result<MemtableRanges>;
 

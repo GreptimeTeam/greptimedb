@@ -40,7 +40,6 @@ use crate::memtable::{
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::Batch;
 use crate::read::dedup::LastNonNullIter;
-use crate::read::scan_region::PredicateGroup;
 use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
@@ -238,10 +237,10 @@ impl Memtable for SimpleBulkMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
-        sequence: Option<SequenceRange>,
-        _options: RangesOptions,
+        options: RangesOptions,
     ) -> error::Result<MemtableRanges> {
+        let predicate = options.predicate;
+        let sequence = options.sequence;
         let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
         let values = self.series.read().unwrap().read_to_values();
@@ -618,12 +617,7 @@ mod tests {
         memtable.write_one(kv).unwrap();
 
         let ranges = memtable
-            .ranges(
-                None,
-                PredicateGroup::default(),
-                None,
-                RangesOptions::default(),
-            )
+            .ranges(None, RangesOptions::default())
             .unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
@@ -657,12 +651,7 @@ mod tests {
         memtable.freeze().unwrap();
 
         let ranges = memtable
-            .ranges(
-                None,
-                PredicateGroup::default(),
-                None,
-                RangesOptions::default(),
-            )
+            .ranges(None, RangesOptions::default())
             .unwrap();
         let mut source = vec![];
         for r in ranges.ranges.values() {
@@ -705,12 +694,7 @@ mod tests {
         memtable.freeze().unwrap();
 
         let ranges = memtable
-            .ranges(
-                None,
-                PredicateGroup::default(),
-                None,
-                RangesOptions::default(),
-            )
+            .ranges(None, RangesOptions::default())
             .unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
@@ -926,12 +910,7 @@ mod tests {
             })
             .unwrap();
         let MemtableRanges { ranges, .. } = memtable
-            .ranges(
-                None,
-                PredicateGroup::default(),
-                None,
-                RangesOptions::default(),
-            )
+            .ranges(None, RangesOptions::default())
             .unwrap();
         let mut source = if ranges.len() == 1 {
             let only_range = ranges.into_values().next().unwrap();
