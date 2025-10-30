@@ -471,9 +471,6 @@ impl ScanRegion {
             self.version.options.append_mode,
         );
 
-        // // Remove field filters for LastNonNull mode after logging the request.
-        // self.maybe_remove_field_filters();
-
         let (non_field_filters, field_filters) = self.partition_by_field_filters();
         let inverted_index_appliers = [
             self.build_invereted_index_applier(&non_field_filters),
