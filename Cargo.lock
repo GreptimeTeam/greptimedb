@@ -1932,7 +1932,6 @@ dependencies = [
  "moka",
  "nu-ansi-term",
  "object-store",
- "ordered-float 4.6.0",
  "plugins",
  "prometheus",
  "prost 0.13.5",
