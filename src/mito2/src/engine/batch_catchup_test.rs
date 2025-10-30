@@ -162,7 +162,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
         assert!(result.is_ok());
     }
 
-    let requests = (1..num_regions)
+    let requests = (1..=num_regions)
         .map(|id| {
             let region_id = RegionId::new(1, id);
             (
