@@ -386,8 +386,7 @@ impl LocalGcWorker {
             .map(|(file_id, index_file_id)| (*file_id, *index_file_id))
             .collect();
 
-        self.delete_files(region_id, &file_pairs)
-            .await?;
+        self.delete_files(region_id, &file_pairs).await?;
 
         debug!(
             "Successfully deleted {} unused files for region {}",
@@ -397,11 +396,7 @@ impl LocalGcWorker {
         Ok(unused_files)
     }
 
-    async fn delete_files(
-        &self,
-        region_id: RegionId,
-        file_ids: &[(FileId,FileId)],
-    ) -> Result<()> {
+    async fn delete_files(&self, region_id: RegionId, file_ids: &[(FileId, FileId)]) -> Result<()> {
         delete_files(
             region_id,
             file_ids,

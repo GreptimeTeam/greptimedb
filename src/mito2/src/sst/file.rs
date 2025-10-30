@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::tracing_subscriber::filter::FilterId;
 use common_telemetry::{error, info};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
@@ -150,6 +149,7 @@ pub struct FileMeta {
     /// File ID of the index file.
     ///
     /// When this field is None, it means the index file id is the same as the file id.
+    /// Only meaningful when index_file_size > 0.
     /// Used for rebuilding index files.
     pub index_file_id: Option<FileId>,
     /// Number of rows in the file.

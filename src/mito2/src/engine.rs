@@ -500,19 +500,21 @@ impl MitoEngine {
                         return Vec::new();
                     };
 
-                    let file_id = match FileId::parse_str(&entry.file_id) {
+                    let Some(index_file_id) = entry.index_file_id.as_ref() else {
+                        return Vec::new();
+                    };
+                    let file_id = match FileId::parse_str(index_file_id) {
                         Ok(file_id) => file_id,
                         Err(err) => {
                             warn!(
                                 err;
                                 "Failed to parse puffin index file id, table_dir: {}, file_id: {}",
                                 entry.table_dir,
-                                entry.file_id
+                                index_file_id
                             );
                             return Vec::new();
                         }
                     };
-
                     let region_file_id = RegionFileId::new(entry.region_id, file_id);
                     let context = IndexEntryContext {
                         table_dir: &entry.table_dir,
@@ -522,7 +524,7 @@ impl MitoEngine {
                         region_number: entry.region_number,
                         region_group: entry.region_group,
                         region_sequence: entry.region_sequence,
-                        file_id: &entry.file_id,
+                        file_id: index_file_id,
                         index_file_size: entry.index_file_size,
                         node_id,
                     };

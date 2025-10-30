@@ -590,12 +590,17 @@ impl MitoRegion {
             .map(|meta| {
                 let region_id = self.region_id;
                 let origin_region_id = meta.region_id;
-                let (index_file_path, index_file_size) = if meta.index_file_size > 0 {
+                let (index_file_id, index_file_path, index_file_size) = if meta.index_file_size > 0
+                {
                     let index_file_path =
                         index_file_path(table_dir, meta.index_file_id(), path_type);
-                    (Some(index_file_path), Some(meta.index_file_size))
+                    (
+                        Some(meta.index_file_id().file_id().to_string()),
+                        Some(index_file_path),
+                        Some(meta.index_file_size),
+                    )
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
                 let visible = visible_ssts.contains(&meta.file_id);
                 ManifestSstEntry {
@@ -606,6 +611,7 @@ impl MitoRegion {
                     region_group: region_id.region_group(),
                     region_sequence: region_id.region_sequence(),
                     file_id: meta.file_id.to_string(),
+                    index_file_id,
                     level: meta.level,
                     file_path: sst_file_path(table_dir, meta.file_id(), path_type),
                     file_size: meta.file_size,
