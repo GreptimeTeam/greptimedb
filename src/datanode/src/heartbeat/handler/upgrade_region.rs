@@ -26,6 +26,9 @@ use crate::heartbeat::task_tracker::WaitResult;
 pub struct UpgradeRegionsHandler;
 
 impl UpgradeRegionsHandler {
+    // Handles uprade regions instruction.
+    // 
+    // Returns batch of upgrade region replies, the order of the replies is not guaranteed.
     async fn handle_upgrade_regions(
         &self,
         ctx: &HandlerContext,

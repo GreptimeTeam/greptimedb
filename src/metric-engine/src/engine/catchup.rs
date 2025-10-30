@@ -107,7 +107,9 @@ impl MetricEngineInner {
                     data_region_result,
                     physical_region_id,
                     physical_region_options,
-                    // Note: The region is not closed on failure here to prevent the region server from incorrectly regarding it as open.
+                    // Note: We intentionally don’t close the region if recovery fails.
+                    // Closing it here might confuse the region server since it links RegionIds to Engines.
+                    // If recovery didn’t succeed, the region should stay open.
                     false,
                 )
                 .await
