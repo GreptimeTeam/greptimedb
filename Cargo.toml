@@ -333,6 +333,7 @@ datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git"
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "fd4b2abcf3c3e43e94951bda452c9fd35243aab0" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "4b519a5caa95472cc3988f5556813a583dd35af1" }                           # branch = "v0.58.x"
+bytes = { git = "https://github.com/discord9/bytes", rev = "1572ab22c3cbad0e9b6681d1f68eca4139322a2a" }
 
 [profile.release]
 debug = 1
