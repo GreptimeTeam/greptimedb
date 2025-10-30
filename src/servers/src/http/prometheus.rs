@@ -762,8 +762,17 @@ fn record_batches_to_series(
     Ok(())
 }
 
+/// Writer from a row in the record batch to a Prometheus time series:
+///
+/// `{__name__="<metric name>", <label name>="<label value>", ...}`
+///
+/// The metrics name is the table name; label names are the column names and
+/// the label values are the corresponding row values (all are converted to strings).
 struct RowWriter {
+    /// The template that is to produce a Prometheus time series. It is pre-filled with metrics name
+    /// and label names, waiting to be filled by row values afterward.
     template: HashMap<Column, Option<String>>,
+    /// The current filling row.
     current: Option<HashMap<Column, Option<String>>>,
 }
 
