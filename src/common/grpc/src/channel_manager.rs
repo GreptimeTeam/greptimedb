@@ -22,14 +22,14 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
 };
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
+use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -91,55 +91,16 @@ impl ChannelManager {
         Default::default()
     }
 
-    pub fn with_config(config: ChannelConfig) -> Self {
-        let inner = Inner::with_config(config);
+    /// unified with config function that support tls config
+    /// use [`load_tls_config`] to load tls config from file system
+    pub fn with_config(config: ChannelConfig, tls_config: Option<ClientTlsConfig>) -> Self {
+        let mut inner = Inner::with_config(config.clone());
+        if let Some(tls_config) = tls_config {
+            inner.client_tls_config = Some(tls_config);
+        }
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    /// Read tls cert and key files and create a ChannelManager with TLS config.
-    pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
-        let mut inner = Inner::with_config(config.clone());
-
-        // setup tls
-        let path_config = config.client_tls.context(InvalidTlsConfigSnafu {
-            msg: "no config input",
-        })?;
-
-        if !path_config.enabled {
-            // if TLS not enabled, just ignore other tls config
-            // and not set `client_tls_config` hence not use TLS
-            return Ok(Self {
-                inner: Arc::new(inner),
-            });
-        }
-
-        let mut tls_config = ClientTlsConfig::new();
-
-        if let Some(server_ca) = path_config.server_ca_cert_path {
-            let server_root_ca_cert =
-                std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
-            let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
-            tls_config = tls_config.ca_certificate(server_root_ca_cert);
-        }
-
-        if let (Some(client_cert_path), Some(client_key_path)) =
-            (&path_config.client_cert_path, &path_config.client_key_path)
-        {
-            let client_cert =
-                std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
-            let client_key =
-                std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
-            let client_identity = Identity::from_pem(client_cert, client_key);
-            tls_config = tls_config.identity(client_identity);
-        }
-
-        inner.client_tls_config = Some(tls_config);
-
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
     }
 
     pub fn config(&self) -> &ChannelConfig {
@@ -285,6 +246,34 @@ impl ChannelManager {
             self.inner.id
         );
     }
+}
+
+pub fn load_tls_config(tls_option: Option<&ClientTlsOption>) -> Result<Option<ClientTlsConfig>> {
+    let path_config = match tls_option {
+        Some(path_config) if path_config.enabled => path_config,
+        _ => return Ok(None),
+    };
+
+    let mut tls_config = ClientTlsConfig::new();
+
+    if let Some(server_ca) = &path_config.server_ca_cert_path {
+        let server_root_ca_cert =
+            std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
+        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
+        tls_config = tls_config.ca_certificate(server_root_ca_cert);
+    }
+
+    if let (Some(client_cert_path), Some(client_key_path)) =
+        (&path_config.client_cert_path, &path_config.client_key_path)
+    {
+        let client_cert =
+            std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
+        let client_key =
+            std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
+        let client_identity = Identity::from_pem(client_cert, client_key);
+        tls_config = tls_config.identity(client_identity);
+    }
+    Ok(Some(tls_config))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,7 +648,7 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(true);
-        let mgr = ChannelManager::with_config(config);
+        let mgr = ChannelManager::with_config(config, None);
 
         let res = mgr.build_endpoint("test_addr");
 
