@@ -70,7 +70,6 @@ impl GcScheduler {
     ) -> Result<HashMap<TableId, Vec<GcCandidate>>> {
         let mut table_candidates: HashMap<TableId, Vec<GcCandidate>> = HashMap::new();
         let now = Instant::now();
-        let gc_tracker = self.region_gc_tracker.lock().await;
 
         for (table_id, region_stats) in table_to_region_stats {
             let mut candidates = Vec::new();
@@ -82,7 +81,7 @@ impl GcScheduler {
                 }
 
                 // Skip regions that are in cooldown period
-                if let Some(gc_info) = gc_tracker.get(&region_stat.id)
+                if let Some(gc_info) = self.region_gc_tracker.lock().await.get(&region_stat.id)
                     && now.duration_since(gc_info.last_gc_time) < self.config.gc_cooldown_period
                 {
                     debug!("Skipping region {} due to cooldown", region_stat.id);

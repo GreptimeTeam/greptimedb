@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
 use common_telemetry::{error, info, warn};
+use futures::StreamExt;
 use itertools::Itertools;
 use snafu::{OptionExt as _, ResultExt};
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
@@ -125,32 +128,53 @@ impl GcScheduler {
 
         // Step 5: Process each valid candidate region with retry logic
         let valid_candidates_count = valid_candidates.len();
-        let mut successful_regions = 0;
+        let successful_regions = Arc::new(AtomicUsize::new(0));
+        let failed_regions = Arc::new(AtomicUsize::new(0));
 
-        for candidate in valid_candidates {
-            let region_id = candidate.region_id;
-            match self
-                .process_region_gc_with_retry(candidate, &file_refs_manifest, &region_to_peer)
-                .await
-            {
-                Ok((_report, used_full_listing)) => {
-                    successful_regions += 1;
-                    // Update GC tracker
-                    let mut gc_tracker = self.region_gc_tracker.lock().await;
-                    let now = Instant::now();
-                    let gc_info = gc_tracker
-                        .entry(region_id)
-                        .or_insert_with(|| RegionGcInfo::new(now));
-                    gc_info.last_gc_time = now;
-                    if used_full_listing {
-                        gc_info.last_full_listing_time = Some(now);
+        let file_refs_manifest = Arc::new(file_refs_manifest);
+        let region_to_peer = Arc::new(region_to_peer);
+
+        futures::stream::iter(valid_candidates)
+            .for_each_concurrent(Some(self.config.region_gc_concurrency), |candidate| {
+                let region_id = candidate.region_id;
+                let file_refs_manifest = file_refs_manifest.clone();
+                let region_to_peer = region_to_peer.clone();
+                let successful_regions = successful_regions.clone();
+                let failed_regions = failed_regions.clone();
+                let region_gc_tracker = self.region_gc_tracker.clone();
+
+                async move {
+                    match self
+                        .process_region_gc_with_retry(
+                            candidate,
+                            &file_refs_manifest,
+                            &region_to_peer,
+                        )
+                        .await
+                    {
+                        Ok((_report, used_full_listing)) => {
+                            successful_regions.fetch_add(1, Ordering::Relaxed);
+                            // Update GC tracker
+                            let mut gc_tracker = region_gc_tracker.lock().await;
+                            let now = Instant::now();
+                            let gc_info = gc_tracker
+                                .entry(region_id)
+                                .or_insert_with(|| RegionGcInfo::new(now));
+                            gc_info.last_gc_time = now;
+                            if used_full_listing {
+                                gc_info.last_full_listing_time = Some(now);
+                            }
+                        }
+                        Err(e) => {
+                            failed_regions.fetch_add(1, Ordering::Relaxed);
+                            error!("Failed to GC region {} after all retries: {}", region_id, e);
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("Failed to GC region {} after all retries: {}", region_id, e);
-                }
-            }
-        }
+            })
+            .await;
+
+        let successful_regions = successful_regions.load(Ordering::Relaxed);
 
         info!(
             "Completed GC for table {}: {}/{} regions successful ({} skipped due to missing file references)",

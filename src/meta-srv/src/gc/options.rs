@@ -35,6 +35,8 @@ pub struct GcSchedulerOptions {
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
     pub max_retries_per_region: usize,
+    /// Concurrency for region GC within a table.
+    pub region_gc_concurrency: usize,
     /// Backoff duration between retries.
     pub retry_backoff_duration: Duration,
     /// Minimum region size threshold for GC (in bytes).
@@ -67,6 +69,7 @@ impl Default for GcSchedulerOptions {
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
+            region_gc_concurrency: 16,
             min_region_size_threshold: 100 * 1024 * 1024, // 100MB
             sst_count_weight: 1.0,
             file_removal_rate_weight: 0.5,
@@ -94,6 +97,13 @@ impl GcSchedulerOptions {
         if self.max_retries_per_region == 0 {
             return error::InvalidArgumentsSnafu {
                 err_msg: "max_retries_per_region must be greater than 0",
+            }
+            .fail();
+        }
+
+        if self.region_gc_concurrency == 0 {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "region_gc_concurrency must be greater than 0",
             }
             .fail();
         }
