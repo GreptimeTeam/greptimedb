@@ -27,7 +27,7 @@ use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceRange};
+use store_api::storage::ColumnId;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -222,7 +222,7 @@ impl Memtable for SimpleBulkMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceRange>,
+        sequence: Option<store_api::storage::SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build(None)?;
 
@@ -411,7 +411,7 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::TimestampMillisecondVector;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{RegionId, SequenceNumber};
+    use store_api::storage::{RegionId, SequenceNumber, SequenceRange};
 
     use super::*;
     use crate::read;
