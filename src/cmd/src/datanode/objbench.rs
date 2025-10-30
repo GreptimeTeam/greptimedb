@@ -162,6 +162,7 @@ impl ObjbenchCommand {
             file_size,
             available_indexes: Default::default(),
             index_file_size: 0,
+            index_file_id: None,
             num_rows,
             num_row_groups,
             sequence: None,
