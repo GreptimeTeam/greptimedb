@@ -36,7 +36,9 @@ use tokio::sync::Semaphore;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
-use crate::memtable::bulk::part::{BulkPart, BulkPartEncodeMetrics, BulkPartEncoder};
+use crate::memtable::bulk::part::{
+    BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, UnorderedPart,
+};
 use crate::memtable::bulk::part_reader::BulkPartRecordBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
@@ -55,7 +57,7 @@ use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 #[derive(Default)]
 struct BulkParts {
     /// Unordered small parts (< 1024 rows).
-    unordered_part: part::UnorderedPart,
+    unordered_part: UnorderedPart,
     /// Raw parts.
     parts: Vec<BulkPartWrapper>,
     /// Parts encoded as parquets.
@@ -306,20 +308,20 @@ impl Memtable for BulkMemtable {
         {
             let mut bulk_parts = self.parts.write().unwrap();
 
-            // Route small parts to unordered_part based on threshold
+            // Routes small parts to unordered_part based on threshold
             if bulk_parts.unordered_part.should_accept(fragment.num_rows()) {
                 bulk_parts.unordered_part.push(fragment);
 
-                // Compact unordered_part if threshold is reached
-                if bulk_parts.should_compact_unordered_part() {
-                    if let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()? {
-                        bulk_parts.parts.push(BulkPartWrapper {
-                            part: bulk_part,
-                            file_id: FileId::random(),
-                            merging: false,
-                        });
-                        bulk_parts.unordered_part.clear();
-                    }
+                // Compacts unordered_part if threshold is reached
+                if bulk_parts.should_compact_unordered_part()
+                    && let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
+                {
+                    bulk_parts.parts.push(BulkPartWrapper {
+                        part: bulk_part,
+                        file_id: FileId::random(),
+                        merging: false,
+                    });
+                    bulk_parts.unordered_part.clear();
                 }
             } else {
                 bulk_parts.parts.push(BulkPartWrapper {
@@ -377,24 +379,24 @@ impl Memtable for BulkMemtable {
             let bulk_parts = self.parts.read().unwrap();
 
             // Adds range for unordered part if not empty
-            if !bulk_parts.unordered_part.is_empty() {
-                if let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()? {
-                    let num_rows = unordered_bulk_part.num_rows();
-                    let range = MemtableRange::new(
-                        Arc::new(MemtableRangeContext::new(
-                            self.id,
-                            Box::new(BulkRangeIterBuilder {
-                                part: unordered_bulk_part,
-                                context: context.clone(),
-                                sequence,
-                            }),
-                            predicate.clone(),
-                        )),
-                        num_rows,
-                    );
-                    ranges.insert(range_id, range);
-                    range_id += 1;
-                }
+            if !bulk_parts.unordered_part.is_empty()
+                && let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
+            {
+                let num_rows = unordered_bulk_part.num_rows();
+                let range = MemtableRange::new(
+                    Arc::new(MemtableRangeContext::new(
+                        self.id,
+                        Box::new(BulkRangeIterBuilder {
+                            part: unordered_bulk_part,
+                            context: context.clone(),
+                            sequence,
+                        }),
+                        predicate.clone(),
+                    )),
+                    num_rows,
+                );
+                ranges.insert(range_id, range);
+                range_id += 1;
             }
 
             // Adds ranges for regular parts
@@ -1585,7 +1587,12 @@ mod tests {
 
         // Verify we can read all data correctly
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         // Should have at least 1 range (the compacted part)
         assert!(!ranges.ranges.is_empty());
@@ -1669,7 +1676,12 @@ mod tests {
 
         // Verify all data can be read
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         assert_eq!(13, ranges.stats.num_rows);
 
@@ -1719,7 +1731,12 @@ mod tests {
 
         // Test that ranges() can correctly read from unordered_part
         let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
-        let ranges = memtable.ranges(None, predicate_group, None, false).unwrap();
+        let ranges = memtable
+            .ranges(
+                None,
+                RangesOptions::default().with_predicate(predicate_group),
+            )
+            .unwrap();
 
         // Should have 1 range for the unordered_part
         assert_eq!(1, ranges.ranges.len());
