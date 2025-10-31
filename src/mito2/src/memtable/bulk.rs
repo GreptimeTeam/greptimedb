@@ -688,12 +688,15 @@ impl IterBuilder for BulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
-        _metrics: Option<MemScanMetrics>,
+        metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
+        let series_count = self.part.estimated_series_count();
         let iter = BulkPartRecordBatchIter::new(
             self.part.batch.clone(),
             self.context.clone(),
             self.sequence,
+            series_count,
+            metrics,
         );
 
         Ok(Box::new(iter))
@@ -726,9 +729,12 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
-        _metrics: Option<MemScanMetrics>,
+        metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        if let Some(iter) = self.part.read(self.context.clone(), self.sequence)? {
+        if let Some(iter) = self
+            .part
+            .read(self.context.clone(), self.sequence, metrics)?
+        {
             Ok(iter)
         } else {
             // Return an empty iterator if no data to read
@@ -812,12 +818,17 @@ impl PartToMerge {
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         match self {
             PartToMerge::Bulk { part, .. } => {
+                let series_count = part.estimated_series_count();
                 let iter = BulkPartRecordBatchIter::new(
-                    part.batch, context, None, // No sequence filter for merging
+                    part.batch,
+                    context,
+                    None, // No sequence filter for merging
+                    series_count,
+                    None, // No metrics for merging
                 );
                 Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
             }
-            PartToMerge::Encoded { part, .. } => part.read(context, None),
+            PartToMerge::Encoded { part, .. } => part.read(context, None, None),
         }
     }
 }

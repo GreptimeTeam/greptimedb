@@ -477,6 +477,8 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
                             bulk_part.batch.clone(),
                             context.clone(),
                             None, // No sequence filter
+                            1024, // 1024 hosts per part
+                            None, // No mem_scan_metrics
                         );
                         iters.push(Box::new(iter) as _);
                     }
@@ -534,8 +536,13 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             );
 
             // Create and iterate over BulkPartRecordBatchIter with filter
-            let iter =
-                BulkPartRecordBatchIter::new(record_batch_with_filter.clone(), context, None);
+            let iter = BulkPartRecordBatchIter::new(
+                record_batch_with_filter.clone(),
+                context,
+                None, // No sequence filter
+                4096, // 4096 hosts
+                None, // No mem_scan_metrics
+            );
 
             // Consume all batches
             for batch_result in iter {
@@ -559,7 +566,13 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             );
 
             // Create and iterate over BulkPartRecordBatchIter
-            let iter = BulkPartRecordBatchIter::new(record_batch_no_filter.clone(), context, None);
+            let iter = BulkPartRecordBatchIter::new(
+                record_batch_no_filter.clone(),
+                context,
+                None, // No sequence filter
+                4096, // 4096 hosts
+                None, // No mem_scan_metrics
+            );
 
             // Consume all batches
             for batch_result in iter {
