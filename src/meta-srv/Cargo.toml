@@ -62,6 +62,7 @@ hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
+ordered-float.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true
 prost.workspace = true

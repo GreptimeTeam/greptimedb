@@ -608,14 +608,13 @@ impl TestEnv {
                 metadata,
                 0,
                 manifest_opts,
-                Default::default(),
-                Default::default(),
                 FormatType::PrimaryKey,
+                &Default::default(),
             )
             .await
             .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts, Default::default(), Default::default()).await
+            RegionManifestManager::open(manifest_opts, &Default::default()).await
         }
     }
 
