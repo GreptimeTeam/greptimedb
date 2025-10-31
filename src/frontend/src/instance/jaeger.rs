@@ -42,8 +42,9 @@ use servers::error::{
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams};
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -472,23 +473,41 @@ fn json_tag_filters(
     Ok(filters)
 }
 
+macro_rules! col_eq_or_col_eq {
+    ($span_key:expr, $resource_key:expr, $value:expr) => {
+        col($span_key)
+            .eq(lit($value))
+            .or(col($resource_key).eq(lit($value)))
+    };
+}
+
 fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Expr>> {
     let filters = tags
         .into_iter()
         .filter_map(|(key, value)| {
-            let key = format!("\"span_attributes.{}\"", key);
+            if key == KEY_OTEL_STATUS_ERROR_KEY && value == JsonValue::Bool(true) {
+                return Some(col(SPAN_STATUS_CODE).eq(lit(SPAN_STATUS_ERROR)));
+            }
+
+            // TODO(shuiyisong): add more precise mapping from key to col name
+            let span_key = format!("\"span_attributes.{}\"", key);
+            let resource_key = format!("\"resource_attributes.{}\"", key);
             match value {
-                JsonValue::String(value) => Some(col(key).eq(lit(value))),
+                JsonValue::String(value) => {
+                    Some(col_eq_or_col_eq!(span_key, resource_key, value.clone()))
+                }
                 JsonValue::Number(value) => {
                     if value.is_f64() {
                         // safe to unwrap as checked previously
-                        Some(col(key).eq(lit(value.as_f64().unwrap())))
+                        let value = value.as_f64().unwrap();
+                        Some(col_eq_or_col_eq!(span_key, resource_key, value))
                     } else {
-                        Some(col(key).eq(lit(value.as_i64().unwrap())))
+                        let value = value.as_i64().unwrap();
+                        Some(col_eq_or_col_eq!(span_key, resource_key, value))
                     }
                 }
-                JsonValue::Bool(value) => Some(col(key).eq(lit(value))),
-                JsonValue::Null => Some(col(key).is_null()),
+                JsonValue::Bool(value) => Some(col_eq_or_col_eq!(span_key, resource_key, value)),
+                JsonValue::Null => Some(col(span_key).is_null().or(col(resource_key).is_null())),
                 // not supported at the moment
                 JsonValue::Array(_value) => None,
                 JsonValue::Object(_value) => None,
