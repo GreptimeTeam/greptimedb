@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -36,6 +36,7 @@ use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
 const JSON_PLAIN_FIELD_NAME: &str = "__plain__";
+const JSON_PLAIN_FIELD_METADATA_KEY: &str = "is_plain_json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum JsonFormat {
@@ -65,17 +66,19 @@ impl JsonType {
     /// Make json type a struct type, by:
     /// - if the json is an object, its entries are mapped to struct fields, obviously;
     /// - if not, the json is one of bool, number, string or array, make it a special field called
-    ///   [JSON_PLAIN_FIELD_NAME] in a struct with only that field.
+    ///   [JSON_PLAIN_FIELD_NAME] with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"` in a
+    ///   struct with only that field.
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
             JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Native(inner) => match inner.as_ref() {
                 ConcreteDataType::Struct(t) => t.clone(),
-                x => StructType::new(Arc::new(vec![StructField::new(
-                    JSON_PLAIN_FIELD_NAME.to_string(),
-                    x.clone(),
-                    true,
-                )])),
+                x => {
+                    let mut field =
+                        StructField::new(JSON_PLAIN_FIELD_NAME.to_string(), x.clone(), true);
+                    field.insert_metadata(JSON_PLAIN_FIELD_METADATA_KEY, true);
+                    StructType::new(Arc::new(vec![field]))
+                }
             },
         }
     }
@@ -87,7 +90,11 @@ impl JsonType {
             return true;
         };
         let fields = t.fields();
-        fields.len() == 1 && fields[0].name() == JSON_PLAIN_FIELD_NAME
+        let Some((single, [])) = fields.split_first() else {
+            return false;
+        };
+        single.name() == JSON_PLAIN_FIELD_NAME
+            && single.metadata(JSON_PLAIN_FIELD_METADATA_KEY) == Some("true")
     }
 
     /// Try to merge this json type with others, error on datatype conflict.
@@ -104,6 +111,47 @@ impl JsonType {
             }
             .fail(),
         }
+    }
+
+    pub(crate) fn is_mergeable(&self, other: &JsonType) -> bool {
+        match (&self.format, &other.format) {
+            (JsonFormat::Jsonb, JsonFormat::Jsonb) => true,
+            (JsonFormat::Native(this), JsonFormat::Native(that)) => {
+                is_mergeable(this.as_ref(), that.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_mergeable(this: &ConcreteDataType, that: &ConcreteDataType) -> bool {
+    fn is_mergeable_struct(this: &StructType, that: &StructType) -> bool {
+        let this_fields = this.fields();
+        let this_fields = this_fields
+            .iter()
+            .map(|x| (x.name(), x))
+            .collect::<HashMap<_, _>>();
+
+        for that_field in that.fields().iter() {
+            if let Some(this_field) = this_fields.get(that_field.name())
+                && !is_mergeable(this_field.data_type(), that_field.data_type())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    match (this, that) {
+        (this, that) if this == that => true,
+        (ConcreteDataType::List(this), ConcreteDataType::List(that)) => {
+            is_mergeable(this.item_type(), that.item_type())
+        }
+        (ConcreteDataType::Struct(this), ConcreteDataType::Struct(that)) => {
+            is_mergeable_struct(this, that)
+        }
+        (ConcreteDataType::Null(_), _) | (_, ConcreteDataType::Null(_)) => true,
+        _ => false,
     }
 }
 
@@ -243,10 +291,12 @@ mod tests {
             let result = json_type.merge(other);
             match (result, expected) {
                 (Ok(()), Ok(expected)) => {
-                    assert_eq!(json_type.name(), expected)
+                    assert_eq!(json_type.name(), expected);
+                    assert!(json_type.is_mergeable(other));
                 }
                 (Err(err), Err(expected)) => {
-                    assert_eq!(err.to_string(), expected)
+                    assert_eq!(err.to_string(), expected);
+                    assert!(!json_type.is_mergeable(other));
                 }
                 _ => unreachable!(),
             }
