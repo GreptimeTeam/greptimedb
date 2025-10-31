@@ -26,7 +26,6 @@ use datatypes::arrow::datatypes::{
     Int32Type, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType,
 };
-use datatypes::schema::SchemaRef;
 
 fn prepare_record_batch(rows: usize) -> RecordBatch {
     let schema = Schema::new(vec![
@@ -54,14 +53,6 @@ fn prepare_record_batch(rows: usize) -> RecordBatch {
     ];
 
     RecordBatch::try_new(Arc::new(schema), columns).unwrap()
-}
-
-fn iter_by_greptimedb_values(schema: SchemaRef, record_batch: RecordBatch) {
-    let record_batch =
-        common_recordbatch::RecordBatch::try_from_df_record_batch(schema, record_batch).unwrap();
-    for row in record_batch.rows() {
-        black_box(row);
-    }
 }
 
 fn iter_by_loop_rows_and_columns(record_batch: RecordBatch) {
@@ -125,19 +116,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("iter_record_batch");
 
     for rows in [1usize, 10, 100, 1_000, 10_000] {
-        group.bench_with_input(
-            BenchmarkId::new("by_greptimedb_values", rows),
-            &rows,
-            |b, rows| {
-                let record_batch = prepare_record_batch(*rows);
-                let schema =
-                    Arc::new(datatypes::schema::Schema::try_from(record_batch.schema()).unwrap());
-                b.iter(|| {
-                    iter_by_greptimedb_values(schema.clone(), record_batch.clone());
-                })
-            },
-        );
-
         group.bench_with_input(
             BenchmarkId::new("by_loop_rows_and_columns", rows),
             &rows,
