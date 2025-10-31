@@ -751,7 +751,7 @@ mod test {
             physical_region_ids.push(physical_region_id);
 
             let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topics[topic_idx(i) as usize].clone(),
+                topic: topics[topic_idx(i)].clone(),
             });
             env.create_physical_region(
                 physical_region_id,
@@ -787,7 +787,7 @@ mod test {
             .map(|(idx, region_id)| {
                 let mut options = HashMap::new();
                 let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                    topic: topics[topic_idx(idx as u32) as usize].clone(),
+                    topic: topics[topic_idx(idx as u32)].clone(),
                 });
                 options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
                 options.insert(

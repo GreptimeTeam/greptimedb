@@ -283,6 +283,11 @@ impl WorkerGroup {
         self.worker(region_id).is_region_opening(region_id)
     }
 
+    /// Returns true if the specific region is catching up.
+    pub(crate) fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.worker(region_id).is_region_catching_up(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     ///
     /// This method should not be public.
@@ -490,6 +495,7 @@ impl<S: LogStore> WorkerStarter<S> {
     fn start(self) -> Result<RegionWorker> {
         let regions = Arc::new(RegionMap::default());
         let opening_regions = Arc::new(OpeningRegions::default());
+        let catchup_regions = Arc::new(CatchupRegions::default());
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -499,7 +505,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
-            catchup_regions: Arc::new(CatchupRegions::default()),
+            catchup_regions: catchup_regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
             sender: sender.clone(),
@@ -552,6 +558,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             regions,
             opening_regions,
+            catchup_regions,
             sender,
             handle: Mutex::new(Some(handle)),
             running,
@@ -567,6 +574,8 @@ pub(crate) struct RegionWorker {
     regions: RegionMapRef,
     /// The opening regions.
     opening_regions: OpeningRegionsRef,
+    /// The catching up regions.
+    catchup_regions: CatchupRegionsRef,
     /// Request sender.
     sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
@@ -637,6 +646,11 @@ impl RegionWorker {
         self.opening_regions.is_region_exists(region_id)
     }
 
+    /// Returns true if the region is catching up.
+    fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.catchup_regions.is_region_exists(region_id)
+    }
+
     /// Returns region of specific `region_id`.
     fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.regions.get_region(region_id)
@@ -646,6 +660,12 @@ impl RegionWorker {
     /// Returns the [OpeningRegionsRef].
     pub(crate) fn opening_regions(&self) -> &OpeningRegionsRef {
         &self.opening_regions
+    }
+
+    #[cfg(test)]
+    /// Returns the [CatchupRegionsRef].
+    pub(crate) fn catchup_regions(&self) -> &CatchupRegionsRef {
+        &self.catchup_regions
     }
 }
 

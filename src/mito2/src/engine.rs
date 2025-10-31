@@ -303,6 +303,11 @@ impl MitoEngine {
         self.inner.workers.is_region_opening(region_id)
     }
 
+    /// Returns true if the specific region is catching up.
+    pub fn is_region_catching_up(&self, region_id: RegionId) -> bool {
+        self.inner.workers.is_region_catching_up(region_id)
+    }
+
     /// Returns the region disk/memory statistic.
     pub fn get_region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         self.find_region(region_id)
