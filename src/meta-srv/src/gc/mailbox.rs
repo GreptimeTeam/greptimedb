@@ -200,6 +200,8 @@ impl GcScheduler {
         for (peer, regions) in datanode_regions {
             match self.send_get_file_refs_instruction(&peer, &regions).await {
                 Ok(manifest) => {
+                    // TODO(discord9): if other regions provide file refs for one region on other datanode, and no version,
+                    // is it correct to merge manifest_version directly?
                     all_file_refs.extend(manifest.file_refs);
                     all_manifest_versions.extend(manifest.manifest_version);
                 }

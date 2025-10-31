@@ -274,14 +274,12 @@ impl MitoEngine {
         let file_ref_mgr = self.file_ref_manager();
 
         let region_ids = region_ids.into_iter().collect::<Vec<_>>();
-        // Convert region IDs to MitoRegionRef objects, error if any region doesn't exist
+        // Convert region IDs to MitoRegionRef objects, ignore regions that do not exist on current datanode
+        // as regions on other datanodes are not managed by this engine.
         let regions: Vec<MitoRegionRef> = region_ids
             .into_iter()
-            .map(|region_id| {
-                self.find_region(region_id)
-                    .with_context(|| RegionNotFoundSnafu { region_id })
-            })
-            .collect::<Result<_>>()?;
+            .filter_map(|region_id| self.find_region(region_id))
+            .collect();
 
         file_ref_mgr
             .get_snapshot_of_unmanifested_refs(regions)

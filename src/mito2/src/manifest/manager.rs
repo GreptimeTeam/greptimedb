@@ -552,6 +552,10 @@ impl RegionManifestManager {
         Ok(version)
     }
 
+    pub(crate) fn set_manifest(&mut self, manifest: Arc<RegionManifest>) {
+        self.manifest = manifest;
+    }
+
     /// Retrieves the current [RegionManifest].
     pub fn manifest(&self) -> Arc<RegionManifest> {
         self.manifest.clone()

@@ -297,6 +297,16 @@ pub struct RemovedFilesRecord {
 }
 
 impl RemovedFilesRecord {
+    /// Clear the actually deleted files from the list of removed files
+    pub fn clear_deleted_files(&mut self, deleted_files: Vec<FileId>) {
+        let deleted_file_set: HashSet<_> = HashSet::from_iter(deleted_files);
+        for files in self.removed_files.iter_mut() {
+            files.file_ids.retain(|fid| !deleted_file_set.contains(fid));
+        }
+
+        self.removed_files.retain(|fs| !fs.file_ids.is_empty());
+    }
+
     /// Count the number of files removed after the given timestamp. Also return the minimum
     /// timestamp of all removed files.
     fn file_removed_cnt_after(&self, t_ms: i64) -> (u64, Option<i64>) {
