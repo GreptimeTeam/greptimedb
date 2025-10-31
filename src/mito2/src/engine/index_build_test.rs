@@ -220,7 +220,8 @@ async fn test_index_build_type_compact() {
         .await
         .unwrap();
     assert!(scanner.num_files() == 2);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await < 2);
+    // Compaction is an async task, so it may be finished at this moment.
+    assert!(num_of_index_files(&engine, &scanner, region_id).await <= 2);
 
     // Wait a while to make sure index build tasks are finished.
     listener.wait_stop(5).await; // 4 flush + 1 compaction = some abort + some finish
@@ -229,6 +230,7 @@ async fn test_index_build_type_compact() {
         .await
         .unwrap();
     assert!(scanner.num_files() == 2);
+    // Index files should be built.
     assert!(num_of_index_files(&engine, &scanner, region_id).await == 2);
 }
 

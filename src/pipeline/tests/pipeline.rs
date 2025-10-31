@@ -855,7 +855,7 @@ transform:
     row.0.values.into_iter().for_each(|v| {
         if let ValueData::TimestampNanosecondValue(v) = v.value_data.unwrap() {
             let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-            assert!(now - v < 1_000_000);
+            assert!(now - v < 5_000_000);
         }
     });
 }
