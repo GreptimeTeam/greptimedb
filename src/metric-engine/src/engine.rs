@@ -260,7 +260,20 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
+            RegionRequest::Catchup(_) => {
+                let mut response = self
+                    .inner
+                    .handle_batch_catchup_requests(
+                        1,
+                        vec![(region_id, RegionCatchupRequest::default())],
+                    )
+                    .await
+                    .map_err(BoxedError::new)?;
+                debug_assert_eq!(response.len(), 1);
+                let (resp_region_id, response) = response.pop().unwrap();
+                debug_assert_eq!(region_id, resp_region_id);
+                return response;
+            }
             RegionRequest::BulkInserts(_) => {
                 // todo(hl): find a way to support bulk inserts in metric engine.
                 UnsupportedRegionRequestSnafu { request }.fail()
