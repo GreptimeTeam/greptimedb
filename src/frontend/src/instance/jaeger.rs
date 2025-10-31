@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,6 +28,7 @@ use common_function::scalars::udf::create_udf;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
+use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
@@ -323,6 +324,7 @@ async fn query_trace_table(
         })?;
 
     let is_data_model_v1 = table
+        .clone()
         .table_info()
         .meta
         .options
@@ -330,6 +332,14 @@ async fn query_trace_table(
         .get(TABLE_DATA_MODEL)
         .map(|s| s.as_str())
         == Some(TABLE_DATA_MODEL_TRACE_V1);
+
+    // collect to set
+    let col_names = table
+        .table_info()
+        .meta
+        .field_column_names()
+        .cloned()
+        .collect::<HashSet<String>>();
 
     let df_context = create_df_context(query_engine)?;
 
@@ -343,7 +353,7 @@ async fn query_trace_table(
     let dataframe = filters
         .into_iter()
         .chain(tags.map_or(Ok(vec![]), |t| {
-            tags_filters(&dataframe, t, is_data_model_v1)
+            tags_filters(&dataframe, t, is_data_model_v1, &col_names)
         })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
@@ -473,15 +483,10 @@ fn json_tag_filters(
     Ok(filters)
 }
 
-macro_rules! col_eq_or_col_eq {
-    ($span_key:expr, $resource_key:expr, $value:expr) => {
-        col($span_key)
-            .eq(lit($value))
-            .or(col($resource_key).eq(lit($value)))
-    };
-}
-
-fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Expr>> {
+fn flatten_tag_filters(
+    tags: HashMap<String, JsonValue>,
+    col_names: &HashSet<String>,
+) -> ServerResult<Vec<Expr>> {
     let filters = tags
         .into_iter()
         .filter_map(|(key, value)| {
@@ -494,20 +499,59 @@ fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Exp
             let resource_key = format!("\"resource_attributes.{}\"", key);
             match value {
                 JsonValue::String(value) => {
-                    Some(col_eq_or_col_eq!(span_key, resource_key, value.clone()))
+                    if col_names.contains(&span_key) {
+                        return Some(col(span_key).eq(lit(value)));
+                    }
+                    if col_names.contains(&resource_key) {
+                        return Some(col(resource_key).eq(lit(value)));
+                    }
+                    warn!("tag key {} not found in table columns", key);
+                    None
                 }
                 JsonValue::Number(value) => {
                     if value.is_f64() {
                         // safe to unwrap as checked previously
                         let value = value.as_f64().unwrap();
-                        Some(col_eq_or_col_eq!(span_key, resource_key, value))
+                        if col_names.contains(&span_key) {
+                            return Some(col(span_key).eq(lit(value)));
+                        }
+                        if col_names.contains(&resource_key) {
+                            return Some(col(resource_key).eq(lit(value)));
+                        }
+                        warn!("tag key {} not found in table columns", key);
+                        None
                     } else {
                         let value = value.as_i64().unwrap();
-                        Some(col_eq_or_col_eq!(span_key, resource_key, value))
+                        if col_names.contains(&span_key) {
+                            return Some(col(span_key).eq(lit(value)));
+                        }
+                        if col_names.contains(&resource_key) {
+                            return Some(col(resource_key).eq(lit(value)));
+                        }
+                        warn!("tag key {} not found in table columns", key);
+                        None
                     }
                 }
-                JsonValue::Bool(value) => Some(col_eq_or_col_eq!(span_key, resource_key, value)),
-                JsonValue::Null => Some(col(span_key).is_null().or(col(resource_key).is_null())),
+                JsonValue::Bool(value) => {
+                    if col_names.contains(&span_key) {
+                        return Some(col(span_key).eq(lit(value)));
+                    }
+                    if col_names.contains(&resource_key) {
+                        return Some(col(resource_key).eq(lit(value)));
+                    }
+                    warn!("tag key {} not found in table columns", key);
+                    None
+                }
+                JsonValue::Null => {
+                    if col_names.contains(&span_key) {
+                        return Some(col(span_key).is_null());
+                    }
+                    if col_names.contains(&resource_key) {
+                        return Some(col(resource_key).is_null());
+                    }
+                    warn!("tag key {} not found in table columns", key);
+                    None
+                }
                 // not supported at the moment
                 JsonValue::Array(_value) => None,
                 JsonValue::Object(_value) => None,
@@ -521,9 +565,10 @@ fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
     is_data_model_v1: bool,
+    col_names: &HashSet<String>,
 ) -> ServerResult<Vec<Expr>> {
     if is_data_model_v1 {
-        flatten_tag_filters(tags)
+        flatten_tag_filters(tags, col_names)
     } else {
         json_tag_filters(dataframe, tags)
     }
