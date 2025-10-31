@@ -22,9 +22,12 @@ use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
+use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::region::MitoRegionRef;
-use crate::request::{BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, OptionOutputTx};
+use crate::request::{
+    BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
+};
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
@@ -172,7 +175,8 @@ impl<S> RegionWorkerLoop<S> {
             );
             let _ = self
                 .index_build_scheduler
-                .schedule_build(&region.version_control, task);
+                .schedule_build(&region.version_control, task)
+                .await;
         }
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
@@ -203,11 +207,19 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
 
+        // Clean old puffin-related cache for all rebuilt files.
+        let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
+        for file_meta in &request.edit.files_to_add {
+            let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
+            cache_strategy.evict_puffin_cache(region_file_id).await;
+        }
+
         region.version_control.apply_edit(
             Some(request.edit.clone()),
             &[],
             region.file_purger.clone(),
         );
+
         for file_meta in &request.edit.files_to_add {
             self.listener
                 .on_index_build_finish(RegionFileId::new(region_id, file_meta.file_id))
@@ -221,6 +233,27 @@ impl<S> RegionWorkerLoop<S> {
         request: IndexBuildFailed,
     ) {
         error!(request.err; "Index build failed for region: {}", region_id);
-        // TODO(SNC123): Implement error handling logic after IndexBuildScheduler optimization.
+        self.index_build_scheduler
+            .on_failure(region_id, request.err.clone())
+            .await;
+    }
+
+    pub(crate) async fn handle_index_build_stopped(
+        &mut self,
+        region_id: RegionId,
+        request: IndexBuildStopped,
+    ) {
+        let Some(region) = self.regions.get_region(region_id) else {
+            warn!(
+                "Region not found for index build stopped, region_id: {}",
+                region_id
+            );
+            return;
+        };
+        self.index_build_scheduler.on_task_stopped(
+            region_id,
+            request.file_id,
+            &region.version_control,
+        );
     }
 }

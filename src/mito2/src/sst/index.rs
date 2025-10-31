@@ -21,11 +21,13 @@ pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::index::IndexValuesCodec;
@@ -43,7 +45,10 @@ use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, Regio
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
-use crate::error::{BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, Result};
+use crate::error::{
+    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::{Batch, BatchReader};
@@ -51,7 +56,8 @@ use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
-    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
+    WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileHandle, FileMeta, IndexType, RegionFileId};
@@ -410,7 +416,7 @@ impl IndexerBuilderImpl {
 }
 
 /// Type of an index build task.
-#[derive(Debug, Clone, PartialEq, IntoStaticStr)]
+#[derive(Debug, Clone, IntoStaticStr)]
 pub enum IndexBuildType {
     /// Build index when schema change.
     SchemaChange,
@@ -425,6 +431,16 @@ pub enum IndexBuildType {
 impl IndexBuildType {
     fn as_str(&self) -> &'static str {
         self.into()
+    }
+
+    // Higher value means higher priority.
+    fn priority(&self) -> u8 {
+        match self {
+            IndexBuildType::Manual => 3,
+            IndexBuildType::SchemaChange => 2,
+            IndexBuildType::Flush => 1,
+            IndexBuildType::Compact => 0,
+        }
     }
 }
 
@@ -447,6 +463,7 @@ pub enum IndexBuildOutcome {
 /// Mpsc output result sender.
 pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
+#[derive(Clone)]
 pub struct IndexBuildTask {
     /// The file meta to build index for.
     pub file_meta: FileMeta,
@@ -465,14 +482,24 @@ pub struct IndexBuildTask {
     pub(crate) result_sender: ResultMpscSender,
 }
 
+impl std::fmt::Debug for IndexBuildTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexBuildTask")
+            .field("region_id", &self.file_meta.region_id)
+            .field("file_id", &self.file_meta.file_id)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
 impl IndexBuildTask {
     /// Notify the caller the job is success.
-    pub async fn on_success(&mut self, outcome: IndexBuildOutcome) {
+    pub async fn on_success(&self, outcome: IndexBuildOutcome) {
         let _ = self.result_sender.send(Ok(outcome)).await;
     }
 
     /// Send index build error to waiter.
-    pub async fn on_failure(&mut self, err: Arc<Error>) {
+    pub async fn on_failure(&self, err: Arc<Error>) {
         let _ = self
             .result_sender
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
@@ -503,7 +530,18 @@ impl IndexBuildTask {
                 );
                 self.on_failure(e.into()).await
             }
+        }
+        let worker_request = WorkerRequest::Background {
+            region_id: self.file_meta.region_id,
+            notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
+                region_id: self.file_meta.region_id,
+                file_id: self.file_meta.file_id,
+            }),
         };
+        let _ = self
+            .request_sender
+            .send(WorkerRequestWithTime::new(worker_request))
+            .await;
     }
 
     // Checks if the SST file still exists in object store and version to avoid conflict with compaction.
@@ -542,7 +580,13 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
-        let mut indexer = self.indexer_builder.build(self.file_meta.file_id).await;
+        let index_file_id = if self.file_meta.index_file_size > 0 {
+            // Generate new file ID if index file exists to avoid overwrite.
+            FileId::random()
+        } else {
+            self.file_meta.file_id
+        };
+        let mut indexer = self.indexer_builder.build(index_file_id).await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
@@ -602,9 +646,10 @@ impl IndexBuildTask {
             }
 
             // Upload index file if write cache is enabled.
-            self.maybe_upload_index_file(index_output.clone()).await?;
+            self.maybe_upload_index_file(index_output.clone(), index_file_id)
+                .await?;
 
-            let worker_request = match self.update_manifest(index_output).await {
+            let worker_request = match self.update_manifest(index_output, index_file_id).await {
                 Ok(edit) => {
                     let index_build_finished = IndexBuildFinished {
                         region_id: self.file_meta.region_id,
@@ -632,14 +677,18 @@ impl IndexBuildTask {
         Ok(IndexBuildOutcome::Finished)
     }
 
-    async fn maybe_upload_index_file(&self, output: IndexOutput) -> Result<()> {
+    async fn maybe_upload_index_file(
+        &self,
+        output: IndexOutput,
+        index_file_id: FileId,
+    ) -> Result<()> {
         if let Some(write_cache) = &self.write_cache {
             let file_id = self.file_meta.file_id;
             let region_id = self.file_meta.region_id;
             let remote_store = self.access_layer.object_store();
             let mut upload_tracker = UploadTracker::new(region_id);
             let mut err = None;
-            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
+            let puffin_key = IndexKey::new(region_id, index_file_id, FileType::Puffin);
             let puffin_path = RegionFilePathFactory::new(
                 self.access_layer.table_dir().to_string(),
                 self.access_layer.path_type(),
@@ -673,9 +722,14 @@ impl IndexBuildTask {
         Ok(())
     }
 
-    async fn update_manifest(&mut self, output: IndexOutput) -> Result<RegionEdit> {
+    async fn update_manifest(
+        &mut self,
+        output: IndexOutput,
+        index_file_id: FileId,
+    ) -> Result<RegionEdit> {
         self.file_meta.available_indexes = output.build_available_indexes();
         self.file_meta.index_file_size = output.file_size;
+        self.file_meta.index_file_id = Some(index_file_id);
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
@@ -701,25 +755,204 @@ impl IndexBuildTask {
     }
 }
 
-#[derive(Clone)]
-pub struct IndexBuildScheduler {
-    scheduler: SchedulerRef,
+impl PartialEq for IndexBuildTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.reason.priority() == other.reason.priority()
+    }
 }
 
-impl IndexBuildScheduler {
-    pub fn new(scheduler: SchedulerRef) -> Self {
-        IndexBuildScheduler { scheduler }
+impl Eq for IndexBuildTask {}
+
+impl PartialOrd for IndexBuildTask {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexBuildTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.reason.priority().cmp(&other.reason.priority())
+    }
+}
+
+/// Tracks the index build status of a region scheduled by the [IndexBuildScheduler].
+pub struct IndexBuildStatus {
+    pub region_id: RegionId,
+    pub building_files: HashSet<FileId>,
+    pub pending_tasks: BinaryHeap<IndexBuildTask>,
+}
+
+impl IndexBuildStatus {
+    pub fn new(region_id: RegionId) -> Self {
+        IndexBuildStatus {
+            region_id,
+            building_files: HashSet::new(),
+            pending_tasks: BinaryHeap::new(),
+        }
     }
 
-    pub(crate) fn schedule_build(
+    async fn on_failure(self, err: Arc<Error>) {
+        for task in self.pending_tasks {
+            task.on_failure(err.clone()).await;
+        }
+    }
+}
+
+pub struct IndexBuildScheduler {
+    /// Background job scheduler.
+    scheduler: SchedulerRef,
+    /// Tracks regions need to build index.
+    region_status: HashMap<RegionId, IndexBuildStatus>,
+    /// Limit of files allowed to build index concurrently for a region.
+    files_limit: usize,
+}
+
+/// Manager background index build tasks of a worker.
+impl IndexBuildScheduler {
+    pub fn new(scheduler: SchedulerRef, files_limit: usize) -> Self {
+        IndexBuildScheduler {
+            scheduler,
+            region_status: HashMap::new(),
+            files_limit,
+        }
+    }
+
+    pub(crate) async fn schedule_build(
         &mut self,
         version_control: &VersionControlRef,
         task: IndexBuildTask,
     ) -> Result<()> {
-        // We should clone version control to expand the lifetime.
-        let job = task.into_index_build_job(version_control.clone());
-        self.scheduler.schedule(job)?;
+        let status = self
+            .region_status
+            .entry(task.file_meta.region_id)
+            .or_insert_with(|| IndexBuildStatus::new(task.file_meta.region_id));
+
+        if status.building_files.contains(&task.file_meta.file_id) {
+            let region_file_id =
+                RegionFileId::new(task.file_meta.region_id, task.file_meta.file_id);
+            debug!(
+                "Aborting index build task since index is already being built for region file {:?}",
+                region_file_id
+            );
+            task.on_success(IndexBuildOutcome::Aborted(format!(
+                "Index is already being built for region file {:?}",
+                region_file_id
+            )))
+            .await;
+            task.listener.on_index_build_abort(region_file_id).await;
+            return Ok(());
+        }
+
+        status.pending_tasks.push(task);
+
+        self.schedule_next_build_batch(version_control);
         Ok(())
+    }
+
+    /// Schedule tasks until reaching the files limit or no more tasks.
+    fn schedule_next_build_batch(&mut self, version_control: &VersionControlRef) {
+        let mut building_count = 0;
+        for status in self.region_status.values() {
+            building_count += status.building_files.len();
+        }
+
+        while building_count < self.files_limit {
+            if let Some(task) = self.find_next_task() {
+                let region_id = task.file_meta.region_id;
+                let file_id = task.file_meta.file_id;
+                let job = task.into_index_build_job(version_control.clone());
+                if self.scheduler.schedule(job).is_ok() {
+                    if let Some(status) = self.region_status.get_mut(&region_id) {
+                        status.building_files.insert(file_id);
+                        building_count += 1;
+                        status
+                            .pending_tasks
+                            .retain(|t| t.file_meta.file_id != file_id);
+                    } else {
+                        error!(
+                            "Region status not found when scheduling index build task, region: {}",
+                            region_id
+                        );
+                    }
+                } else {
+                    error!(
+                        "Failed to schedule index build job, region: {}, file_id: {}",
+                        region_id, file_id
+                    );
+                }
+            } else {
+                // No more tasks to schedule.
+                break;
+            }
+        }
+    }
+
+    /// Find the next task which has the highest priority to run.
+    fn find_next_task(&self) -> Option<IndexBuildTask> {
+        self.region_status
+            .iter()
+            .filter_map(|(_, status)| status.pending_tasks.peek())
+            .max()
+            .cloned()
+    }
+
+    pub(crate) fn on_task_stopped(
+        &mut self,
+        region_id: RegionId,
+        file_id: FileId,
+        version_control: &VersionControlRef,
+    ) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.building_files.remove(&file_id);
+            if status.building_files.is_empty() && status.pending_tasks.is_empty() {
+                // No more tasks for this region, remove it.
+                self.region_status.remove(&region_id);
+            }
+        }
+
+        self.schedule_next_build_batch(version_control);
+    }
+
+    pub(crate) async fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        error!(
+            err; "Index build scheduler encountered failure for region {}, removing all pending tasks.",
+            region_id
+        );
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+        status.on_failure(err).await;
+    }
+
+    /// Notifies the scheduler that the region is dropped.
+    pub(crate) async fn on_region_dropped(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        )
+        .await;
+    }
+
+    /// Notifies the scheduler that the region is closed.
+    pub(crate) async fn on_region_closed(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()))
+            .await;
+    }
+
+    /// Notifies the scheduler that the region is truncated.
+    pub(crate) async fn on_region_truncated(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionTruncatedSnafu { region_id }.build()),
+        )
+        .await;
+    }
+
+    async fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+        status.on_failure(err).await;
     }
 }
 
@@ -1192,7 +1425,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1222,7 +1455,10 @@ mod tests {
         };
 
         // Schedule the build task and check result.
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
         match result_rx.recv().await.unwrap() {
             Ok(outcome) => {
                 if outcome == IndexBuildOutcome::Finished {
@@ -1236,7 +1472,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_sst_exist() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let region_id = metadata.region_id;
@@ -1272,7 +1508,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1304,7 +1543,7 @@ mod tests {
 
     async fn schedule_index_build_task_with_mode(build_mode: IndexBuildMode) {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1340,7 +1579,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         let puffin_path = location::index_file_path(
             env.access_layer.table_dir(),
@@ -1395,7 +1637,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_no_index() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let mut metadata = sst_region_metadata();
         // Unset indexes in metadata to simulate no index scenario.
         metadata.column_metadatas.iter_mut().for_each(|col| {
@@ -1437,7 +1679,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1454,7 +1699,7 @@ mod tests {
     #[tokio::test]
     async fn test_index_build_task_with_write_cache() {
         let env = SchedulerEnv::new().await;
-        let mut scheduler = env.mock_index_build_scheduler();
+        let mut scheduler = env.mock_index_build_scheduler(4);
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -1518,7 +1763,10 @@ mod tests {
             result_sender: result_tx,
         };
 
-        scheduler.schedule_build(&version_control, task).unwrap();
+        scheduler
+            .schedule_build(&version_control, task)
+            .await
+            .unwrap();
 
         // The task should finish successfully.
         match result_rx.recv().await.unwrap() {
@@ -1531,5 +1779,189 @@ mod tests {
         // The write cache should contain the uploaded index file.
         let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
         assert!(write_cache.file_cache().contains_key(&index_key));
+    }
+
+    async fn create_mock_task_for_schedule(
+        env: &SchedulerEnv,
+        file_id: FileId,
+        region_id: RegionId,
+        reason: IndexBuildType,
+    ) -> IndexBuildTask {
+        let metadata = Arc::new(sst_region_metadata());
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
+        let indexer_builder = mock_indexer_builder(metadata, env).await;
+        let (tx, _rx) = mpsc::channel(4);
+        let (result_tx, _result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
+
+        IndexBuildTask {
+            file_meta: FileMeta {
+                region_id,
+                file_id,
+                file_size: 100,
+                ..Default::default()
+            },
+            reason,
+            access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
+            manifest_ctx,
+            write_cache: None,
+            file_purger,
+            indexer_builder,
+            request_sender: tx,
+            result_sender: result_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_comprehensive() {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(2);
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let file_purger = Arc::new(NoopFilePurger {});
+
+        // Prepare multiple files for testing
+        let file_id1 = FileId::random();
+        let file_id2 = FileId::random();
+        let file_id3 = FileId::random();
+        let file_id4 = FileId::random();
+        let file_id5 = FileId::random();
+
+        let mut files = HashMap::new();
+        for file_id in [file_id1, file_id2, file_id3, file_id4, file_id5] {
+            files.insert(
+                file_id,
+                FileMeta {
+                    region_id,
+                    file_id,
+                    file_size: 100,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let version_control = mock_version_control(metadata, file_purger, files).await;
+
+        // Test 1: Basic scheduling
+        let task1 =
+            create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        assert!(
+            scheduler
+                .schedule_build(&version_control, task1)
+                .await
+                .is_ok()
+        );
+        assert!(scheduler.region_status.contains_key(&region_id));
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1);
+        assert!(status.building_files.contains(&file_id1));
+
+        // Test 2: Duplicate file scheduling (should be skipped)
+        let task1_dup =
+            create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        scheduler
+            .schedule_build(&version_control, task1_dup)
+            .await
+            .unwrap();
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1); // Still only one
+
+        // Test 3: Fill up to limit (2 building tasks)
+        let task2 =
+            create_mock_task_for_schedule(&env, file_id2, region_id, IndexBuildType::Flush).await;
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2); // Reached limit
+        assert_eq!(status.pending_tasks.len(), 0);
+
+        // Test 4: Add tasks with different priorities to pending queue
+        // Now all new tasks will be pending since we reached the limit
+        let task3 =
+            create_mock_task_for_schedule(&env, file_id3, region_id, IndexBuildType::Compact).await;
+        let task4 =
+            create_mock_task_for_schedule(&env, file_id4, region_id, IndexBuildType::SchemaChange)
+                .await;
+        let task5 =
+            create_mock_task_for_schedule(&env, file_id5, region_id, IndexBuildType::Manual).await;
+
+        scheduler
+            .schedule_build(&version_control, task3)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task4)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task5)
+            .await
+            .unwrap();
+
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2); // Still at limit
+        assert_eq!(status.pending_tasks.len(), 3); // Three pending
+
+        // Test 5: Task completion triggers scheduling next highest priority task (Manual)
+        scheduler.on_task_stopped(region_id, file_id1, &version_control);
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert!(!status.building_files.contains(&file_id1));
+        assert_eq!(status.building_files.len(), 2); // Should schedule next task
+        assert_eq!(status.pending_tasks.len(), 2); // One less pending
+        // The highest priority task (Manual) should now be building
+        assert!(status.building_files.contains(&file_id5));
+
+        // Test 6: Complete another task, should schedule SchemaChange (second highest priority)
+        scheduler.on_task_stopped(region_id, file_id2, &version_control);
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2);
+        assert_eq!(status.pending_tasks.len(), 1); // One less pending
+        assert!(status.building_files.contains(&file_id4)); // SchemaChange should be building
+
+        // Test 7: Complete remaining tasks and cleanup
+        scheduler.on_task_stopped(region_id, file_id5, &version_control);
+        scheduler.on_task_stopped(region_id, file_id4, &version_control);
+
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 1); // Last task (Compact) should be building
+        assert_eq!(status.pending_tasks.len(), 0);
+        assert!(status.building_files.contains(&file_id3));
+
+        scheduler.on_task_stopped(region_id, file_id3, &version_control);
+
+        // Region should be removed when all tasks complete
+        assert!(!scheduler.region_status.contains_key(&region_id));
+
+        // Test 8: Region dropped with pending tasks
+        let task6 =
+            create_mock_task_for_schedule(&env, file_id1, region_id, IndexBuildType::Flush).await;
+        let task7 =
+            create_mock_task_for_schedule(&env, file_id2, region_id, IndexBuildType::Flush).await;
+        let task8 =
+            create_mock_task_for_schedule(&env, file_id3, region_id, IndexBuildType::Manual).await;
+
+        scheduler
+            .schedule_build(&version_control, task6)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task7)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task8)
+            .await
+            .unwrap();
+
+        assert!(scheduler.region_status.contains_key(&region_id));
+        let status = scheduler.region_status.get(&region_id).unwrap();
+        assert_eq!(status.building_files.len(), 2);
+        assert_eq!(status.pending_tasks.len(), 1);
+
+        scheduler.on_region_dropped(region_id).await;
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 }

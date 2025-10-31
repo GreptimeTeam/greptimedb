@@ -213,7 +213,11 @@ impl AccessLayer {
     }
 
     /// Deletes a SST file (and its index file if it has one) with given file id.
-    pub(crate) async fn delete_sst(&self, region_file_id: &RegionFileId) -> Result<()> {
+    pub(crate) async fn delete_sst(
+        &self,
+        region_file_id: &RegionFileId,
+        index_file_id: &RegionFileId,
+    ) -> Result<()> {
         let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
         self.object_store
             .delete(&path)
@@ -222,7 +226,7 @@ impl AccessLayer {
                 file_id: region_file_id.file_id(),
             })?;
 
-        let path = location::index_file_path(&self.table_dir, *region_file_id, self.path_type);
+        let path = location::index_file_path(&self.table_dir, *index_file_id, self.path_type);
         self.object_store
             .delete(&path)
             .await

@@ -146,6 +146,12 @@ pub struct FileMeta {
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Size of the index file.
     pub index_file_size: u64,
+    /// File ID of the index file.
+    ///
+    /// When this field is None, it means the index file id is the same as the file id.
+    /// Only meaningful when index_file_size > 0.
+    /// Used for rebuilding index files.
+    pub index_file_id: Option<FileId>,
     /// Number of rows in the file.
     ///
     /// For historical reasons, this field might be missing in old files. Thus
@@ -259,6 +265,16 @@ impl FileMeta {
     pub fn file_id(&self) -> RegionFileId {
         RegionFileId::new(self.region_id, self.file_id)
     }
+
+    /// Returns the cross-region index file id.
+    /// If the index file id is not set, returns the file id.
+    pub fn index_file_id(&self) -> RegionFileId {
+        if let Some(index_file_id) = self.index_file_id {
+            RegionFileId::new(self.region_id, index_file_id)
+        } else {
+            self.file_id()
+        }
+    }
 }
 
 /// Handle to a SST file.
@@ -292,6 +308,16 @@ impl FileHandle {
     /// Returns the cross-region file id.
     pub fn file_id(&self) -> RegionFileId {
         RegionFileId::new(self.inner.meta.region_id, self.inner.meta.file_id)
+    }
+
+    /// Returns the cross-region index file id.
+    /// If the index file id is not set, returns the file id.
+    pub fn index_file_id(&self) -> RegionFileId {
+        if let Some(index_file_id) = self.inner.meta.index_file_id {
+            RegionFileId::new(self.inner.meta.region_id, index_file_id)
+        } else {
+            self.file_id()
+        }
     }
 
     /// Returns the complete file path of the file.
@@ -379,22 +405,28 @@ impl FileHandleInner {
 /// Delete
 pub async fn delete_files(
     region_id: RegionId,
-    file_ids: &[FileId],
+    file_ids: &[(FileId, FileId)],
     delete_index: bool,
     access_layer: &AccessLayerRef,
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
     // Remove meta of the file from cache.
     if let Some(cache) = &cache_manager {
-        for file_id in file_ids {
+        for (file_id, _) in file_ids {
             cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
         }
     }
     let mut deleted_files = Vec::with_capacity(file_ids.len());
 
-    for file_id in file_ids {
+    for (file_id, index_file_id) in file_ids {
         let region_file_id = RegionFileId::new(region_id, *file_id);
-        match access_layer.delete_sst(&region_file_id).await {
+        match access_layer
+            .delete_sst(
+                &RegionFileId::new(region_id, *file_id),
+                &RegionFileId::new(region_id, *index_file_id),
+            )
+            .await
+        {
             Ok(_) => {
                 deleted_files.push(*file_id);
             }
@@ -411,14 +443,12 @@ pub async fn delete_files(
         deleted_files
     );
 
-    for file_id in file_ids {
-        let region_file_id = RegionFileId::new(region_id, *file_id);
-
+    for (file_id, index_file_id) in file_ids {
         if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache()) {
             // Removes index file from the cache.
             if delete_index {
                 write_cache
-                    .remove(IndexKey::new(region_id, *file_id, FileType::Puffin))
+                    .remove(IndexKey::new(region_id, *index_file_id, FileType::Puffin))
                     .await;
             }
 
@@ -431,11 +461,11 @@ pub async fn delete_files(
         // Purges index content in the stager.
         if let Err(e) = access_layer
             .puffin_manager_factory()
-            .purge_stager(region_file_id)
+            .purge_stager(RegionFileId::new(region_id, *index_file_id))
             .await
         {
             error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_id, region_id);
+                    index_file_id, region_id);
         }
     }
     Ok(())
@@ -459,6 +489,7 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
@@ -505,6 +536,7 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            index_file_id: None,
             num_rows: 0,
             num_row_groups: 0,
             sequence: None,
