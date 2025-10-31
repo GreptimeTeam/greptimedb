@@ -323,6 +323,26 @@ impl StructVectorBuilder {
         }
         self.null_buffer.append_null();
     }
+
+    pub(crate) fn struct_type(&self) -> &StructType {
+        &self.fields
+    }
+
+    pub(crate) fn value_builders(&self) -> &[Box<dyn MutableVector>] {
+        &self.value_builders
+    }
+
+    pub(crate) fn mut_value_builders(&mut self) -> &mut [Box<dyn MutableVector>] {
+        &mut self.value_builders
+    }
+
+    pub(crate) fn null_buffer(&self) -> &NullBufferBuilder {
+        &self.null_buffer
+    }
+
+    pub(crate) fn mut_null_buffer(&mut self) -> &mut NullBufferBuilder {
+        &mut self.null_buffer
+    }
 }
 
 impl MutableVector for StructVectorBuilder {
