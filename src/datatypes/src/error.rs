@@ -266,6 +266,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse or serialize arrow metadata"))]
+    ArrowMetadata {
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -307,7 +315,8 @@ impl ErrorExt for Error {
             | ConvertArrowArrayToScalars { .. }
             | ConvertScalarToArrowArray { .. }
             | ParseExtendedType { .. }
-            | InconsistentStructFieldsAndItems { .. } => StatusCode::Internal,
+            | InconsistentStructFieldsAndItems { .. }
+            | ArrowMetadata { .. } => StatusCode::Internal,
         }
     }
 
