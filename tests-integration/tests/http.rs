@@ -5634,6 +5634,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -5674,6 +5679,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -5751,6 +5761,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
                             "value": "1.0.0"
                         },
                         {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
                             "key": "peer.service",
                             "type": "string",
                             "value": "test-jaeger-query-api"
@@ -5791,6 +5806,11 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
                             "key": "otel.scope.version",
                             "type": "string",
                             "value": "1.0.0"
+                        },
+                        {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
                         },
                         {
                             "key": "peer.service",
@@ -6144,6 +6164,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -6184,6 +6209,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -6260,6 +6290,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "value": "1.0.0"
             },
             {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
+            },
+            {
               "key": "peer.service",
               "type": "string",
               "value": "test-jaeger-query-api"
@@ -6300,6 +6335,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
               "key": "otel.scope.version",
               "type": "string",
               "value": "1.0.0"
+            },
+            {
+              "key": "otel.status_description",
+              "type": "string",
+              "value": "success"
             },
             {
               "key": "peer.service",
@@ -6377,6 +6417,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                             "value": "1.0.0"
                         },
                         {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
                             "key": "peer.service",
                             "type": "string",
                             "value": "test-jaeger-query-api"
@@ -6417,6 +6462,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                             "key": "otel.scope.version",
                             "type": "string",
                             "value": "1.0.0"
+                        },
+                        {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
                         },
                         {
                             "key": "peer.service",
