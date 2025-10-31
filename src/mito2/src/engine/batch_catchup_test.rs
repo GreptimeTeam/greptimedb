@@ -55,8 +55,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
         .await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
 
-    // FIXME(weny): change region number to 3.
-    let num_regions = 2u32;
+    let num_regions = 3u32;
     let table_dir_fn = |region_id| format!("test/{region_id}");
     let mut region_schema = HashMap::new();
 
