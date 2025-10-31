@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+arrow-schema.workspace = true
 common-base.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true

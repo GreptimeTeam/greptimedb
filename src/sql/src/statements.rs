@@ -32,10 +32,13 @@ pub mod tql;
 pub(crate) mod transform;
 pub mod truncate;
 
+use std::sync::Arc;
+
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
+use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::TimestampType;
@@ -149,8 +152,11 @@ pub fn column_to_schema(
             .extensions
             .build_json_structure_settings()?
             .unwrap_or_default();
+        let extension = JsonExtensionType::new(Arc::new(JsonMetadata {
+            json_structure_settings: Some(settings.clone()),
+        }));
         column_schema
-            .with_json_structure_settings(&settings)
+            .with_extension_type(&extension)
             .with_context(|_| SetJsonStructureSettingsSnafu {
                 value: format!("{settings:?}"),
             })?;

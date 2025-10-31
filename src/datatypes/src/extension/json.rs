@@ -18,16 +18,24 @@ use arrow_schema::extension::ExtensionType;
 use arrow_schema::{ArrowError, DataType};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+use crate::json::JsonStructureSettings;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JsonMetadata {
     /// Indicates how to handle JSON is stored in underlying data type
     ///
     /// This field can be `None` for data is converted to complete structured in-memory form.
-    pub json_structure_settings: Option<String>,
+    pub json_structure_settings: Option<JsonStructureSettings>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct JsonExtensionType(Arc<JsonMetadata>);
+
+impl JsonExtensionType {
+    pub fn new(metadata: Arc<JsonMetadata>) -> Self {
+        JsonExtensionType(metadata)
+    }
+}
 
 impl ExtensionType for JsonExtensionType {
     const NAME: &'static str = "greptime.json";
