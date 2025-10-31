@@ -31,8 +31,8 @@ use crate::scalars::vector::impl_conv::{
 /// The accumulator for the `vec_avg` aggregate function.
 #[derive(Debug, Default)]
 pub struct VectorAvg {
-    avg: Option<OVector<f32, Dyn>>,
-    count: usize,
+    sum: Option<OVector<f32, Dyn>>,
+    count: u64,
     has_null: bool,
 }
 
@@ -42,6 +42,7 @@ impl VectorAvg {
         let signature = Signature::one_of(
             vec![
                 TypeSignature::Exact(vec![DataType::Utf8]),
+                TypeSignature::Exact(vec![DataType::LargeUtf8]),
                 TypeSignature::Exact(vec![DataType::Binary]),
             ],
             Volatility::Immutable,
@@ -75,7 +76,7 @@ impl VectorAvg {
     }
 
     fn inner(&mut self, len: usize) -> &mut OVector<f32, Dyn> {
-        self.avg
+        self.sum
             .get_or_insert_with(|| OVector::zeros_generic(Dyn(len), Const::<1>))
     }
 
@@ -116,7 +117,7 @@ impl VectorAvg {
         if vectors.len() != values[0].len() {
             if is_update {
                 self.has_null = true;
-                self.avg = None;
+                self.sum = None;
                 self.count = 0;
             }
             return Ok(());
@@ -129,13 +130,9 @@ impl VectorAvg {
             let v_view = DVectorView::from_slice(&v, dims);
             sum += &v_view;
         }
-        if is_update {
-            *self.inner(dims) = sum / (len as f32);
-        } else {
-            let avg = self.inner(dims).clone();
-            *self.inner(dims) = (avg * self.count as f32 + sum) / ((self.count + len) as f32)
-        }
-        self.count += len;
+
+        *self.inner(dims) += sum;
+        self.count += len as u64;
 
         Ok(())
     }
@@ -155,10 +152,10 @@ impl Accumulator for VectorAvg {
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
-        match &self.avg {
+        match &self.sum {
             None => Ok(ScalarValue::Binary(None)),
-            Some(vector) => Ok(ScalarValue::Binary(Some(veclit_to_binlit(
-                vector.as_slice(),
+            Some(sum) => Ok(ScalarValue::Binary(Some(veclit_to_binlit(
+                (sum / self.count as f32).as_slice(),
             )))),
         }
     }
@@ -183,7 +180,7 @@ mod tests {
         // test update empty batch, expect not updating anything
         let mut vec_avg = VectorAvg::default();
         vec_avg.update_batch(&[]).unwrap();
-        assert!(vec_avg.avg.is_none());
+        assert!(vec_avg.sum.is_none());
         assert!(!vec_avg.has_null);
         assert_eq!(ScalarValue::Binary(None), vec_avg.evaluate().unwrap());
 
