@@ -42,7 +42,7 @@ impl Display for KafkaProvider {
 }
 
 // The Provider of raft engine log store
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RaftEngineProvider {
     pub id: u64,
 }
@@ -59,7 +59,7 @@ impl RaftEngineProvider {
 }
 
 /// The Provider of LogStore
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),

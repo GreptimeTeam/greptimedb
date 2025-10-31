@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_meta::instruction::{
+    InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
+};
 use common_telemetry::{info, warn};
+use futures::future::join_all;
 use store_api::region_request::{RegionCatchupRequest, RegionRequest, ReplayCheckpoint};
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -22,115 +25,151 @@ use crate::heartbeat::task_tracker::WaitResult;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UpgradeRegionsHandler;
 
+impl UpgradeRegionsHandler {
+    // Handles upgrade regions instruction.
+    //
+    // Returns batch of upgrade region replies, the order of the replies is not guaranteed.
+    async fn handle_upgrade_regions(
+        &self,
+        ctx: &HandlerContext,
+        upgrade_regions: Vec<UpgradeRegion>,
+    ) -> Vec<UpgradeRegionReply> {
+        let mut replies = Vec::with_capacity(upgrade_regions.len());
+        let mut catchup_request = Vec::with_capacity(upgrade_regions.len());
+
+        for upgrade_region in upgrade_regions {
+            let Some(writable) = ctx.region_server.is_region_leader(upgrade_region.region_id)
+            else {
+                replies.push(UpgradeRegionReply {
+                    region_id: upgrade_region.region_id,
+                    ready: false,
+                    exists: false,
+                    error: None,
+                });
+                continue;
+            };
+
+            if writable {
+                replies.push(UpgradeRegionReply {
+                    region_id: upgrade_region.region_id,
+                    ready: true,
+                    exists: true,
+                    error: None,
+                });
+            } else {
+                let UpgradeRegion {
+                    last_entry_id,
+                    metadata_last_entry_id,
+                    location_id,
+                    replay_entry_id,
+                    metadata_replay_entry_id,
+                    replay_timeout,
+                    ..
+                } = upgrade_region;
+
+                let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
+                    (Some(entry_id), metadata_entry_id) => Some(ReplayCheckpoint {
+                        entry_id,
+                        metadata_entry_id,
+                    }),
+                    _ => None,
+                };
+
+                catchup_request.push((
+                    upgrade_region.region_id,
+                    replay_timeout.unwrap_or_default(),
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        entry_id: last_entry_id,
+                        metadata_entry_id: metadata_last_entry_id,
+                        location_id,
+                        checkpoint,
+                    },
+                ));
+            }
+        }
+
+        let mut wait_results = Vec::with_capacity(catchup_request.len());
+
+        for (region_id, replay_timeout, catchup_request) in catchup_request {
+            let region_server_moved = ctx.region_server.clone();
+            // TODO(weny): parallelize the catchup tasks.
+            let result = ctx
+                .catchup_tasks
+                .try_register(
+                    region_id,
+                    Box::pin(async move {
+                        info!(
+                            "Executing region: {region_id} catchup to: last entry id {:?}",
+                            catchup_request.entry_id
+                        );
+                        region_server_moved
+                            .handle_request(region_id, RegionRequest::Catchup(catchup_request))
+                            .await?;
+                        Ok(())
+                    }),
+                )
+                .await;
+
+            if result.is_busy() {
+                warn!("Another catchup task is running for the region: {region_id}");
+            }
+
+            // We don't care that it returns a newly registered or running task.
+            let mut watcher = result.into_watcher();
+            wait_results.push((
+                region_id,
+                ctx.catchup_tasks.wait(&mut watcher, replay_timeout).await,
+            ));
+        }
+
+        let results = join_all(
+            wait_results
+                .into_iter()
+                .map(|(region_id, result)| async move {
+                    match result {
+                        WaitResult::Timeout => UpgradeRegionReply {
+                            region_id,
+                            ready: false,
+                            exists: true,
+                            error: None,
+                        },
+                        WaitResult::Finish(Ok(_)) => UpgradeRegionReply {
+                            region_id,
+                            ready: true,
+                            exists: true,
+                            error: None,
+                        },
+                        WaitResult::Finish(Err(err)) => UpgradeRegionReply {
+                            region_id,
+                            ready: false,
+                            exists: true,
+                            error: Some(format!("{err:?}")),
+                        },
+                    }
+                }),
+        )
+        .await;
+
+        replies.extend(results.into_iter());
+        replies
+    }
+}
+
 #[async_trait::async_trait]
 impl InstructionHandler for UpgradeRegionsHandler {
-    type Instruction = UpgradeRegion;
+    type Instruction = Vec<UpgradeRegion>;
 
     async fn handle(
         &self,
         ctx: &HandlerContext,
-        UpgradeRegion {
-            region_id,
-            last_entry_id,
-            metadata_last_entry_id,
-            replay_timeout,
-            location_id,
-            replay_entry_id,
-            metadata_replay_entry_id,
-        }: UpgradeRegion,
+        upgrade_regions: Self::Instruction,
     ) -> Option<InstructionReply> {
-        let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
-            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready: false,
-                exists: false,
-                error: None,
-            }));
-        };
+        let replies = self.handle_upgrade_regions(ctx, upgrade_regions).await;
 
-        if writable {
-            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready: true,
-                exists: true,
-                error: None,
-            }));
-        }
-
-        let region_server_moved = ctx.region_server.clone();
-
-        let checkpoint = match (replay_entry_id, metadata_replay_entry_id) {
-            (Some(entry_id), metadata_entry_id) => Some(ReplayCheckpoint {
-                entry_id,
-                metadata_entry_id,
-            }),
-            _ => None,
-        };
-
-        // The catchup task is almost zero cost if the inside region is writable.
-        // Therefore, it always registers a new catchup task.
-        let register_result = ctx
-            .catchup_tasks
-            .try_register(
-                region_id,
-                Box::pin(async move {
-                    info!(
-                        "Executing region: {region_id} catchup to: last entry id {last_entry_id:?}"
-                    );
-                    region_server_moved
-                        .handle_request(
-                            region_id,
-                            RegionRequest::Catchup(RegionCatchupRequest {
-                                set_writable: true,
-                                entry_id: last_entry_id,
-                                metadata_entry_id: metadata_last_entry_id,
-                                location_id,
-                                checkpoint,
-                            }),
-                        )
-                        .await?;
-
-                    Ok(())
-                }),
-            )
-            .await;
-
-        if register_result.is_busy() {
-            warn!("Another catchup task is running for the region: {region_id}");
-        }
-
-        // Returns immediately
-        let Some(replay_timeout) = replay_timeout else {
-            return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready: false,
-                exists: true,
-                error: None,
-            }));
-        };
-
-        // We don't care that it returns a newly registered or running task.
-        let mut watcher = register_result.into_watcher();
-        let result = ctx.catchup_tasks.wait(&mut watcher, replay_timeout).await;
-
-        match result {
-            WaitResult::Timeout => Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready: false,
-                exists: true,
-                error: None,
-            })),
-            WaitResult::Finish(Ok(_)) => {
-                Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready: true,
-                    exists: true,
-                    error: None,
-                }))
-            }
-            WaitResult::Finish(Err(err)) => {
-                Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready: false,
-                    exists: true,
-                    error: Some(format!("{err:?}")),
-                }))
-            }
-        }
+        Some(InstructionReply::UpgradeRegions(UpgradeRegionsReply::new(
+            replies,
+        )))
     }
 }
 
@@ -164,15 +203,15 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    UpgradeRegion {
+                    vec![UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    },
+                    }],
                 )
                 .await;
 
-            let reply = reply.unwrap().expect_upgrade_region_reply();
+            let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
             assert!(!reply.exists);
             assert!(reply.error.is_none());
         }
@@ -201,15 +240,15 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    UpgradeRegion {
+                    vec![UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    },
+                    }],
                 )
                 .await;
 
-            let reply = reply.unwrap().expect_upgrade_region_reply();
+            let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
             assert!(reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
@@ -239,15 +278,15 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    UpgradeRegion {
+                    vec![UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    },
+                    }],
                 )
                 .await;
 
-            let reply = reply.unwrap().expect_upgrade_region_reply();
+            let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
             assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
@@ -280,15 +319,15 @@ mod tests {
             let reply = UpgradeRegionsHandler
                 .handle(
                     &handler_context,
-                    UpgradeRegion {
+                    vec![UpgradeRegion {
                         region_id,
                         replay_timeout,
                         ..Default::default()
-                    },
+                    }],
                 )
                 .await;
 
-            let reply = reply.unwrap().expect_upgrade_region_reply();
+            let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
             assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
@@ -298,17 +337,17 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                UpgradeRegion {
+                vec![UpgradeRegion {
                     region_id,
                     replay_timeout: Some(Duration::from_millis(500)),
                     ..Default::default()
-                },
+                }],
             )
             .await;
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        let reply = reply.unwrap().expect_upgrade_region_reply();
+        let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
         assert!(reply.ready);
         assert!(reply.exists);
         assert!(reply.error.is_none());
@@ -339,15 +378,15 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                UpgradeRegion {
+                vec![UpgradeRegion {
                     region_id,
                     ..Default::default()
-                },
+                }],
             )
             .await;
 
         // It didn't wait for handle returns; it had no idea about the error.
-        let reply = reply.unwrap().expect_upgrade_region_reply();
+        let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
         assert!(!reply.ready);
         assert!(reply.exists);
         assert!(reply.error.is_none());
@@ -355,18 +394,18 @@ mod tests {
         let reply = UpgradeRegionsHandler
             .handle(
                 &handler_context,
-                UpgradeRegion {
+                vec![UpgradeRegion {
                     region_id,
                     replay_timeout: Some(Duration::from_millis(200)),
                     ..Default::default()
-                },
+                }],
             )
             .await;
 
-        let reply = reply.unwrap().expect_upgrade_region_reply();
+        let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
         assert!(!reply.ready);
         assert!(reply.exists);
         assert!(reply.error.is_some());
-        assert!(reply.error.unwrap().contains("mock_error"));
+        assert!(reply.error.as_ref().unwrap().contains("mock_error"));
     }
 }

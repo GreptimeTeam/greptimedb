@@ -602,6 +602,7 @@ pub(crate) enum WorkerRequest {
 }
 
 impl WorkerRequest {
+    /// Creates a new open region request.
     pub(crate) fn new_open_region_request(
         region_id: RegionId,
         request: RegionOpenRequest,
@@ -615,6 +616,21 @@ impl WorkerRequest {
             request: DdlRequest::Open((request, entry_receiver)),
         });
 
+        (worker_request, receiver)
+    }
+
+    /// Creates a new catchup region request.
+    pub(crate) fn new_catchup_region_request(
+        region_id: RegionId,
+        request: RegionCatchupRequest,
+        entry_receiver: Option<WalEntryReceiver>,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+        let worker_request = WorkerRequest::Ddl(SenderDdlRequest {
+            region_id,
+            sender: sender.into(),
+            request: DdlRequest::Catchup((request, entry_receiver)),
+        });
         (worker_request, receiver)
     }
 
@@ -701,7 +717,7 @@ impl WorkerRequest {
             RegionRequest::Catchup(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Catchup(v),
+                request: DdlRequest::Catchup((v, None)),
             }),
             RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
                 metadata: region_metadata,
@@ -757,7 +773,7 @@ pub(crate) enum DdlRequest {
     Compact(RegionCompactRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
-    Catchup(RegionCatchupRequest),
+    Catchup((RegionCatchupRequest, Option<WalEntryReceiver>)),
 }
 
 /// Sender and Ddl request.

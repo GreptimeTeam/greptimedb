@@ -28,6 +28,7 @@ use tokio::time::Instant;
 use crate::error::{self, Result};
 use crate::region::MitoRegion;
 use crate::region::opener::{RegionOpener, replay_memtable};
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -35,6 +36,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCatchupRequest,
+        entry_receiver: Option<WalEntryReceiver>,
     ) -> Result<AffectedRows> {
         let Some(region) = self.regions.get_region(region_id) else {
             return error::RegionNotFoundSnafu { region_id }.fail();
@@ -76,9 +78,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.provider
             );
             let timer = Instant::now();
-            let wal_entry_reader =
+            let wal_entry_reader = entry_receiver.map(|r| Box::new(r) as _).unwrap_or_else(|| {
                 self.wal
-                    .wal_entry_reader(&region.provider, region_id, request.location_id);
+                    .wal_entry_reader(&region.provider, region_id, request.location_id)
+            });
             let on_region_opened = self.wal.on_region_opened();
             let last_entry_id = replay_memtable(
                 &region.provider,

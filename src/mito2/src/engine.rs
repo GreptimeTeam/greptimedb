@@ -21,6 +21,8 @@ mod append_mode_test;
 #[cfg(test)]
 mod basic_test;
 #[cfg(test)]
+mod batch_catchup_test;
+#[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
 mod bump_committed_sequence_test;
@@ -91,7 +93,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
-use store_api::logstore::provider::Provider;
+use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -100,7 +102,9 @@ use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+};
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
@@ -772,6 +776,122 @@ impl EngineInner {
         Ok(responses)
     }
 
+    async fn catchup_topic_regions(
+        &self,
+        provider: Provider,
+        region_requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let now = Instant::now();
+        let region_ids = region_requests
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
+        let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
+            provider.clone(),
+            self.wal_raw_entry_reader.clone(),
+            &region_ids,
+            DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
+        );
+
+        let mut responses = Vec::with_capacity(region_requests.len());
+        for ((region_id, request), entry_receiver) in
+            region_requests.into_iter().zip(entry_receivers)
+        {
+            let (request, receiver) =
+                WorkerRequest::new_catchup_region_request(region_id, request, Some(entry_receiver));
+            self.workers.submit_to_worker(region_id, request).await?;
+            responses.push(async move { receiver.await.context(RecvSnafu)? });
+        }
+
+        // Wait for entries distribution.
+        let distribution =
+            common_runtime::spawn_global(async move { distributor.distribute().await });
+        // Wait for worker returns.
+        let responses = join_all(responses).await;
+        distribution.await.context(JoinSnafu)??;
+
+        let num_failure = responses.iter().filter(|r| r.is_err()).count();
+        info!(
+            "Caught up {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            region_ids.len() - num_failure,
+            // Safety: provider is kafka provider.
+            provider.as_kafka_provider().unwrap(),
+            num_failure,
+            now.elapsed(),
+        );
+
+        Ok(region_ids.into_iter().zip(responses).collect())
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let mut responses = Vec::with_capacity(requests.len());
+        let mut topic_regions: HashMap<Arc<KafkaProvider>, Vec<_>> = HashMap::new();
+        let mut remaining_region_requests = vec![];
+
+        for (region_id, request) in requests {
+            match self.workers.get_region(region_id) {
+                Some(region) => match region.provider.as_kafka_provider() {
+                    Some(provider) => {
+                        topic_regions
+                            .entry(provider.clone())
+                            .or_default()
+                            .push((region_id, request));
+                    }
+                    None => {
+                        remaining_region_requests.push((region_id, request));
+                    }
+                },
+                None => responses.push((region_id, RegionNotFoundSnafu { region_id }.fail())),
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+
+        if !topic_regions.is_empty() {
+            let mut tasks = Vec::with_capacity(topic_regions.len());
+            for (provider, region_requests) in topic_regions {
+                let semaphore_moved = semaphore.clone();
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    self.catchup_topic_regions(Provider::Kafka(provider), region_requests)
+                        .await
+                })
+            }
+
+            let r = try_join_all(tasks).await?;
+            responses.extend(r.into_iter().flatten());
+        }
+
+        if !remaining_region_requests.is_empty() {
+            let mut tasks = Vec::with_capacity(remaining_region_requests.len());
+            let mut region_ids = Vec::with_capacity(remaining_region_requests.len());
+            for (region_id, request) in remaining_region_requests {
+                let semaphore_moved = semaphore.clone();
+                region_ids.push(region_id);
+                tasks.push(async move {
+                    // Safety: semaphore must exist
+                    let _permit = semaphore_moved.acquire().await.unwrap();
+                    let (request, receiver) =
+                        WorkerRequest::new_catchup_region_request(region_id, request, None);
+
+                    self.workers.submit_to_worker(region_id, request).await?;
+
+                    receiver.await.context(RecvSnafu)?
+                })
+            }
+
+            let results = join_all(tasks).await;
+            responses.extend(region_ids.into_iter().zip(results));
+        }
+
+        Ok(responses)
+    }
+
     /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(
         &self,
@@ -899,6 +1019,29 @@ impl RegionEngine for MitoEngine {
         // TODO(weny): add metrics.
         self.inner
             .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map(|responses| {
+                responses
+                    .into_iter()
+                    .map(|(region_id, response)| {
+                        (
+                            region_id,
+                            response.map(RegionResponse::new).map_err(BoxedError::new),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(BoxedError::new)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
             .await
             .map(|responses| {
                 responses

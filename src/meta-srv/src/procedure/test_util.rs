@@ -18,7 +18,7 @@ use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, DowngradeRegionsReply, FlushRegionReply, InstructionReply, SimpleReply,
-    UpgradeRegionReply,
+    UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -212,11 +212,14 @@ pub fn new_upgrade_region_reply(
         to: "meta".to_string(),
         timestamp_millis: current_time_millis(),
         payload: Some(Payload::Json(
-            serde_json::to_string(&InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                ready,
-                exists,
-                error,
-            }))
+            serde_json::to_string(&InstructionReply::UpgradeRegions(
+                UpgradeRegionsReply::single(UpgradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    ready,
+                    exists,
+                    error,
+                }),
+            ))
             .unwrap(),
         )),
     }
