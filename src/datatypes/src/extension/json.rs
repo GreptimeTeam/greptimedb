@@ -16,9 +16,15 @@ use std::sync::Arc;
 
 use arrow_schema::extension::ExtensionType;
 use arrow_schema::{ArrowError, DataType};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JsonMetadata;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct JsonMetadata {
+    /// Indicates how to handle JSON is stored in underlying data type
+    ///
+    /// This field can be `None` for data is converted to complete structured in-memory form.
+    pub json_structure_settings: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonExtensionType(Arc<JsonMetadata>);
@@ -32,11 +38,18 @@ impl ExtensionType for JsonExtensionType {
     }
 
     fn serialize_metadata(&self) -> Option<String> {
-        None
+        serde_json::to_string(self.metadata()).ok()
     }
 
-    fn deserialize_metadata(_metadata: Option<&str>) -> Result<Self::Metadata, ArrowError> {
-        Ok(Arc::new(JsonMetadata))
+    fn deserialize_metadata(metadata: Option<&str>) -> Result<Self::Metadata, ArrowError> {
+        if let Some(metadata) = metadata {
+            let metadata = serde_json::from_str(metadata).map_err(|e| {
+                ArrowError::ParseError(format!("Failed to deserialize JSON metadata: {}", e))
+            })?;
+            Ok(Arc::new(metadata))
+        } else {
+            Ok(Arc::new(JsonMetadata::default()))
+        }
     }
 
     fn supports_data_type(&self, data_type: &DataType) -> Result<(), ArrowError> {
