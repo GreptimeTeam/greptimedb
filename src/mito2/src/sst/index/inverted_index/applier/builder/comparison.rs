@@ -227,7 +227,7 @@ mod tests {
             ),
         ];
 
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_basic_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -236,7 +236,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         for ((left, op, right), _) in &cases {
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_type_mismatch() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_type_mismatch_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -264,7 +264,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_field_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_field_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -283,7 +283,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         builder
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_collect_comparison_nonexistent_column() {
-        let (_d, facotry) =
+        let (_d, factory) =
             PuffinManagerFactory::new_for_test_block("test_collect_comparison_nonexistent_column_");
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
@@ -317,7 +317,7 @@ mod tests {
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
-            facotry,
+            factory,
         );
 
         let res = builder.collect_comparison_expr(
