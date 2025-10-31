@@ -37,7 +37,7 @@ use common_error::status_code::StatusCode;
 use common_runtime::RepeatedTask;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -260,7 +260,25 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
+            RegionRequest::Catchup(_) => {
+                let mut response = self
+                    .inner
+                    .handle_batch_catchup_requests(
+                        1,
+                        vec![(region_id, RegionCatchupRequest::default())],
+                    )
+                    .await
+                    .map_err(BoxedError::new)?;
+                debug_assert_eq!(response.len(), 1);
+                let (resp_region_id, response) = response
+                    .pop()
+                    .context(error::UnexpectedRequestSnafu {
+                        reason: "expected 1 response, but got zero responses",
+                    })
+                    .map_err(BoxedError::new)?;
+                debug_assert_eq!(region_id, resp_region_id);
+                return response;
+            }
             RegionRequest::BulkInserts(_) => {
                 // todo(hl): find a way to support bulk inserts in metric engine.
                 UnsupportedRegionRequestSnafu { request }.fail()
@@ -509,13 +527,17 @@ mod test {
     use std::collections::HashMap;
 
     use common_telemetry::info;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
+    use mito2::test_util::{kafka_log_store_factory, prepare_test_for_kafka_log_store};
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
         PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     };
 
     use super::*;
+    use crate::maybe_skip_kafka_log_store_integration_test;
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -695,5 +717,129 @@ mod test {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+    }
+
+    #[tokio::test]
+    async fn test_catchup_regions() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_log_store_integration_test!();
+        let kafka_log_store_factory = kafka_log_store_factory().unwrap();
+        let mito_env = mito2::test_util::TestEnv::new()
+            .await
+            .with_log_store_factory(kafka_log_store_factory.clone());
+        let env = TestEnv::with_mito_env(mito_env).await;
+        let table_dir = |region_id| format!("table/{region_id}");
+        let mut physical_region_ids = vec![];
+        let mut logical_region_ids = vec![];
+
+        let num_topics = 3;
+        let num_physical_regions = 8;
+        let num_logical_regions = 16;
+        let parallelism = 2;
+        let mut topics = Vec::with_capacity(num_topics);
+        for _ in 0..num_topics {
+            let topic = prepare_test_for_kafka_log_store(&kafka_log_store_factory)
+                .await
+                .unwrap();
+            topics.push(topic);
+        }
+
+        let topic_idx = |id| (id as usize) % num_topics;
+        // Creates physical regions
+        for i in 0..num_physical_regions {
+            let physical_region_id = RegionId::new(1, i);
+            physical_region_ids.push(physical_region_id);
+
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topics[topic_idx(i)].clone(),
+            });
+            env.create_physical_region(
+                physical_region_id,
+                &table_dir(physical_region_id),
+                vec![(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                )],
+            )
+            .await;
+            // Creates logical regions for each physical region
+            for j in 0..num_logical_regions {
+                let logical_region_id = RegionId::new(1024 + i, j);
+                logical_region_ids.push(logical_region_id);
+                env.create_logical_region(physical_region_id, logical_region_id)
+                    .await;
+            }
+        }
+
+        let metric_engine = env.metric();
+        // Closes all regions
+        for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
+            metric_engine
+                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .await
+                .unwrap();
+        }
+
+        // Opens all regions and skip the wal
+        let requests = physical_region_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, region_id)| {
+                let mut options = HashMap::new();
+                let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                    topic: topics[topic_idx(idx as u32)].clone(),
+                });
+                options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+                options.insert(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                );
+                (
+                    *region_id,
+                    RegionOpenRequest {
+                        engine: METRIC_ENGINE_NAME.to_string(),
+                        table_dir: table_dir(*region_id),
+                        path_type: PathType::Bare,
+                        options: options.clone(),
+                        skip_wal_replay: true,
+                        checkpoint: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        info!("Open batch regions with parallelism: {parallelism}");
+        metric_engine
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(!state.logical_regions().contains_key(logical_region));
+            }
+        }
+
+        let catch_requests = physical_region_ids
+            .iter()
+            .map(|region_id| {
+                (
+                    *region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        metric_engine
+            .handle_batch_catchup_requests(parallelism, catch_requests)
+            .await
+            .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(state.logical_regions().contains_key(logical_region));
+            }
+        }
     }
 }

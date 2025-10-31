@@ -14,6 +14,7 @@
 
 //! Mito region.
 
+pub mod catchup;
 pub mod opener;
 pub mod options;
 pub(crate) mod version;
@@ -1149,6 +1150,34 @@ impl OpeningRegions {
 }
 
 pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
+
+/// The regions that are catching up.
+#[derive(Debug, Default)]
+pub(crate) struct CatchupRegions {
+    regions: RwLock<HashSet<RegionId>>,
+}
+
+impl CatchupRegions {
+    /// Returns true if the region exists.
+    pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
+        let regions = self.regions.read().unwrap();
+        regions.contains(&region_id)
+    }
+
+    /// Inserts a new region into the set.
+    pub(crate) fn insert_region(&self, region_id: RegionId) {
+        let mut regions = self.regions.write().unwrap();
+        regions.insert(region_id);
+    }
+
+    /// Remove region by id.
+    pub(crate) fn remove_region(&self, region_id: RegionId) {
+        let mut regions = self.regions.write().unwrap();
+        regions.remove(&region_id);
+    }
+}
+
+pub(crate) type CatchupRegionsRef = Arc<CatchupRegions>;
 
 /// Manifest stats.
 #[derive(Default, Debug, Clone)]

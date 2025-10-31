@@ -47,6 +47,7 @@ impl MetricEngineInner {
 
         for (region_id, request) in requests {
             if !request.is_physical_table() {
+                warn!("Skipping non-physical table open request: {region_id}");
                 continue;
             }
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;

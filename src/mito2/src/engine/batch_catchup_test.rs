@@ -53,20 +53,30 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
             ..Default::default()
         })
         .await;
-    let topic = prepare_test_for_kafka_log_store(&factory).await;
 
-    // FIXME(weny): change region number to 3.
-    let num_regions = 2u32;
+    // Prepares 3 topics for 8 regions
+    let num_topic = 3;
+    let mut topics = vec![];
+    for _ in 0..num_topic {
+        let topic = prepare_test_for_kafka_log_store(&factory).await.unwrap();
+        topics.push(topic);
+    }
+
+    let num_regions = 8u32;
     let table_dir_fn = |region_id| format!("test/{region_id}");
     let mut region_schema = HashMap::new();
 
+    let get_topic_idx = |id| (id - 1) % num_topic;
+
+    // Creates 8 regions and puts data into them
     for id in 1..=num_regions {
         let engine = engine.clone();
-        let topic = topic.clone();
+        let topic_idx = get_topic_idx(id);
+        let topic = topics[topic_idx as usize].clone();
         let region_id = RegionId::new(1, id);
         let request = CreateRequestBuilder::new()
             .table_dir(&table_dir_fn(region_id))
-            .kafka_topic(topic.clone())
+            .kafka_topic(Some(topic))
             .build();
         let column_schemas = rows_schema(&request);
         region_schema.insert(region_id, column_schemas);
@@ -76,7 +86,9 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
             .unwrap();
     }
 
-    for i in 0..10 {
+    // Puts data into regions
+    let rows = 30;
+    for i in 0..rows {
         for region_number in 1..=num_regions {
             let region_id = RegionId::new(1, region_number);
             let rows = Rows {
@@ -103,7 +115,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
             expected.push_str(
                 "+-------+---------+---------------------+\n| tag_0 | field_0 | ts                  |\n+-------+---------+---------------------+\n",
             );
-            for row in 0..10 {
+            for row in 0..rows {
                 expected.push_str(&format!(
                     "| {}   | {}.0   | 1970-01-01T00:{:02}:{:02} |\n",
                     i * 120 + row,
@@ -129,25 +141,22 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
         )
         .await;
 
-    let mut options = HashMap::new();
-    if let Some(topic) = &topic {
-        options.insert(
-            WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
-        );
-    };
     let requests = (1..=num_regions)
         .map(|id| {
             let region_id = RegionId::new(1, id);
+            let topic_idx = get_topic_idx(id);
+            let topic = topics[topic_idx as usize].clone();
+            let mut options = HashMap::new();
+            options.insert(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions { topic })).unwrap(),
+            );
             (
                 region_id,
                 RegionOpenRequest {
                     engine: String::new(),
                     table_dir: table_dir_fn(region_id),
-                    options: options.clone(),
+                    options,
                     skip_wal_replay: true,
                     path_type: PathType::Bare,
                     checkpoint: None,
@@ -155,8 +164,10 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
             )
         })
         .collect::<Vec<_>>();
+
+    let parallelism = 2;
     let results = engine
-        .handle_batch_open_requests(4, requests)
+        .handle_batch_open_requests(parallelism, requests)
         .await
         .unwrap();
     for (_, result) in results {
@@ -180,7 +191,7 @@ async fn test_batch_catchup_with_format(factory: Option<LogStoreFactory>, flat_f
         .collect::<Vec<_>>();
 
     let results = engine
-        .handle_batch_catchup_requests(4, requests)
+        .handle_batch_catchup_requests(parallelism, requests)
         .await
         .unwrap();
     for (_, result) in results {

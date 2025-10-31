@@ -15,19 +15,13 @@
 use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
-use common_telemetry::debug;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{
-    AffectedRows, RegionCatchupRequest, RegionRequest, ReplayCheckpoint,
-};
+use store_api::region_request::{RegionCatchupRequest, ReplayCheckpoint};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
-use crate::error::{
-    BatchCatchupMitoRegionSnafu, MitoCatchupOperationSnafu, PhysicalRegionNotFoundSnafu, Result,
-    UnsupportedRegionRequestSnafu,
-};
+use crate::error::{BatchCatchupMitoRegionSnafu, PhysicalRegionNotFoundSnafu, Result};
 use crate::utils;
 
 impl MetricEngineInner {
@@ -118,72 +112,5 @@ impl MetricEngineInner {
         }
 
         Ok(responses)
-    }
-
-    pub async fn catchup_region(
-        &self,
-        region_id: RegionId,
-        req: RegionCatchupRequest,
-    ) -> Result<AffectedRows> {
-        if !self.is_physical_region(region_id) {
-            return UnsupportedRegionRequestSnafu {
-                request: RegionRequest::Catchup(req),
-            }
-            .fail();
-        }
-        let data_region_id = utils::to_data_region_id(region_id);
-        let physical_region_options = *self
-            .state
-            .read()
-            .unwrap()
-            .physical_region_states()
-            .get(&data_region_id)
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?
-            .options();
-
-        let metadata_region_id = utils::to_metadata_region_id(region_id);
-        // TODO(weny): improve the catchup, we can read the wal entries only once.
-        debug!("Catchup metadata region {metadata_region_id}");
-        self.mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::Catchup(RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: req.metadata_entry_id,
-                    metadata_entry_id: None,
-                    location_id: req.location_id,
-                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
-                        entry_id: c.metadata_entry_id.unwrap_or_default(),
-                        metadata_entry_id: None,
-                    }),
-                }),
-            )
-            .await
-            .context(MitoCatchupOperationSnafu)?;
-
-        debug!("Catchup data region {data_region_id}");
-        self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Catchup(RegionCatchupRequest {
-                    set_writable: req.set_writable,
-                    entry_id: req.entry_id,
-                    metadata_entry_id: None,
-                    location_id: req.location_id,
-                    checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
-                        entry_id: c.entry_id,
-                        metadata_entry_id: None,
-                    }),
-                }),
-            )
-            .await
-            .context(MitoCatchupOperationSnafu)
-            .map(|response| response.affected_rows)?;
-
-        self.recover_states(region_id, physical_region_options)
-            .await?;
-        Ok(0)
     }
 }

@@ -76,7 +76,7 @@ mod tests {
         ];
 
         for (phy_region_id, logi_region_ids) in &phy_to_logi {
-            env.create_physical_region(*phy_region_id, &TestEnv::default_table_dir())
+            env.create_physical_region(*phy_region_id, &TestEnv::default_table_dir(), vec![])
                 .await;
             for logi_region_id in logi_region_ids {
                 env.create_logical_region(*phy_region_id, *logi_region_id)

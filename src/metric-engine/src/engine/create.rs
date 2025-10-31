@@ -828,9 +828,9 @@ mod test {
         let physical_region_id2 = RegionId::new(1024, 1);
         let logical_region_id1 = RegionId::new(1025, 0);
         let logical_region_id2 = RegionId::new(1025, 1);
-        env.create_physical_region(physical_region_id1, "/test_dir1")
+        env.create_physical_region(physical_region_id1, "/test_dir1", vec![])
             .await;
-        env.create_physical_region(physical_region_id2, "/test_dir2")
+        env.create_physical_region(physical_region_id2, "/test_dir2", vec![])
             .await;
 
         let region_create_request1 =

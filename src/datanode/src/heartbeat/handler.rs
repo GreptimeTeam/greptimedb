@@ -44,7 +44,6 @@ use crate::region_server::RegionServer;
 #[derive(Clone)]
 pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
-    catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
     open_region_parallelism: usize,
@@ -64,7 +63,6 @@ pub trait InstructionHandler: Send + Sync {
 #[derive(Clone)]
 pub struct HandlerContext {
     region_server: RegionServer,
-    catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
     flush_tasks: TaskTracker<()>,
     gc_tasks: TaskTracker<GcReport>,
@@ -75,7 +73,6 @@ impl HandlerContext {
     pub fn new_for_test(region_server: RegionServer) -> Self {
         Self {
             region_server,
-            catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
             gc_tasks: TaskTracker::new(),
@@ -88,7 +85,6 @@ impl RegionHeartbeatResponseHandler {
     pub fn new(region_server: RegionServer) -> Self {
         Self {
             region_server,
-            catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
             // Default to half of the number of CPUs.
@@ -114,7 +110,12 @@ impl RegionHeartbeatResponseHandler {
             )),
             Instruction::FlushRegions(_) => Ok(Box::new(FlushRegionsHandler.into())),
             Instruction::DowngradeRegions(_) => Ok(Box::new(DowngradeRegionsHandler.into())),
-            Instruction::UpgradeRegions(_) => Ok(Box::new(UpgradeRegionsHandler.into())),
+            Instruction::UpgradeRegions(_) => Ok(Box::new(
+                UpgradeRegionsHandler {
+                    upgrade_region_parallelism: self.open_region_parallelism,
+                }
+                .into(),
+            )),
             Instruction::GetFileRefs(_) => Ok(Box::new(GetFileRefsHandler.into())),
             Instruction::GcRegions(_) => Ok(Box::new(GcRegionsHandler.into())),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
@@ -216,7 +217,6 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
 
         let mailbox = ctx.mailbox.clone();
         let region_server = self.region_server.clone();
-        let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
         let flush_tasks = self.flush_tasks.clone();
         let gc_tasks = self.gc_tasks.clone();
@@ -226,7 +226,6 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 .handle(
                     &HandlerContext {
                         region_server,
-                        catchup_tasks,
                         downgrade_tasks,
                         flush_tasks,
                         gc_tasks,

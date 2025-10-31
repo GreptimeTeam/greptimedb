@@ -138,7 +138,7 @@ impl UpgradeCandidateRegion {
                 region_id,
                 last_entry_id,
                 metadata_last_entry_id,
-                replay_timeout: Some(replay_timeout),
+                replay_timeout,
                 location_id: Some(ctx.persistent_ctx.from_peer.id),
                 replay_entry_id: None,
                 metadata_replay_entry_id: None,
