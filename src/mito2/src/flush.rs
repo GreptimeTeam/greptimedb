@@ -765,6 +765,17 @@ fn memtable_flat_sources(
             flat_sources.encoded.push(encoded);
         } else {
             let iter = only_range.build_record_batch_iter(None)?;
+            // Dedup according to merge mode.
+            // Even single range may have duplicate rows.
+            let iter = match options.merge_mode() {
+                MergeMode::LastRow => {
+                    Box::new(FlatDedupIterator::new(iter, FlatLastRow::new(false))) as _
+                }
+                MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
+                    iter,
+                    FlatLastNonNull::new(field_column_start, false),
+                )) as _,
+            };
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
