@@ -36,6 +36,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio::io::AsyncWriteExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
 use self::csv::CsvFormat;
@@ -43,7 +44,8 @@ use self::json::JsonFormat;
 use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
-use crate::buffered_writer::{DfRecordBatchEncoder, LazyBufferedWriter};
+use crate::buffered_writer::DfRecordBatchEncoder;
+use crate::compressed_writer::IntoCompressedWriter;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
@@ -195,33 +197,75 @@ pub async fn infer_schemas(
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }
 
-pub async fn stream_to_file<T: DfRecordBatchEncoder, U: Fn(SharedBuffer) -> T>(
+/// Generic function to stream record batches to a file with compression support.
+/// This function handles the common logic for writing data to files with compression,
+/// allowing different file formats to use the same implementation.
+pub async fn stream_to_file<E>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: &str,
     threshold: usize,
     concurrency: usize,
-    encoder_factory: U,
-) -> Result<usize> {
+    compression_type: CompressionType,
+    encoder_factory: impl Fn(SharedBuffer) -> E,
+) -> Result<usize>
+where
+    E: DfRecordBatchEncoder,
+{
+    // Create the file writer with OpenDAL's built-in buffering
+    let writer = store
+        .writer_with(path)
+        .concurrent(concurrency)
+        .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+        .await
+        .with_context(|_| error::WriteObjectSnafu { path })?
+        .into_futures_async_write()
+        .compat_write();
+
+    // Apply compression if needed
+    let mut compressed_writer = writer.into_compressed_writer(compression_type);
+
+    // Create a buffer for the encoder
     let buffer = SharedBuffer::with_capacity(threshold);
-    let encoder = encoder_factory(buffer.clone());
-    let mut writer = LazyBufferedWriter::new(threshold, buffer, encoder, path, |path| async {
-        store
-            .writer_with(&path)
-            .concurrent(concurrency)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .await
-            .map(|v| v.into_futures_async_write().compat_write())
-            .context(error::WriteObjectSnafu { path })
-    });
+    let mut encoder = encoder_factory(buffer.clone());
 
     let mut rows = 0;
 
+    // Process each record batch
     while let Some(batch) = stream.next().await {
         let batch = batch.context(error::ReadRecordBatchSnafu)?;
-        writer.write(&batch).await?;
+
+        // Write batch using the encoder
+        encoder.write(&batch)?;
         rows += batch.num_rows();
+
+        // Flush encoded data to compressed writer
+        let data = {
+            let mut buffer_guard = buffer.buffer.lock().unwrap();
+            buffer_guard.split()
+        };
+        if !data.is_empty() {
+            compressed_writer
+                .write_all(&data)
+                .await
+                .context(error::AsyncWriteSnafu)?;
+        }
     }
-    writer.close_inner_writer().await?;
+
+    // Final flush of any remaining data
+    let final_data = {
+        let mut buffer_guard = buffer.buffer.lock().unwrap();
+        buffer_guard.split()
+    };
+    if !final_data.is_empty() {
+        compressed_writer
+            .write_all(&final_data)
+            .await
+            .context(error::AsyncWriteSnafu)?;
+    }
+
+    // Shutdown compression and close writer
+    compressed_writer.shutdown().await?;
+
     Ok(rows)
 }
