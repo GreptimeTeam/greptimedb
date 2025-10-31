@@ -40,10 +40,12 @@ use crate::http::extractor::TraceTableName;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
-    KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
-    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
-    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    KEY_OTEL_STATUS_ERROR_KEY, KEY_OTEL_STATUS_MESSAGE, KEY_OTEL_TRACE_STATE, KEY_SERVICE_NAME,
+    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
+    SPAN_STATUS_MESSAGE_COLUMN, SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -858,6 +860,38 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                             key: KEY_OTEL_STATUS_CODE.to_string(),
                             value_type: ValueType::String,
                             value: Value::String(normalize_status_code(&span_status)),
+                        });
+                        // set error to comply with the Jaeger API
+                        if span_status == SPAN_STATUS_ERROR {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_STATUS_ERROR_KEY.to_string(),
+                                value_type: ValueType::Boolean,
+                                value: Value::Boolean(true),
+                            });
+                        }
+                    }
+                }
+
+                SPAN_STATUS_MESSAGE_COLUMN => {
+                    if let JsonValue::String(span_status_message) = cell
+                        && !span_status_message.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_STATUS_MESSAGE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(span_status_message),
+                        });
+                    }
+                }
+
+                TRACE_STATE_COLUMN => {
+                    if let JsonValue::String(trace_state) = cell
+                        && !trace_state.is_empty()
+                    {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_TRACE_STATE.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(trace_state),
                         });
                     }
                 }
