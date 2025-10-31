@@ -27,9 +27,10 @@ use crate::error::Result;
 use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::span::{TraceSpan, parse};
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
-    SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN,
-    TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SCOPE_NAME_COLUMN,
+    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
@@ -135,11 +136,11 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id)),
         make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind)),
         make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name)),
-        make_string_column_data("span_status_code", Some(span.span_status_code)),
-        make_string_column_data("span_status_message", Some(span.span_status_message)),
-        make_string_column_data("trace_state", Some(span.trace_state)),
-        make_string_column_data("scope_name", Some(span.scope_name)),
-        make_string_column_data("scope_version", Some(span.scope_version)),
+        make_string_column_data(SPAN_STATUS_CODE, Some(span.span_status_code)),
+        make_string_column_data(SPAN_STATUS_MESSAGE_COLUMN, Some(span.span_status_message)),
+        make_string_column_data(TRACE_STATE_COLUMN, Some(span.trace_state)),
+        make_string_column_data(SCOPE_NAME_COLUMN, Some(span.scope_name)),
+        make_string_column_data(SCOPE_VERSION_COLUMN, Some(span.scope_version)),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
