@@ -130,7 +130,7 @@ pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFacto
 #[template]
 #[rstest]
 #[case::with_kafka(kafka_log_store_factory())]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[template]

@@ -37,7 +37,7 @@ use common_error::status_code::StatusCode;
 use common_runtime::RepeatedTask;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -270,7 +270,12 @@ impl RegionEngine for MetricEngine {
                     .await
                     .map_err(BoxedError::new)?;
                 debug_assert_eq!(response.len(), 1);
-                let (resp_region_id, response) = response.pop().unwrap();
+                let (resp_region_id, response) = response
+                    .pop()
+                    .context(error::UnexpectedRequestSnafu {
+                        reason: "expected 1 response, but got zero responses",
+                    })
+                    .map_err(BoxedError::new)?;
                 debug_assert_eq!(region_id, resp_region_id);
                 return response;
             }
@@ -723,19 +728,31 @@ mod test {
             .await
             .with_log_store_factory(kafka_log_store_factory.clone());
         let env = TestEnv::with_mito_env(mito_env).await;
-        let topic = prepare_test_for_kafka_log_store(&kafka_log_store_factory)
-            .await
-            .unwrap();
         let table_dir = |region_id| format!("table/{region_id}");
         let mut physical_region_ids = vec![];
         let mut logical_region_ids = vec![];
-        let wal_options = WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.clone(),
-        });
-        // Creates 3 physical regions
-        for i in 0..3 {
+
+        let num_topics = 3;
+        let num_physical_regions = 8;
+        let num_logical_regions = 16;
+        let parallelism = 2;
+        let mut topics = Vec::with_capacity(num_topics);
+        for _ in 0..num_topics {
+            let topic = prepare_test_for_kafka_log_store(&kafka_log_store_factory)
+                .await
+                .unwrap();
+            topics.push(topic);
+        }
+
+        let topic_idx = |id| (id as usize) % num_topics;
+        // Creates physical regions
+        for i in 0..num_physical_regions {
             let physical_region_id = RegionId::new(1, i);
             physical_region_ids.push(physical_region_id);
+
+            let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                topic: topics[topic_idx(i) as usize].clone(),
+            });
             env.create_physical_region(
                 physical_region_id,
                 &table_dir(physical_region_id),
@@ -745,8 +762,8 @@ mod test {
                 )],
             )
             .await;
-            // Creates 3 logical regions for each physical region
-            for j in 0..3 {
+            // Creates logical regions for each physical region
+            for j in 0..num_logical_regions {
                 let logical_region_id = RegionId::new(1024 + i, j);
                 logical_region_ids.push(logical_region_id);
                 env.create_logical_region(physical_region_id, logical_region_id)
@@ -763,16 +780,20 @@ mod test {
                 .unwrap();
         }
 
-        let mut options = HashMap::new();
-        options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
-        options.insert(
-            WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&wal_options).unwrap(),
-        );
         // Opens all regions and skip the wal
         let requests = physical_region_ids
             .iter()
-            .map(|region_id| {
+            .enumerate()
+            .map(|(idx, region_id)| {
+                let mut options = HashMap::new();
+                let wal_options = WalOptions::Kafka(KafkaWalOptions {
+                    topic: topics[topic_idx(idx as u32) as usize].clone(),
+                });
+                options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+                options.insert(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                );
                 (
                     *region_id,
                     RegionOpenRequest {
@@ -786,9 +807,9 @@ mod test {
                 )
             })
             .collect::<Vec<_>>();
-        info!("Open batch regions");
+        info!("Open batch regions with parallelism: {parallelism}");
         metric_engine
-            .handle_batch_open_requests(2, requests)
+            .handle_batch_open_requests(parallelism, requests)
             .await
             .unwrap();
         {
@@ -811,8 +832,14 @@ mod test {
             })
             .collect::<Vec<_>>();
         metric_engine
-            .handle_batch_catchup_requests(2, catch_requests)
+            .handle_batch_catchup_requests(parallelism, catch_requests)
             .await
             .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(state.logical_regions().contains_key(logical_region));
+            }
+        }
     }
 }
