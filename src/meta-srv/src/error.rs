@@ -17,12 +17,14 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
+use common_procedure::ProcedureId;
 use common_runtime::JoinError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
+use uuid::Uuid;
 
 use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
@@ -774,6 +776,129 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create repartition subtasks"))]
+    RepartitionCreateSubtasks {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize partition expression"))]
+    RepartitionSerializePartitionExpr {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Source partition expression '{}' does not match any existing region",
+        expr
+    ))]
+    RepartitionSourceExprMismatch {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Repartition group {} is missing a source region id", group_id))]
+    RepartitionMissingSourceRegionId {
+        group_id: Uuid,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Repartition group {} cannot find route for source region {}",
+        group_id,
+        region_id
+    ))]
+    RepartitionSourceRegionRouteMissing {
+        group_id: Uuid,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Repartition group {} has no source regions after planning", group_id))]
+    RepartitionNoSourceRegions {
+        group_id: Uuid,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Repartition group {} target {} is missing an allocated region id",
+        group_id,
+        target_index
+    ))]
+    RepartitionMissingTargetRegionId {
+        group_id: Uuid,
+        target_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Route for target region {} not found", region_id))]
+    RepartitionTargetRegionRouteMissing {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Repartition group {} is missing prepare context", group_id))]
+    RepartitionMissingPrepareContext {
+        group_id: Uuid,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Repartition group {} has no registered subprocedure", group_id))]
+    RepartitionSubprocedureUnknown {
+        group_id: Uuid,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to fetch state for repartition group {} subprocedure {}",
+        group_id,
+        procedure_id
+    ))]
+    RepartitionSubprocedureStateFetch {
+        group_id: Uuid,
+        procedure_id: ProcedureId,
+        #[snafu(source)]
+        source: common_procedure::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Repartition group {} subprocedure {} state missing",
+        group_id,
+        procedure_id
+    ))]
+    RepartitionSubprocedureStateMissing {
+        group_id: Uuid,
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Repartition group {} subprocedure {} failed: {}",
+        group_id,
+        procedure_id,
+        reason
+    ))]
+    RepartitionSubprocedureFailed {
+        group_id: Uuid,
+        procedure_id: ProcedureId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
@@ -997,6 +1122,11 @@ impl Error {
         matches!(self, Error::RetryLater { .. })
             || matches!(self, Error::RetryLaterWithSource { .. })
     }
+
+    /// Returns `true` if the error requires cleaning poison records.
+    pub fn need_clean_poisons(&self) -> bool {
+        false
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1012,6 +1142,8 @@ impl ErrorExt for Error {
             | Error::TcpBind { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
+            | Error::RepartitionCreateSubtasks { .. }
+            | Error::RepartitionSerializePartitionExpr { .. }
             | Error::NoLeader { .. }
             | Error::LeaderLeaseExpired { .. }
             | Error::LeaderLeaseChanged { .. }
@@ -1032,7 +1164,8 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::BuildKafkaClient { .. } => StatusCode::Internal,
+            | Error::BuildKafkaClient { .. }
+            | Error::RepartitionSubprocedureStateFetch { .. } => StatusCode::Internal,
 
             Error::DeleteRecords { .. }
             | Error::GetOffset { .. }
@@ -1066,7 +1199,14 @@ impl ErrorExt for Error {
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
             | Error::HandlerNotFound { .. }
-            | Error::LeaderPeerChanged { .. } => StatusCode::InvalidArguments,
+            | Error::LeaderPeerChanged { .. }
+            | Error::RepartitionSourceExprMismatch { .. }
+            | Error::RepartitionMissingSourceRegionId { .. }
+            | Error::RepartitionSourceRegionRouteMissing { .. }
+            | Error::RepartitionNoSourceRegions { .. }
+            | Error::RepartitionMissingTargetRegionId { .. }
+            | Error::RepartitionTargetRegionRouteMissing { .. }
+            | Error::RepartitionMissingPrepareContext { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
@@ -1080,7 +1220,10 @@ impl ErrorExt for Error {
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
-            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
+            | Error::RegionMigrated { .. }
+            | Error::RepartitionSubprocedureUnknown { .. }
+            | Error::RepartitionSubprocedureStateMissing { .. }
+            | Error::RepartitionSubprocedureFailed { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }

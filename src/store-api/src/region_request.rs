@@ -179,6 +179,30 @@ impl RegionRequest {
                 reason: "ListMetadata request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::Pause(_) => UnexpectedSnafu {
+                reason: "Pause request should be handled separately by RegionServer",
+            }
+            .fail(),
+            region_request::Body::Resume(_) => UnexpectedSnafu {
+                reason: "Resume request should be handled separately by RegionServer",
+            }
+            .fail(),
+            region_request::Body::StageRegionRule(_) => UnexpectedSnafu {
+                reason: "StageRegionRule request should be handled separately by RegionServer",
+            }
+            .fail(),
+            region_request::Body::PublishRegionRule(_) => UnexpectedSnafu {
+                reason: "PublishRegionRule request should be handled separately by RegionServer",
+            }
+            .fail(),
+            region_request::Body::RemapManifest(_) => UnexpectedSnafu {
+                reason: "RemapManifest request should be handled separately by RegionServer",
+            }
+            .fail(),
+            region_request::Body::ApplyStagedManifest(_) => UnexpectedSnafu {
+                reason: "ApplyStagedManifest request should be handled separately by RegionServer",
+            }
+            .fail(),
         }
     }
 
