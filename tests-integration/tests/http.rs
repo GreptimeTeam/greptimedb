@@ -1584,6 +1584,8 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "enable_virtual_host_style =",
         "cache_path =",
         "cache_capacity =",
+        "memory_pool_size =",
+        "scan_memory_limit =",
         "sas_token =",
         "scope =",
         "num_workers =",

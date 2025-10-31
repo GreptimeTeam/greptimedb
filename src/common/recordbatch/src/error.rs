@@ -193,6 +193,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Exceeded memory limit: {}", msg))]
+    ExceedMemoryLimit {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -229,6 +236,8 @@ impl ErrorExt for Error {
             Error::StreamTimeout { .. } => StatusCode::Cancelled,
 
             Error::StreamCancelled { .. } => StatusCode::Cancelled,
+
+            Error::ExceedMemoryLimit { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

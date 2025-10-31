@@ -10121,6 +10121,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-stat",
  "common-telemetry",
  "common-time",
  "datafusion",
