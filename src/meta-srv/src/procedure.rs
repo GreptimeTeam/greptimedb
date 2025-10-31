@@ -19,6 +19,7 @@ use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
 pub mod region_migration;
+pub mod repartition;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
