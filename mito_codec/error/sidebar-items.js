@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["DeserializeFieldSnafu","FieldTypeMismatchSnafu","IndexEncodeNullSnafu","NotSupportedFieldSnafu","SerializeFieldSnafu","UnsupportedOperationSnafu"],"type":["Result"]};

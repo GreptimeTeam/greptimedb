@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FLAT_SCAN_CHANNEL_SIZE"],"enum":["Scanner"],"fn":["file_in_range","pre_filter_mode"],"struct":["PredicateGroup","ScanInput","ScanRegion","StreamContext"]};
