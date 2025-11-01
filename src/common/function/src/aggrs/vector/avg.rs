@@ -16,6 +16,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, LargeStringArray, StringArray};
+use arrow::compute::sum;
+use arrow::datatypes::UInt64Type;
 use arrow_schema::{DataType, Field};
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{
@@ -33,7 +35,6 @@ use crate::scalars::vector::impl_conv::{
 pub struct VectorAvg {
     sum: Option<OVector<f32, Dyn>>,
     count: u64,
-    has_null: bool,
 }
 
 impl VectorAvg {
@@ -52,7 +53,10 @@ impl VectorAvg {
             signature,
             DataType::Binary,
             Arc::new(Self::accumulator),
-            vec![Arc::new(Field::new("x", DataType::Binary, true))],
+            vec![
+                Arc::new(Field::new("sum", DataType::Binary, true)),
+                Arc::new(Field::new("count", DataType::UInt64, true)),
+            ],
         );
         AggregateUDF::from(udaf)
     }
@@ -81,7 +85,7 @@ impl VectorAvg {
     }
 
     fn update(&mut self, values: &[ArrayRef], is_update: bool) -> Result<()> {
-        if values.is_empty() || self.has_null {
+        if values.is_empty() {
             return Ok(());
         };
 
@@ -114,16 +118,16 @@ impl VectorAvg {
             }
         };
 
-        if vectors.len() != values[0].len() {
-            if is_update {
-                self.has_null = true;
-                self.sum = None;
-                self.count = 0;
-            }
+        if vectors.is_empty() {
             return Ok(());
         }
 
-        let len = vectors.len();
+        let len = if is_update {
+            vectors.len() as u64
+        } else {
+            sum(values[1].as_primitive::<UInt64Type>()).unwrap_or_default()
+        };
+
         let dims = vectors[0].len();
         let mut sum = DVector::zeros(dims);
         for v in vectors {
@@ -132,7 +136,7 @@ impl VectorAvg {
         }
 
         *self.inner(dims) += sum;
-        self.count += len as u64;
+        self.count += len;
 
         Ok(())
     }
@@ -140,7 +144,11 @@ impl VectorAvg {
 
 impl Accumulator for VectorAvg {
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        self.evaluate().map(|v| vec![v])
+        let vector = match &self.sum {
+            None => ScalarValue::Binary(None),
+            Some(sum) => ScalarValue::Binary(Some(veclit_to_binlit(sum.as_slice()))),
+        };
+        Ok(vec![vector, ScalarValue::from(self.count)])
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
@@ -181,7 +189,6 @@ mod tests {
         let mut vec_avg = VectorAvg::default();
         vec_avg.update_batch(&[]).unwrap();
         assert!(vec_avg.sum.is_none());
-        assert!(!vec_avg.has_null);
         assert_eq!(ScalarValue::Binary(None), vec_avg.evaluate().unwrap());
 
         // test update one not-null value
@@ -223,7 +230,22 @@ mod tests {
             Some("[7.0,8.0,9.0]".to_string()),
         ]))];
         vec_avg.update_batch(&v).unwrap();
-        assert_eq!(ScalarValue::Binary(None), vec_avg.evaluate().unwrap());
+        assert_eq!(
+            ScalarValue::Binary(Some(veclit_to_binlit(&[4.0, 5.0, 6.0]))),
+            vec_avg.evaluate().unwrap()
+        );
+
+        let mut vec_avg = VectorAvg::default();
+        let v: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
+            None,
+            Some("[4.0,5.0,6.0]".to_string()),
+            Some("[7.0,8.0,9.0]".to_string()),
+        ]))];
+        vec_avg.update_batch(&v).unwrap();
+        assert_eq!(
+            ScalarValue::Binary(Some(veclit_to_binlit(&[5.5, 6.5, 7.5]))),
+            vec_avg.evaluate().unwrap()
+        );
 
         // test update with constant vector
         let mut vec_avg = VectorAvg::default();
