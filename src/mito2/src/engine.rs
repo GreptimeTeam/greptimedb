@@ -277,10 +277,6 @@ impl MitoEngine {
         &self.inner.config
     }
 
-    pub fn scan_memory_tracker(&self) -> QueryMemoryTracker {
-        self.inner.scan_memory_tracker.clone()
-    }
-
     pub fn cache_manager(&self) -> CacheManagerRef {
         self.inner.workers.cache_manager()
     }

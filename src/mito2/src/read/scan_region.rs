@@ -350,8 +350,8 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input().await?;
-        Ok(SeqScan::new(input.with_compaction(false)))
+        let input = self.scan_input().await?.with_compaction(false);
+        Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
