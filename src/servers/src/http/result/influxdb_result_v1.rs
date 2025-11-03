@@ -139,13 +139,13 @@ impl RowWriter {
         for i in 0..record_batch.num_rows() {
             for array in record_batch.columns().iter() {
                 if array.is_null(i) {
-                    self.push(())?;
+                    self.push(datatypes::value::Value::Null)?;
                     continue;
                 }
 
                 match array.data_type() {
                     DataType::Null => {
-                        self.push(())?;
+                        self.push(datatypes::value::Value::Null)?;
                     }
                     DataType::Boolean => {
                         let array = array.as_boolean();
