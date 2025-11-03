@@ -873,6 +873,12 @@ impl From<&[u8]> for Value {
     }
 }
 
+impl From<()> for Value {
+    fn from(_: ()) -> Self {
+        Value::Null
+    }
+}
+
 impl TryFrom<Value> for serde_json::Value {
     type Error = serde_json::Error;
 

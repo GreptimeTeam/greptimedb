@@ -76,6 +76,17 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env with specific `prefix` and `mito_env` for test.
+    pub async fn with_mito_env(mut mito_env: MitoTestEnv) -> Self {
+        let mito = mito_env.create_engine(MitoConfig::default()).await;
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     pub fn data_home(&self) -> String {
         let env_root = self.mito_env.data_home().to_string_lossy().to_string();
         join_dir(&env_root, "data")
@@ -125,7 +136,12 @@ impl TestEnv {
     }
 
     /// Create regions in [MetricEngine] with specific `physical_region_id`.
-    pub async fn create_physical_region(&self, physical_region_id: RegionId, table_dir: &str) {
+    pub async fn create_physical_region(
+        &self,
+        physical_region_id: RegionId,
+        table_dir: &str,
+        options: Vec<(String, String)>,
+    ) {
         let region_create_request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -151,6 +167,7 @@ impl TestEnv {
             primary_key: vec![],
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
+                .chain(options.into_iter())
                 .collect(),
             table_dir: table_dir.to_string(),
             path_type: PathType::Bare, // Use Bare path type for engine regions
@@ -231,7 +248,7 @@ impl TestEnv {
     /// under [`default_logical_region_id`].
     pub async fn init_metric_region(&self) {
         let physical_region_id = self.default_physical_region_id();
-        self.create_physical_region(physical_region_id, &Self::default_table_dir())
+        self.create_physical_region(physical_region_id, &Self::default_table_dir(), vec![])
             .await;
         let logical_region_id = self.default_logical_region_id();
         self.create_logical_region(physical_region_id, logical_region_id)
@@ -422,6 +439,22 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
         rows.push(Row { values });
     }
     rows
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```text
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_kafka_log_store_integration_test {
+    () => {
+        if std::env::var("GT_KAFKA_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The kafka endpoints is empty, skipping the test");
+            return;
+        }
+    };
 }
 
 #[cfg(test)]

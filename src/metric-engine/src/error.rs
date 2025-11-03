@@ -156,13 +156,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Mito catchup operation fails"))]
-    MitoCatchupOperation {
-        source: BoxedError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Mito sync operation fails"))]
     MitoSyncOperation {
         source: BoxedError,
@@ -364,7 +357,6 @@ impl ErrorExt for Error {
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
-            | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoDeleteOperation { source, .. }
             | MitoSyncOperation { source, .. }

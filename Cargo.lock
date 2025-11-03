@@ -7504,6 +7504,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "common-wal",
  "datafusion",
  "datatypes",
  "futures-util",
