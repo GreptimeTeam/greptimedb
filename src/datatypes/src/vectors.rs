@@ -35,6 +35,7 @@ mod duration;
 mod eq;
 mod helper;
 mod interval;
+pub(crate) mod json;
 mod list;
 mod null;
 pub(crate) mod operations;
