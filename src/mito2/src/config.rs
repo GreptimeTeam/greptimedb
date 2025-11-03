@@ -119,8 +119,8 @@ pub struct MitoConfig {
     /// TTL for write cache.
     #[serde(with = "humantime_serde")]
     pub write_cache_ttl: Option<Duration>,
-    /// Parallelism for cache fill operations (default: 1). Set to 0 to disable cache filling.
-    pub cache_fill_parallelism: usize,
+    /// Preload index (puffin) files into cache on region open (default: true).
+    pub preload_index_cache: bool,
     /// Percentage of write cache capacity allocated for index (puffin) files (default: 20).
     /// The remaining capacity is used for data (parquet) files.
     /// Must be between 0 and 100 (exclusive).
@@ -185,7 +185,7 @@ impl Default for MitoConfig {
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
             write_cache_ttl: None,
-            cache_fill_parallelism: 1,
+            preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,

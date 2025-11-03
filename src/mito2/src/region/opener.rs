@@ -54,7 +54,7 @@ use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderProvider;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_TOTAL_FILES};
+use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -844,99 +844,95 @@ fn spawn_cache_fill_task(
     let object_store = access_layer.object_store().clone();
     let version_control = version_control.clone();
 
-    let parallelism = config.cache_fill_parallelism;
+    let preload_enabled = config.preload_index_cache;
 
     common_runtime::spawn_global(async move {
-        if parallelism == 0 {
+        if !preload_enabled {
             return;
         }
 
-        // First pass: collect IndexKeys and file sizes for files that need to be downloaded
-        let mut files_to_download_list = Vec::new();
-        let mut files_skipped = 0;
+        // Collects IndexKeys and file sizes for files that need to be downloaded
+        let mut files_to_download = Vec::new();
+        let mut files_already_cached = 0;
 
         {
             let version = version_control.current().version;
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
-                    // Only collect Puffin (index) files if they exist
                     if file_meta.exists_index() {
                         let puffin_key =
                             IndexKey::new(file_meta.region_id, file_meta.file_id, FileType::Puffin);
 
                         if !write_cache.file_cache().contains_key(&puffin_key) {
-                            files_to_download_list.push((puffin_key, file_meta.index_file_size));
+                            files_to_download.push((puffin_key, file_meta.index_file_size));
                         } else {
-                            files_skipped += 1;
+                            files_already_cached += 1;
                         }
                     }
                 }
             }
         }
-        let files_to_download = files_to_download_list.len() as i64;
+        let total_files = files_to_download.len() as i64;
 
         info!(
-            "Starting background cache fill task for region {}, total_files_to_download: {}, files_already_cached: {}, parallelism: {}",
-            region_id, files_to_download, files_skipped, parallelism
+            "Starting background index cache preload for region {}, total_files_to_download: {}, files_already_cached: {}",
+            region_id, total_files, files_already_cached
         );
 
-        // Increment the total files counter
-        CACHE_FILL_TOTAL_FILES.inc_by(files_to_download as u64);
+        CACHE_FILL_PENDING_FILES.add(total_files);
 
-        // Second pass: download the files in parallel
         let mut files_downloaded = 0;
+        let mut files_skipped = 0;
 
-        // Process files in chunks based on parallelism
-        for chunk in files_to_download_list.chunks(parallelism) {
-            let futures = chunk.iter().map(|(puffin_key, file_size)| {
-                let write_cache = write_cache.clone();
-                let table_dir = table_dir.clone();
-                let object_store = object_store.clone();
-                let puffin_key = *puffin_key;
-                let file_size = *file_size;
+        for (puffin_key, file_size) in files_to_download {
+            let file_cache = write_cache.file_cache();
+            let current_size = file_cache.puffin_cache_size();
+            let capacity = file_cache.puffin_cache_capacity();
 
-                async move {
-                    let index_remote_path = location::index_file_path(
-                        &table_dir,
-                        RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                        path_type,
+            // Checks if adding this file would exceed capacity
+            if current_size + file_size > capacity {
+                info!(
+                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}",
+                    region_id, puffin_key.file_id, current_size, file_size, capacity
+                );
+                files_skipped = (total_files - files_downloaded) as usize;
+                CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
+                break;
+            }
+
+            let index_remote_path = location::index_file_path(
+                &table_dir,
+                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
+                path_type,
+            );
+
+            match write_cache
+                .download(puffin_key, &index_remote_path, &object_store, file_size)
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                        "Downloaded index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
                     );
-
-                    match write_cache
-                        .download(puffin_key, &index_remote_path, &object_store, file_size)
-                        .await
-                    {
-                        Ok(_) => {
-                            debug!(
-                                "Downloaded index file to write cache, region: {}, file_id: {}",
-                                region_id, puffin_key.file_id
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            warn!(
-                                e; "Failed to download index file to write cache, region: {}, file_id: {}",
-                                region_id, puffin_key.file_id
-                            );
-                            false
-                        }
-                    }
+                    files_downloaded += 1;
+                    CACHE_FILL_DOWNLOADED_FILES.inc_by(1);
+                    CACHE_FILL_PENDING_FILES.dec();
                 }
-            });
-
-            // Wait for all downloads in this chunk to complete
-            let results = futures::future::join_all(futures).await;
-
-            // Count successful downloads and update metric
-            let chunk_downloaded = results.iter().filter(|&&success| success).count() as i64;
-            files_downloaded += chunk_downloaded;
-            CACHE_FILL_DOWNLOADED_FILES.inc_by(chunk_downloaded as u64);
+                Err(e) => {
+                    warn!(
+                        e; "Failed to download index file to write cache, region: {}, file_id: {}",
+                        region_id, puffin_key.file_id
+                    );
+                    CACHE_FILL_PENDING_FILES.dec();
+                }
+            }
         }
 
         info!(
-            "Completed background cache fill task for region {}, files_to_download: {}, files_downloaded: {}, files_skipped: {}",
-            region_id, files_to_download, files_downloaded, files_skipped
+            "Completed background cache fill task for region {}, total_files: {}, files_downloaded: {}, files_already_cached: {}, files_skipped: {}",
+            region_id, total_files, files_downloaded, files_already_cached, files_skipped
         );
     });
 }

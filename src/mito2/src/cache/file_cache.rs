@@ -59,6 +59,8 @@ pub(crate) struct FileCache {
     parquet_index: Cache<IndexKey, IndexValue>,
     /// Index to track cached Puffin files.
     puffin_index: Cache<IndexKey, IndexValue>,
+    /// Capacity of the puffin (index) cache in bytes.
+    puffin_capacity: u64,
 }
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
@@ -101,6 +103,7 @@ impl FileCache {
             local_store,
             parquet_index,
             puffin_index,
+            puffin_capacity,
         }
     }
 
@@ -408,6 +411,16 @@ impl FileCache {
     /// Checks if the key is in the file cache.
     pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
         self.memory_index(key.file_type).contains_key(key)
+    }
+
+    /// Returns the capacity of the puffin (index) cache in bytes.
+    pub(crate) fn puffin_cache_capacity(&self) -> u64 {
+        self.puffin_capacity
+    }
+
+    /// Returns the current weighted size (used bytes) of the puffin (index) cache.
+    pub(crate) fn puffin_cache_size(&self) -> u64 {
+        self.puffin_index.weighted_size()
     }
 }
 

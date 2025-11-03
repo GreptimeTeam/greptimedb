@@ -470,10 +470,10 @@ lazy_static! {
         "mito cache fill downloaded files count",
     ).unwrap();
 
-    /// Total number of files to download during cache fill on region open.
-    pub static ref CACHE_FILL_TOTAL_FILES: IntCounter = register_int_counter!(
-        "mito_cache_fill_total_files",
-        "mito cache fill total files to download count",
+    /// Number of files pending download during cache fill on region open.
+    pub static ref CACHE_FILL_PENDING_FILES: IntGauge = register_int_gauge!(
+        "mito_cache_fill_pending_files",
+        "mito cache fill pending files count",
     ).unwrap();
 }
 
