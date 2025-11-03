@@ -18,8 +18,6 @@
 
 #![feature(assert_matches)]
 #![feature(int_roundings)]
-// Required for deep macro expansion in prometheus histogram_opts! (see metrics.rs).
-#![recursion_limit = "256"]
 #![feature(debug_closure_helpers)]
 #![feature(duration_constructors)]
 
