@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
@@ -223,8 +223,6 @@ pub(crate) struct ScanRegion {
     filter_deleted: bool,
     /// Whether to use flat format.
     flat_format: bool,
-    /// Memory tracker for the query.
-    query_memory_tracker: Option<QueryMemoryTracker>,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -250,7 +248,6 @@ impl ScanRegion {
             start_time: None,
             filter_deleted: true,
             flat_format: false,
-            query_memory_tracker: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
@@ -314,13 +311,6 @@ impl ScanRegion {
         self
     }
 
-    /// Sets memory tracker for the query.
-    #[must_use]
-    pub(crate) fn with_query_memory_tracker(mut self, tracker: QueryMemoryTracker) -> Self {
-        self.query_memory_tracker = Some(tracker);
-        self
-    }
-
     #[cfg(feature = "enterprise")]
     pub(crate) fn set_extension_range_provider(
         &mut self,
@@ -360,20 +350,20 @@ impl ScanRegion {
 
     /// Scan sequentially.
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
-        let (input, tracker) = self.scan_input().await?;
-        Ok(SeqScan::new(input.with_compaction(false), tracker))
+        let input = self.scan_input().await?;
+        Ok(SeqScan::new(input.with_compaction(false)))
     }
 
     /// Unordered scan.
     pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
-        let (input, tracker) = self.scan_input().await?;
-        Ok(UnorderedScan::new(input, tracker))
+        let input = self.scan_input().await?;
+        Ok(UnorderedScan::new(input))
     }
 
     /// Scans by series.
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
-        let (input, tracker) = self.scan_input().await?;
-        Ok(SeriesScan::new(input, tracker))
+        let input = self.scan_input().await?;
+        Ok(SeriesScan::new(input))
     }
 
     /// Returns true if the region can use unordered scan for current request.
@@ -396,7 +386,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
-    async fn scan_input(mut self) -> Result<(ScanInput, Option<QueryMemoryTracker>)> {
+    async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
@@ -531,7 +521,7 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok((input, self.query_memory_tracker))
+        Ok(input)
     }
 
     fn region_id(&self) -> RegionId {

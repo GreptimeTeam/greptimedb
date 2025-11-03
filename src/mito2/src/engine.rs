@@ -83,7 +83,7 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
+use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
@@ -964,8 +964,7 @@ impl EngineInner {
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start)
-        .with_flat_format(self.config.default_experimental_flat_format)
-        .with_query_memory_tracker(self.scan_memory_tracker.clone());
+        .with_flat_format(self.config.default_experimental_flat_format);
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -1129,6 +1128,10 @@ impl RegionEngine for MitoEngine {
             .region_scanner()
             .await
             .map_err(BoxedError::new)
+    }
+
+    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+        Some(Arc::new(self.inner.scan_memory_tracker.register_permit()))
     }
 
     async fn get_committed_sequence(

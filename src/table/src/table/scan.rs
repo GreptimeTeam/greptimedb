@@ -19,7 +19,10 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    DfRecordBatch, DfSendableRecordBatchStream, MemoryPermit, MemoryTrackedStream,
+    SendableRecordBatchStream,
+};
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
@@ -49,7 +52,6 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 use crate::table::metrics::StreamMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
-#[derive(Debug)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
@@ -63,10 +65,32 @@ pub struct RegionScanExec {
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
     explain_verbose: bool,
+    query_memory_permit: Option<Arc<MemoryPermit>>,
+}
+
+impl std::fmt::Debug for RegionScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegionScanExec")
+            .field("scanner", &self.scanner)
+            .field("arrow_schema", &self.arrow_schema)
+            .field("output_ordering", &self.output_ordering)
+            .field("metric", &self.metric)
+            .field("properties", &self.properties)
+            .field("append_mode", &self.append_mode)
+            .field("total_rows", &self.total_rows)
+            .field("is_partition_set", &self.is_partition_set)
+            .field("distribution", &self.distribution)
+            .field("explain_verbose", &self.explain_verbose)
+            .finish()
+    }
 }
 
 impl RegionScanExec {
-    pub fn new(scanner: RegionScannerRef, request: ScanRequest) -> DfResult<Self> {
+    pub fn new(
+        scanner: RegionScannerRef,
+        request: ScanRequest,
+        query_memory_permit: Option<Arc<MemoryPermit>>,
+    ) -> DfResult<Self> {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
         let mut num_output_partition = scanner_props.num_partitions();
@@ -170,6 +194,7 @@ impl RegionScanExec {
             is_partition_set: false,
             distribution: request.distribution,
             explain_verbose: false,
+            query_memory_permit,
         })
     }
 
@@ -237,6 +262,7 @@ impl RegionScanExec {
             is_partition_set: true,
             distribution: self.distribution,
             explain_verbose: self.explain_verbose,
+            query_memory_permit: self.query_memory_permit.clone(),
         })
     }
 
@@ -320,6 +346,13 @@ impl ExecutionPlan for RegionScanExec {
             .unwrap()
             .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let stream = if let Some(permit) = &self.query_memory_permit {
+            Box::pin(MemoryTrackedStream::new(stream, permit.clone()))
+        } else {
+            stream
+        };
+
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
@@ -511,7 +544,7 @@ mod test {
         let region_metadata = Arc::new(builder.build().unwrap());
 
         let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
-        let plan = RegionScanExec::new(scanner, ScanRequest::default()).unwrap();
+        let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties

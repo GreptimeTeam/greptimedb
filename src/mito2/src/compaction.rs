@@ -641,16 +641,14 @@ impl CompactionSstReaderBuilder<'_> {
     async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
         let scan_input = self.build_scan_input(false)?.with_compaction(true);
 
-        SeqScan::new(scan_input, None)
-            .build_reader_for_compaction()
-            .await
+        SeqScan::new(scan_input).build_reader_for_compaction().await
     }
 
     /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
     async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
         let scan_input = self.build_scan_input(true)?.with_compaction(true);
 
-        SeqScan::new(scan_input, None)
+        SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
             .await
     }
