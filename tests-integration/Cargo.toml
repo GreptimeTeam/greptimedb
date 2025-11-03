@@ -73,8 +73,7 @@ session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
+sqlx = { workspace = true, features = [
     "mysql",
     "postgres",
     "chrono",
