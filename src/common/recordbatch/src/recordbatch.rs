@@ -23,7 +23,6 @@ use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef a
 use datatypes::arrow::array::RecordBatchOptions;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
-use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
@@ -194,11 +193,6 @@ impl RecordBatch {
         self.df_record_batch.num_rows()
     }
 
-    /// Create an iterator to traverse the data by row
-    pub fn rows(&self) -> RecordBatchRowIterator<'_> {
-        RecordBatchRowIterator::new(self)
-    }
-
     pub fn column_vectors(
         &self,
         table_name: &str,
@@ -277,44 +271,6 @@ impl Serialize for RecordBatch {
     }
 }
 
-pub struct RecordBatchRowIterator<'a> {
-    record_batch: &'a RecordBatch,
-    rows: usize,
-    columns: usize,
-    row_cursor: usize,
-}
-
-impl<'a> RecordBatchRowIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator<'a> {
-        RecordBatchRowIterator {
-            record_batch,
-            rows: record_batch.df_record_batch.num_rows(),
-            columns: record_batch.df_record_batch.num_columns(),
-            row_cursor: 0,
-        }
-    }
-}
-
-impl Iterator for RecordBatchRowIterator<'_> {
-    type Item = Vec<Value>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.row_cursor == self.rows {
-            None
-        } else {
-            let mut row = Vec::with_capacity(self.columns);
-
-            for col in 0..self.columns {
-                let column = self.record_batch.column(col);
-                row.push(column.get(self.row_cursor));
-            }
-
-            self.row_cursor += 1;
-            Some(row)
-        }
-    }
-}
-
 /// merge multiple recordbatch into a single
 pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
     let batches_len = batches.len();
@@ -349,7 +305,9 @@ pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Resul
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use datatypes::arrow::array::{AsArray, UInt32Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
+    use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
@@ -408,64 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn test_record_batch_visitor() {
-        let column_schemas = vec![
-            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
-            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
-        ];
-        let schema = Arc::new(Schema::new(column_schemas));
-        let columns: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
-            Arc::new(StringVector::from(vec![
-                None,
-                Some("hello"),
-                Some("greptime"),
-                None,
-            ])),
-        ];
-        let recordbatch = RecordBatch::new(schema, columns).unwrap();
-
-        let mut record_batch_iter = recordbatch.rows();
-        assert_eq!(
-            vec![Value::UInt32(1), Value::Null],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(2), Value::String("hello".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(3), Value::String("greptime".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert_eq!(
-            vec![Value::UInt32(4), Value::Null],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
-
-        assert!(record_batch_iter.next().is_none());
-    }
-
-    #[test]
     fn test_record_batch_slice() {
         let column_schemas = vec![
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
@@ -483,26 +383,16 @@ mod tests {
         ];
         let recordbatch = RecordBatch::new(schema, columns).unwrap();
         let recordbatch = recordbatch.slice(1, 2).expect("recordbatch slice");
-        let mut record_batch_iter = recordbatch.rows();
-        assert_eq!(
-            vec![Value::UInt32(2), Value::String("hello".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
 
-        assert_eq!(
-            vec![Value::UInt32(3), Value::String("greptime".into())],
-            record_batch_iter
-                .next()
-                .unwrap()
-                .into_iter()
-                .collect::<Vec<Value>>()
-        );
+        let expected = &UInt32Array::from_iter_values([2u32, 3]);
+        let array = recordbatch.column(0).to_arrow_array();
+        let actual = array.as_primitive::<UInt32Type>();
+        assert_eq!(expected, actual);
 
-        assert!(record_batch_iter.next().is_none());
+        let expected = &StringArray::from(vec!["hello", "greptime"]);
+        let array = recordbatch.column(1).to_arrow_array();
+        let actual = array.as_string::<i32>();
+        assert_eq!(expected, actual);
 
         assert!(recordbatch.slice(1, 5).is_err());
     }
