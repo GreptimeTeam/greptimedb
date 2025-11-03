@@ -62,10 +62,16 @@ impl WriteCache {
         local_store: ObjectStore,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = Arc::new(FileCache::new(local_store, cache_capacity, ttl));
+        let file_cache = Arc::new(FileCache::new(
+            local_store,
+            cache_capacity,
+            ttl,
+            index_cache_percent,
+        ));
         file_cache.recover(false).await;
 
         Ok(Self {
@@ -80,6 +86,7 @@ impl WriteCache {
         cache_dir: &str,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
@@ -90,6 +97,7 @@ impl WriteCache {
             local_store,
             cache_capacity,
             ttl,
+            index_cache_percent,
             puffin_manager_factory,
             intermediate_manager,
         )

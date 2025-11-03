@@ -567,6 +567,7 @@ impl RegionOpener {
             &version_control,
             &self.cache_manager,
             &access_layer,
+            config,
         );
 
         Ok(Some(region))
@@ -828,6 +829,7 @@ fn spawn_cache_fill_task(
     version_control: &VersionControlRef,
     cache_manager: &Option<CacheManagerRef>,
     access_layer: &AccessLayerRef,
+    config: &MitoConfig,
 ) {
     let Some(cache_manager) = cache_manager else {
         return;
@@ -842,12 +844,9 @@ fn spawn_cache_fill_task(
     let object_store = access_layer.object_store().clone();
     let version_control = version_control.clone();
 
+    let parallelism = config.cache_fill_parallelism;
+
     common_runtime::spawn_global(async move {
-        // Read parallelism from environment variable, default to 1
-        let parallelism = std::env::var("CACHE_FILL_PARALLELISM")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1);
         if parallelism == 0 {
             return;
         }

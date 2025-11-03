@@ -43,11 +43,8 @@ use crate::sst::parquet::metadata::MetadataLoader;
 /// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
 const FILE_DIR: &str = "cache/object/write/";
 
-/// Environment variable for index (puffin) cache ratio.
-const INDEX_CACHE_RATIO_ENV: &str = "INDEX_CACHE_RATIO";
-
-/// Default ratio for index (puffin) cache (60% of total capacity).
-const DEFAULT_INDEX_CACHE_RATIO: f64 = 0.6;
+/// Default percentage for index (puffin) cache (20% of total capacity).
+pub(crate) const DEFAULT_INDEX_CACHE_PERCENT: u8 = 20;
 
 /// Minimum capacity for each cache (512MB).
 const MIN_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
@@ -66,28 +63,22 @@ pub(crate) struct FileCache {
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
 
-/// Reads the index cache ratio from environment variable.
-/// Returns the default ratio (0.6) if the env var is not set or invalid.
-fn get_index_cache_ratio() -> f64 {
-    std::env::var(INDEX_CACHE_RATIO_ENV)
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|&ratio| ratio > 0.0 && ratio < 1.0)
-        .unwrap_or(DEFAULT_INDEX_CACHE_RATIO)
-}
-
 impl FileCache {
     /// Creates a new file cache.
     pub(crate) fn new(
         local_store: ObjectStore,
         capacity: ReadableSize,
         ttl: Option<Duration>,
+        index_cache_percent: Option<u8>,
     ) -> FileCache {
-        // Get the ratio for puffin/index cache from environment variable
-        let index_ratio = get_index_cache_ratio();
+        // Validate and use the provided percent or default
+        let index_percent = index_cache_percent
+            .filter(|&percent| percent > 0 && percent < 100)
+            .unwrap_or(DEFAULT_INDEX_CACHE_PERCENT);
         let total_capacity = capacity.as_bytes();
 
-        // Calculate capacity for each cache based on the ratio
+        // Convert percent to ratio and calculate capacity for each cache
+        let index_ratio = index_percent as f64 / 100.0;
         let puffin_capacity = (total_capacity as f64 * index_ratio) as u64;
         let parquet_capacity = total_capacity - puffin_capacity;
 
@@ -96,8 +87,8 @@ impl FileCache {
         let parquet_capacity = parquet_capacity.max(MIN_CACHE_CAPACITY);
 
         info!(
-            "Initializing file cache with index_ratio: {}, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
-            index_ratio,
+            "Initializing file cache with index_percent: {}%, total_capacity: {}, parquet_capacity: {}, puffin_capacity: {}",
+            index_percent,
             ReadableSize(total_capacity),
             ReadableSize(parquet_capacity),
             ReadableSize(puffin_capacity)
@@ -537,6 +528,7 @@ mod tests {
             local_store.clone(),
             ReadableSize::mb(10),
             Some(Duration::from_millis(10)),
+            None,
         );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
@@ -573,7 +565,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -621,7 +613,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -653,7 +645,7 @@ mod tests {
     async fn test_file_cache_recover() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
 
         let region_id = RegionId::new(2000, 0);
         let file_type = FileType::Parquet;
@@ -683,6 +675,7 @@ mod tests {
             local_store.clone(),
             ReadableSize::mb(10),
             None,
+            None,
         ));
         // No entry before recovery.
         assert!(
@@ -709,7 +702,7 @@ mod tests {
     async fn test_file_cache_read_ranges() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None, None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);

@@ -1714,6 +1714,7 @@ mod tests {
                 dir.path().to_str().unwrap(),
                 ReadableSize::mb(10),
                 None,
+                None,
                 factory,
                 intm_manager,
             )

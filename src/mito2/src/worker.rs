@@ -450,6 +450,7 @@ pub async fn write_cache_from_config(
         &config.write_cache_path,
         config.write_cache_size,
         config.write_cache_ttl,
+        Some(config.index_cache_percent),
         puffin_manager_factory,
         intermediate_manager,
     )
