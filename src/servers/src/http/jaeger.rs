@@ -656,7 +656,10 @@ async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> 
                     .await
                     .context(CollectRecordbatchSnafu)?,
             )?;
-            debug!("The query records: {:?}", records);
+            debug!(
+                "The query records: {}",
+                serde_json::to_string(&records).unwrap()
+            );
             Ok(Some(records))
         }
         // It's unlikely to happen. However, if the output is not a stream, return None.

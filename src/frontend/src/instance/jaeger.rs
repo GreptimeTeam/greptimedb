@@ -338,7 +338,7 @@ async fn query_trace_table(
         .table_info()
         .meta
         .field_column_names()
-        .cloned()
+        .map(|s| format!("\"{}\"", s))
         .collect::<HashSet<String>>();
 
     let df_context = create_df_context(query_engine)?;
