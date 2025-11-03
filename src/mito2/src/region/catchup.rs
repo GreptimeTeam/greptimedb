@@ -38,14 +38,13 @@ pub struct RegionCatchupTask<S> {
 impl<S: LogStore> RegionCatchupTask<S> {
     pub fn new(region: Arc<MitoRegion>, wal: Wal<S>, allow_stale_entries: bool) -> Self {
         Self {
-            region,
-
-            allow_stale_entries,
-            wal,
             entry_receiver: None,
+            region,
             replay_checkpoint_entry_id: None,
             expected_last_entry_id: None,
+            allow_stale_entries,
             location_id: None,
+            wal,
         }
     }
 
@@ -91,7 +90,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
         let flushed_entry_id = self.region.version_control.current().last_entry_id;
         let replay_from_entry_id = self
             .replay_checkpoint_entry_id
-            .unwrap_or_default()
+            .unwrap_or(flushed_entry_id)
             .max(flushed_entry_id);
         let region_id = self.region.region_id;
         info!(
@@ -130,7 +129,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
                 last_entry_id >= expected_last_entry_id,
                 error::UnexpectedSnafu {
                     reason: format!(
-                        "failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+                        "Failed to catchup region {}, it was expected to replay to {}, but actually replayed to {}",
                         region_id, expected_last_entry_id, last_entry_id,
                     ),
                 }
@@ -148,9 +147,9 @@ impl<S: LogStore> RegionCatchupTask<S> {
             .store()
             .latest_entry_id(&self.region.provider)
             .unwrap_or_default();
-        warn!(
+        info!(
             "Skips to replay memtable for region: {}, flushed entry id: {}, latest entry id: {}",
-            self.region.region_id, flushed_entry_id, latest_entry_id
+            region_id, flushed_entry_id, latest_entry_id
         );
 
         if latest_entry_id > flushed_entry_id {

@@ -56,6 +56,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        // If the memtable is not empty or the manifest has been updated, we need to reopen the region.
         let region = match self.reopen_region_if_needed(region).await {
             Ok(region) => region,
             Err(e) => {
@@ -140,7 +141,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region: Arc<MitoRegion>,
     ) -> Result<Arc<MitoRegion>> {
-        // Note: Currently, We protect the split brain by ensuring the mutable table is empty.
+        // Note: Currently, We protect the split brain by ensuring the memtable table is empty.
         // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
         let version = region.version();
         let is_empty_memtable = version.memtables.is_empty();

@@ -1005,7 +1005,7 @@ impl RegionServerInner {
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
-        let mut responoses = Vec::with_capacity(requests.len());
+        let mut responses = Vec::with_capacity(requests.len());
         match engine
             .handle_batch_catchup_requests(parallelism, requests)
             .await
@@ -1023,15 +1023,15 @@ impl RegionServerInner {
                                 .await
                             {
                                 error!(e; "Failed to set region to ready: {}", region_id);
-                                responoses.push((region_id, Err(BoxedError::new(e))));
+                                responses.push((region_id, Err(BoxedError::new(e))));
                             } else {
-                                responoses.push((region_id, Ok(())));
+                                responses.push((region_id, Ok(())));
                             }
                         }
                         Err(e) => {
                             self.unset_region_status(region_id, &engine, RegionChange::Catchup);
                             error!(e; "Failed to catchup region: {}", region_id);
-                            responoses.push((region_id, Err(e)));
+                            responses.push((region_id, Err(e)));
                         }
                     }
                 }
@@ -1048,7 +1048,7 @@ impl RegionServerInner {
             }
         }
 
-        Ok(responoses)
+        Ok(responses)
     }
 
     pub async fn handle_batch_catchup_requests(
