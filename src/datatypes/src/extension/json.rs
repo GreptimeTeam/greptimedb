@@ -87,7 +87,9 @@ impl ExtensionType for JsonExtensionType {
             // boolean
             | DataType::Boolean
             // null
-            | DataType::Null=> Ok(()),
+            | DataType::Null
+            // legacy json type
+            | DataType::Binary => Ok(()),
             dt => Err(ArrowError::SchemaError(format!(
                 "Unexpected data type {dt}"
             ))),
