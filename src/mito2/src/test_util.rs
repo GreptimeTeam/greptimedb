@@ -90,7 +90,7 @@ pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
     Some(LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory))
 }
 
-pub(crate) fn kafka_log_store_factory() -> Option<LogStoreFactory> {
+pub fn kafka_log_store_factory() -> Option<LogStoreFactory> {
     let _ = dotenv::dotenv();
     let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
         warn!("env GT_KAFKA_ENDPOINTS not found");
@@ -130,7 +130,7 @@ pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFacto
 #[template]
 #[rstest]
 #[case::with_kafka(kafka_log_store_factory())]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[template]
@@ -140,7 +140,7 @@ pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFac
 pub(crate) fn single_raft_engine_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
 #[derive(Clone)]
-pub(crate) struct RaftEngineLogStoreFactory;
+pub struct RaftEngineLogStoreFactory;
 
 impl RaftEngineLogStoreFactory {
     async fn create_log_store<P: AsRef<Path>>(&self, wal_path: P) -> RaftEngineLogStore {
@@ -148,7 +148,7 @@ impl RaftEngineLogStoreFactory {
     }
 }
 
-pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
+pub async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) -> Option<String> {
     if let LogStoreFactory::Kafka(factory) = factory {
         let topic = uuid::Uuid::new_v4().to_string();
         let client = factory.client().await;
@@ -186,7 +186,7 @@ pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
         .unwrap();
 }
 #[derive(Clone)]
-pub(crate) struct KafkaLogStoreFactory {
+pub struct KafkaLogStoreFactory {
     broker_endpoints: Vec<String>,
 }
 
@@ -204,7 +204,7 @@ impl KafkaLogStoreFactory {
 }
 
 #[derive(Clone)]
-pub(crate) enum LogStoreFactory {
+pub enum LogStoreFactory {
     RaftEngine(RaftEngineLogStoreFactory),
     Kafka(KafkaLogStoreFactory),
 }
@@ -268,7 +268,7 @@ impl TestEnv {
     }
 
     /// Overwrites the original `log_store_factory`.
-    pub(crate) fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
+    pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
         self
     }
