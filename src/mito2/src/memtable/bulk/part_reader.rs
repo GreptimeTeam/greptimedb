@@ -283,11 +283,15 @@ impl Iterator for BulkPartRecordBatchIter {
     type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let record_batch = self.record_batch.take()?;
+        let Some(record_batch) = self.record_batch.take() else {
+            // `take()` should be cheap, we report the metrics directly.
+            self.report_mem_scan_metrics();
+            return None;
+        };
 
         let result = self.process_batch(record_batch).transpose();
 
-        // Report metrics when iteration is complete
+        // Reports metrics when iteration is complete
         if result.is_none() {
             self.report_mem_scan_metrics();
         }
