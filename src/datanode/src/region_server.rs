@@ -1230,6 +1230,11 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
+                if matches!(region_change, RegionChange::Ingest) {
+                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                        .with_label_values(&[request_type])
+                        .inc();
+                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
