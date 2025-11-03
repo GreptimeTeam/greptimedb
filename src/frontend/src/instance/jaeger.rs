@@ -483,25 +483,33 @@ fn json_tag_filters(
     Ok(filters)
 }
 
+/// Helper function to check if span_key or resource_key exists in col_names and create an expression.
+/// If neither exists, logs a warning and returns None.
+#[inline]
+fn check_col_and_build_expr<F>(
+    span_key: String,
+    resource_key: String,
+    key: &str,
+    col_names: &HashSet<String>,
+    expr_builder: F,
+) -> Option<Expr>
+where
+    F: FnOnce(String) -> Expr,
+{
+    if col_names.contains(&span_key) {
+        return Some(expr_builder(span_key));
+    }
+    if col_names.contains(&resource_key) {
+        return Some(expr_builder(resource_key));
+    }
+    warn!("tag key {} not found in table columns", key);
+    None
+}
+
 fn flatten_tag_filters(
     tags: HashMap<String, JsonValue>,
     col_names: &HashSet<String>,
 ) -> ServerResult<Vec<Expr>> {
-    /// Macro to check if span_key or resource_key exists in col_names and create an expression.
-    /// If neither exists, logs a warning and returns None.
-    macro_rules! check_col_and_build_expr {
-        ($span_key:expr, $resource_key:expr, $key:expr, $col_names:expr, $expr_builder:expr) => {{
-            if $col_names.contains(&$span_key) {
-                return Some($expr_builder($span_key));
-            }
-            if $col_names.contains(&$resource_key) {
-                return Some($expr_builder($resource_key));
-            }
-            warn!("tag key {} not found in table columns", $key);
-            None
-        }};
-    }
-
     let filters = tags
         .into_iter()
         .filter_map(|(key, value)| {
@@ -514,32 +522,33 @@ fn flatten_tag_filters(
             let resource_key = format!("\"resource_attributes.{}\"", key);
             match value {
                 JsonValue::String(value) => {
-                    check_col_and_build_expr!(span_key, resource_key, key, col_names, |k| col(k)
-                        .eq(lit(value)))
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).eq(lit(value))
+                    })
                 }
                 JsonValue::Number(value) => {
                     if value.is_f64() {
                         // safe to unwrap as checked previously
                         let value = value.as_f64().unwrap();
-                        check_col_and_build_expr!(span_key, resource_key, key, col_names, |k| col(
-                            k
-                        )
-                        .eq(lit(value)))
+                        check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                            col(k).eq(lit(value))
+                        })
                     } else {
                         let value = value.as_i64().unwrap();
-                        check_col_and_build_expr!(span_key, resource_key, key, col_names, |k| col(
-                            k
-                        )
-                        .eq(lit(value)))
+                        check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                            col(k).eq(lit(value))
+                        })
                     }
                 }
                 JsonValue::Bool(value) => {
-                    check_col_and_build_expr!(span_key, resource_key, key, col_names, |k| col(k)
-                        .eq(lit(value)))
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).eq(lit(value))
+                    })
                 }
                 JsonValue::Null => {
-                    check_col_and_build_expr!(span_key, resource_key, key, col_names, |k| col(k)
-                        .is_null())
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).is_null()
+                    })
                 }
                 // not supported at the moment
                 JsonValue::Array(_value) => None,
