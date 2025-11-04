@@ -15,11 +15,25 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
 DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000::timestamp;
 
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
 DELETE FROM monitor WHERE host = 'host2';
+
+ADMIN flush_table('monitor');
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
 DELETE FROM monitor WHERE cpu = 66.6;
 
+ADMIN flush_table('monitor');
+
+SELECT ts, host, cpu, memory FROM monitor WHERE cpu = 66.6 ORDER BY ts;
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
 DELETE FROM monitor WHERE memory > 2048;
+
+SELECT ts, host, cpu, memory FROM monitor WHERE memory > 2048 ORDER BY ts;
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
