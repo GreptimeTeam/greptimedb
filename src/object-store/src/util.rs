@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::error::Error as StdError;
 use std::fmt::Display;
 use std::path;
 use std::time::Duration;
@@ -174,11 +175,20 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
+            let mut root = err.source();
+            while let Some(r) = root {
+                if let Some(s) = r.source() {
+                    root = Some(s);
+                } else {
+                    break;
+                }
+            }
+
             // Print error if it's unexpected, otherwise in error.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err:#?}",
+                    "service={} name={} {}: {operation} {message} {err:#?}, root={root:#?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),
@@ -186,7 +196,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             } else {
                 debug!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err}",
+                    "service={} name={} {}: {operation} {message} {err}, root={root:?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),
