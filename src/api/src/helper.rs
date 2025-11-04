@@ -24,9 +24,7 @@ use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::types::{
     IntervalType, JsonFormat, StructField, StructType, TimeType, TimestampType,
 };
-use datatypes::value::{
-    ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
-};
+use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, StructValueRef, Value};
 use datatypes::vectors::VectorRef;
 use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ddl_request::Expr;
@@ -762,18 +760,7 @@ pub fn pb_value_to_value_ref<'a>(
         }
 
         ValueData::StructValue(struct_value) => {
-            let struct_datatype_ext = datatype_ext
-                .as_ref()
-                .and_then(|ext| {
-                    if let Some(TypeExt::StructType(s)) = &ext.type_ext {
-                        Some(s)
-                    } else {
-                        None
-                    }
-                })
-                .expect("struct must contain datatype ext");
-
-            let struct_fields = struct_datatype_ext
+            let struct_fields = struct_value
                 .fields
                 .iter()
                 .map(|field| {
@@ -789,7 +776,7 @@ pub fn pb_value_to_value_ref<'a>(
             let items = struct_value
                 .items
                 .iter()
-                .zip(struct_datatype_ext.fields.iter())
+                .zip(struct_value.fields.iter())
                 .map(|(item, field)| pb_value_to_value_ref(item, field.datatype_extension.as_ref()))
                 .collect::<Vec<ValueRef>>();
 
@@ -834,130 +821,9 @@ pub fn is_column_type_value_eq(
     ColumnDataTypeWrapper::try_new(type_value, type_extension)
         .map(|wrapper| {
             let datatype = ConcreteDataType::from(wrapper);
-            expect_type == &datatype
+            expect_type.is_json() && datatype.is_json() || &datatype == expect_type
         })
         .unwrap_or(false)
-}
-
-/// Convert value into proto's value.
-pub fn to_proto_value(value: Value) -> v1::Value {
-    match value {
-        Value::Null => v1::Value { value_data: None },
-        Value::Boolean(v) => v1::Value {
-            value_data: Some(ValueData::BoolValue(v)),
-        },
-        Value::UInt8(v) => v1::Value {
-            value_data: Some(ValueData::U8Value(v.into())),
-        },
-        Value::UInt16(v) => v1::Value {
-            value_data: Some(ValueData::U16Value(v.into())),
-        },
-        Value::UInt32(v) => v1::Value {
-            value_data: Some(ValueData::U32Value(v)),
-        },
-        Value::UInt64(v) => v1::Value {
-            value_data: Some(ValueData::U64Value(v)),
-        },
-        Value::Int8(v) => v1::Value {
-            value_data: Some(ValueData::I8Value(v.into())),
-        },
-        Value::Int16(v) => v1::Value {
-            value_data: Some(ValueData::I16Value(v.into())),
-        },
-        Value::Int32(v) => v1::Value {
-            value_data: Some(ValueData::I32Value(v)),
-        },
-        Value::Int64(v) => v1::Value {
-            value_data: Some(ValueData::I64Value(v)),
-        },
-        Value::Float32(v) => v1::Value {
-            value_data: Some(ValueData::F32Value(*v)),
-        },
-        Value::Float64(v) => v1::Value {
-            value_data: Some(ValueData::F64Value(*v)),
-        },
-        Value::String(v) => v1::Value {
-            value_data: Some(ValueData::StringValue(v.as_utf8().to_string())),
-        },
-        Value::Binary(v) => v1::Value {
-            value_data: Some(ValueData::BinaryValue(v.to_vec())),
-        },
-        Value::Date(v) => v1::Value {
-            value_data: Some(ValueData::DateValue(v.val())),
-        },
-        Value::Timestamp(v) => match v.unit() {
-            TimeUnit::Second => v1::Value {
-                value_data: Some(ValueData::TimestampSecondValue(v.value())),
-            },
-            TimeUnit::Millisecond => v1::Value {
-                value_data: Some(ValueData::TimestampMillisecondValue(v.value())),
-            },
-            TimeUnit::Microsecond => v1::Value {
-                value_data: Some(ValueData::TimestampMicrosecondValue(v.value())),
-            },
-            TimeUnit::Nanosecond => v1::Value {
-                value_data: Some(ValueData::TimestampNanosecondValue(v.value())),
-            },
-        },
-        Value::Time(v) => match v.unit() {
-            TimeUnit::Second => v1::Value {
-                value_data: Some(ValueData::TimeSecondValue(v.value())),
-            },
-            TimeUnit::Millisecond => v1::Value {
-                value_data: Some(ValueData::TimeMillisecondValue(v.value())),
-            },
-            TimeUnit::Microsecond => v1::Value {
-                value_data: Some(ValueData::TimeMicrosecondValue(v.value())),
-            },
-            TimeUnit::Nanosecond => v1::Value {
-                value_data: Some(ValueData::TimeNanosecondValue(v.value())),
-            },
-        },
-        Value::IntervalYearMonth(v) => v1::Value {
-            value_data: Some(ValueData::IntervalYearMonthValue(v.to_i32())),
-        },
-        Value::IntervalDayTime(v) => v1::Value {
-            value_data: Some(ValueData::IntervalDayTimeValue(v.to_i64())),
-        },
-        Value::IntervalMonthDayNano(v) => v1::Value {
-            value_data: Some(ValueData::IntervalMonthDayNanoValue(
-                convert_month_day_nano_to_pb(v),
-            )),
-        },
-        Value::Decimal128(v) => v1::Value {
-            value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
-        },
-        Value::List(list_value) => v1::Value {
-            value_data: Some(ValueData::ListValue(v1::ListValue {
-                items: convert_list_to_pb_values(list_value),
-            })),
-        },
-        Value::Struct(struct_value) => v1::Value {
-            value_data: Some(ValueData::StructValue(v1::StructValue {
-                items: convert_struct_to_pb_values(struct_value),
-            })),
-        },
-        Value::Json(v) => v1::Value {
-            value_data: Some(ValueData::JsonValue(Box::new(to_proto_value(*v)))),
-        },
-        Value::Duration(_) => v1::Value { value_data: None },
-    }
-}
-
-fn convert_list_to_pb_values(list_value: ListValue) -> Vec<v1::Value> {
-    list_value
-        .take_items()
-        .into_iter()
-        .map(to_proto_value)
-        .collect()
-}
-
-fn convert_struct_to_pb_values(struct_value: StructValue) -> Vec<v1::Value> {
-    struct_value
-        .take_items()
-        .into_iter()
-        .map(to_proto_value)
-        .collect()
 }
 
 /// Returns the [ColumnDataTypeWrapper] of the value.
@@ -1002,19 +868,19 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
 pub fn vectors_to_rows<'a>(
     columns: impl Iterator<Item = &'a VectorRef>,
     row_count: usize,
-) -> Vec<Row> {
+) -> Result<Vec<Row>> {
     let mut rows = vec![Row { values: vec![] }; row_count];
     for column in columns {
         for (row_index, row) in rows.iter_mut().enumerate() {
-            row.values.push(value_to_grpc_value(column.get(row_index)))
+            row.values.push(value_to_grpc_value(column.get(row_index))?)
         }
     }
 
-    rows
+    Ok(rows)
 }
 
-pub fn value_to_grpc_value(value: Value) -> GrpcValue {
-    GrpcValue {
+pub fn value_to_grpc_value(value: Value) -> Result<GrpcValue> {
+    Ok(GrpcValue {
         value_data: match value {
             Value::Null => None,
             Value::Boolean(v) => Some(ValueData::BoolValue(v)),
@@ -1054,23 +920,38 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     .take_items()
                     .into_iter()
                     .map(value_to_grpc_value)
-                    .collect();
+                    .collect::<Result<Vec<GrpcValue>>>()?;
                 Some(ValueData::ListValue(v1::ListValue { items }))
             }
             Value::Struct(struct_value) => {
+                let fields = struct_value.struct_type().fields();
+                let fields = fields
+                    .iter()
+                    .map(|f| {
+                        let (datatype, datatype_extension) =
+                            ColumnDataTypeWrapper::try_from(f.data_type().clone())
+                                .map(|x| x.to_parts())?;
+                        Ok(v1::StructField {
+                            name: f.name().to_string(),
+                            datatype: datatype as i32,
+                            datatype_extension,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
                 let items = struct_value
                     .take_items()
                     .into_iter()
                     .map(value_to_grpc_value)
-                    .collect();
-                Some(ValueData::StructValue(v1::StructValue { items }))
+                    .collect::<Result<Vec<_>>>()?;
+                Some(ValueData::StructValue(v1::StructValue { fields, items }))
             }
             Value::Json(inner_value) => Some(ValueData::JsonValue(Box::new(value_to_grpc_value(
                 *inner_value,
-            )))),
+            )?))),
             Value::Duration(_) => unreachable!(),
         },
-    }
+    })
 }
 
 pub fn from_pb_time_unit(unit: v1::TimeUnit) -> TimeUnit {
@@ -1163,6 +1044,7 @@ mod tests {
     use common_time::interval::IntervalUnit;
     use datatypes::scalars::ScalarVector;
     use datatypes::types::{Int8Type, Int32Type, UInt8Type, UInt32Type};
+    use datatypes::value::{ListValue, StructValue};
     use datatypes::vectors::{
         BooleanVector, DateVector, Float32Vector, PrimitiveVector, StringVector,
     };
@@ -1653,7 +1535,7 @@ mod tests {
             Arc::new(string_vec),
         ];
 
-        let result = vectors_to_rows(vector_refs.iter(), 3);
+        let result = vectors_to_rows(vector_refs.iter(), 3).unwrap();
 
         assert_eq!(result.len(), 3);
 
@@ -1740,7 +1622,7 @@ mod tests {
             Arc::new(ConcreteDataType::boolean_datatype()),
         ));
 
-        let pb_value = to_proto_value(value);
+        let pb_value = value_to_grpc_value(value).unwrap();
 
         match pb_value.value_data.unwrap() {
             ValueData::ListValue(pb_list_value) => {
@@ -1769,7 +1651,7 @@ mod tests {
             .unwrap(),
         );
 
-        let pb_value = to_proto_value(value);
+        let pb_value = value_to_grpc_value(value).unwrap();
 
         match pb_value.value_data.unwrap() {
             ValueData::StructValue(pb_struct_value) => {

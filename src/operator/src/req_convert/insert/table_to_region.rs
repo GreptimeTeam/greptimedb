@@ -15,10 +15,11 @@
 use api::v1::Rows;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use partition::manager::PartitionRuleManager;
+use snafu::ResultExt;
 use table::metadata::TableInfo;
 use table::requests::InsertRequest as TableInsertRequest;
 
-use crate::error::Result;
+use crate::error::{ConvertToGrpcValueSnafu, Result};
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::{column_schema, row_count};
@@ -42,7 +43,8 @@ impl<'a> TableToRegion<'a> {
     ) -> Result<InstantAndNormalInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
-        let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
+        let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count)
+            .context(ConvertToGrpcValueSnafu)?;
 
         let rows = Rows { schema, rows };
         let requests = Partitioner::new(self.partition_manager)

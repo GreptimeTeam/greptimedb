@@ -380,7 +380,7 @@ impl StreamingEngine {
                                     }
                                     .fail()?;
                                 }
-                                Ok(row.into())
+                                row.try_into()
                             })
                             .collect::<Result<Vec<_>, Error>>()?;
                         let table_name = table_name.last().unwrap().clone();
@@ -412,9 +412,9 @@ impl StreamingEngine {
                                 row.extend(Some(Value::from(
                                     common_time::Timestamp::new_millisecond(0),
                                 )));
-                                row.into()
+                                row.try_into()
                             })
-                            .collect::<Vec<_>>();
+                            .collect::<Result<Vec<_>, Error>>()?;
                         let table_name = table_name.last().unwrap().clone();
                         let req = RowDeleteRequest {
                             table_name,

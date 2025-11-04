@@ -57,8 +57,8 @@ use store_api::storage::{FileId, SequenceNumber, SequenceRange};
 use table::predicate::Predicate;
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
-    EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertToGrpcValueSnafu, DataTypeMismatchSnafu,
+    EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -185,15 +185,15 @@ impl BulkPart {
                 let values = (0..self.batch.num_columns())
                     .map(|col_idx| {
                         if let Some(v) = &vectors[col_idx] {
-                            value_to_grpc_value(v.get(row_idx))
+                            value_to_grpc_value(v.get(row_idx)).context(ConvertToGrpcValueSnafu)
                         } else {
-                            api::v1::Value { value_data: None }
+                            Ok(api::v1::Value { value_data: None })
                         }
                     })
-                    .collect::<Vec<_>>();
-                api::v1::Row { values }
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(api::v1::Row { values })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let schema = region_metadata
             .column_metadatas

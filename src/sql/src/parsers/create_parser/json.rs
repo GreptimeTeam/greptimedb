@@ -20,7 +20,7 @@ use crate::error::{Result, SyntaxSnafu};
 use crate::statements::OptionMap;
 use crate::util;
 
-pub(super) fn parse_json_datatype_options(parser: &mut Parser<'_>) -> Result<OptionMap> {
+pub(super) fn parse_json_datatype_options(parser: &mut Parser<'_>) -> Result<Option<OptionMap>> {
     if parser.consume_token(&Token::LParen) {
         let result = parser
             .parse_comma_separated0(Parser::parse_sql_option, Token::RParen)
@@ -32,9 +32,9 @@ pub(super) fn parse_json_datatype_options(parser: &mut Parser<'_>) -> Result<Opt
                     .collect::<Result<Vec<_>>>()
             })?;
         parser.expect_token(&Token::RParen).context(SyntaxSnafu)?;
-        Ok(OptionMap::new(result))
+        Ok(Some(OptionMap::new(result)))
     } else {
-        Ok(OptionMap::default())
+        Ok(None)
     }
 }
 
@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_datatype_options() {
-        fn parse(sql: &str) -> OptionMap {
+        fn parse(sql: &str) -> Option<OptionMap> {
             let Statement::CreateTable(mut create_table) = ParserContext::create_with_dialect(
                 sql,
                 &GreptimeDbDialect {},
@@ -72,8 +72,7 @@ mod tests {
             assert_eq!(column_def.data_type, DataType::JSON);
             assert!(column_def.options.is_empty());
 
-            assert!(extensions.json_datatype_options.is_some());
-            extensions.json_datatype_options.unwrap()
+            extensions.json_datatype_options
         }
 
         let sql = r#"
@@ -81,7 +80,7 @@ CREATE TABLE json_data (
     my_json JSON(format = "partial", unstructured_keys = ["k", "foo.bar", "a.b.c"]),
     ts TIMESTAMP TIME INDEX,
 )"#;
-        let options = parse(sql);
+        let options = parse(sql).unwrap();
         assert_eq!(options.len(), 2);
         assert_eq!(
             options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
@@ -100,7 +99,7 @@ CREATE TABLE json_data (
     my_json JSON(format = "structured"),
     ts TIMESTAMP TIME INDEX,
 )"#;
-        let options = parse(sql);
+        let options = parse(sql).unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(
             options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
@@ -112,7 +111,7 @@ CREATE TABLE json_data (
     my_json JSON(format = "raw"),
     ts TIMESTAMP TIME INDEX,
 )"#;
-        let options = parse(sql);
+        let options = parse(sql).unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(
             options.value(JSON_OPT_FORMAT).and_then(|x| x.as_string()),
@@ -124,7 +123,7 @@ CREATE TABLE json_data (
     my_json JSON(),
     ts TIMESTAMP TIME INDEX,
 )"#;
-        let options = parse(sql);
+        let options = parse(sql).unwrap();
         assert!(options.is_empty());
 
         let sql = r#"
@@ -133,6 +132,6 @@ CREATE TABLE json_data (
     ts TIMESTAMP TIME INDEX,
 )"#;
         let options = parse(sql);
-        assert!(options.is_empty());
+        assert!(options.is_none());
     }
 }

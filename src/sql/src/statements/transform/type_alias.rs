@@ -108,7 +108,9 @@ impl TransformRule for TypeAliasTransformRule {
             } if get_type_by_alias(data_type).is_some() => {
                 // Safety: checked in the match arm.
                 let new_type = get_type_by_alias(data_type).unwrap();
-                if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                if let Ok(new_type) =
+                    sql_data_type_to_concrete_data_type(&new_type, &Default::default())
+                {
                     *expr = Expr::Function(cast_expr_to_arrow_cast_func(
                         (**cast_expr).clone(),
                         new_type.as_arrow_type().to_string(),
@@ -123,9 +125,10 @@ impl TransformRule for TypeAliasTransformRule {
                 expr: cast_expr,
                 ..
             } => {
-                if let Ok(concrete_type) =
-                    sql_data_type_to_concrete_data_type(&DataType::Timestamp(*precision, *zone))
-                {
+                if let Ok(concrete_type) = sql_data_type_to_concrete_data_type(
+                    &DataType::Timestamp(*precision, *zone),
+                    &Default::default(),
+                ) {
                     let new_type = concrete_type.as_arrow_type();
                     *expr = Expr::Function(cast_expr_to_arrow_cast_func(
                         (**cast_expr).clone(),

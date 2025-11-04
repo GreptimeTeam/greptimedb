@@ -20,7 +20,8 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
-use datatypes::arrow::array::RecordBatchOptions;
+use datatypes::arrow::array::{Array, RecordBatchOptions};
+use datatypes::arrow::datatypes::{Field, Schema};
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
@@ -31,7 +32,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use crate::DfRecordBatch;
 use crate::error::{
     self, ArrowComputeSnafu, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu,
-    ProjectArrowRecordBatchSnafu, Result,
+    ProjectArrowRecordBatchSnafu, Result, SchemaConversionSnafu,
 };
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -59,6 +60,8 @@ impl RecordBatch {
         // the casting here will be removed in the end.
         // TODO(LFC): Remove the casting here once `Batch` is no longer used.
         let arrow_arrays = Self::cast_view_arrays(schema.arrow_schema(), arrow_arrays)?;
+
+        let schema = maybe_amend_with_struct_arrays(schema, &arrow_arrays)?;
 
         let df_record_batch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
@@ -246,6 +249,33 @@ impl RecordBatch {
         );
         let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
         RecordBatch::new(self.schema.clone(), columns)
+    }
+}
+
+fn maybe_amend_with_struct_arrays(schema: SchemaRef, arrays: &[ArrayRef]) -> Result<SchemaRef> {
+    if arrays
+        .iter()
+        .any(|x| matches!(x.data_type(), ArrowDataType::Struct(_)))
+    {
+        let schema = schema.arrow_schema();
+        let mut fields = Vec::with_capacity(schema.fields().len());
+        for (f, a) in schema.fields().iter().zip(arrays.iter()) {
+            let field_type = f.data_type();
+            let array_type = a.data_type();
+            match (field_type, array_type) {
+                (ArrowDataType::Struct(_), ArrowDataType::Struct(x)) => {
+                    let field = Field::new_struct(f.name(), x.clone(), f.is_nullable());
+                    fields.push(Arc::new(field));
+                }
+                _ => fields.push(f.clone()),
+            }
+        }
+        let schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+        let schema = schema.try_into().context(SchemaConversionSnafu)?;
+        Ok(Arc::new(schema))
+    } else {
+        // Fast path: must not need to amend if there are no struct arrays.
+        Ok(schema)
     }
 }
 

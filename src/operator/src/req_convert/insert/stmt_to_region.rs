@@ -30,8 +30,8 @@ use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
-    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
-    SchemaReadOnlySnafu, TableNotFoundSnafu,
+    ColumnNotFoundSnafu, ConvertToGrpcValueSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
+    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
@@ -238,8 +238,7 @@ fn sql_value_to_grpc_value(
         .context(crate::error::SqlCommonSnafu)?
     };
 
-    let grpc_value = value_to_grpc_value(value);
-    Ok(grpc_value)
+    value_to_grpc_value(value).context(ConvertToGrpcValueSnafu)
 }
 
 fn replace_default(sql_val: &SqlValue) -> bool {

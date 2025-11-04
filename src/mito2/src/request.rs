@@ -20,7 +20,6 @@ use std::time::Instant;
 
 use api::helper::{
     ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
-    to_proto_value,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -43,8 +42,8 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
-    CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
+    CompactRegionSnafu, ConvertColumnDataTypeSnafu, ConvertToGrpcValueSnafu, CreateDefaultSnafu,
+    Error, FillDefaultSnafu, FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
@@ -411,7 +410,7 @@ impl WriteRequest {
         };
 
         // Convert default value into proto's value.
-        Ok(to_proto_value(default_value))
+        api::helper::value_to_grpc_value(default_value).context(ConvertToGrpcValueSnafu)
     }
 }
 
