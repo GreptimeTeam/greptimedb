@@ -661,13 +661,29 @@ impl TableRouteStorage {
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
-        let mut table_routes = self.batch_get_inner(table_ids).await?;
-        self.remap_routes_addresses(&mut table_routes).await?;
+        let mut raw_table_routes = self.batch_get_inner(table_ids).await?;
+        self.remap_routes_addresses(&mut raw_table_routes).await?;
 
-        Ok(table_routes)
+        Ok(raw_table_routes
+            .into_iter()
+            .map(|x| x.map(|x| x.inner))
+            .collect())
     }
 
-    async fn batch_get_inner(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
+    pub async fn batch_get_with_raw_bytes(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<Vec<Option<DeserializedValueWithBytes<TableRouteValue>>>> {
+        let mut raw_table_routes = self.batch_get_inner(table_ids).await?;
+        self.remap_routes_addresses(&mut raw_table_routes).await?;
+
+        Ok(raw_table_routes)
+    }
+
+    async fn batch_get_inner(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<Vec<Option<DeserializedValueWithBytes<TableRouteValue>>>> {
         let keys = table_ids
             .iter()
             .map(|id| TableRouteKey::new(*id).to_bytes())
@@ -685,7 +701,7 @@ impl TableRouteStorage {
         keys.into_iter()
             .map(|key| {
                 if let Some(value) = kvs.get(&key) {
-                    Ok(Some(TableRouteValue::try_from_raw_value(value)?))
+                    Ok(Some(DeserializedValueWithBytes::from_inner_slice(value)?))
                 } else {
                     Ok(None)
                 }
@@ -695,14 +711,14 @@ impl TableRouteStorage {
 
     async fn remap_routes_addresses(
         &self,
-        table_routes: &mut [Option<TableRouteValue>],
+        table_routes: &mut [Option<DeserializedValueWithBytes<TableRouteValue>>],
     ) -> Result<()> {
         let keys = table_routes
             .iter()
             .flat_map(|table_route| {
                 table_route
                     .as_ref()
-                    .map(extract_address_keys)
+                    .map(|x| extract_address_keys(&x.inner))
                     .unwrap_or_default()
             })
             .collect::<HashSet<_>>()

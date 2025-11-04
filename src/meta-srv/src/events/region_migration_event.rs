@@ -62,10 +62,12 @@ pub(crate) struct RegionMigrationEvent {
 
 impl RegionMigrationEvent {
     pub fn from_persistent_ctx(ctx: &PersistentContext) -> Self {
+        // FIXME(weny): handle multiple region ids.
+        let region_id = ctx.region_ids[0];
         Self {
-            region_id: ctx.region_id,
-            table_id: ctx.region_id.table_id(),
-            region_number: ctx.region_id.region_number(),
+            region_id,
+            table_id: region_id.table_id(),
+            region_number: region_id.region_number(),
             trigger_reason: ctx.trigger_reason,
             src_node_id: ctx.from_peer.id,
             src_peer_addr: ctx.from_peer.addr.clone(),

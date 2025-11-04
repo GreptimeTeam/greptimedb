@@ -18,7 +18,6 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 
-use common_meta::lock_key::TableLock;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
@@ -48,12 +47,10 @@ impl State for UpdateMetadata {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        let table_id = TableLock::Write(ctx.region_id().table_id()).into();
-        let _guard = procedure_ctx.provider.acquire_lock(&table_id).await;
-
         match self {
             UpdateMetadata::Downgrade => {
-                self.downgrade_leader_region(ctx).await?;
+                self.downgrade_leader_region(ctx, &procedure_ctx.provider)
+                    .await?;
 
                 Ok((
                     Box::<DowngradeLeaderRegion>::default(),
@@ -61,7 +58,8 @@ impl State for UpdateMetadata {
                 ))
             }
             UpdateMetadata::Upgrade => {
-                self.upgrade_candidate_region(ctx).await?;
+                self.upgrade_candidate_region(ctx, &procedure_ctx.provider)
+                    .await?;
 
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
@@ -71,7 +69,8 @@ impl State for UpdateMetadata {
                 Ok((Box::new(CloseDowngradedRegion), Status::executing(false)))
             }
             UpdateMetadata::Rollback => {
-                self.rollback_downgraded_region(ctx).await?;
+                self.rollback_downgraded_region(ctx, &procedure_ctx.provider)
+                    .await?;
 
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
