@@ -58,7 +58,7 @@ use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
-    ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+    ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -220,7 +220,7 @@ impl RegionOpener {
         mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<MitoRegion> {
+    ) -> Result<MitoRegionRef> {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
@@ -308,7 +308,7 @@ impl RegionOpener {
         ));
         let now = self.time_provider.current_time_millis();
 
-        Ok(MitoRegion {
+        Ok(Arc::new(MitoRegion {
             region_id,
             version_control,
             access_layer: access_layer.clone(),
@@ -332,7 +332,7 @@ impl RegionOpener {
             written_bytes: Arc::new(AtomicU64::new(0)),
             sst_format,
             stats: self.stats,
-        })
+        }))
     }
 
     /// Opens an existing region in read only mode.
@@ -342,7 +342,7 @@ impl RegionOpener {
         mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<MitoRegion> {
+    ) -> Result<MitoRegionRef> {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let region = self
@@ -400,7 +400,7 @@ impl RegionOpener {
         &mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
-    ) -> Result<Option<MitoRegion>> {
+    ) -> Result<Option<MitoRegionRef>> {
         let region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = Self::manifest_options(
@@ -570,7 +570,7 @@ impl RegionOpener {
             config,
         );
 
-        Ok(Some(region))
+        Ok(Some(Arc::new(region)))
     }
 
     /// Returns a new manifest options.
