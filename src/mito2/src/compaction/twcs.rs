@@ -835,7 +835,7 @@ mod tests {
     fn test_build_output_multiple_windows_with_zero_runs() {
         let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
 
-        let files = vec![
+        let files = [
             // Window 0: Contains 3 files but not forming any runs (not enough files in sequence to reach trigger_file_num)
             new_file_handle_with_sequence(file_ids[0], 0, 999, 0, 1),
             new_file_handle_with_sequence(file_ids[1], 0, 999, 0, 2),
@@ -885,7 +885,7 @@ mod tests {
         let large_file_1 = new_file_handle_with_size_and_sequence(file_ids[0], 0, 999, 0, 1, 2000); // 2000 bytes
         let large_file_2 = new_file_handle_with_size_and_sequence(file_ids[1], 0, 999, 0, 2, 2500); // 2500 bytes
 
-        let files = vec![large_file_1, large_file_2];
+        let files = [large_file_1, large_file_2];
 
         let mut windows = assign_to_windows(files.iter(), 3);
 
