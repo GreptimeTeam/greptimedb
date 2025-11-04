@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info, warn};
-use futures::{FutureExt, TryStreamExt};
+use common_telemetry::{debug, error, info, warn};
+use futures::{AsyncWriteExt, FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use moka::policy::EvictionPolicy;
@@ -32,9 +32,13 @@ use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 
+use crate::access_layer::TempFileCleaner;
 use crate::cache::{FILE_TYPE, INDEX_TYPE};
-use crate::error::{OpenDalSnafu, Result};
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::error::{self, OpenDalSnafu, Result};
+use crate::metrics::{
+    CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
+    WRITE_CACHE_DOWNLOAD_ELAPSED,
+};
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
@@ -421,6 +425,94 @@ impl FileCache {
     /// Returns the current weighted size (used bytes) of the puffin (index) cache.
     pub(crate) fn puffin_cache_size(&self) -> u64 {
         self.puffin_index.weighted_size()
+    }
+
+    /// Downloads a file in `remote_path` from the remote object store to the local cache
+    /// (specified by `index_key`).
+    pub(crate) async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+            .await
+        {
+            let filename = index_key.to_string();
+            TempFileCleaner::clean_atomic_dir_files(&self.local_store, &[&filename]).await;
+
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn download_without_cleaning(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        const DOWNLOAD_READER_CONCURRENCY: usize = 8;
+        const DOWNLOAD_READER_CHUNK_SIZE: ReadableSize = ReadableSize::mb(8);
+
+        let file_type = index_key.file_type;
+        let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
+            .with_label_values(&[match file_type {
+                FileType::Parquet => "download_parquet",
+                FileType::Puffin => "download_puffin",
+            }])
+            .start_timer();
+
+        let reader = remote_store
+            .reader_with(remote_path)
+            .concurrent(DOWNLOAD_READER_CONCURRENCY)
+            .chunk(DOWNLOAD_READER_CHUNK_SIZE.as_bytes() as usize)
+            .await
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_read(0..file_size)
+            .await
+            .context(error::OpenDalSnafu)?;
+
+        let cache_path = self.cache_file_path(index_key);
+        let mut writer = self
+            .local_store
+            .writer(&cache_path)
+            .await
+            .context(error::OpenDalSnafu)?
+            .into_futures_async_write();
+
+        let region_id = index_key.region_id;
+        let file_id = index_key.file_id;
+        let bytes_written =
+            futures::io::copy(reader, &mut writer)
+                .await
+                .context(error::DownloadSnafu {
+                    region_id,
+                    file_id,
+                    file_type,
+                })?;
+        writer.close().await.context(error::DownloadSnafu {
+            region_id,
+            file_id,
+            file_type,
+        })?;
+
+        WRITE_CACHE_DOWNLOAD_BYTES_TOTAL.inc_by(bytes_written);
+
+        let elapsed = timer.stop_and_record();
+        debug!(
+            "Successfully download file '{}' to local '{}', file size: {}, region: {}, cost: {:?}s",
+            remote_path, cache_path, bytes_written, region_id, elapsed,
+        );
+
+        let index_value = IndexValue {
+            file_size: bytes_written as _,
+        };
+        self.put(index_key, index_value).await;
+        Ok(())
     }
 }
 

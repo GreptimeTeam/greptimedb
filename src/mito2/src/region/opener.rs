@@ -39,9 +39,10 @@ use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
 
-use crate::access_layer::{AccessLayer, AccessLayerRef};
+use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::write_cache::WriteCacheRef;
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -561,16 +562,12 @@ impl RegionOpener {
             stats: self.stats.clone(),
         };
 
-        // Spawn background task to fill write cache with index files
-        spawn_cache_fill_task(
-            self.region_id,
-            &version_control,
-            &self.cache_manager,
-            &access_layer,
-            config,
-        );
+        let region = Arc::new(region);
 
-        Ok(Some(Arc::new(region)))
+        // Spawn background task to fill write cache with index files
+        spawn_cache_fill_task(&region, config, &self.cache_manager);
+
+        Ok(Some(region))
     }
 
     /// Returns a new manifest options.
@@ -823,33 +820,23 @@ pub(crate) fn new_manifest_dir(region_dir: &str) -> String {
     join_dir(region_dir, "manifest")
 }
 
-/// Spawns a background task to download all index (Puffin) files from the version into the write cache.
-fn spawn_cache_fill_task(
-    region_id: RegionId,
-    version_control: &VersionControlRef,
-    cache_manager: &Option<CacheManagerRef>,
-    access_layer: &AccessLayerRef,
-    config: &MitoConfig,
-) {
-    let Some(cache_manager) = cache_manager else {
-        return;
-    };
-    let Some(write_cache) = cache_manager.write_cache() else {
-        return;
-    };
+/// A task to load and fill the region file cache.
+pub(crate) struct RegionLoadCacheTask {
+    region: MitoRegionRef,
+}
 
-    let write_cache = write_cache.clone();
-    let table_dir = access_layer.table_dir().to_string();
-    let path_type = access_layer.path_type();
-    let object_store = access_layer.object_store().clone();
-    let version_control = version_control.clone();
+impl RegionLoadCacheTask {
+    pub(crate) fn new(region: MitoRegionRef) -> Self {
+        Self { region }
+    }
 
-    let preload_enabled = config.preload_index_cache;
-
-    common_runtime::spawn_global(async move {
-        if !preload_enabled {
-            return;
-        }
+    /// Fills the write cache with index files from the region.
+    pub(crate) async fn fill_cache(&self, write_cache: WriteCacheRef) {
+        let region_id = self.region.region_id;
+        let table_dir = self.region.access_layer.table_dir();
+        let path_type = self.region.access_layer.path_type();
+        let object_store = self.region.access_layer.object_store();
+        let version_control = &self.region.version_control;
 
         // Collects IndexKeys and file sizes for files that need to be downloaded
         let mut files_to_download = Vec::new();
@@ -902,13 +889,13 @@ fn spawn_cache_fill_task(
             }
 
             let index_remote_path = location::index_file_path(
-                &table_dir,
+                table_dir,
                 RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
                 path_type,
             );
 
             match write_cache
-                .download(puffin_key, &index_remote_path, &object_store, file_size)
+                .download(puffin_key, &index_remote_path, object_store, file_size)
                 .await
             {
                 Ok(_) => {
@@ -934,5 +921,31 @@ fn spawn_cache_fill_task(
             "Completed background cache fill task for region {}, total_files: {}, files_downloaded: {}, files_already_cached: {}, files_skipped: {}",
             region_id, total_files, files_downloaded, files_already_cached, files_skipped
         );
+    }
+}
+
+/// Spawns a background task to download all index (Puffin) files from the version into the write cache.
+fn spawn_cache_fill_task(
+    region: &MitoRegionRef,
+    config: &MitoConfig,
+    cache_manager: &Option<CacheManagerRef>,
+) {
+    let Some(cache_manager) = cache_manager else {
+        return;
+    };
+    let Some(write_cache) = cache_manager.write_cache() else {
+        return;
+    };
+
+    let preload_enabled = config.preload_index_cache;
+    if !preload_enabled {
+        return;
+    }
+
+    let task = RegionLoadCacheTask::new(region.clone());
+    let write_cache = write_cache.clone();
+
+    common_runtime::spawn_global(async move {
+        task.fill_cache(write_cache).await;
     });
 }
