@@ -88,7 +88,7 @@ impl TwcsPicker {
             // because after compaction there will be no overlapping files.
             let filter_deleted = !files.overlapping && found_runs <= 2 && !self.append_mode;
             if found_runs == 0 {
-                return output;
+                continue;
             }
 
             let inputs = if found_runs > 1 {
@@ -829,6 +829,81 @@ mod tests {
                 max_output_file_size
             );
         }
+    }
+
+    #[test]
+    fn test_build_output_multiple_windows_with_zero_runs() {
+        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        let files = vec![
+            // Window 0: Contains 3 files but not forming any runs (not enough files in sequence to reach trigger_file_num)
+            new_file_handle_with_sequence(file_ids[0], 0, 999, 0, 1),
+            new_file_handle_with_sequence(file_ids[1], 0, 999, 0, 2),
+            new_file_handle_with_sequence(file_ids[2], 0, 999, 0, 3),
+            // Window 3: Contains files that will form 2 runs
+            new_file_handle_with_sequence(file_ids[3], 3000, 3999, 0, 4),
+            new_file_handle_with_sequence(file_ids[4], 3000, 3999, 0, 5),
+            new_file_handle_with_sequence(file_ids[5], 3000, 3999, 0, 6),
+        ];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        // Create picker with trigger_file_num of 4 so single files won't form runs in first window
+        let picker = TwcsPicker {
+            trigger_file_num: 4, // High enough to prevent runs in first window
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(123), &mut windows, active_window);
+
+        assert!(
+            !output.is_empty(),
+            "Should have output from windows with runs, even when one window has 0 runs"
+        );
+
+        let all_output_files: Vec<_> = output
+            .iter()
+            .flat_map(|o| o.inputs.iter())
+            .map(|f| f.file_id().file_id())
+            .collect();
+
+        assert!(
+            all_output_files.contains(&file_ids[3])
+                || all_output_files.contains(&file_ids[4])
+                || all_output_files.contains(&file_ids[5]),
+            "Output should contain files from the window with runs"
+        );
+    }
+
+    #[test]
+    fn test_build_output_single_window_zero_runs() {
+        let file_ids = (0..2).map(|_| FileId::random()).collect::<Vec<_>>();
+
+        let large_file_1 = new_file_handle_with_size_and_sequence(file_ids[0], 0, 999, 0, 1, 2000); // 2000 bytes
+        let large_file_2 = new_file_handle_with_size_and_sequence(file_ids[1], 0, 999, 0, 2, 2500); // 2500 bytes
+
+        let files = vec![large_file_1, large_file_2];
+
+        let mut windows = assign_to_windows(files.iter(), 3);
+
+        let picker = TwcsPicker {
+            trigger_file_num: 2,
+            time_window_seconds: Some(3),
+            max_output_file_size: Some(1000),
+            append_mode: true,
+        };
+
+        let active_window = find_latest_window_in_seconds(files.iter(), 3);
+        let output = picker.build_output(RegionId::from_u64(456), &mut windows, active_window);
+
+        // Should return empty output (no compaction needed)
+        assert!(
+            output.is_empty(),
+            "Should return empty output when no runs are found after filtering"
+        );
     }
 
     // TODO(hl): TTL tester that checks if get_expired_ssts function works as expected.
