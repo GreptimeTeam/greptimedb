@@ -18,7 +18,7 @@ use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -48,6 +48,8 @@ pub struct TwcsPicker {
     pub max_output_file_size: Option<u64>,
     /// Whether the target region is in append mode.
     pub append_mode: bool,
+    /// Max background compaction tasks.
+    pub max_background_tasks: Option<usize>,
 }
 
 impl TwcsPicker {
@@ -91,7 +93,7 @@ impl TwcsPicker {
                 continue;
             }
 
-            let inputs = if found_runs > 1 {
+            let mut inputs = if found_runs > 1 {
                 reduce_runs(sorted_runs)
             } else {
                 let run = sorted_runs.last().unwrap();
@@ -102,6 +104,17 @@ impl TwcsPicker {
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
+            if let Some(max_background_tasks) = self.max_background_tasks
+                && inputs.len() > max_background_tasks
+            {
+                debug!(
+                    "Region ({:?}) compaction input size({}) larger than max background tasks({}), remaining inputs truncated",
+                    region_id,
+                    inputs.len(),
+                    max_background_tasks
+                );
+                inputs.truncate(max_background_tasks);
+            }
             if !inputs.is_empty() {
                 log_pick_result(
                     region_id,
@@ -680,6 +693,7 @@ mod tests {
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
+                max_background_tasks: None,
             }
             .build_output(RegionId::from_u64(0), &mut windows, active_window);
 
@@ -854,6 +868,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            max_background_tasks: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -894,6 +909,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: Some(1000),
             append_mode: true,
+            max_background_tasks: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);

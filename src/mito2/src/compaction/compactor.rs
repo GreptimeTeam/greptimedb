@@ -429,24 +429,6 @@ impl DefaultCompactor {
             region_id, input_file_names, output_file_names, flat_format, metrics
         );
         metrics.observe();
-
-        // // Update manifest immediately when this task finishes
-        // let edit = RegionEdit {
-        //     files_to_add: output_files.clone(),
-        //     files_to_remove: inputs_to_remove,
-        //     // Use current timestamp as the edit timestamp.
-        //     timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-        //     compaction_time_window: Some(Duration::from_secs(compaction_time_window_clone as u64)),
-        //     flushed_entry_id: None,
-        //     flushed_sequence: None,
-        //     committed_sequence: None,
-        // };
-        //
-        // let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-        // // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        // manifest_ctx_clone
-        //     .update_manifest(RegionLeaderState::Writable, action_list)
-        //     .await?;
         Ok(output_files)
     }
 }
@@ -553,6 +535,7 @@ impl Compactor for DefaultCompactor {
                 &compact_request_options,
                 &compaction_region.region_options.compaction,
                 compaction_region.region_options.append_mode,
+                None,
             )
             .pick(compaction_region);
 
