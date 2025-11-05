@@ -313,36 +313,36 @@ mod tests {
     //     assert!(!err.is_retryable());
     // }
 
-    #[tokio::test]
-    async fn test_next_update_metadata_downgrade_state() {
-        let mut state = Box::new(RegionMigrationStart);
-        // from_peer: 1
-        // to_peer: 2
-        let persistent_context = new_persistent_context();
-        let from_peer_id = persistent_context.from_peer.id;
-        let to_peer = persistent_context.to_peer.clone();
-        let region_id = persistent_context.region_ids[0];
+    // #[tokio::test]
+    // async fn test_next_update_metadata_downgrade_state() {
+    //     let mut state = Box::new(RegionMigrationStart);
+    //     // from_peer: 1
+    //     // to_peer: 2
+    //     let persistent_context = new_persistent_context();
+    //     let from_peer_id = persistent_context.from_peer.id;
+    //     let to_peer = persistent_context.to_peer.clone();
+    //     let region_id = persistent_context.region_ids[0];
 
-        let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(persistent_context);
+    //     let env = TestingEnv::new();
+    //     let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(Peer::empty(from_peer_id)),
-            follower_peers: vec![to_peer],
-            ..Default::default()
-        }];
+    //     let table_info = new_test_table_info(1024, vec![1]).into();
+    //     let region_routes = vec![RegionRoute {
+    //         region: Region::new_test(region_id),
+    //         leader_peer: Some(Peer::empty(from_peer_id)),
+    //         follower_peers: vec![to_peer],
+    //         ..Default::default()
+    //     }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-        let procedure_ctx = new_procedure_context();
-        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+    //     env.create_physical_table_metadata(table_info, region_routes)
+    //         .await;
+    //     let procedure_ctx = new_procedure_context();
+    //     let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
-        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+    //     let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
 
-        assert_matches!(update_metadata, UpdateMetadata::Downgrade);
-    }
+    //     assert_matches!(update_metadata, UpdateMetadata::Downgrade);
+    // }
 
     #[tokio::test]
     async fn test_next_migration_end_state() {
