@@ -199,7 +199,7 @@ impl SourceSender {
     /// send record batch
     pub async fn send_record_batch(&self, batch: RecordBatch) -> Result<usize, Error> {
         let row_cnt = batch.num_rows();
-        let batch = Batch::from(batch);
+        let batch = Batch::try_from(batch)?;
 
         self.send_buf_row_cnt.fetch_add(row_cnt, Ordering::SeqCst);
 

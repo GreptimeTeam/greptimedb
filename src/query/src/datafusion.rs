@@ -682,13 +682,14 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{ArrayRef, UInt64Array};
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_recordbatch::util;
     use datafusion::prelude::{col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{Helper, UInt32Vector, UInt64Vector, VectorRef};
+    use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
     use session::context::{QueryContext, QueryContextBuilder};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
@@ -770,10 +771,8 @@ mod tests {
                 assert_eq!(1, batch.num_columns());
                 assert_eq!(batch.column(0).len(), 1);
 
-                assert_eq!(
-                    *batch.column(0),
-                    Arc::new(UInt64Vector::from_slice([4950])) as VectorRef
-                );
+                let expected = Arc::new(UInt64Array::from_iter_values([4950])) as ArrayRef;
+                assert_eq!(batch.column(0), &expected);
             }
             _ => unreachable!(),
         }

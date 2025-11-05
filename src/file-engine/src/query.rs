@@ -22,13 +22,17 @@ use std::task::{Context, Poll};
 use common_datasource::object_store::build_backend;
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchMetrics;
-use common_recordbatch::error::{CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult};
+use common_recordbatch::error::{
+    CastVectorSnafu, DataTypesSnafu, ExternalSnafu, Result as RecordBatchResult,
+};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::logical_expr::utils as df_logical_expr_utils;
 use datafusion_expr::expr::Expr;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use futures::Stream;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::ScanRequest;
@@ -197,7 +201,7 @@ impl FileToScanRegionStream {
             .all(|scan_column_schema| {
                 file_record_batch
                     .column_by_name(&scan_column_schema.name)
-                    .map(|rb| rb.data_type() == scan_column_schema.data_type)
+                    .map(|rb| rb.data_type() == &scan_column_schema.data_type.as_arrow_type())
                     .unwrap_or_default()
             })
     }
@@ -231,9 +235,10 @@ impl FileToScanRegionStream {
     }
 
     fn cast_column_type(
-        source_column: &VectorRef,
+        source_column: &ArrayRef,
         target_data_type: &ConcreteDataType,
     ) -> RecordBatchResult<VectorRef> {
+        let source_column = Helper::try_into_vector(source_column).context(DataTypesSnafu)?;
         if &source_column.data_type() == target_data_type {
             Ok(source_column.clone())
         } else {

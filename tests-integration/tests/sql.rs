@@ -307,13 +307,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             }
         });
         assert_eq!(json, expected_j);
-        assert_eq!(
-            vector,
-            [1.0f32, 2.0, 3.0]
-                .iter()
-                .flat_map(|x| x.to_le_bytes())
-                .collect::<Vec<u8>>()
-        );
+        assert_eq!(vector, "[1,2,3]".as_bytes());
     }
 
     let rows = sqlx::query("select i from demo where i=?")
