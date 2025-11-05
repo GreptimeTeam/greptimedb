@@ -857,6 +857,8 @@ impl RegionLoadCacheTask {
                     }
                 }
             }
+            // Releases the Version after the scope to avoid holding the memtables and file handles
+            // for a long time.
         }
         let total_files = files_to_download.len() as i64;
 
@@ -873,6 +875,14 @@ impl RegionLoadCacheTask {
         for (puffin_key, file_size) in files_to_download {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
+            let region_state = self.region.state();
+            if !can_load_cache(region_state) {
+                info!(
+                    "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
+                    region_state, region_id, current_size, capacity
+                );
+                break;
+            }
 
             // Checks if adding this file would exceed capacity
             if current_size + file_size > capacity {
@@ -941,4 +951,17 @@ fn maybe_load_cache(
 
     let task = RegionLoadCacheTask::new(region.clone());
     write_cache.load_region_cache(task);
+}
+
+fn can_load_cache(state: RegionRoleState) -> bool {
+    match state {
+        RegionRoleState::Leader(RegionLeaderState::Writable)
+        | RegionRoleState::Leader(RegionLeaderState::Staging)
+        | RegionRoleState::Leader(RegionLeaderState::Altering)
+        | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        | RegionRoleState::Leader(RegionLeaderState::Editing) => true,
+        RegionRoleState::Leader(RegionLeaderState::Dropping)
+        | RegionRoleState::Leader(RegionLeaderState::Truncating) => true,
+        RegionRoleState::Follower => true,
+    }
 }
