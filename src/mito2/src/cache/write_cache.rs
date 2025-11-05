@@ -23,6 +23,7 @@ use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::access_layer::{
     FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
@@ -31,6 +32,7 @@ use crate::access_layer::{
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::UPLOAD_BYTES_TOTAL;
+use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -49,6 +51,8 @@ pub struct WriteCache {
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for index.
     intermediate_manager: IntermediateManager,
+    /// Sender for region load cache tasks.
+    task_sender: UnboundedSender<RegionLoadCacheTask>,
 }
 
 pub type WriteCacheRef = Arc<WriteCache>;
@@ -64,18 +68,21 @@ impl WriteCache {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
+        let (task_sender, task_receiver) = unbounded_channel();
+
         let file_cache = Arc::new(FileCache::new(
             local_store,
             cache_capacity,
             ttl,
             index_cache_percent,
         ));
-        file_cache.recover(false).await;
+        file_cache.recover(false, Some(task_receiver)).await;
 
         Ok(Self {
             file_cache,
             puffin_manager_factory,
             intermediate_manager,
+            task_sender,
         })
     }
 
@@ -353,6 +360,13 @@ impl WriteCache {
         self.file_cache.put(index_key, index_value).await;
 
         Ok(())
+    }
+
+    /// Sends a region load cache task to the background processing queue.
+    ///
+    /// If the receiver has been dropped, the error is ignored.
+    pub(crate) fn load_region_cache(&self, task: RegionLoadCacheTask) {
+        let _ = self.task_sender.send(task);
     }
 }
 

@@ -41,8 +41,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::write_cache::WriteCacheRef;
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::error;
 use crate::error::{
@@ -564,8 +563,7 @@ impl RegionOpener {
 
         let region = Arc::new(region);
 
-        // Spawn background task to fill write cache with index files
-        spawn_cache_fill_task(&region, config, &self.cache_manager);
+        maybe_load_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
     }
@@ -830,8 +828,8 @@ impl RegionLoadCacheTask {
         Self { region }
     }
 
-    /// Fills the write cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, write_cache: WriteCacheRef) {
+    /// Fills the file cache with index files from the region.
+    pub(crate) async fn fill_cache(&self, file_cache: FileCacheRef) {
         let region_id = self.region.region_id;
         let table_dir = self.region.access_layer.table_dir();
         let path_type = self.region.access_layer.path_type();
@@ -851,7 +849,7 @@ impl RegionLoadCacheTask {
                         let puffin_key =
                             IndexKey::new(file_meta.region_id, file_meta.file_id, FileType::Puffin);
 
-                        if !write_cache.file_cache().contains_key(&puffin_key) {
+                        if !file_cache.contains_key(&puffin_key) {
                             files_to_download.push((puffin_key, file_meta.index_file_size));
                         } else {
                             files_already_cached += 1;
@@ -873,7 +871,6 @@ impl RegionLoadCacheTask {
         let mut files_skipped = 0;
 
         for (puffin_key, file_size) in files_to_download {
-            let file_cache = write_cache.file_cache();
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
 
@@ -894,7 +891,7 @@ impl RegionLoadCacheTask {
                 path_type,
             );
 
-            match write_cache
+            match file_cache
                 .download(puffin_key, &index_remote_path, object_store, file_size)
                 .await
             {
@@ -924,8 +921,8 @@ impl RegionLoadCacheTask {
     }
 }
 
-/// Spawns a background task to download all index (Puffin) files from the version into the write cache.
-fn spawn_cache_fill_task(
+/// Loads all index (Puffin) files from the version into the write cache.
+fn maybe_load_cache(
     region: &MitoRegionRef,
     config: &MitoConfig,
     cache_manager: &Option<CacheManagerRef>,
@@ -943,9 +940,5 @@ fn spawn_cache_fill_task(
     }
 
     let task = RegionLoadCacheTask::new(region.clone());
-    let write_cache = write_cache.clone();
-
-    common_runtime::spawn_global(async move {
-        task.fill_cache(write_cache).await;
-    });
+    write_cache.load_region_cache(task);
 }

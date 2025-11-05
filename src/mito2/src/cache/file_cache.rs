@@ -31,6 +31,7 @@ use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::access_layer::TempFileCleaner;
 use crate::cache::{FILE_TYPE, INDEX_TYPE};
@@ -39,6 +40,7 @@ use crate::metrics::{
     CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
     WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
+use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
@@ -340,11 +342,32 @@ impl FileCache {
     }
 
     /// Recovers the index from local store.
-    pub(crate) async fn recover(self: &Arc<Self>, sync: bool) {
+    ///
+    /// If `task_receiver` is provided, spawns a background task after recovery
+    /// to process `RegionLoadCacheTask` messages for loading files into the cache.
+    pub(crate) async fn recover(
+        self: &Arc<Self>,
+        sync: bool,
+        task_receiver: Option<UnboundedReceiver<RegionLoadCacheTask>>,
+    ) {
         let moved_self = self.clone();
         let handle = tokio::spawn(async move {
             if let Err(err) = moved_self.recover_inner().await {
                 error!(err; "Failed to recover file cache.")
+            }
+
+            // Spawns background task to process region load cache tasks after recovery.
+            // So it won't block the recovery when `sync` is true.
+            if let Some(mut receiver) = task_receiver {
+                let cache_ref = moved_self.clone();
+                info!("Spawning background task for processing region load cache tasks");
+                tokio::spawn(async move {
+                    while let Some(task) = receiver.recv().await {
+                        let file_cache = cache_ref.clone();
+                        task.fill_cache(file_cache).await;
+                    }
+                    info!("Background task for processing region load cache tasks stopped");
+                });
             }
         });
 
@@ -789,7 +812,7 @@ mod tests {
                 .await
                 .is_none()
         );
-        cache.recover(true).await;
+        cache.recover(true, None).await;
 
         // Check size.
         cache.parquet_index.run_pending_tasks().await;
