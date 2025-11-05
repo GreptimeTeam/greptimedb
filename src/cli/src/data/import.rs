@@ -282,6 +282,54 @@ impl Import {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn build_import(input_dir: &str) -> Import {
+        Import {
+            catalog: "catalog".to_string(),
+            schema: None,
+            database_client: DatabaseClient::new(
+                "127.0.0.1:4000".to_string(),
+                "catalog".to_string(),
+                None,
+                Duration::from_secs(0),
+                None,
+            ),
+            input_dir: input_dir.to_string(),
+            parallelism: 1,
+            target: ImportTarget::Data,
+        }
+    }
+
+    #[test]
+    fn rewrite_copy_database_sql_replaces_placeholder() {
+        let import = build_import("/tmp/export-path");
+        let comment = "-- COPY DATABASE \"catalog\".\"schema\" FROM 's3://bucket/demo/' WITH (format = 'parquet') CONNECTION (region = 'us-west-2')";
+        let sql = format!(
+            "{comment}\nCOPY DATABASE \"catalog\".\"schema\" FROM '{}' WITH (format = 'parquet');",
+            COPY_PATH_PLACEHOLDER
+        );
+
+        let rewritten = import.rewrite_copy_database_sql("schema", &sql).unwrap();
+        let expected_location = import.build_copy_database_location("schema");
+        let escaped = expected_location.replace('\'', "''");
+
+        assert!(rewritten.starts_with(comment));
+        assert!(rewritten.contains(&format!("FROM '{escaped}'")));
+        assert!(!rewritten.contains(COPY_PATH_PLACEHOLDER));
+    }
+
+    #[test]
+    fn rewrite_copy_database_sql_requires_placeholder() {
+        let import = build_import("/tmp/export-path");
+        let sql = "COPY DATABASE \"catalog\".\"schema\" FROM '/tmp/export-path/catalog/schema/' WITH (format = 'parquet');";
+        assert!(import.rewrite_copy_database_sql("schema", sql).is_err());
+    }
+}
 #[async_trait]
 impl Tool for Import {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
