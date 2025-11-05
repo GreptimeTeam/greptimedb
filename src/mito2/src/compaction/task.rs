@@ -28,7 +28,7 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionLeaderState;
 use crate::request::{
-    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditRequest,
+    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditResult,
     WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::file::FileMeta;
@@ -111,7 +111,7 @@ impl CompactionTaskImpl {
             .update_manifest(RegionLeaderState::Writable, action_list)
             .await
         {
-            warn!(
+            error!(
                 e;
                 "Failed to update manifest for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
             );
@@ -119,31 +119,27 @@ impl CompactionTaskImpl {
         }
 
         // 2. Notify region worker loop to remove expired files from region version.
-        self.send_to_worker(WorkerRequest::EditRegion(RegionEditRequest {
-            region_id: compaction_region.region_id,
-            edit,
-            tx: expire_delete_sender,
-        }))
+        self.send_to_worker(WorkerRequest::Background {
+            region_id,
+            notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                region_id,
+                sender: expire_delete_sender,
+                edit,
+                result: Ok(()),
+            }),
+        })
         .await;
 
-        match expire_delete_listener.await.context(error::RecvSnafu) {
-            Ok(Ok(())) => {
-                // Successfully removed expired files
-            }
-            Ok(Err(e)) => {
-                warn!(
-                    e;
-                    "Failed to remove expired files from region version, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
-                );
-                return;
-            }
-            Err(e) => {
-                warn!(
-                    e;
-                    "Failed to receive confirmation for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
-                );
-                return;
-            }
+        if let Err(e) = expire_delete_listener
+            .await
+            .context(error::RecvSnafu)
+            .flatten()
+        {
+            warn!(
+                e;
+                "Failed to remove expired files from region version, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
+            );
+            return;
         }
 
         info!(
