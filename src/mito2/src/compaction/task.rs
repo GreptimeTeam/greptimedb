@@ -126,24 +126,26 @@ impl CompactionTaskImpl {
         self.mark_files_compacting(true);
 
         // 1. In case of local compaction, we can delete expired ssts in advance.
-        let remove_timer = COMPACTION_STAGE_ELAPSED
-            .with_label_values(&["remove_expired"])
-            .start_timer();
-        let expired_ssts = self
-            .picker_output
-            .expired_ssts
-            .drain(..)
-            .map(|f| f.meta_ref().clone())
-            .collect();
-        if let Err(e) = self
-            .remove_expired(&self.compaction_region, expired_ssts)
-            .await
-        {
-            remove_timer.stop_and_discard();
-            warn!(e; "Failed to remove expired sst files");
-            return Err(e);
-        };
-        remove_timer.observe_duration();
+        if !self.picker_output.expired_ssts.is_empty() {
+            let remove_timer = COMPACTION_STAGE_ELAPSED
+                .with_label_values(&["remove_expired"])
+                .start_timer();
+            let expired_ssts = self
+                .picker_output
+                .expired_ssts
+                .drain(..)
+                .map(|f| f.meta_ref().clone())
+                .collect();
+            if let Err(e) = self
+                .remove_expired(&self.compaction_region, expired_ssts)
+                .await
+            {
+                remove_timer.stop_and_discard();
+                warn!(e; "Failed to remove expired sst files");
+                return Err(e);
+            };
+            remove_timer.observe_duration();
+        }
 
         // 2. Merge inputs
         let merge_timer = COMPACTION_STAGE_ELAPSED
