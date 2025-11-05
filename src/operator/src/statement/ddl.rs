@@ -52,7 +52,6 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
-use partition::PartitionRule;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
@@ -429,7 +428,7 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
-                table_name: physical_table_name.to_string(),
+                table_name: physical_table_name.clone(),
             })?;
 
         let physical_table_info = physical_table.table_info();
@@ -438,7 +437,7 @@ impl StatementExecutor {
             .find_table_partition_rule(&physical_table_info)
             .await
             .context(error::FindTablePartitionRuleSnafu {
-                table_name: physical_table_name.to_string(),
+                table_name: physical_table_name.clone(),
             })?;
 
         let multi_dim_rule = partition_rule

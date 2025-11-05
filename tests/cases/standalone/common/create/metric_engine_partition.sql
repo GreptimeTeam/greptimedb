@@ -45,8 +45,6 @@ with (
     on_physical_table = "metric_engine_partition",
 );
 
-drop table invalid_logical_partition;
-
 create table logical_table_2 (
     ts timestamp time index,
     host string primary key,
@@ -171,6 +169,8 @@ select * from logical_table_4;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN select * from logical_table_4;
+
+drop table logical_table_1;
 
 drop table logical_table_2;
 

@@ -59,10 +59,6 @@ Error: 1004(InvalidArguments), Invalid partition rule: logical table partition r
  logical table partition exprs:		 [PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host1"))) }, PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host3"))) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host1"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host2"))) }) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host2"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host3"))) }) }]
  physical table partition exprs:	 [PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host1"))) }, PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host2"))) }, PartitionExpr { lhs: Expr(PartitionExpr { lhs: Column("host"), op: Gt, rhs: Value(String(StringBytes("host1"))) }), op: And, rhs: Expr(PartitionExpr { lhs: Column("host"), op: LtEq, rhs: Value(String(StringBytes("host2"))) }) }]
 
-drop table invalid_logical_partition;
-
-Error: 4001(TableNotFound), Table not found: greptime.public.invalid_logical_partition
-
 create table logical_table_2 (
     ts timestamp time index,
     host string primary key,
@@ -444,6 +440,10 @@ EXPLAIN select * from logical_table_4;
 |_|_|
 +-+-+
 
+drop table logical_table_1;
+
+Affected Rows: 0
+
 drop table logical_table_2;
 
 Affected Rows: 0
@@ -458,5 +458,5 @@ Affected Rows: 0
 
 drop table metric_engine_partition;
 
-Error: 1004(InvalidArguments), Physical region 4398046511104(1024, 0) is busy, there are still some logical regions using it
+Affected Rows: 0
 
