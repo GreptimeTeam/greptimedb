@@ -104,17 +104,6 @@ impl TwcsPicker {
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
-            if let Some(max_background_tasks) = self.max_background_tasks
-                && inputs.len() > max_background_tasks
-            {
-                debug!(
-                    "Region ({:?}) compaction input size({}) larger than max background tasks({}), remaining inputs truncated",
-                    region_id,
-                    inputs.len(),
-                    max_background_tasks
-                );
-                inputs.truncate(max_background_tasks);
-            }
             if !inputs.is_empty() {
                 log_pick_result(
                     region_id,
@@ -132,6 +121,16 @@ impl TwcsPicker {
                     filter_deleted,
                     output_time_range: None, // we do not enforce output time range in twcs compactions.
                 });
+
+                if let Some(max_background_tasks) = self.max_background_tasks
+                    && output.len() >= max_background_tasks
+                {
+                    debug!(
+                        "Region ({:?}) compaction task size larger than max background tasks({}), remaining tasks discarded",
+                        region_id, max_background_tasks
+                    );
+                    break;
+                }
             }
         }
         output

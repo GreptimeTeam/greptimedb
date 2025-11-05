@@ -83,11 +83,13 @@ impl CompactionTaskImpl {
 
     /// Remove expired ssts files, update manifest immediately
     /// and apply the edit to region version.
+    ///
+    /// This function logs errors but does not stop the compaction process if removal fails.
     async fn remove_expired(
         &self,
         compaction_region: &CompactionRegion,
         expired_files: Vec<FileMeta>,
-    ) -> error::Result<()> {
+    ) {
         let region_id = compaction_region.region_id;
         let expired_files_str = expired_files.iter().map(|f| f.file_id).join(",");
         let (expire_delete_sender, expire_delete_listener) = tokio::sync::oneshot::channel();
@@ -104,10 +106,18 @@ impl CompactionTaskImpl {
 
         // 1. Update manifest
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        compaction_region
+        if let Err(e) = compaction_region
             .manifest_ctx
             .update_manifest(RegionLeaderState::Writable, action_list)
-            .await?;
+            .await
+        {
+            warn!(
+                e;
+                "Failed to update manifest for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
+            );
+            return;
+        }
+
         // 2. Notify region worker loop to remove expired files from region version.
         self.send_to_worker(WorkerRequest::EditRegion(RegionEditRequest {
             region_id: compaction_region.region_id,
@@ -115,11 +125,30 @@ impl CompactionTaskImpl {
             tx: expire_delete_sender,
         }))
         .await;
-        expire_delete_listener.await.context(error::RecvSnafu)??;
+
+        match expire_delete_listener.await.context(error::RecvSnafu) {
+            Ok(Ok(())) => {
+                // Successfully removed expired files
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    e;
+                    "Failed to remove expired files from region version, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    e;
+                    "Failed to receive confirmation for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
+                );
+                return;
+            }
+        }
+
         info!(
             "Successfully removed expired files, region: {region_id}, files: [{expired_files_str}]"
         );
-        Ok(())
     }
 
     async fn handle_expiration_and_compaction(&mut self) -> error::Result<RegionEdit> {
@@ -136,14 +165,9 @@ impl CompactionTaskImpl {
                 .drain(..)
                 .map(|f| f.meta_ref().clone())
                 .collect();
-            if let Err(e) = self
-                .remove_expired(&self.compaction_region, expired_ssts)
-                .await
-            {
-                remove_timer.stop_and_discard();
-                warn!(e; "Failed to remove expired sst files");
-                return Err(e);
-            };
+            // remove_expired logs errors but doesn't stop compaction
+            self.remove_expired(&self.compaction_region, expired_ssts)
+                .await;
             remove_timer.observe_duration();
         }
 
