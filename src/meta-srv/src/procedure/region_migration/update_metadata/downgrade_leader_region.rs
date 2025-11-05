@@ -17,7 +17,7 @@ use common_meta::lock_key::TableLock;
 use common_meta::rpc::router::LeaderState;
 use common_procedure::ContextProviderRef;
 use common_telemetry::error;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::procedure::region_migration::Context;
@@ -48,18 +48,14 @@ impl UpdateMetadata {
         let table_metadata_manager = ctx.table_metadata_manager.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let table_regions = ctx.persistent_ctx.table_regions();
-        let table_routes = ctx.get_table_route_values().await?;
 
         for (table_id, regions) in table_regions {
             let table_lock = TableLock::Write(table_id).into();
             let _guard = ctx_provider.acquire_lock(&table_lock).await;
 
-            let current_table_route_value = table_routes
-                .get(&table_id)
-                .context(error::TableRouteNotFoundSnafu { table_id })?;
-
+            let current_table_route_value = ctx.get_table_route_value(table_id).await?;
             if let Err(err) = table_metadata_manager
-                .update_leader_region_status(table_id, current_table_route_value, |route| {
+                .update_leader_region_status(table_id, &current_table_route_value, |route| {
                     if regions.contains(&route.region.id)
                         && route
                             .leader_peer
