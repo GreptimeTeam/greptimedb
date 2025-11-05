@@ -16,6 +16,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{Float64Type, TimestampMillisecondType};
+use arrow_schema::DataType;
 use axum::Json;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
@@ -24,8 +27,6 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
@@ -34,7 +35,7 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
+    ArrowSnafu, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
 };
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
@@ -247,13 +248,7 @@ impl PrometheusJsonResponse {
             // prepare things...
             let tag_columns = tag_column_indices
                 .iter()
-                .map(|i| {
-                    batch
-                        .column(*i)
-                        .as_any()
-                        .downcast_ref::<StringVector>()
-                        .unwrap()
-                })
+                .map(|i| batch.column(*i).as_string::<i32>())
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
@@ -261,22 +256,18 @@ impl PrometheusJsonResponse {
                 .collect::<Vec<_>>();
             let timestamp_column = batch
                 .column(timestamp_column_index)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondVector>()
-                .unwrap();
-            let casted_field_column = batch
-                .column(first_field_column_index)
-                .cast(&ConcreteDataType::float64_datatype())
-                .unwrap();
-            let field_column = casted_field_column
-                .as_any()
-                .downcast_ref::<Float64Vector>()
-                .unwrap();
+                .as_primitive::<TimestampMillisecondType>();
+
+            let array =
+                arrow::compute::cast(batch.column(first_field_column_index), &DataType::Float64)
+                    .context(ArrowSnafu)?;
+            let field_column = array.as_primitive::<Float64Type>();
 
             // assemble rows
             for row_index in 0..batch.num_rows() {
                 // retrieve value
-                if let Some(v) = field_column.get_data(row_index) {
+                if field_column.is_valid(row_index) {
+                    let v = field_column.value(row_index);
                     // ignore all NaN values to reduce the amount of data to be sent.
                     if v.is_nan() {
                         continue;
@@ -289,14 +280,13 @@ impl PrometheusJsonResponse {
                     }
                     for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
                         // TODO(ruihang): add test for NULL tag
-                        if let Some(tag_value) = tag_column.get_data(row_index) {
-                            tags.push((tag_name, tag_value));
+                        if tag_column.is_valid(row_index) {
+                            tags.push((tag_name, tag_column.value(row_index)));
                         }
                     }
 
                     // retrieve timestamp
-                    let timestamp_millis: i64 =
-                        timestamp_column.get_data(row_index).unwrap().into();
+                    let timestamp_millis = timestamp_column.value(row_index);
                     let timestamp = timestamp_millis as f64 / 1000.0;
 
                     buffer

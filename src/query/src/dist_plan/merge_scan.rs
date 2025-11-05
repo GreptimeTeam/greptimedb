@@ -334,7 +334,10 @@ impl MergeScanExec {
                     let batch = batch?;
                     // reconstruct batch using `self.schema`
                     // to remove metadata and correct column name
-                    let batch = RecordBatch::new(schema.clone(), batch.columns().iter().cloned())?;
+                    let batch = RecordBatch::from_df_record_batch(
+                        schema.clone(),
+                        batch.into_df_record_batch(),
+                    );
                     metric.record_output_batch_rows(batch.num_rows());
                     if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();

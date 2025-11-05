@@ -34,7 +34,6 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{Expr, SortExpr, col, lit, lit_timestamp_nano, wildcard};
-use datatypes::value::ValueRef;
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
@@ -595,13 +594,10 @@ async fn trace_ids_from_output(output: Output) -> ServerResult<Vec<String>> {
         {
             let mut trace_ids = vec![];
             for recordbatch in recordbatches {
-                for col in recordbatch.columns().iter() {
-                    for row_idx in 0..recordbatch.num_rows() {
-                        if let ValueRef::String(value) = col.get_ref(row_idx) {
-                            trace_ids.push(value.to_string());
-                        }
-                    }
-                }
+                recordbatch
+                    .iter_column_as_string(0)
+                    .flatten()
+                    .for_each(|x| trace_ids.push(x));
             }
 
             return Ok(trace_ids);

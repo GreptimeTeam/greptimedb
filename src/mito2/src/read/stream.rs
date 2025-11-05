@@ -109,7 +109,10 @@ impl ConvertBatchStream {
                     compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
                         .context(ArrowComputeSnafu)?;
 
-                RecordBatch::try_from_df_record_batch(output_schema, record_batch)
+                Ok(RecordBatch::from_df_record_batch(
+                    output_schema,
+                    record_batch,
+                ))
             }
             ScanBatch::RecordBatch(df_record_batch) => {
                 // Safety: Only flat format returns this batch.

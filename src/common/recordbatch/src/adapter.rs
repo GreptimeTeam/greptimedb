@@ -314,10 +314,10 @@ impl Stream for RecordBatchStreamAdapter {
                         metric_collector.record_batch_metrics,
                     );
                 }
-                Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+                Poll::Ready(Some(Ok(RecordBatch::from_df_record_batch(
                     self.schema(),
                     df_record_batch,
-                )))
+                ))))
             }
             Poll::Ready(None) => {
                 if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =

@@ -1440,8 +1440,7 @@ mod test {
                 ..
             }) => {
                 let record = record.take().first().cloned().unwrap();
-                let data = record.column(0);
-                Ok(data.get(0).to_string())
+                Ok(record.iter_column_as_string(0).next().unwrap().unwrap())
             }
             Ok(_) => unreachable!(),
             Err(e) => Err(e),
