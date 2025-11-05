@@ -87,7 +87,6 @@ mod tests {
     use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
-    use crate::region::supervisor::RegionFailureDetectorControl;
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))

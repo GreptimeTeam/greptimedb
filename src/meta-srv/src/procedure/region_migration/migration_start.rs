@@ -252,7 +252,6 @@ impl RegionMigrationStart {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -261,7 +260,6 @@ mod tests {
 
     use super::*;
     use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
-    use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {

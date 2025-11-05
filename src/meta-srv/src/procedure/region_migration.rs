@@ -1010,7 +1010,6 @@ impl Procedure for RegionMigrationProcedure {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants::REGION_LEASE_SECS;
@@ -1018,7 +1017,6 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
 
-    use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
@@ -1163,58 +1161,58 @@ mod tests {
         );
     }
 
-    fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
-        vec![
-            // MigrationStart
-            Step::next(
-                "Should be the update metadata for downgrading",
-                None,
-                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
-            ),
-            // UpdateMetadata::Downgrade
-            Step::next(
-                "Should be the downgrade leader region",
-                None,
-                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
-            ),
-            // Downgrade Candidate
-            Step::next(
-                "Should be the upgrade candidate region",
-                Some(mock_datanode_reply(
-                    from_peer_id,
-                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
-                )),
-                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
-            ),
-            // Upgrade Candidate
-            Step::next(
-                "Should be the update metadata for upgrading",
-                Some(mock_datanode_reply(
-                    to_peer_id,
-                    Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
-                )),
-                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
-            ),
-            // UpdateMetadata::Upgrade
-            Step::next(
-                "Should be the close downgraded region",
-                None,
-                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
-            ),
-            // CloseDowngradedRegion
-            Step::next(
-                "Should be the region migration end",
-                None,
-                Assertion::simple(assert_region_migration_end, assert_done),
-            ),
-            // RegionMigrationEnd
-            Step::next(
-                "Should be the region migration end again",
-                None,
-                Assertion::simple(assert_region_migration_end, assert_done),
-            ),
-        ]
-    }
+    // fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
+    //     vec![
+    //         // MigrationStart
+    //         Step::next(
+    //             "Should be the update metadata for downgrading",
+    //             None,
+    //             Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+    //         ),
+    //         // UpdateMetadata::Downgrade
+    //         Step::next(
+    //             "Should be the downgrade leader region",
+    //             None,
+    //             Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+    //         ),
+    //         // Downgrade Candidate
+    //         Step::next(
+    //             "Should be the upgrade candidate region",
+    //             Some(mock_datanode_reply(
+    //                 from_peer_id,
+    //                 Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+    //             )),
+    //             Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+    //         ),
+    //         // Upgrade Candidate
+    //         Step::next(
+    //             "Should be the update metadata for upgrading",
+    //             Some(mock_datanode_reply(
+    //                 to_peer_id,
+    //                 Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+    //             )),
+    //             Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+    //         ),
+    //         // UpdateMetadata::Upgrade
+    //         Step::next(
+    //             "Should be the close downgraded region",
+    //             None,
+    //             Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+    //         ),
+    //         // CloseDowngradedRegion
+    //         Step::next(
+    //             "Should be the region migration end",
+    //             None,
+    //             Assertion::simple(assert_region_migration_end, assert_done),
+    //         ),
+    //         // RegionMigrationEnd
+    //         Step::next(
+    //             "Should be the region migration end again",
+    //             None,
+    //             Assertion::simple(assert_region_migration_end, assert_done),
+    //         ),
+    //     ]
+    // }
 
     // #[tokio::test]
     // async fn test_procedure_flow() {

@@ -98,7 +98,7 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_procedure_test::MockContextProvider;
     use store_api::storage::RegionId;
 

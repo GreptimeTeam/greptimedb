@@ -222,14 +222,11 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
-    use common_procedure_test::MockContextProvider;
     use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
