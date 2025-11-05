@@ -60,10 +60,10 @@ use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
     EncodeSnafu, InvalidMetadataSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::memtable::BoxedRecordBatchIterator;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
+use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics};
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -229,6 +229,154 @@ impl BulkPart {
 
     pub fn num_rows(&self) -> usize {
         self.batch.num_rows()
+    }
+}
+
+/// A collection of small unordered bulk parts.
+/// Used to batch small parts together before merging them into a sorted part.
+pub struct UnorderedPart {
+    /// Small bulk parts that haven't been sorted yet.
+    parts: Vec<BulkPart>,
+    /// Total number of rows across all parts.
+    total_rows: usize,
+    /// Minimum timestamp across all parts.
+    min_timestamp: i64,
+    /// Maximum timestamp across all parts.
+    max_timestamp: i64,
+    /// Maximum sequence number across all parts.
+    max_sequence: u64,
+    /// Row count threshold for accepting parts (default: 1024).
+    threshold: usize,
+    /// Row count threshold for compacting (default: 4096).
+    compact_threshold: usize,
+}
+
+impl Default for UnorderedPart {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UnorderedPart {
+    /// Creates a new empty UnorderedPart.
+    pub fn new() -> Self {
+        Self {
+            parts: Vec::new(),
+            total_rows: 0,
+            min_timestamp: i64::MAX,
+            max_timestamp: i64::MIN,
+            max_sequence: 0,
+            threshold: 1024,
+            compact_threshold: 4096,
+        }
+    }
+
+    /// Sets the threshold for accepting parts into unordered_part.
+    pub fn set_threshold(&mut self, threshold: usize) {
+        self.threshold = threshold;
+    }
+
+    /// Sets the threshold for compacting unordered_part.
+    pub fn set_compact_threshold(&mut self, compact_threshold: usize) {
+        self.compact_threshold = compact_threshold;
+    }
+
+    /// Returns the threshold for accepting parts.
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    /// Returns the compact threshold.
+    pub fn compact_threshold(&self) -> usize {
+        self.compact_threshold
+    }
+
+    /// Returns true if this part should accept the given row count.
+    pub fn should_accept(&self, num_rows: usize) -> bool {
+        num_rows < self.threshold
+    }
+
+    /// Returns true if this part should be compacted.
+    pub fn should_compact(&self) -> bool {
+        self.total_rows >= self.compact_threshold
+    }
+
+    /// Adds a BulkPart to this unordered collection.
+    pub fn push(&mut self, part: BulkPart) {
+        self.total_rows += part.num_rows();
+        self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
+        self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
+        self.max_sequence = self.max_sequence.max(part.sequence);
+        self.parts.push(part);
+    }
+
+    /// Returns the total number of rows across all parts.
+    pub fn num_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    /// Returns true if there are no parts.
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// Returns the number of parts in this collection.
+    pub fn num_parts(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// Concatenates and sorts all parts into a single RecordBatch.
+    /// Returns None if the collection is empty.
+    pub fn concat_and_sort(&self) -> Result<Option<RecordBatch>> {
+        if self.parts.is_empty() {
+            return Ok(None);
+        }
+
+        if self.parts.len() == 1 {
+            // If there's only one part, return its batch directly
+            return Ok(Some(self.parts[0].batch.clone()));
+        }
+
+        // Get the schema from the first part
+        let schema = self.parts[0].batch.schema();
+
+        // Concatenate all record batches
+        let batches: Vec<RecordBatch> = self.parts.iter().map(|p| p.batch.clone()).collect();
+        let concatenated =
+            arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
+
+        // Sort the concatenated batch
+        let sorted_batch = sort_primary_key_record_batch(&concatenated)?;
+
+        Ok(Some(sorted_batch))
+    }
+
+    /// Converts all parts into a single sorted BulkPart.
+    /// Returns None if the collection is empty.
+    pub fn to_bulk_part(&self) -> Result<Option<BulkPart>> {
+        let Some(sorted_batch) = self.concat_and_sort()? else {
+            return Ok(None);
+        };
+
+        let timestamp_index = self.parts[0].timestamp_index;
+
+        Ok(Some(BulkPart {
+            batch: sorted_batch,
+            max_timestamp: self.max_timestamp,
+            min_timestamp: self.min_timestamp,
+            sequence: self.max_sequence,
+            timestamp_index,
+            raw_data: None,
+        }))
+    }
+
+    /// Clears all parts from this collection.
+    pub fn clear(&mut self) {
+        self.parts.clear();
+        self.total_rows = 0;
+        self.min_timestamp = i64::MAX;
+        self.max_timestamp = i64::MIN;
+        self.max_sequence = 0;
     }
 }
 
@@ -572,6 +720,7 @@ impl EncodedBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
+        mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         // Compute skip_fields for row group pruning using the same approach as compute_skip_fields in reader.rs.
         let skip_fields_for_pruning =
@@ -587,11 +736,11 @@ impl EncodedBulkPart {
         }
 
         let iter = EncodedBulkPartIter::try_new(
+            self,
             context,
             row_groups_to_read,
-            self.metadata.parquet_metadata.clone(),
-            self.data.clone(),
             sequence,
+            mem_scan_metrics,
         )?;
         Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
     }
@@ -1415,6 +1564,7 @@ mod tests {
                     .unwrap(),
                 ),
                 None,
+                None,
             )
             .unwrap()
             .expect("expect at least one row group");
@@ -1474,7 +1624,7 @@ mod tests {
             .unwrap(),
         );
         let mut reader = part
-            .read(context, None)
+            .read(context, None, None)
             .unwrap()
             .expect("expect at least one row group");
         let mut total_rows_read = 0;
@@ -1507,7 +1657,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(part.read(context, None).unwrap().is_none());
+        assert!(part.read(context, None, None).unwrap().is_none());
 
         check_prune_row_group(&part, None, 310);
 

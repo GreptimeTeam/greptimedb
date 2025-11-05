@@ -131,4 +131,9 @@ impl BulkIterContext {
     pub(crate) fn pre_filter_mode(&self) -> PreFilterMode {
         self.base.pre_filter_mode
     }
+
+    /// Returns the region id.
+    pub(crate) fn region_id(&self) -> store_api::storage::RegionId {
+        self.base.read_format.metadata().region_id
+    }
 }
