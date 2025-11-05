@@ -48,6 +48,7 @@ use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTracker, RegionMigrationTriggerReason,
 };
+use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
@@ -442,11 +443,11 @@ pub(crate) fn assert_update_metadata_upgrade(next: &dyn State) {
     assert_matches!(state, UpdateMetadata::Upgrade);
 }
 
-// /// Asserts the [State] should be [UpdateMetadata::Rollback].
-// pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
-//     let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
-//     assert_matches!(state, UpdateMetadata::Rollback);
-// }
+/// Asserts the [State] should be [UpdateMetadata::Rollback].
+pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
+    let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+    assert_matches!(state, UpdateMetadata::Rollback);
+}
 
 /// Asserts the [State] should be [RegionMigrationEnd].
 pub(crate) fn assert_region_migration_end(next: &dyn State) {
@@ -461,13 +462,13 @@ pub(crate) fn assert_close_downgraded_region(next: &dyn State) {
         .unwrap();
 }
 
-// /// Asserts the [State] should be [RegionMigrationAbort].
-// pub(crate) fn assert_region_migration_abort(next: &dyn State) {
-//     let _ = next
-//         .as_any()
-//         .downcast_ref::<RegionMigrationAbort>()
-//         .unwrap();
-// }
+/// Asserts the [State] should be [RegionMigrationAbort].
+pub(crate) fn assert_region_migration_abort(next: &dyn State) {
+    let _ = next
+        .as_any()
+        .downcast_ref::<RegionMigrationAbort>()
+        .unwrap();
+}
 
 /// Asserts the [State] should be [DowngradeLeaderRegion].
 pub(crate) fn assert_downgrade_leader_region(next: &dyn State) {

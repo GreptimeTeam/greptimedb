@@ -15,7 +15,7 @@
 use common_error::ext::BoxedError;
 use common_meta::lock_key::TableLock;
 use common_procedure::ContextProviderRef;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -56,15 +56,15 @@ impl UpdateMetadata {
                 .context(error::TableMetadataManagerSnafu)
             {
                 error!(err; "Failed to update the table route during the rollback downgraded leader regions: {regions:?}");
-                ctx.remove_table_route_value();
                 return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to update the table route during the rollback downgraded leader regions: {regions:?}"),
                 });
             }
+            info!(
+                "Rolling back downgraded leader region table route success, table_id: {table_id}, regions: {regions:?}"
+            );
         }
-
         ctx.register_failure_detectors().await;
-        ctx.remove_table_route_value();
 
         Ok(())
     }
@@ -109,109 +109,6 @@ mod tests {
 
         assert!(!err.is_retryable());
     }
-
-    // #[tokio::test]
-    // async fn test_update_table_route_with_retry() {
-    //     let state = UpdateMetadata::Rollback;
-    //     let persistent_context = new_persistent_context();
-    //     let from_peer = persistent_context.from_peer.clone();
-
-    //     let env = TestingEnv::new();
-    //     let mut ctx = env.context_factory().new_context(persistent_context);
-    //     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    //     ctx.region_failure_detector_controller = Arc::new(RegionFailureDetectorControl::new(tx));
-    //     let table_id = ctx.persistent_ctx.region_ids[0].table_id();
-
-    //     let table_info = new_test_table_info(1024, vec![1, 2, 3]).into();
-    //     let region_routes = vec![
-    //         RegionRoute {
-    //             region: Region::new_test(RegionId::new(1024, 1)),
-    //             leader_peer: Some(from_peer.clone()),
-    //             leader_state: Some(LeaderState::Downgrading),
-    //             ..Default::default()
-    //         },
-    //         RegionRoute {
-    //             region: Region::new_test(RegionId::new(1024, 2)),
-    //             leader_peer: Some(Peer::empty(4)),
-    //             leader_state: Some(LeaderState::Downgrading),
-    //             ..Default::default()
-    //         },
-    //         RegionRoute {
-    //             region: Region::new_test(RegionId::new(1024, 3)),
-    //             leader_peer: Some(Peer::empty(5)),
-    //             ..Default::default()
-    //         },
-    //     ];
-
-    //     let expected_region_routes = {
-    //         let mut region_routes = region_routes.clone();
-    //         region_routes[0].leader_state = None;
-    //         region_routes[1].leader_state = None;
-    //         region_routes
-    //     };
-
-    //     env.create_physical_table_metadata(table_info, region_routes)
-    //         .await;
-
-    //     let table_metadata_manager = env.table_metadata_manager();
-    //     let old_table_route = table_metadata_manager
-    //         .table_route_manager()
-    //         .table_route_storage()
-    //         .get_with_raw_bytes(table_id)
-    //         .await
-    //         .unwrap()
-    //         .unwrap();
-
-    //     // modifies the table route.
-    //     table_metadata_manager
-    //         .update_leader_region_status(table_id, &old_table_route, |route| {
-    //             if route.region.id == RegionId::new(1024, 2) {
-    //                 Some(None)
-    //             } else {
-    //                 None
-    //             }
-    //         })
-    //         .await
-    //         .unwrap();
-
-    //     ctx.volatile_ctx.table_route = Some(old_table_route);
-    //     let provider = Arc::new(MockContextProvider::new(HashMap::new())) as _;
-    //     let err = state
-    //         .rollback_downgraded_region(&mut ctx, &provider)
-    //         .await
-    //         .unwrap_err();
-    //     assert!(ctx.volatile_ctx.table_route.is_none());
-    //     assert!(err.is_retryable());
-    //     assert!(format!("{err:?}").contains("Failed to update the table route"));
-    //     assert_eq!(rx.len(), 0);
-    //     let provider = Arc::new(MockContextProvider::new(HashMap::new())) as _;
-    //     state
-    //         .rollback_downgraded_region(&mut ctx, &provider)
-    //         .await
-    //         .unwrap();
-    //     let event = rx.try_recv().unwrap();
-    //     let detecting_regions = event.into_region_failure_detectors();
-    //     assert_eq!(
-    //         detecting_regions,
-    //         ctx.persistent_ctx
-    //             .region_ids
-    //             .iter()
-    //             .map(|region_id| (from_peer.id, *region_id))
-    //             .collect::<Vec<_>>(),
-    //     );
-
-    //     let table_route = table_metadata_manager
-    //         .table_route_manager()
-    //         .table_route_storage()
-    //         .get(table_id)
-    //         .await
-    //         .unwrap()
-    //         .unwrap();
-    //     assert_eq!(
-    //         &expected_region_routes,
-    //         table_route.region_routes().unwrap()
-    //     );
-    // }
 
     #[tokio::test]
     async fn test_next_migration_end_state() {
@@ -262,8 +159,6 @@ mod tests {
             .as_any()
             .downcast_ref::<RegionMigrationAbort>()
             .unwrap();
-
-        assert!(ctx.volatile_ctx.table_route.is_none());
 
         let table_route = table_metadata_manager
             .table_route_manager()

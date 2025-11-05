@@ -279,8 +279,6 @@ pub struct VolatileContext {
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
     opening_region_guard: Vec<OperatingRegionGuard>,
-    /// `table_route` is stored via previous steps for future use.
-    table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
     // /// `datanode_table` is stored via previous steps for future use.
     // from_peer_datanode_table: Option<DatanodeTableValue>,
     // /// `table_info` is stored via previous steps for future use.
@@ -586,37 +584,6 @@ impl Context {
         Ok(datanode_table_value)
     }
 
-    // /// Returns the `table_route` of [VolatileContext] if any.
-    // /// Otherwise, returns the value retrieved from remote.
-    // ///
-    // /// Retry:
-    // /// - Failed to retrieve the metadata of table.
-    // pub async fn get_table_route_value(
-    //     &mut self,
-    // ) -> Result<&DeserializedValueWithBytes<TableRouteValue>> {
-    //     let table_route_value = &mut self.volatile_ctx.table_route;
-
-    //     if table_route_value.is_none() {
-    //         let table_id = self.persistent_ctx.region_ids.table_id();
-    //         let table_route = self
-    //             .table_metadata_manager
-    //             .table_route_manager()
-    //             .table_route_storage()
-    //             .get_with_raw_bytes(table_id)
-    //             .await
-    //             .context(error::TableMetadataManagerSnafu)
-    //             .map_err(BoxedError::new)
-    //             .with_context(|_| error::RetryLaterWithSourceSnafu {
-    //                 reason: format!("Failed to get TableRoute: {table_id}"),
-    //             })?
-    //             .context(error::TableRouteNotFoundSnafu { table_id })?;
-
-    //         *table_route_value = Some(table_route);
-    //     }
-
-    //     Ok(table_route_value.as_ref().unwrap())
-    // }
-
     /// Notifies the RegionSupervisor to register failure detectors of failed region.
     ///
     /// The original failure detector was removed once the procedure was triggered.
@@ -628,10 +595,13 @@ impl Context {
             .iter()
             .map(|region_id| (datanode_id, *region_id))
             .collect::<Vec<_>>();
-
         self.region_failure_detector_controller
             .register_failure_detectors(detecting_regions)
             .await;
+        info!(
+            "Registered failure detectors after migration failures for datanode {}, regions {:?}",
+            datanode_id, region_ids
+        );
     }
 
     /// Notifies the RegionSupervisor to deregister failure detectors.
@@ -668,92 +638,6 @@ impl Context {
             .await;
     }
 
-    /// Removes the `table_route` of [VolatileContext], returns true if any.
-    pub fn remove_table_route_value(&mut self) -> bool {
-        let value = self.volatile_ctx.table_route.take();
-        value.is_some()
-    }
-
-    // /// Returns the `table_info` of [VolatileContext] if any.
-    // /// Otherwise, returns the value retrieved from remote.
-    // ///
-    // /// Retry:
-    // /// - Failed to retrieve the metadata of table.
-    // pub async fn get_table_info_value(
-    //     &mut self,
-    // ) -> Result<&DeserializedValueWithBytes<TableInfoValue>> {
-    //     let table_info_value = &mut self.volatile_ctx.table_info;
-
-    //     if table_info_value.is_none() {
-    //         let table_id = self.persistent_ctx.region_ids.table_id();
-    //         let table_info = self
-    //             .table_metadata_manager
-    //             .table_info_manager()
-    //             .get(table_id)
-    //             .await
-    //             .context(error::TableMetadataManagerSnafu)
-    //             .map_err(BoxedError::new)
-    //             .with_context(|_| error::RetryLaterWithSourceSnafu {
-    //                 reason: format!("Failed to get TableInfo: {table_id}"),
-    //             })?
-    //             .context(error::TableInfoNotFoundSnafu { table_id })?;
-
-    //         *table_info_value = Some(table_info);
-    //     }
-
-    //     Ok(table_info_value.as_ref().unwrap())
-    // }
-
-    // /// Returns the `table_info` of [VolatileContext] if any.
-    // /// Otherwise, returns the value retrieved from remote.
-    // ///
-    // /// Retry:
-    // /// - Failed to retrieve the metadata of datanode.
-    // pub async fn get_from_peer_datanode_table_value(&mut self) -> Result<&DatanodeTableValue> {
-    //     let datanode_value = &mut self.volatile_ctx.from_peer_datanode_table;
-
-    //     if datanode_value.is_none() {
-    //         let table_id = self.persistent_ctx.region_ids.table_id();
-    //         let datanode_id = self.persistent_ctx.from_peer.id;
-
-    //         let datanode_table = self
-    //             .table_metadata_manager
-    //             .datanode_table_manager()
-    //             .get(&DatanodeTableKey {
-    //                 datanode_id,
-    //                 table_id,
-    //             })
-    //             .await
-    //             .context(error::TableMetadataManagerSnafu)
-    //             .map_err(BoxedError::new)
-    //             .with_context(|_| error::RetryLaterWithSourceSnafu {
-    //                 reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
-    //             })?
-    //             .context(error::DatanodeTableNotFoundSnafu {
-    //                 table_id,
-    //                 datanode_id,
-    //             })?;
-
-    //         *datanode_value = Some(datanode_table);
-    //     }
-
-    //     Ok(datanode_value.as_ref().unwrap())
-    // }
-
-    // /// Fetches the replay checkpoint for the given topic.
-    // pub async fn fetch_replay_checkpoint(&self, topic: &str) -> Result<Option<ReplayCheckpoint>> {
-    //     let region_id = self.region_id();
-    //     let topic_region_key = TopicRegionKey::new(region_id, topic);
-    //     let value = self
-    //         .table_metadata_manager
-    //         .topic_region_manager()
-    //         .get(topic_region_key)
-    //         .await
-    //         .context(error::TableMetadataManagerSnafu)?;
-
-    //     Ok(value.and_then(|value| value.checkpoint))
-    // }
-
     /// Fetches the replay checkpoints for the given topic region keys.
     pub async fn get_replay_checkpoints(
         &self,
@@ -773,11 +657,6 @@ impl Context {
 
         Ok(replay_checkpoints)
     }
-
-    // /// Returns the [RegionId].
-    // pub fn region_id(&self) -> RegionId {
-    //     self.persistent_ctx.region_ids
-    // }
 
     /// Broadcasts the invalidate table cache message.
     pub async fn invalidate_table_cache(&self) -> Result<()> {
@@ -925,9 +804,11 @@ impl RegionMigrationProcedure {
                     })
                     .await
                     .context(error::TableMetadataManagerSnafu)?;
+                info!(
+                    "Rolling back downgraded region leader table route, table_id: {table_id}, regions: {regions:?}"
+                );
             }
         }
-
         self.context.register_failure_detectors().await;
 
         Ok(())
@@ -1010,6 +891,7 @@ impl Procedure for RegionMigrationProcedure {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants::REGION_LEASE_SECS;
@@ -1161,152 +1043,122 @@ mod tests {
         );
     }
 
-    // fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
-    //     vec![
-    //         // MigrationStart
-    //         Step::next(
-    //             "Should be the update metadata for downgrading",
-    //             None,
-    //             Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
-    //         ),
-    //         // UpdateMetadata::Downgrade
-    //         Step::next(
-    //             "Should be the downgrade leader region",
-    //             None,
-    //             Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
-    //         ),
-    //         // Downgrade Candidate
-    //         Step::next(
-    //             "Should be the upgrade candidate region",
-    //             Some(mock_datanode_reply(
-    //                 from_peer_id,
-    //                 Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
-    //             )),
-    //             Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
-    //         ),
-    //         // Upgrade Candidate
-    //         Step::next(
-    //             "Should be the update metadata for upgrading",
-    //             Some(mock_datanode_reply(
-    //                 to_peer_id,
-    //                 Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
-    //             )),
-    //             Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
-    //         ),
-    //         // UpdateMetadata::Upgrade
-    //         Step::next(
-    //             "Should be the close downgraded region",
-    //             None,
-    //             Assertion::simple(assert_close_downgraded_region, assert_no_persist),
-    //         ),
-    //         // CloseDowngradedRegion
-    //         Step::next(
-    //             "Should be the region migration end",
-    //             None,
-    //             Assertion::simple(assert_region_migration_end, assert_done),
-    //         ),
-    //         // RegionMigrationEnd
-    //         Step::next(
-    //             "Should be the region migration end again",
-    //             None,
-    //             Assertion::simple(assert_region_migration_end, assert_done),
-    //         ),
-    //     ]
-    // }
+    fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
+        vec![
+            // MigrationStart
+            Step::next(
+                "Should be the open candidate region",
+                None,
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_flush_leader_region, assert_no_persist),
+            ),
+            // Flush Leader Region
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(move |id| {
+                        Ok(new_flush_region_reply_for_region(
+                            id,
+                            RegionId::new(1024, 1),
+                            true,
+                            None,
+                        ))
+                    }),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Candidate
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the update metadata for upgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+                )),
+                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the close downgraded region",
+                None,
+                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+            ),
+            // CloseDowngradedRegion
+            Step::next(
+                "Should be the region migration end",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+            // RegionMigrationEnd
+            Step::next(
+                "Should be the region migration end again",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+        ]
+    }
 
-    // #[tokio::test]
-    // async fn test_procedure_flow() {
-    //     common_telemetry::init_default_ut_logging();
+    #[tokio::test]
+    async fn test_procedure_flow() {
+        common_telemetry::init_default_ut_logging();
 
-    //     let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
-    //     let state = Box::new(RegionMigrationStart);
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
 
-    //     // The table metadata.
-    //     let from_peer_id = persistent_context.from_peer.id;
-    //     let to_peer_id = persistent_context.to_peer.id;
-    //     let from_peer = persistent_context.from_peer.clone();
-    //     let to_peer = persistent_context.to_peer.clone();
-    //     let region_id = persistent_context.region_ids[0];
-    //     let table_info = new_test_table_info(1024, vec![1]).into();
-    //     let region_routes = vec![RegionRoute {
-    //         region: Region::new_test(region_id),
-    //         leader_peer: Some(from_peer),
-    //         follower_peers: vec![to_peer],
-    //         ..Default::default()
-    //     }];
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_ids[0];
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
 
-    //     let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
-    //     suite.init_table_metadata(table_info, region_routes).await;
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
 
-    //     let steps = procedure_flow_steps(from_peer_id, to_peer_id);
-    //     let timer = Instant::now();
+        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
+        let timer = Instant::now();
 
-    //     // Run the table tests.
-    //     let runner = ProcedureMigrationSuiteRunner::new(suite)
-    //         .steps(steps)
-    //         .run_once()
-    //         .await;
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps)
+            .run_once()
+            .await;
 
-    //     // Ensure it didn't run into the slow path.
-    //     assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
 
-    //     runner.suite.verify_table_metadata().await;
-    // }
-
-    // #[tokio::test]
-    // async fn test_procedure_flow_idempotent() {
-    //     common_telemetry::init_default_ut_logging();
-
-    //     let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
-    //     let state = Box::new(RegionMigrationStart);
-
-    //     // The table metadata.
-    //     let from_peer_id = persistent_context.from_peer.id;
-    //     let to_peer_id = persistent_context.to_peer.id;
-    //     let from_peer = persistent_context.from_peer.clone();
-    //     let to_peer = persistent_context.to_peer.clone();
-    //     let region_id = persistent_context.region_ids[0];
-    //     let table_info = new_test_table_info(1024, vec![1]).into();
-    //     let region_routes = vec![RegionRoute {
-    //         region: Region::new_test(region_id),
-    //         leader_peer: Some(from_peer),
-    //         follower_peers: vec![to_peer],
-    //         ..Default::default()
-    //     }];
-
-    //     let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
-    //     suite.init_table_metadata(table_info, region_routes).await;
-
-    //     let steps = procedure_flow_steps(from_peer_id, to_peer_id);
-    //     let setup_to_latest_persisted_state = Step::setup(
-    //         "Sets state to UpdateMetadata::Downgrade",
-    //         merge_before_test_fn(vec![
-    //             setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
-    //             Arc::new(reset_volatile_ctx),
-    //         ]),
-    //     );
-
-    //     let steps = [
-    //         steps.clone(),
-    //         vec![setup_to_latest_persisted_state.clone()],
-    //         steps.clone()[1..].to_vec(),
-    //         vec![setup_to_latest_persisted_state],
-    //         steps.clone()[1..].to_vec(),
-    //     ]
-    //     .concat();
-    //     let timer = Instant::now();
-
-    //     // Run the table tests.
-    //     let runner = ProcedureMigrationSuiteRunner::new(suite)
-    //         .steps(steps.clone())
-    //         .run_once()
-    //         .await;
-
-    //     // Ensure it didn't run into the slow path.
-    //     assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
-
-    //     runner.suite.verify_table_metadata().await;
-    // }
+        runner.suite.verify_table_metadata().await;
+    }
 
     #[tokio::test]
     async fn test_procedure_flow_open_candidate_region_retryable_error() {
@@ -1395,101 +1247,125 @@ mod tests {
         assert_eq!(table_routes_version.unwrap(), 0);
     }
 
-    // #[tokio::test]
-    // async fn test_procedure_flow_upgrade_candidate_with_retry_and_failed() {
-    //     common_telemetry::init_default_ut_logging();
+    #[tokio::test]
+    async fn test_procedure_flow_upgrade_candidate_with_retry_and_failed() {
+        common_telemetry::init_default_ut_logging();
 
-    //     let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
-    //     let state = Box::new(RegionMigrationStart);
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
 
-    //     // The table metadata.
-    //     let from_peer_id = persistent_context.from_peer.id;
-    //     let to_peer_id = persistent_context.to_peer.id;
-    //     let from_peer = persistent_context.from_peer.clone();
-    //     let to_peer = persistent_context.to_peer.clone();
-    //     let region_id = persistent_context.region_ids[0];
-    //     let table_info = new_test_table_info(1024, vec![1]).into();
-    //     let region_routes = vec![RegionRoute {
-    //         region: Region::new_test(region_id),
-    //         leader_peer: Some(from_peer),
-    //         follower_peers: vec![to_peer],
-    //         ..Default::default()
-    //     }];
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let region_id = persistent_context.region_ids[0];
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![],
+            ..Default::default()
+        }];
 
-    //     let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
-    //     suite.init_table_metadata(table_info, region_routes).await;
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
 
-    //     let steps = vec![
-    //         // MigrationStart
-    //         Step::next(
-    //             "Should be the update metadata for downgrading",
-    //             None,
-    //             Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
-    //         ),
-    //         // UpdateMetadata::Downgrade
-    //         Step::next(
-    //             "Should be the downgrade leader region",
-    //             None,
-    //             Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
-    //         ),
-    //         // Downgrade Candidate
-    //         Step::next(
-    //             "Should be the upgrade candidate region",
-    //             Some(mock_datanode_reply(
-    //                 from_peer_id,
-    //                 Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
-    //             )),
-    //             Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
-    //         ),
-    //         // Upgrade Candidate
-    //         Step::next(
-    //             "Should be the rollback metadata",
-    //             Some(mock_datanode_reply(
-    //                 to_peer_id,
-    //                 Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
-    //             )),
-    //             Assertion::simple(assert_update_metadata_rollback, assert_no_persist),
-    //         ),
-    //         // UpdateMetadata::Rollback
-    //         Step::next(
-    //             "Should be the region migration abort",
-    //             None,
-    //             Assertion::simple(assert_region_migration_abort, assert_no_persist),
-    //         ),
-    //         // RegionMigrationAbort
-    //         Step::next(
-    //             "Should throw an error",
-    //             None,
-    //             Assertion::error(|error| {
-    //                 assert!(!error.is_retryable());
-    //                 assert_matches!(error, error::Error::MigrationAbort { .. });
-    //             }),
-    //         ),
-    //     ];
+        let steps = vec![
+            // MigrationStart
+            Step::next(
+                "Should be the open candidate region",
+                None,
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_flush_leader_region, assert_no_persist),
+            ),
+            // Flush Leader Region
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(move |id| {
+                        Ok(new_flush_region_reply_for_region(
+                            id,
+                            RegionId::new(1024, 1),
+                            true,
+                            None,
+                        ))
+                    }),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Candidate
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the rollback metadata",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                )),
+                Assertion::simple(assert_update_metadata_rollback, assert_no_persist),
+            ),
+            // UpdateMetadata::Rollback
+            Step::next(
+                "Should be the region migration abort",
+                None,
+                Assertion::simple(assert_region_migration_abort, assert_no_persist),
+            ),
+            // RegionMigrationAbort
+            Step::next(
+                "Should throw an error",
+                None,
+                Assertion::error(|error| {
+                    assert!(!error.is_retryable());
+                    assert_matches!(error, error::Error::MigrationAbort { .. });
+                }),
+            ),
+        ];
 
-    //     let setup_to_latest_persisted_state = Step::setup(
-    //         "Sets state to UpdateMetadata::Downgrade",
-    //         merge_before_test_fn(vec![
-    //             setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
-    //             Arc::new(reset_volatile_ctx),
-    //         ]),
-    //     );
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to OpenCandidateRegion",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
 
-    //     let steps = [
-    //         steps.clone(),
-    //         vec![setup_to_latest_persisted_state.clone()],
-    //         steps.clone()[1..].to_vec(),
-    //         vec![setup_to_latest_persisted_state],
-    //         steps.clone()[1..].to_vec(),
-    //     ]
-    //     .concat();
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
 
-    //     // Run the table tests.
-    //     ProcedureMigrationSuiteRunner::new(suite)
-    //         .steps(steps.clone())
-    //         .run_once()
-    //         .await;
-    // }
+        // Run the table tests.
+        ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+    }
 
     #[tokio::test]
     async fn test_procedure_flow_upgrade_candidate_with_retry() {

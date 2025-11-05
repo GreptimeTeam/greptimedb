@@ -104,40 +104,6 @@ impl State for RegionMigrationStart {
 }
 
 impl RegionMigrationStart {
-    // /// Retrieves region route.
-    // ///
-    // /// Abort(non-retry):
-    // /// - TableRoute is not found.
-    // /// - RegionRoute is not found.
-    // ///
-    // /// Retry:
-    // /// - Failed to retrieve the metadata of table.
-    // async fn retrieve_region_route(
-    //     &self,
-    //     ctx: &mut Context,
-    //     region_id: RegionId,
-    // ) -> Result<RegionRoute> {
-    //     let table_id = region_id.table_id();
-    //     let table_route = ctx.get_table_route_value().await?;
-
-    //     let region_route = table_route
-    //         .region_routes()
-    //         .context(error::UnexpectedLogicalRouteTableSnafu {
-    //             err_msg: format!("{self:?} is a non-physical TableRouteValue."),
-    //         })?
-    //         .iter()
-    //         .find(|route| route.region.id == region_id)
-    //         .cloned()
-    //         .context(error::UnexpectedSnafu {
-    //             violated: format!(
-    //                 "RegionRoute({}) is not found in TableRoute({})",
-    //                 region_id, table_id
-    //             ),
-    //         })?;
-
-    //     Ok(region_route)
-    // }
-
     /// Retrieves region routes for multiple regions.
     ///
     /// Abort(non-retry):
@@ -175,15 +141,6 @@ impl RegionMigrationStart {
         Ok(region_routes)
     }
 
-    // /// Checks whether the candidate region on region has been opened.
-    // /// Returns true if it's been opened.
-    // fn check_candidate_region_on_peer(&self, region_route: &RegionRoute, to_peer: &Peer) -> bool {
-    //     region_route
-    //         .follower_peers
-    //         .iter()
-    //         .any(|peer| peer.id == to_peer.id)
-    // }
-
     /// Returns true if the region leader is not the `from_peer`.
     ///     
     /// Abort(non-retry):
@@ -201,28 +158,6 @@ impl RegionMigrationStart {
             != from_peer.id;
         Ok(is_invalid_leader_peer)
     }
-
-    // /// Returns true if any of the region leaders is not the `from_peer`.
-    // ///
-    // /// Abort(non-retry):
-    // /// - Leader peer of RegionRoute is not found.
-    // fn invalid_leader_peers(
-    //     &self,
-    //     region_routes: &[RegionRoute],
-    //     from_peer: &Peer,
-    // ) -> Result<bool> {
-    //     for region_route in region_routes {
-    //         if self.invalid_leader_peer(region_route, from_peer)? {
-    //             info!(
-    //                 "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
-    //                 region_route.region.id, region_route.leader_peer, from_peer,
-    //             );
-    //             return Ok(true);
-    //         }
-    //     }
-
-    //     Ok(false)
-    // }
 
     /// Filters out regions that unmigrated.
     fn filter_unmigrated_regions(&self, region_routes: &mut Vec<RegionRoute>, to_peer: &Peer) {
@@ -253,12 +188,15 @@ impl RegionMigrationStart {
 #[cfg(test)]
 mod tests {
 
+    use std::assert_matches::assert_matches;
+
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::error::Error;
     use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -266,81 +204,39 @@ mod tests {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
-    // #[tokio::test]
-    // async fn test_table_route_is_not_found_error() {
-    //     let state = RegionMigrationStart;
-    //     let env = TestingEnv::new();
-    //     let persistent_context = new_persistent_context();
-    //     let mut ctx = env.context_factory().new_context(persistent_context);
+    #[tokio::test]
+    async fn test_table_route_is_not_found_error() {
+        let state = RegionMigrationStart;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let err = state.retrieve_region_routes(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::TableRouteNotFound { .. });
+        assert!(!err.is_retryable());
+    }
 
-    //     let err = state
-    //         .retrieve_region_route(&mut ctx, RegionId::new(1024, 1))
-    //         .await
-    //         .unwrap_err();
+    #[tokio::test]
+    async fn test_region_route_is_not_found_error() {
+        let state = RegionMigrationStart;
+        let persistent_context = new_persistent_context();
+        let from_peer = persistent_context.from_peer.clone();
 
-    //     assert_matches!(err, Error::TableRouteNotFound { .. });
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
-    //     assert!(!err.is_retryable());
-    // }
+        let table_info = new_test_table_info(1024, vec![3]).into();
+        let region_route = RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 3)),
+            leader_peer: Some(from_peer.clone()),
+            ..Default::default()
+        };
 
-    // #[tokio::test]
-    // async fn test_region_route_is_not_found_error() {
-    //     let state = RegionMigrationStart;
-    //     let persistent_context = new_persistent_context();
-    //     let from_peer = persistent_context.from_peer.clone();
-
-    //     let env = TestingEnv::new();
-    //     let mut ctx = env.context_factory().new_context(persistent_context);
-
-    //     let table_info = new_test_table_info(1024, vec![1]).into();
-    //     let region_route = RegionRoute {
-    //         region: Region::new_test(RegionId::new(1024, 1)),
-    //         leader_peer: Some(from_peer.clone()),
-    //         ..Default::default()
-    //     };
-
-    //     env.create_physical_table_metadata(table_info, vec![region_route])
-    //         .await;
-
-    //     let err = state
-    //         .retrieve_region_route(&mut ctx, RegionId::new(1024, 3))
-    //         .await
-    //         .unwrap_err();
-
-    //     assert_matches!(err, Error::Unexpected { .. });
-    //     assert!(!err.is_retryable());
-    // }
-
-    // #[tokio::test]
-    // async fn test_next_update_metadata_downgrade_state() {
-    //     let mut state = Box::new(RegionMigrationStart);
-    //     // from_peer: 1
-    //     // to_peer: 2
-    //     let persistent_context = new_persistent_context();
-    //     let from_peer_id = persistent_context.from_peer.id;
-    //     let to_peer = persistent_context.to_peer.clone();
-    //     let region_id = persistent_context.region_ids[0];
-
-    //     let env = TestingEnv::new();
-    //     let mut ctx = env.context_factory().new_context(persistent_context);
-
-    //     let table_info = new_test_table_info(1024, vec![1]).into();
-    //     let region_routes = vec![RegionRoute {
-    //         region: Region::new_test(region_id),
-    //         leader_peer: Some(Peer::empty(from_peer_id)),
-    //         follower_peers: vec![to_peer],
-    //         ..Default::default()
-    //     }];
-
-    //     env.create_physical_table_metadata(table_info, region_routes)
-    //         .await;
-    //     let procedure_ctx = new_procedure_context();
-    //     let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
-
-    //     let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
-
-    //     assert_matches!(update_metadata, UpdateMetadata::Downgrade);
-    // }
+        env.create_physical_table_metadata(table_info, vec![region_route])
+            .await;
+        let err = state.retrieve_region_routes(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(!err.is_retryable());
+    }
 
     #[tokio::test]
     async fn test_next_migration_end_state() {

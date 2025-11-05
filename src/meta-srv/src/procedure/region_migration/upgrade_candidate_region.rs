@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{
     Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
 };
@@ -66,17 +68,9 @@ impl State for UpgradeCandidateRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
 
-        // let region_wal_option = self.get_region_wal_option(ctx).await?;
-        // let region_id = ctx.persistent_ctx.region_ids;
-        // if region_wal_option.is_none() {
-        //     warn!(
-        //         "Region {} wal options not found, during upgrade candidate region",
-        //         region_id
-        //     );
-        // }
-
+        let topics = self.get_kafka_topics(ctx).await?;
         if self
-            .upgrade_region_with_retry(ctx, procedure_ctx, None)
+            .upgrade_region_with_retry(ctx, procedure_ctx, topics)
             .await
         {
             ctx.update_upgrade_candidate_region_elapsed(now);
@@ -93,25 +87,33 @@ impl State for UpgradeCandidateRegion {
 }
 
 impl UpgradeCandidateRegion {
-    // async fn get_region_wal_option(&self, ctx: &mut Context) -> Result<Option<WalOptions>> {
-    //     let region_id = ctx.persistent_ctx.region_ids;
-    //     match ctx.get_from_peer_datanode_table_value().await {
-    //         Ok(datanode_table_value) => {
-    //             let region_wal_options =
-    //                 parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
-    //                     .context(error::ParseWalOptionsSnafu)?;
-    //             Ok(region_wal_options.get(&region_id.region_number()).cloned())
-    //         }
-    //         Err(error::Error::DatanodeTableNotFound { datanode_id, .. }) => {
-    //             warn!(
-    //                 "Datanode table not found, during upgrade candidate region, the target region might already been migrated, region_id: {}, datanode_id: {}",
-    //                 region_id, datanode_id
-    //             );
-    //             Ok(None)
-    //         }
-    //         Err(e) => Err(e),
-    //     }
-    // }
+    async fn get_kafka_topics(&self, ctx: &mut Context) -> Result<HashSet<String>> {
+        let table_regions = ctx.persistent_ctx.table_regions();
+        let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
+        let mut topics = HashSet::new();
+        for (table_id, regions) in table_regions {
+            let Some(datanode_table_value) = datanode_table_values.get(&table_id) else {
+                continue;
+            };
+
+            let region_wal_options =
+                parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
+                    .context(error::ParseWalOptionsSnafu)?;
+
+            for region_id in regions {
+                let Some(WalOptions::Kafka(kafka_wal_options)) =
+                    region_wal_options.get(&region_id.region_number())
+                else {
+                    continue;
+                };
+                if !topics.contains(&kafka_wal_options.topic) {
+                    topics.insert(kafka_wal_options.topic.clone());
+                }
+            }
+        }
+
+        Ok(topics)
+    }
 
     /// Builds upgrade region instruction.
     async fn build_upgrade_region_instruction(
@@ -305,26 +307,24 @@ impl UpgradeCandidateRegion {
         &self,
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
-        wal_options: Option<&WalOptions>,
+        topics: HashSet<String>,
     ) -> bool {
         let mut retry = 0;
         let mut upgraded = false;
 
+        let mut guards = Vec::with_capacity(topics.len());
         loop {
             let timer = Instant::now();
             // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
-            let _guard = if let Some(WalOptions::Kafka(kafka_wal_options)) = wal_options {
-                Some(
+            for topic in &topics {
+                guards.push(
                     procedure_ctx
                         .provider
-                        .acquire_lock(
-                            &(RemoteWalLock::Read(kafka_wal_options.topic.clone()).into()),
-                        )
+                        .acquire_lock(&(RemoteWalLock::Read(topic.clone()).into()))
                         .await,
-                )
-            } else {
-                None
-            };
+                );
+            }
+
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);
