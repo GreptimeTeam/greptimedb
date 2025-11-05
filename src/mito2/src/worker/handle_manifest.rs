@@ -103,9 +103,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if change_result.result.is_ok() {
             // Apply the metadata to region's version.
-            region
-                .version_control
-                .alter_schema(change_result.new_meta, &region.memtable_builder);
+            region.version_control.alter_schema(change_result.new_meta);
 
             let version = region.version();
             info!(

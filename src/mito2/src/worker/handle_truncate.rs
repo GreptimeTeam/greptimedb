@@ -129,7 +129,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Applies the truncate action to the region.
                 region
                     .version_control
-                    .truncate(truncate_result.kind.clone(), &region.memtable_builder);
+                    .truncate(truncate_result.kind.clone());
             }
             Err(e) => {
                 // Unable to truncate the region.

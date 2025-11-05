@@ -454,6 +454,11 @@ impl TimePartitions {
         self.part_duration
     }
 
+    /// Returns the memtable builder.
+    pub(crate) fn memtable_builder(&self) -> &MemtableBuilderRef {
+        &self.builder
+    }
+
     /// Returns memory usage.
     pub(crate) fn memory_usage(&self) -> usize {
         let inner = self.inner.lock().unwrap();

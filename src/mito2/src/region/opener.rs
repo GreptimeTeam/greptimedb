@@ -328,7 +328,6 @@ impl RegionOpener {
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(0),
-            memtable_builder,
             written_bytes: Arc::new(AtomicU64::new(0)),
             sst_format,
             stats: self.stats,
@@ -564,7 +563,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
-            memtable_builder,
             sst_format,
             stats: self.stats.clone(),
         };

@@ -47,7 +47,6 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
-use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::sst::FormatType;
@@ -140,8 +139,6 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// Memtable builder for the region.
-    pub(crate) memtable_builder: MemtableBuilderRef,
     /// Format type of the SST file.
     pub(crate) sst_format: FormatType,
     /// manifest stats
@@ -1220,7 +1217,6 @@ mod tests {
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
-    use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
     use crate::time_provider::StdTimeProvider;
@@ -1391,7 +1387,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
-            memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
             sst_format: FormatType::PrimaryKey,
             stats: ManifestStats::default(),
         };
