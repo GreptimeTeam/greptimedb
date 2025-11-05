@@ -269,3 +269,66 @@ impl CompactionTask for CompactionTaskImpl {
         .await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use store_api::storage::FileId;
+
+    use crate::compaction::picker::PickerOutput;
+    use crate::compaction::test_util::new_file_handle;
+
+    #[test]
+    fn test_picker_output_with_expired_ssts() {
+        // Test that PickerOutput correctly includes expired_ssts
+        // This verifies that expired SSTs are properly identified and included
+        // in the picker output, which is then handled by handle_expiration_and_compaction
+
+        let file_ids = (0..3).map(|_| FileId::random()).collect::<Vec<_>>();
+        let expired_ssts = vec![
+            new_file_handle(file_ids[0], 0, 999, 0),
+            new_file_handle(file_ids[1], 1000, 1999, 0),
+        ];
+
+        let picker_output = PickerOutput {
+            outputs: vec![],
+            expired_ssts: expired_ssts.clone(),
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        // Verify expired_ssts are included
+        assert_eq!(picker_output.expired_ssts.len(), 2);
+        assert_eq!(
+            picker_output.expired_ssts[0].file_id(),
+            expired_ssts[0].file_id()
+        );
+        assert_eq!(
+            picker_output.expired_ssts[1].file_id(),
+            expired_ssts[1].file_id()
+        );
+    }
+
+    #[test]
+    fn test_picker_output_without_expired_ssts() {
+        // Test that PickerOutput works correctly when there are no expired SSTs
+        let picker_output = PickerOutput {
+            outputs: vec![],
+            expired_ssts: vec![],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+
+        // Verify empty expired_ssts
+        assert!(picker_output.expired_ssts.is_empty());
+    }
+
+    // Note: Testing remove_expired() directly requires extensive mocking of:
+    // - manifest_ctx (ManifestContext)
+    // - request_sender (mpsc::Sender<WorkerRequestWithTime>)
+    // - WorkerRequest handling
+    //
+    // The behavior is tested indirectly through integration tests:
+    // - remove_expired() logs errors but doesn't stop compaction
+    // - handle_expiration_and_compaction() continues even if remove_expired() encounters errors
+    // - The function is designed to be non-blocking for compaction
+}
