@@ -34,7 +34,7 @@ use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
-use crate::memtable::MemtableId;
+use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
@@ -202,6 +202,37 @@ impl VersionControl {
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
                 .metadata(metadata)
+                .memtables(MemtableVersion::new(new_mutable))
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+    }
+
+    /// Alter format of the region.
+    ///
+    /// It replaces existing mutable memtable with a memtable that uses the
+    /// new format. Memtables of the version must be empty.
+    pub(crate) fn alter_format(
+        &self,
+        options: RegionOptions,
+        memtable_builder: MemtableBuilderRef,
+    ) {
+        let version = self.current().version;
+        let part_duration = Some(version.memtables.mutable.part_duration());
+        let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        let new_mutable = Arc::new(TimePartitions::new(
+            version.metadata.clone(),
+            memtable_builder,
+            next_memtable_id,
+            part_duration,
+        ));
+        debug_assert!(version.memtables.mutable.is_empty());
+        debug_assert!(version.memtables.immutables().is_empty());
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .options(options)
                 .memtables(MemtableVersion::new(new_mutable))
                 .build(),
         );
