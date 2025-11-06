@@ -275,25 +275,12 @@ pub struct VolatileContext {
     /// `opening_region_guard` will be set after the
     /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
     ///
-    /// `opening_region_guard` should be consumed after
+    /// `opening_region_guards` should be consumed after
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
-    opening_region_guard: Vec<OperatingRegionGuard>,
-    // /// `datanode_table` is stored via previous steps for future use.
-    // from_peer_datanode_table: Option<DatanodeTableValue>,
-    // /// `table_info` is stored via previous steps for future use.
-    // ///
-    // /// `table_info` should remain unchanged during the procedure;
-    // /// no other DDL procedure executed concurrently for the current table.
-    // table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
+    opening_region_guards: Vec<OperatingRegionGuard>,
     /// The deadline of leader region lease.
     leader_region_lease_deadline: Option<Instant>,
-    // /// The last_entry_id of leader region.
-    // leader_region_last_entry_id: Option<u64>,
-    // /// The last_entry_id of leader metadata region (Only used for metric engine).
-    // leader_region_metadata_last_entry_id: Option<u64>,
-    /// The table routes of the regions.
-    table_routes: Option<HashMap<TableId, DeserializedValueWithBytes<TableRouteValue>>>,
     /// The datanode table values.
     from_peer_datanode_table_values: Option<HashMap<TableId, DatanodeTableValue>>,
     /// The last_entry_ids of leader regions.
@@ -466,32 +453,28 @@ impl Context {
     /// Retry:
     /// - Failed to retrieve the metadata of table.
     pub async fn get_table_route_values(
-        &mut self,
-    ) -> Result<&HashMap<TableId, DeserializedValueWithBytes<TableRouteValue>>> {
-        let table_route_values = &mut self.volatile_ctx.table_routes;
-        if table_route_values.is_none() {
-            let table_ids = self.persistent_ctx.region_table_ids();
-            let table_routes = self
-                .table_metadata_manager
-                .table_route_manager()
-                .table_route_storage()
-                .batch_get_with_raw_bytes(&table_ids)
-                .await
-                .context(error::TableMetadataManagerSnafu)
-                .map_err(BoxedError::new)
-                .with_context(|_| error::RetryLaterWithSourceSnafu {
-                    reason: format!("Failed to get table routes: {table_ids:?}"),
-                })?;
-            let table_routes = table_ids
-                .into_iter()
-                .zip(table_routes)
-                .filter_map(|(table_id, table_route)| {
-                    table_route.map(|table_route| (table_id, table_route))
-                })
-                .collect::<HashMap<_, _>>();
-            *table_route_values = Some(table_routes);
-        }
-        Ok(table_route_values.as_ref().unwrap())
+        &self,
+    ) -> Result<HashMap<TableId, DeserializedValueWithBytes<TableRouteValue>>> {
+        let table_ids = self.persistent_ctx.region_table_ids();
+        let table_routes = self
+            .table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .batch_get_with_raw_bytes(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table routes: {table_ids:?}"),
+            })?;
+        let table_routes = table_ids
+            .into_iter()
+            .zip(table_routes)
+            .filter_map(|(table_id, table_route)| {
+                table_route.map(|table_route| (table_id, table_route))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(table_routes)
     }
 
     /// Returns the `table_route` of [VolatileContext] if any.
@@ -851,7 +834,7 @@ impl Procedure for RegionMigrationProcedure {
                     Err(ProcedureError::retry_later(e))
                 } else {
                     // Consumes the opening region guard before deregistering the failure detectors.
-                    self.context.volatile_ctx.opening_region_guard.clear();
+                    self.context.volatile_ctx.opening_region_guards.clear();
                     self.context
                         .deregister_failure_detectors_for_candidate_region()
                         .await;

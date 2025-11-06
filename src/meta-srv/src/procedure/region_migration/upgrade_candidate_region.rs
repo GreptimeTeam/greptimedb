@@ -121,7 +121,6 @@ impl UpgradeCandidateRegion {
         ctx: &mut Context,
         replay_timeout: Duration,
     ) -> Result<Instruction> {
-        // TODO(weny): find a way to avoid cloning `region_ids`.
         let region_ids = ctx.persistent_ctx.region_ids.clone();
         let datanode_table_values = ctx.get_from_peer_datanode_table_values().await?;
         let mut region_topic = Vec::with_capacity(region_ids.len());

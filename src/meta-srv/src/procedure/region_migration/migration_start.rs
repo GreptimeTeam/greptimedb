@@ -113,8 +113,7 @@ impl RegionMigrationStart {
     /// Retry:
     /// - Failed to retrieve the metadata of table.
     async fn retrieve_region_routes(&self, ctx: &mut Context) -> Result<Vec<RegionRoute>> {
-        // TODO(weny): find a way to avoid cloning `region_ids`.
-        let region_ids = ctx.persistent_ctx.region_ids.clone();
+        let region_ids = &ctx.persistent_ctx.region_ids;
         let table_route_values = ctx.get_table_route_values().await?;
         let mut region_routes = Vec::with_capacity(region_ids.len());
         for region_id in region_ids {
@@ -127,7 +126,7 @@ impl RegionMigrationStart {
                     err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
                 })?
                 .iter()
-                .find(|route| route.region.id == region_id)
+                .find(|route| route.region.id == *region_id)
                 .cloned()
                 .context(error::UnexpectedSnafu {
                     violated: format!(

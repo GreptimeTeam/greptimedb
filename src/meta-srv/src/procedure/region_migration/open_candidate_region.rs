@@ -65,7 +65,6 @@ impl OpenCandidateRegion {
     /// Abort(non-retry):
     /// - Datanode Table is not found.
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
-        // TODO(weny): find a way to avoid cloning `region_ids`.
         let region_ids = ctx.persistent_ctx.region_ids.clone();
         let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let to_peer_id = ctx.persistent_ctx.to_peer.id;
@@ -127,7 +126,7 @@ impl OpenCandidateRegion {
 
         // This method might be invoked multiple times.
         // Only registers the guard if `opening_region_guard` is absent.
-        if vc.opening_region_guard.is_empty() {
+        if vc.opening_region_guards.is_empty() {
             for region_id in region_ids {
                 // Registers the opening region.
                 let guard = ctx
@@ -137,7 +136,7 @@ impl OpenCandidateRegion {
                         peer_id: candidate.id,
                         region_id: *region_id,
                     })?;
-                vc.opening_region_guard.push(guard);
+                vc.opening_region_guards.push(guard);
             }
         }
 
@@ -454,7 +453,7 @@ mod tests {
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let vc = ctx.volatile_ctx;
-        assert_eq!(vc.opening_region_guard[0].info(), (to_peer_id, region_id));
+        assert_eq!(vc.opening_region_guards[0].info(), (to_peer_id, region_id));
 
         let flush_leader_region = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
         assert_matches!(flush_leader_region, PreFlushRegion);

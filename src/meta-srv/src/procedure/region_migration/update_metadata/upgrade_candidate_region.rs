@@ -216,7 +216,7 @@ impl UpdateMetadata {
 
         ctx.deregister_failure_detectors().await;
         // Consumes the guard.
-        ctx.volatile_ctx.opening_region_guard.clear();
+        ctx.volatile_ctx.opening_region_guards.clear();
 
         Ok(())
     }
@@ -465,7 +465,7 @@ mod tests {
         let guard = opening_keeper
             .register(2, RegionId::new(table_id, 1))
             .unwrap();
-        ctx.volatile_ctx.opening_region_guard.push(guard);
+        ctx.volatile_ctx.opening_region_guards.push(guard);
 
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
@@ -489,7 +489,7 @@ mod tests {
             .unwrap();
         let region_routes = table_route.region_routes().unwrap();
 
-        assert!(ctx.volatile_ctx.opening_region_guard.is_empty());
+        assert!(ctx.volatile_ctx.opening_region_guards.is_empty());
         assert_eq!(region_routes.len(), 1);
         assert!(!region_routes[0].is_leader_downgrading());
         assert!(region_routes[0].follower_peers.is_empty());
