@@ -366,16 +366,6 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             vec![],
         ),
 
-        TRIGGERS => (
-            vec![
-                string_column("TRIGGER_NAME"),
-                ColumnSchema::new("trigger_id", ConcreteDataType::uint64_datatype(), false),
-                string_column("TRIGGER_DEFINITION"),
-                ColumnSchema::new("flownode_id", ConcreteDataType::uint64_datatype(), true),
-            ],
-            vec![],
-        ),
-
         // TODO: Considering store internal metrics in `global_status` and
         // `session_status` tables.
         GLOBAL_STATUS => (
