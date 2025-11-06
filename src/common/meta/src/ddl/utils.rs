@@ -442,7 +442,7 @@ pub fn extract_column_metadatas(
     results: &mut [RegionResponse],
     key: &str,
 ) -> Result<Option<Vec<ColumnMetadata>>> {
-    let schemas = results
+    let mut schemas = results
         .iter_mut()
         .map(|r| r.extensions.remove(key))
         .collect::<Vec<_>>();
@@ -454,20 +454,24 @@ pub fn extract_column_metadatas(
 
     // Verify all the physical schemas are the same
     // Safety: previous check ensures this vec is not empty
-    let first = schemas.first().unwrap();
-    ensure!(
-        schemas.iter().all(|x| x == first),
-        MetadataCorruptionSnafu {
-            err_msg: "The table column metadata schemas from datanodes are not the same."
-        }
-    );
+    let first_column_metadatas = schemas
+        .swap_remove(0)
+        .map(|first_bytes| ColumnMetadata::decode_list(&first_bytes).context(DecodeJsonSnafu))
+        .transpose()?;
 
-    if let Some(first) = first {
-        let column_metadatas = ColumnMetadata::decode_list(first).context(DecodeJsonSnafu)?;
-        Ok(Some(column_metadatas))
-    } else {
-        Ok(None)
+    for s in schemas {
+        // check decoded column metadata instead of bytes because it contains extension map.
+        let column_metadata = s
+            .map(|bytes| ColumnMetadata::decode_list(&bytes).context(DecodeJsonSnafu))
+            .transpose()?;
+        ensure!(
+            column_metadata == first_column_metadatas,
+            MetadataCorruptionSnafu {
+                err_msg: "The table column metadata schemas from datanodes are not the same."
+            }
+        );
     }
+    Ok(first_column_metadatas)
 }
 
 #[cfg(test)]
