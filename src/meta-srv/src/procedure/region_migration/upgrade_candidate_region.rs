@@ -251,7 +251,7 @@ impl UpgradeCandidateRegion {
         let candidate = &pc.to_peer;
 
         let msg = MailboxMessage::json_message(
-            &format!("Upgrade candidate region: {:?}", region_ids),
+            &format!("Upgrade candidate regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
@@ -269,7 +269,7 @@ impl UpgradeCandidateRegion {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received upgrade region reply: {:?}, region: {:?}, elapsed: {:?}",
+                    "Received upgrade region reply: {:?}, regions: {:?}, elapsed: {:?}",
                     reply,
                     region_ids,
                     now.elapsed()

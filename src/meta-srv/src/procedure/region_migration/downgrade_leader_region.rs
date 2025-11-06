@@ -335,15 +335,15 @@ impl DowngradeLeaderRegion {
                 retry += 1;
                 // Throws the error immediately if the procedure exceeded the deadline.
                 if matches!(err, error::Error::ExceededDeadline { .. }) {
-                    error!(err; "Failed to downgrade region leader, region: {:?}, exceeded deadline", ctx.persistent_ctx.region_ids);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, exceeded deadline", ctx.persistent_ctx.region_ids);
                     return Err(err);
                 } else if matches!(err, error::Error::PusherNotFound { .. }) {
                     // Throws the error immediately if the datanode is unreachable.
-                    error!(err; "Failed to downgrade region leader, region: {:?}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_ids, ctx.persistent_ctx.from_peer.id);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_ids, ctx.persistent_ctx.from_peer.id);
                     self.update_leader_region_lease_deadline(ctx).await;
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
-                    error!(err; "Failed to downgrade region leader, region: {:?}, retry later", ctx.persistent_ctx.region_ids);
+                    error!(err; "Failed to downgrade region leader, regions: {:?}, retry later", ctx.persistent_ctx.region_ids);
                     sleep(self.retry_initial_interval).await;
                 } else {
                     return Err(BoxedError::new(err)).context(error::DowngradeLeaderSnafu {
@@ -570,6 +570,7 @@ mod tests {
         let state = DowngradeLeaderRegion::default();
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
+        let region_id = persistent_context.region_ids[0];
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
@@ -608,7 +609,13 @@ mod tests {
         });
 
         state.downgrade_region_with_retry(&mut ctx).await.unwrap();
-        // assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_last_entry_ids
+                .get(&region_id)
+                .cloned(),
+            Some(1)
+        );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
     }
 
@@ -667,6 +674,7 @@ mod tests {
         let mut state = Box::<DowngradeLeaderRegion>::default();
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
+        let region_id = persistent_context.region_ids[0];
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
@@ -689,7 +697,13 @@ mod tests {
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let elapsed = timer.elapsed().as_secs();
         assert!(elapsed < REGION_LEASE_SECS / 2);
-        // assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
+        assert_eq!(
+            ctx.volatile_ctx
+                .leader_region_last_entry_ids
+                .get(&region_id)
+                .cloned(),
+            Some(1)
+        );
         assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
 
         let _ = next

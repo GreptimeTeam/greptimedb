@@ -156,7 +156,7 @@ impl PersistentContext {
         for region_id in &self.region_ids {
             table_regions
                 .entry(region_id.table_id())
-                .or_insert(Vec::new())
+                .or_insert_with(Vec::new)
                 .push(*region_id);
         }
         table_regions

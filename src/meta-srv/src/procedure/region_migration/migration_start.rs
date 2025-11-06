@@ -80,7 +80,7 @@ impl State for RegionMigrationStart {
         for region_route in &region_routes {
             if self.invalid_leader_peer(region_route, from_peer)? {
                 info!(
-                    "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
+                    "Abort region migration, region:{}, unexpected leader peer: {:?}, expected: {:?}",
                     region_route.region.id, region_route.leader_peer, from_peer,
                 );
                 return Ok((
@@ -122,13 +122,13 @@ impl RegionMigrationStart {
                 .get(&table_id)
                 .context(error::TableRouteNotFoundSnafu { table_id })?
                 .region_routes()
-                .context(error::UnexpectedLogicalRouteTableSnafu {
+                .with_context(|_| error::UnexpectedLogicalRouteTableSnafu {
                     err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
                 })?
                 .iter()
                 .find(|route| route.region.id == *region_id)
                 .cloned()
-                .context(error::UnexpectedSnafu {
+                .with_context(|| error::UnexpectedSnafu {
                     violated: format!(
                         "RegionRoute({}) is not found in TableRoute({})",
                         region_id, table_id
@@ -150,7 +150,7 @@ impl RegionMigrationStart {
         let is_invalid_leader_peer = region_route
             .leader_peer
             .as_ref()
-            .context(error::UnexpectedSnafu {
+            .with_context(|| error::UnexpectedSnafu {
                 violated: format!("Leader peer is not found in TableRoute({})", region_id),
             })?
             .id
@@ -175,7 +175,7 @@ impl RegionMigrationStart {
         let region_migrated = region_route
             .leader_peer
             .as_ref()
-            .context(error::UnexpectedSnafu {
+            .with_context(|| error::UnexpectedSnafu {
                 violated: format!("Leader peer is not found in TableRoute({})", region_id),
             })?
             .id

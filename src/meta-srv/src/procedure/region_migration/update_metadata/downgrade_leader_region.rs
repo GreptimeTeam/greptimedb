@@ -71,7 +71,7 @@ impl UpdateMetadata {
                 .context(error::TableMetadataManagerSnafu)
             {
                 error!(err; "Failed to update the table route during the downgrading leader region, regions: {regions:?}, from_peer_id: {from_peer_id}");
-                return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
+                return Err(BoxedError::new(err)).with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!(
                         "Failed to update the table route during the downgrading leader region, regions: {regions:?}, from_peer_id: {from_peer_id}"
                     ),

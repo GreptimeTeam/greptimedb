@@ -111,7 +111,7 @@ impl UpdateMetadata {
                 })?;
 
             // Get the leader peer for the region, error if not found
-            let leader_peer = region_route.leader_peer.as_ref().context(error::UnexpectedSnafu {
+            let leader_peer = region_route.leader_peer.as_ref().with_context(||error::UnexpectedSnafu {
                 violated: format!(
                     "The leader peer of region {region_id} is not found during the metadata upgrade check"
                 ),
@@ -161,11 +161,11 @@ impl UpdateMetadata {
             let _guard = ctx_provider.acquire_lock(&table_lock).await;
 
             let table_route_value = ctx.get_table_route_value(table_id).await?;
-            let region_routes = table_route_value.region_routes().context(
+            let region_routes = table_route_value.region_routes().with_context(|_| {
                 error::UnexpectedLogicalRouteTableSnafu {
                     err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
-                },
-            )?;
+                }
+            })?;
             if self.check_metadata_updated(ctx, &region_ids, region_routes)? {
                 continue;
             }

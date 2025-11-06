@@ -163,12 +163,12 @@ impl PreFlushRegion {
 
                     if let Some(error) = error {
                         warn!(
-                            "Failed to flush leader region {:?} on datanode {:?}, error: {}. Skip flush operation.",
+                            "Failed to flush leader regions {:?} on datanode {:?}, error: {}. Skip flush operation.",
                             region_ids, leader, &error
                         );
                     } else if result {
                         info!(
-                            "The flush leader region {:?} on datanode {:?} is successful, elapsed: {:?}",
+                            "The flush leader regions {:?} on datanode {:?} is successful, elapsed: {:?}",
                             region_ids,
                             leader,
                             now.elapsed()
@@ -178,14 +178,14 @@ impl PreFlushRegion {
                     Ok(())
                 }
                 Err(Error::MailboxTimeout { .. }) => error::ExceededDeadlineSnafu {
-                    operation: "Flush leader region",
+                    operation: "Flush leader regions",
                 }
                 .fail(),
                 Err(err) => Err(err),
             },
             Err(Error::PusherNotFound { .. }) => {
                 warn!(
-                    "Failed to flush leader region({:?}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
+                    "Failed to flush leader regions({:?}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
                     region_ids, leader
                 );
                 Ok(())
