@@ -21,7 +21,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use humantime_serde::re::humantime;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
@@ -35,9 +35,10 @@ use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
-use crate::region::options::TwcsOptions;
+use crate::region::options::{RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
+use crate::sst::FormatType;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -57,36 +58,38 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
-        // Get the version before alter.
-        let version = region.version();
+        // Gets the version before alter.
+        let mut version = region.version();
 
         // fast path for memory state changes like options.
-        match request.kind {
-            AlterKind::SetRegionOptions { options } => {
-                match self.handle_alter_region_options(region, version, options) {
-                    Ok(_) => sender.send(Ok(0)),
-                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
-                }
-                return;
-            }
+        let set_options = match &request.kind {
+            AlterKind::SetRegionOptions { options } => options.clone(),
             AlterKind::UnsetRegionOptions { keys } => {
                 // Converts the keys to SetRegionOption.
                 //
                 // It passes an empty string to achieve the purpose of unset
-                match self.handle_alter_region_options(
-                    region,
-                    version,
-                    keys.iter().map(Into::into).collect(),
-                ) {
-                    Ok(_) => sender.send(Ok(0)),
-                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
-                }
-                return;
+                keys.iter().map(Into::into).collect()
             }
-            _ => {}
+            _ => Vec::new(),
+        };
+        if !set_options.is_empty() {
+            match self.handle_alter_region_options_fast(&region, version, set_options) {
+                Ok(new_version) => {
+                    let Some(new_version) = new_version else {
+                        // We don't have options to alter after flush.
+                        sender.send(Ok(0));
+                        return;
+                    };
+                    version = new_version;
+                }
+                Err(e) => {
+                    sender.send(Err(e).context(InvalidMetadataSnafu));
+                    return;
+                }
+            }
         }
 
-        // Validate request.
+        // Validates request.
         if let Err(e) = request.validate(&version.metadata) {
             // Invalid request.
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
@@ -148,8 +151,8 @@ impl<S> RegionWorkerLoop<S> {
         sender: OptionOutputTx,
     ) {
         let need_index = need_change_index(&request.kind);
-        // TODO(yingwen): New options from request.
-        let new_options = version.options.clone();
+        let new_options =
+            new_region_options_on_empty_memtable(version.options.clone(), &request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -167,12 +170,19 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Handles requests that changes region options, like TTL. It only affects memory state
     /// since changes are persisted in the `DatanodeTableValue` in metasrv.
-    fn handle_alter_region_options(
+    ///
+    /// If the options require empty memtable, it only does validation.
+    ///
+    /// Returns a new version with the updated options if it needs further alteration.
+    fn handle_alter_region_options_fast(
         &mut self,
-        region: MitoRegionRef,
+        region: &MitoRegionRef,
         version: VersionRef,
         options: Vec<SetRegionOption>,
-    ) -> std::result::Result<(), MetadataError> {
+    ) -> std::result::Result<Option<VersionRef>, MetadataError> {
+        assert!(!options.is_empty());
+
+        let mut all_options_altered = true;
         let mut current_options = version.options.clone();
         for option in options {
             match option {
@@ -193,11 +203,60 @@ impl<S> RegionWorkerLoop<S> {
                         region.region_id,
                     )?;
                 }
+                SetRegionOption::Format(format_str) => {
+                    let new_format = format_str.parse::<FormatType>().map_err(|_| {
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: format!("Invalid format type: {}", format_str),
+                        }
+                        .build()
+                    })?;
+                    // If the format is unchanged, we also consider the option is altered.
+                    if new_format != current_options.sst_format.unwrap_or_default() {
+                        all_options_altered = false;
+
+                        // Validates the format type.
+                        ensure!(
+                            new_format == FormatType::Flat,
+                            store_api::metadata::InvalidRegionRequestSnafu {
+                                region_id: region.region_id,
+                                err: "Only allow changing format type to flat",
+                            }
+                        );
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
-        Ok(())
+        if all_options_altered {
+            Ok(None)
+        } else {
+            Ok(Some(region.version()))
+        }
     }
+}
+
+fn new_region_options_on_empty_memtable(
+    mut current_options: RegionOptions,
+    kind: &AlterKind,
+) -> RegionOptions {
+    let AlterKind::SetRegionOptions { options } = kind else {
+        return current_options;
+    };
+
+    for option in options {
+        match option {
+            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
+            SetRegionOption::Format(format_str) => {
+                // Safety: handle_alter_region_options_fast() has validated this.
+                let new_format = format_str.parse::<FormatType>().unwrap();
+                assert_eq!(FormatType::Flat, new_format);
+
+                current_options.sst_format = Some(new_format);
+            }
+        }
+    }
+    current_options
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.
