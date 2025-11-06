@@ -451,6 +451,7 @@ impl Compactor for DefaultCompactor {
                 &compact_request_options,
                 &compaction_region.region_options.compaction,
                 compaction_region.region_options.append_mode,
+                None,
             )
             .pick(compaction_region);
 
