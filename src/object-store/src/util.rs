@@ -14,6 +14,7 @@
 
 use std::fmt::Display;
 
+use common_error::root_source;
 use common_telemetry::{debug, error, trace};
 use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
 use opendal::raw::{AccessorInfo, Operation};
@@ -159,11 +160,12 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
+            let root = root_source(err);
             // Print error if it's unexpected, otherwise in error.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err:#?}",
+                    "service={} name={} {}: {operation} {message} {err:#?}, root={root:#?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),
@@ -171,7 +173,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             } else {
                 debug!(
                     target: LOGGING_TARGET,
-                    "service={} name={} {}: {operation} {message} {err}",
+                    "service={} name={} {}: {operation} {message} {err}, root={root:?}",
                     info.scheme(),
                     info.name(),
                     LoggingContext(context),

@@ -12,6 +12,7 @@ services-memory = ["opendal/services-memory"]
 
 [dependencies]
 bytes.workspace = true
+common-error.workspace = true
 common-telemetry.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
