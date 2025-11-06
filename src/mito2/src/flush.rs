@@ -743,7 +743,6 @@ struct FlatSources {
     encoded: SmallVec<[EncodedRange; 4]>,
 }
 
-// TODO(yingwen): Flushes into multiple files in parallel.
 /// Returns the max sequence and [FlatSource] for the given memtable.
 fn memtable_flat_sources(
     schema: SchemaRef,
@@ -767,20 +766,7 @@ fn memtable_flat_sources(
             let iter = only_range.build_record_batch_iter(None)?;
             // Dedup according to append mode and merge mode.
             // Even single range may have duplicate rows.
-            let iter = if options.append_mode {
-                // No dedup in append mode
-                Box::new(iter) as _
-            } else {
-                match options.merge_mode() {
-                    MergeMode::LastRow => {
-                        Box::new(FlatDedupIterator::new(iter, FlatLastRow::new(false))) as _
-                    }
-                    MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
-                        iter,
-                        FlatLastNonNull::new(field_column_start, false),
-                    )) as _,
-                }
-            };
+            let iter = maybe_dedup_one(options, field_column_start, iter);
             flat_sources.sources.push(FlatSource::Iter(iter));
         };
     } else {
@@ -846,6 +832,28 @@ fn merge_and_dedup(
         }
     };
     Ok(maybe_dedup)
+}
+
+fn maybe_dedup_one(
+    options: &RegionOptions,
+    field_column_start: usize,
+    input_iter: BoxedRecordBatchIterator,
+) -> BoxedRecordBatchIterator {
+    if options.append_mode {
+        // No dedup in append mode
+        input_iter
+    } else {
+        // Dedup according to merge mode.
+        match options.merge_mode() {
+            MergeMode::LastRow => {
+                Box::new(FlatDedupIterator::new(input_iter, FlatLastRow::new(false)))
+            }
+            MergeMode::LastNonNull => Box::new(FlatDedupIterator::new(
+                input_iter,
+                FlatLastNonNull::new(field_column_start, false),
+            )),
+        }
+    }
 }
 
 /// Manages background flushes of a worker.
