@@ -131,6 +131,11 @@ impl VectorAvg {
         let dims = vectors[0].len();
         let mut sum = DVector::zeros(dims);
         for v in vectors {
+            if v.len() != dims {
+                return Err(datafusion_common::DataFusionError::Execution(
+                    "vectors length not match: VEC_AVG".to_string(),
+                ));
+            }
             let v_view = DVectorView::from_slice(&v, dims);
             sum += &v_view;
         }
