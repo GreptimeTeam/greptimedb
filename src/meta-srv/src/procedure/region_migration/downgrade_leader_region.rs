@@ -22,7 +22,7 @@ use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -174,6 +174,10 @@ impl DowngradeLeaderRegion {
         }
 
         if let Some(last_entry_id) = last_entry_id {
+            debug!(
+                "set last_entry_id: {:?}, region_id: {:?}",
+                last_entry_id, region_id
+            );
             ctx.volatile_ctx
                 .set_last_entry_id(*region_id, *last_entry_id);
         }
@@ -570,7 +574,6 @@ mod tests {
         let state = DowngradeLeaderRegion::default();
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
-        let region_id = persistent_context.region_ids[0];
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
@@ -612,7 +615,7 @@ mod tests {
         assert_eq!(
             ctx.volatile_ctx
                 .leader_region_last_entry_ids
-                .get(&region_id)
+                .get(&RegionId::new(0, 0))
                 .cloned(),
             Some(1)
         );
@@ -674,7 +677,6 @@ mod tests {
         let mut state = Box::<DowngradeLeaderRegion>::default();
         let persistent_context = new_persistent_context();
         let from_peer_id = persistent_context.from_peer.id;
-        let region_id = persistent_context.region_ids[0];
 
         let mut env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
@@ -700,7 +702,7 @@ mod tests {
         assert_eq!(
             ctx.volatile_ctx
                 .leader_region_last_entry_ids
-                .get(&region_id)
+                .get(&RegionId::new(0, 0))
                 .cloned(),
             Some(1)
         );
