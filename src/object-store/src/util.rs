@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error::Error as StdError;
 use std::fmt::Display;
 use std::path;
 use std::time::Duration;
 
+use common_error::root_source;
 use common_telemetry::{debug, error, info, warn};
 use opendal::layers::{
     LoggingInterceptor, LoggingLayer, RetryInterceptor, RetryLayer, TracingLayer,
@@ -175,15 +175,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
         err: Option<&opendal::Error>,
     ) {
         if let Some(err) = err {
-            let mut root = err.source();
-            while let Some(r) = root {
-                if let Some(s) = r.source() {
-                    root = Some(s);
-                } else {
-                    break;
-                }
-            }
-
+            let root = root_source(err);
             // Print error if it's unexpected, otherwise in error.
             if err.kind() == ErrorKind::Unexpected {
                 error!(
