@@ -45,7 +45,7 @@ use self::orc::OrcFormat;
 use self::parquet::ParquetFormat;
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::buffered_writer::DfRecordBatchEncoder;
-use crate::compressed_writer::IntoCompressedWriter;
+use crate::compressed_writer::{CompressedWriter, IntoCompressedWriter};
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::share_buffer::SharedBuffer;
@@ -197,6 +197,19 @@ pub async fn infer_schemas(
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }
 
+async fn write_to_compressed_writer(
+    compressed_writer: &mut CompressedWriter,
+    data: &[u8],
+) -> Result<()> {
+    if !data.is_empty() {
+        compressed_writer
+            .write_all(data)
+            .await
+            .context(error::AsyncWriteSnafu)?;
+    }
+    Ok(())
+}
+
 /// Generic function to stream record batches to a file with compression support.
 /// This function handles the common logic for writing data to files with compression,
 /// allowing different file formats to use the same implementation.
@@ -239,29 +252,24 @@ where
         encoder.write(&batch)?;
         rows += batch.num_rows();
 
-        // Flush encoded data to compressed writer
-        let data = {
-            let mut buffer_guard = buffer.buffer.lock().unwrap();
-            buffer_guard.split()
-        };
-        if !data.is_empty() {
-            compressed_writer
-                .write_all(&data)
-                .await
-                .context(error::AsyncWriteSnafu)?;
+        while buffer.buffer.lock().unwrap().len() >= threshold {
+            let chunk = {
+                let mut buffer_guard = buffer.buffer.lock().unwrap();
+                buffer_guard.split_to(threshold)
+            };
+            write_to_compressed_writer(&mut compressed_writer, &chunk).await?;
         }
     }
 
-    // Final flush of any remaining data
-    let final_data = {
-        let mut buffer_guard = buffer.buffer.lock().unwrap();
-        buffer_guard.split()
-    };
-    if !final_data.is_empty() {
-        compressed_writer
-            .write_all(&final_data)
-            .await
-            .context(error::AsyncWriteSnafu)?;
+    // If no row's been written, just simply close the underlying writer
+    // without flush so that no file will be actually created.
+    if rows != 0 {
+        // Final flush of any remaining data
+        let final_data = {
+            let mut buffer_guard = buffer.buffer.lock().unwrap();
+            buffer_guard.split()
+        };
+        write_to_compressed_writer(&mut compressed_writer, &final_data).await?;
     }
 
     // Shutdown compression and close writer
