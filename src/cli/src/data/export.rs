@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::data::default_database;
+use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, S3ConfigNotSetSnafu,
@@ -668,10 +668,26 @@ impl Export {
                 );
 
                 // Create copy_from.sql file
-                let copy_database_from_sql = format!(
-                    r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
-                    export_self.catalog, schema, path, with_options_clone, connection_part
-                );
+                let copy_database_from_sql = {
+                    let command_without_connection = format!(
+                        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({});"#,
+                        export_self.catalog, schema, COPY_PATH_PLACEHOLDER, with_options_clone
+                    );
+
+                    if connection_part.is_empty() {
+                        command_without_connection
+                    } else {
+                        let command_with_connection = format!(
+                            r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
+                            export_self.catalog, schema, path, with_options_clone, connection_part
+                        );
+
+                        format!(
+                            "-- {}\n{}",
+                            command_with_connection, command_without_connection
+                        )
+                    }
+                };
 
                 let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
                 export_self
