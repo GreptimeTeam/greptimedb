@@ -45,3 +45,19 @@ pub fn from_err_code_msg_to_header(code: u32, msg: &str) -> HeaderMap {
     header.insert(GREPTIME_DB_HEADER_ERROR_MSG, msg);
     header
 }
+
+/// Returns the external root cause of the source error (exclude the current error).
+pub fn root_source(err: &dyn std::error::Error) -> Option<&dyn std::error::Error> {
+    // There are some divergence about the behavior of the `sources()` API
+    // in https://github.com/rust-lang/rust/issues/58520
+    // So this function iterates the sources manually.
+    let mut root = err.source();
+    while let Some(r) = root {
+        if let Some(s) = r.source() {
+            root = Some(s);
+        } else {
+            break;
+        }
+    }
+    root
+}
