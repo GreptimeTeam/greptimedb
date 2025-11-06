@@ -282,6 +282,20 @@ impl Import {
     }
 }
 
+#[async_trait]
+impl Tool for Import {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        match self.target {
+            ImportTarget::Schema => self.import_create_table().await.map_err(BoxedError::new),
+            ImportTarget::Data => self.import_database_data().await.map_err(BoxedError::new),
+            ImportTarget::All => {
+                self.import_create_table().await.map_err(BoxedError::new)?;
+                self.import_database_data().await.map_err(BoxedError::new)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -328,18 +342,5 @@ mod tests {
         let import = build_import("/tmp/export-path");
         let sql = "COPY DATABASE \"catalog\".\"schema\" FROM '/tmp/export-path/catalog/schema/' WITH (format = 'parquet');";
         assert!(import.rewrite_copy_database_sql("schema", sql).is_err());
-    }
-}
-#[async_trait]
-impl Tool for Import {
-    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
-        match self.target {
-            ImportTarget::Schema => self.import_create_table().await.map_err(BoxedError::new),
-            ImportTarget::Data => self.import_database_data().await.map_err(BoxedError::new),
-            ImportTarget::All => {
-                self.import_create_table().await.map_err(BoxedError::new)?;
-                self.import_database_data().await.map_err(BoxedError::new)
-            }
-        }
     }
 }
