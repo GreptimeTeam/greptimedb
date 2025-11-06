@@ -2085,6 +2085,7 @@ dependencies = [
  "datafusion-orc",
  "datatypes",
  "futures",
+ "futures-util",
  "lazy_static",
  "object-store",
  "object_store_opendal",

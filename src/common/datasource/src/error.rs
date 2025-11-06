@@ -202,6 +202,14 @@ pub enum Error {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
     },
+
+    #[snafu(display("Failed to build file stream"))]
+    BuildFileStream {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -233,6 +241,7 @@ impl ErrorExt for Error {
             | ReadRecordBatch { .. }
             | WriteRecordBatch { .. }
             | EncodeRecordBatch { .. }
+            | BuildFileStream { .. }
             | OrcReader { .. } => StatusCode::Unexpected,
         }
     }

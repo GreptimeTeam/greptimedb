@@ -138,9 +138,13 @@ impl DfRecordBatchEncoder for json::Writer<SharedBuffer, LineDelimited> {
 #[cfg(test)]
 mod tests {
     use common_test_util::find_workspace_path;
+    use datafusion::datasource::physical_plan::{FileSource, JsonSource};
+    use futures_util::StreamExt;
 
     use super::*;
-    use crate::file_format::{FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat};
+    use crate::file_format::{
+        FORMAT_COMPRESSION_TYPE, FORMAT_SCHEMA_INFER_MAX_RECORD, FileFormat, file_to_stream,
+    };
     use crate::test_util::{format_schema, test_store};
 
     fn test_data_root() -> String {
@@ -212,7 +216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compressed_json_export() {
+    async fn test_compressed_json() {
         use std::sync::Arc;
 
         use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
@@ -229,14 +233,30 @@ mod tests {
         ];
         let schema = Arc::new(Schema::new(column_schemas));
 
-        let columns: Vec<VectorRef> = vec![
+        // Create multiple record batches with different data
+        let batch1_columns: Vec<VectorRef> = vec![
             Arc::new(UInt32Vector::from_slice(vec![1, 2, 3])),
             Arc::new(StringVector::from(vec!["Alice", "Bob", "Charlie"])),
             Arc::new(Float64Vector::from_slice(vec![10.5, 20.3, 30.7])),
         ];
+        let batch1 = RecordBatch::new(schema.clone(), batch1_columns).unwrap();
 
-        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
-        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let batch2_columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![4, 5, 6])),
+            Arc::new(StringVector::from(vec!["David", "Eva", "Frank"])),
+            Arc::new(Float64Vector::from_slice(vec![40.1, 50.2, 60.3])),
+        ];
+        let batch2 = RecordBatch::new(schema.clone(), batch2_columns).unwrap();
+
+        let batch3_columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![7, 8, 9])),
+            Arc::new(StringVector::from(vec!["Grace", "Henry", "Ivy"])),
+            Arc::new(Float64Vector::from_slice(vec![70.4, 80.5, 90.6])),
+        ];
+        let batch3 = RecordBatch::new(schema.clone(), batch3_columns).unwrap();
+
+        // Combine all batches into a RecordBatches collection
+        let recordbatches = RecordBatches::try_new(schema, vec![batch1, batch2, batch3]).unwrap();
 
         // Test with different compression types
         let compression_types = vec![
@@ -244,7 +264,6 @@ mod tests {
             CompressionType::Bzip2,
             CompressionType::Xz,
             CompressionType::Zstd,
-            CompressionType::Uncompressed,
         ];
 
         for compression_type in compression_types {
@@ -255,9 +274,10 @@ mod tests {
 
             // Create a temporary file path
             let temp_dir = std::env::temp_dir();
-            let file_name = format!("test_compressed_{:?}.json", compression_type);
-            let file_path = temp_dir.join(&file_name);
-            let path_str = file_path.to_str().unwrap();
+            let compressed_file_name =
+                format!("test_compressed_json.{}", compression_type.file_extension());
+            let compressed_file_path = temp_dir.join(&compressed_file_name);
+            let compressed_file_path_str = compressed_file_path.to_str().unwrap();
 
             // Create a simple file store for testing
             let store = test_store("/");
@@ -266,7 +286,7 @@ mod tests {
             let rows = stream_to_json(
                 Box::pin(DfRecordBatchStreamAdapter::new(recordbatches.as_stream())),
                 store,
-                path_str,
+                compressed_file_path_str,
                 1024,
                 1,
                 &format,
@@ -274,15 +294,145 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(rows, 3);
+            assert_eq!(rows, 9);
 
-            // Verify file was created and has content
-            assert!(file_path.exists());
-            let file_size = std::fs::metadata(&file_path).unwrap().len();
+            // Verify compressed file was created and has content
+            assert!(compressed_file_path.exists());
+            let file_size = std::fs::metadata(&compressed_file_path).unwrap().len();
             assert!(file_size > 0);
 
+            // Verify the file is actually compressed
+            let file_content = std::fs::read(&compressed_file_path).unwrap();
+            // Compressed files should not start with '{' (JSON character)
+            // They should have compression magic bytes
+            match compression_type {
+                CompressionType::Gzip => {
+                    // Gzip magic bytes: 0x1f 0x8b
+                    assert_eq!(file_content[0], 0x1f, "Gzip file should start with 0x1f");
+                    assert_eq!(
+                        file_content[1], 0x8b,
+                        "Gzip file should have 0x8b as second byte"
+                    );
+                }
+                CompressionType::Bzip2 => {
+                    // Bzip2 magic bytes: 'BZ'
+                    assert_eq!(file_content[0], b'B', "Bzip2 file should start with 'B'");
+                    assert_eq!(
+                        file_content[1], b'Z',
+                        "Bzip2 file should have 'Z' as second byte"
+                    );
+                }
+                CompressionType::Xz => {
+                    // XZ magic bytes: 0xFD '7zXZ'
+                    assert_eq!(file_content[0], 0xFD, "XZ file should start with 0xFD");
+                }
+                CompressionType::Zstd => {
+                    // Zstd magic bytes: 0x28 0xB5 0x2F 0xFD
+                    assert_eq!(file_content[0], 0x28, "Zstd file should start with 0x28");
+                    assert_eq!(
+                        file_content[1], 0xB5,
+                        "Zstd file should have 0xB5 as second byte"
+                    );
+                }
+                _ => {}
+            }
+
+            // Verify the compressed file can be decompressed and content matches original data
+            let store = test_store("/");
+            let schema = Arc::new(
+                JsonFormat {
+                    compression_type,
+                    ..Default::default()
+                }
+                .infer_schema(&store, compressed_file_path_str)
+                .await
+                .unwrap(),
+            );
+            let json_source = JsonSource::new()
+                .with_schema(schema.clone())
+                .with_batch_size(8192);
+
+            let mut stream = file_to_stream(
+                &store,
+                compressed_file_path_str,
+                schema.clone(),
+                json_source.clone(),
+                None,
+                compression_type,
+            )
+            .await
+            .unwrap();
+
+            // Collect all record batches
+            let mut record_batches = vec![];
+            while let Some(batch) = stream.next().await {
+                record_batches.push(batch.unwrap());
+            }
+
+            // Verify we got all 9 rows
+            let total_rows: usize = record_batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(
+                total_rows, 9,
+                "Expected 9 rows for {:?}, but got {}",
+                compression_type, total_rows
+            );
+
+            // Convert record batches to a format we can easily verify
+            let mut parsed_data: Vec<(u32, String, f64)> = Vec::new();
+            for batch in record_batches {
+                let id_col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::Int64Array>()
+                    .unwrap();
+                let name_col = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::StringArray>()
+                    .unwrap();
+                let value_col = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::Float64Array>()
+                    .unwrap();
+
+                for i in 0..batch.num_rows() {
+                    parsed_data.push((
+                        id_col.value(i) as u32,
+                        name_col.value(i).to_string(),
+                        value_col.value(i),
+                    ));
+                }
+            }
+
+            // Verify the data content matches the original
+            let expected_ids = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9];
+            let expected_names = vec![
+                "Alice", "Bob", "Charlie", "David", "Eva", "Frank", "Grace", "Henry", "Ivy",
+            ];
+            let expected_values = vec![10.5, 20.3, 30.7, 40.1, 50.2, 60.3, 70.4, 80.5, 90.6];
+
+            for (i, (id, name, value)) in parsed_data.iter().enumerate() {
+                assert_eq!(
+                    id, &expected_ids[i],
+                    "ID mismatch at row {} for {:?}",
+                    i, compression_type
+                );
+                assert_eq!(
+                    name, &expected_names[i],
+                    "Name mismatch at row {} for {:?}",
+                    i, compression_type
+                );
+                assert!(
+                    (value - expected_values[i]).abs() < 1e-6,
+                    "Value mismatch at row {} for {:?}",
+                    i,
+                    compression_type
+                );
+            }
+
             // Clean up
-            let _ = std::fs::remove_file(&file_path);
+            let _ = std::fs::remove_file(&compressed_file_path);
         }
     }
 }

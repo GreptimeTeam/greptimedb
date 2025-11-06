@@ -30,11 +30,20 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::{ArrowError, Schema as ArrowSchema};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::datasource::physical_plan::FileOpenFuture;
+use common_recordbatch::DfSendableRecordBatchStream;
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType as DfCompressionType;
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::object_store::ObjectStoreUrl;
+use datafusion::datasource::physical_plan::{
+    FileGroup, FileOpenFuture, FileScanConfigBuilder, FileSource, FileStream,
+};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::arrow::datatypes::SchemaRef;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
+use object_store_opendal::OpendalStore;
 use snafu::ResultExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -197,6 +206,20 @@ pub async fn infer_schemas(
     ArrowSchema::try_merge(schemas).context(error::MergeSchemaSnafu)
 }
 
+/// Writes data to a compressed writer if the data is not empty.
+///
+/// This is a helper function that checks if the data slice contains any bytes
+/// before writing to avoid unnecessary operations with empty data.
+///
+/// # Arguments
+///
+/// * `compressed_writer` - The mutable reference to the compressed writer
+/// * `data` - The byte slice to write to the writer
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the write operation succeeds or if data is empty,
+/// otherwise returns an error if the write operation fails.
 async fn write_to_compressed_writer(
     compressed_writer: &mut CompressedWriter,
     data: &[u8],
@@ -210,9 +233,31 @@ async fn write_to_compressed_writer(
     Ok(())
 }
 
-/// Generic function to stream record batches to a file with compression support.
-/// This function handles the common logic for writing data to files with compression,
-/// allowing different file formats to use the same implementation.
+/// Streams record batches to a file with compression support.
+///
+/// This function provides a generic implementation for writing record batches to files
+/// with various compression types. It handles buffering, threshold-based flushing,
+/// and proper resource cleanup.
+///
+/// # Arguments
+///
+/// * `stream` - The input stream of record batches to write
+/// * `store` - The object store where the file will be written
+/// * `path` - The path of the file to write
+/// * `threshold` - The buffer size threshold that triggers flushing to disk
+/// * `concurrency` - The concurrency level for the writer
+/// * `compression_type` - The type of compression to apply to the output
+/// * `encoder_factory` - A factory function that creates an encoder for the specific format
+///
+/// # Returns
+///
+/// Returns the total number of rows written to the file, or an error if the operation fails.
+///
+/// # Notes
+///
+/// - If no rows are written, the file is not created to avoid empty files
+/// - The function handles both buffered writing and final flushing of remaining data
+/// - Proper cleanup of resources is guaranteed even in case of errors
 pub async fn stream_to_file<E>(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
@@ -276,4 +321,59 @@ where
     compressed_writer.shutdown().await?;
 
     Ok(rows)
+}
+
+/// Builds a `FileStream` for reading data from a file source.
+///
+/// This function creates a configured FileStream that can read data from a file
+/// with optional column projection and compression support.
+///
+/// # Arguments
+///
+/// * `store` - The object store containing the file to read
+/// * `filename` - The name of the file to read
+/// * `file_schema` - The schema reference describing the file structure
+/// * `file_source` - The file source implementation for the specific format
+/// * `projection` - Optional list of column indices to read (None for all columns)
+/// * `compression_type` - The type of compression applied to the file
+///
+/// # Returns
+///
+/// Returns a pinned, boxed SendableRecordBatchStream that can be used to read
+/// the file data as record batches, or an error if the stream creation fails.
+///
+/// # Notes
+///
+/// - The function configures the stream with appropriate compression settings
+/// - Column projection can be used to read only a subset of columns for efficiency
+pub async fn file_to_stream(
+    store: &ObjectStore,
+    filename: &str,
+    file_schema: SchemaRef,
+    file_source: Arc<dyn FileSource>,
+    projection: Option<Vec<usize>>,
+    compression_type: CompressionType,
+) -> Result<DfSendableRecordBatchStream> {
+    let df_compression: DfCompressionType = compression_type.into();
+    let config = FileScanConfigBuilder::new(
+        ObjectStoreUrl::local_filesystem(),
+        file_schema,
+        file_source.clone(),
+    )
+    .with_file_group(FileGroup::new(vec![PartitionedFile::new(
+        filename.to_string(),
+        0,
+    )]))
+    .with_projection(projection)
+    .with_file_compression_type(df_compression)
+    .build();
+
+    let store = Arc::new(OpendalStore::new(store.clone()));
+    let file_opener = file_source
+        .with_projection(&config)
+        .create_file_opener(store, &config, 0);
+    let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())
+        .context(error::BuildFileStreamSnafu)?;
+
+    Ok(Box::pin(stream))
 }

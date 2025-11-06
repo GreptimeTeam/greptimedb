@@ -95,10 +95,7 @@ pub(crate) fn scan_config(
         .build()
 }
 
-pub async fn setup_stream_to_json_test(
-    origin_path: &str,
-    threshold: impl Fn(usize) -> usize,
-) {
+pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
     let store = test_store("/");
 
     let schema = test_basic_schema();
