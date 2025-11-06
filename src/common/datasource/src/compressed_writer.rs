@@ -120,18 +120,67 @@ mod tests {
     async fn test_compressed_writer_gzip() {
         let (duplex_writer, mut duplex_reader) = duplex(1024);
         let mut writer = duplex_writer.into_compressed_writer(CompressionType::Gzip);
+        let original = b"test data for gzip compression";
 
-        writer
-            .write_all(b"test data for gzip compression")
-            .await
-            .unwrap();
+        writer.write_all(original).await.unwrap();
         writer.shutdown().await.unwrap();
 
         let mut buffer = Vec::new();
         duplex_reader.read_to_end(&mut buffer).await.unwrap();
 
         // The compressed data should be different from the original
-        assert_ne!(buffer, b"test data for gzip compression");
+        assert_ne!(buffer, original);
+        assert!(!buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_compressed_writer_bzip2() {
+        let (duplex_writer, mut duplex_reader) = duplex(1024);
+        let mut writer = duplex_writer.into_compressed_writer(CompressionType::Bzip2);
+        let original = b"test data for bzip2 compression";
+
+        writer.write_all(original).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut buffer = Vec::new();
+        duplex_reader.read_to_end(&mut buffer).await.unwrap();
+
+        // The compressed data should be different from the original
+        assert_ne!(buffer, original);
+        assert!(!buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_compressed_writer_xz() {
+        let (duplex_writer, mut duplex_reader) = duplex(1024);
+        let mut writer = duplex_writer.into_compressed_writer(CompressionType::Xz);
+        let original = b"test data for xz compression";
+
+        writer.write_all(original).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut buffer = Vec::new();
+        duplex_reader.read_to_end(&mut buffer).await.unwrap();
+
+        // The compressed data should be different from the original
+        assert_ne!(buffer, original);
+        assert!(!buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_compressed_writer_zstd() {
+        let (duplex_writer, mut duplex_reader) = duplex(1024);
+        let mut writer = duplex_writer.into_compressed_writer(CompressionType::Zstd);
+        let original = b"test data for zstd compression";
+
+        writer.write_all(original).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut buffer = Vec::new();
+        duplex_reader.read_to_end(&mut buffer).await.unwrap();
+
+        // The compressed data should be different from the original
+        assert_ne!(buffer, original);
         assert!(!buffer.is_empty());
     }
 
@@ -139,36 +188,15 @@ mod tests {
     async fn test_compressed_writer_uncompressed() {
         let (duplex_writer, mut duplex_reader) = duplex(1024);
         let mut writer = duplex_writer.into_compressed_writer(CompressionType::Uncompressed);
+        let original = b"test data for uncompressed";
 
-        writer
-            .write_all(b"test data for uncompressed")
-            .await
-            .unwrap();
+        writer.write_all(original).await.unwrap();
         writer.shutdown().await.unwrap();
 
         let mut buffer = Vec::new();
         duplex_reader.read_to_end(&mut buffer).await.unwrap();
 
         // Uncompressed data should be the same as the original
-        assert_eq!(buffer, b"test data for uncompressed");
-    }
-
-    #[tokio::test]
-    async fn test_compressed_writer_zstd() {
-        let (duplex_writer, mut duplex_reader) = duplex(1024);
-        let mut writer = duplex_writer.into_compressed_writer(CompressionType::Zstd);
-
-        writer
-            .write_all(b"test data for zstd compression")
-            .await
-            .unwrap();
-        writer.shutdown().await.unwrap();
-
-        let mut buffer = Vec::new();
-        duplex_reader.read_to_end(&mut buffer).await.unwrap();
-
-        // The compressed data should be different from the original
-        assert_ne!(buffer, b"test data for zstd compression");
-        assert!(!buffer.is_empty());
+        assert_eq!(buffer, original);
     }
 }
