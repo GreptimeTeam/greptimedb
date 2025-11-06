@@ -12,13 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::helper::{ColumnDataTypeWrapper, value_to_grpc_value};
+use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::region::InsertRequests as RegionInsertRequests;
-use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
+use api::v1::{
+    AlterTableExpr, ColumnSchema as GrpcColumnSchema, ModifyColumnType, ModifyColumnTypes, Row,
+    Rows,
+};
 use catalog::CatalogManager;
 use common_time::Timezone;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::types::JsonType;
+use datatypes::value::Value;
 use partition::manager::PartitionRuleManager;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -30,12 +39,13 @@ use table::metadata::TableInfoRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
-    ColumnNotFoundSnafu, ConvertToGrpcValueSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
-    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu,
+    ColumnNotFoundSnafu, ConvertToGrpcValueSnafu, InvalidInsertRequestSnafu, InvalidSqlSnafu,
+    MissingInsertBodySnafu, ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
+use crate::statement::StatementExecutor;
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
@@ -62,12 +72,12 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
         let name = stmt.table_name().context(ParseSqlSnafu)?;
         let (catalog, schema, table_name) = self.get_full_name(name)?;
-        let table = self.get_table(&catalog, &schema, &table_name).await?;
+        let mut table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
-        let table_info = table.table_info();
 
         ensure!(
             !common_catalog::consts::is_readonly_schema(&schema),
@@ -94,13 +104,14 @@ impl<'a> StatementToRegion<'a> {
             Ok(())
         })?;
 
-        let mut schema = Vec::with_capacity(column_count);
         let mut rows = vec![
             Row {
                 values: Vec::with_capacity(column_count)
             };
             row_count
         ];
+
+        let mut updater = JsonColumnTypeUpdater::new(statement_executor);
 
         for (i, column_name) in column_names.into_iter().enumerate() {
             let column_schema = table_schema
@@ -109,10 +120,37 @@ impl<'a> StatementToRegion<'a> {
                     msg: format!("Column {} not found in table {}", column_name, &table_name),
                 })?;
 
+            for (sql_row, grpc_row) in sql_rows.iter().zip(rows.iter_mut()) {
+                let value = sql_value_to_value(
+                    column_schema,
+                    &sql_row[i],
+                    Some(&query_ctx.timezone()),
+                    query_ctx.auto_string_to_numeric(),
+                )?;
+
+                updater.check(column_schema, &value)?;
+
+                let value = value_to_grpc_value(value).context(ConvertToGrpcValueSnafu)?;
+                grpc_row.values.push(value);
+            }
+        }
+
+        if updater
+            .maybe_update(&catalog, &schema, &table_name, query_ctx)
+            .await?
+        {
+            table = self.get_table(&catalog, &schema, &table_name).await?;
+        }
+        let table_info = table.table_info();
+
+        let mut schema = Vec::with_capacity(column_count);
+        for column_schema in table.schema().column_schemas() {
             let (datatype, datatype_extension) =
                 ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
                     .context(ColumnDataTypeSnafu)?
                     .to_parts();
+
+            let column_name = &column_schema.name;
             let semantic_type = semantic_type(&table_info, column_name)?;
 
             let grpc_column_schema = GrpcColumnSchema {
@@ -123,16 +161,6 @@ impl<'a> StatementToRegion<'a> {
                 options: options_from_column_schema(column_schema),
             };
             schema.push(grpc_column_schema);
-
-            for (sql_row, grpc_row) in sql_rows.iter().zip(rows.iter_mut()) {
-                let value = sql_value_to_grpc_value(
-                    column_schema,
-                    &sql_row[i],
-                    Some(&query_ctx.timezone()),
-                    query_ctx.auto_string_to_numeric(),
-                )?;
-                grpc_row.values.push(value);
-            }
         }
 
         let requests = Partitioner::new(self.partition_manager)
@@ -194,6 +222,94 @@ impl<'a> StatementToRegion<'a> {
     }
 }
 
+struct JsonColumnTypeUpdater<'a, 'b> {
+    statement_executor: &'a StatementExecutor,
+    merged_types: HashMap<&'b str, JsonType>,
+    column_schemas: HashMap<&'b str, &'b ColumnSchema>,
+}
+
+impl<'a, 'b> JsonColumnTypeUpdater<'a, 'b> {
+    fn new(statement_executor: &'a StatementExecutor) -> Self {
+        Self {
+            statement_executor,
+            merged_types: HashMap::new(),
+            column_schemas: HashMap::new(),
+        }
+    }
+
+    fn check(&mut self, column_schema: &'b ColumnSchema, value: &Value) -> Result<()> {
+        if !matches!(value, Value::Json(_)) {
+            return Ok(());
+        }
+
+        if let (ConcreteDataType::Json(column_type), ConcreteDataType::Json(value_type)) =
+            (&column_schema.data_type, value.data_type())
+        {
+            let merged_type = self
+                .merged_types
+                .entry(&column_schema.name)
+                .or_insert_with(|| column_type.clone());
+            if merged_type != &value_type && merged_type.merge(&value_type).is_err() {
+                return InvalidInsertRequestSnafu {
+                    reason: format!(
+                        r#"json types are conflicting: "{merged_type}" vs "{value_type}""#
+                    ),
+                }
+                .fail();
+            }
+            self.column_schemas
+                .insert(&column_schema.name, column_schema);
+        }
+        Ok(())
+    }
+
+    async fn maybe_update(
+        self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        query_context: &QueryContextRef,
+    ) -> Result<bool> {
+        if self.merged_types.is_empty() {
+            return Ok(false);
+        }
+
+        let mut has_update = false;
+        for (column_name, merged_type) in self.merged_types {
+            if let Some(column_schema) = self.column_schemas.get(column_name)
+                && let ConcreteDataType::Json(column_type) = &column_schema.data_type
+                && column_type != &merged_type
+            {
+                common_telemetry::info!(
+                    "updating table {table} column {column_name} json type: {column_type} => {merged_type}"
+                );
+
+                let (target_type, target_type_extension) =
+                    ColumnDataTypeWrapper::try_from(ConcreteDataType::Json(merged_type))
+                        .context(ColumnDataTypeSnafu)?
+                        .to_parts();
+                let alter_expr = AlterTableExpr {
+                    catalog_name: catalog.to_string(),
+                    schema_name: schema.to_string(),
+                    table_name: table.to_string(),
+                    kind: Some(Kind::ModifyColumnTypes(ModifyColumnTypes {
+                        modify_column_types: vec![ModifyColumnType {
+                            column_name: column_name.to_string(),
+                            target_type: target_type as i32,
+                            target_type_extension,
+                        }],
+                    })),
+                };
+                self.statement_executor
+                    .alter_table_inner(alter_expr, query_context.clone())
+                    .await?;
+                has_update = true;
+            }
+        }
+        Ok(has_update)
+    }
+}
+
 fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a String> {
     if !stmt.columns().is_empty() {
         stmt.columns()
@@ -209,12 +325,12 @@ fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a St
 /// Converts SQL value to gRPC value according to the column schema.
 /// If `auto_string_to_numeric` is true, tries to cast the string value to numeric values,
 /// and fills the default value if the cast fails.
-fn sql_value_to_grpc_value(
+fn sql_value_to_value(
     column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     timezone: Option<&Timezone>,
     auto_string_to_numeric: bool,
-) -> Result<GrpcValue> {
+) -> Result<Value> {
     let column = &column_schema.name;
     let value = if replace_default(sql_val) {
         let default_value = column_schema
@@ -237,8 +353,25 @@ fn sql_value_to_grpc_value(
         )
         .context(crate::error::SqlCommonSnafu)?
     };
+    validate(&value)?;
+    Ok(value)
+}
 
-    value_to_grpc_value(value).context(ConvertToGrpcValueSnafu)
+fn validate(value: &Value) -> Result<()> {
+    match value {
+        Value::Struct(struct_value) => {
+            // Parquet restriction: "Parquet does not support writing empty structs".
+            ensure!(
+                !struct_value.is_empty(),
+                InvalidInsertRequestSnafu {
+                    reason: "empty structs are not supported, consider adding a dummy field"
+                }
+            );
+            Ok(())
+        }
+        Value::Json(value) => validate(value.as_ref()),
+        _ => Ok(()),
+    }
 }
 
 fn replace_default(sql_val: &SqlValue) -> bool {

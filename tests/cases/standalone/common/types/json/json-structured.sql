@@ -3,7 +3,6 @@ CREATE TABLE t (ts TIMESTAMP TIME INDEX, j JSON(format = "structured"));
 DESC TABLE t;
 
 INSERT INTO t VALUES
-(1762128000000, '{}'),
 (1762128001000, '{"int": 1}'),
 (1762128002000, '{"int": 2, "list": [-2.0]}'),
 (1762128003000, '{"int": 3, "list": [-3.0], "nested": {"bool": false}}'),

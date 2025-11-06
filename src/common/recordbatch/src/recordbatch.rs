@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::slice;
 use std::sync::Arc;
 
+use arrow_schema::extension::ExtensionType;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
 use datatypes::arrow::array::{Array, RecordBatchOptions};
 use datatypes::arrow::datatypes::{Field, Schema};
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
@@ -32,7 +35,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use crate::DfRecordBatch;
 use crate::error::{
     self, ArrowComputeSnafu, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu,
-    ProjectArrowRecordBatchSnafu, Result, SchemaConversionSnafu,
+    ProjectArrowRecordBatchSnafu, Result,
 };
 
 /// A two-dimensional batch of column-oriented data with a defined schema.
@@ -60,8 +63,6 @@ impl RecordBatch {
         // the casting here will be removed in the end.
         // TODO(LFC): Remove the casting here once `Batch` is no longer used.
         let arrow_arrays = Self::cast_view_arrays(schema.arrow_schema(), arrow_arrays)?;
-
-        let schema = maybe_amend_with_struct_arrays(schema, &arrow_arrays)?;
 
         let df_record_batch = DfRecordBatch::try_new(schema.arrow_schema().clone(), arrow_arrays)
             .context(error::NewDfRecordBatchSnafu)?;
@@ -252,30 +253,44 @@ impl RecordBatch {
     }
 }
 
-fn maybe_amend_with_struct_arrays(schema: SchemaRef, arrays: &[ArrayRef]) -> Result<SchemaRef> {
-    if arrays
+/// Align the schema's datatypes with the actual arrays', only if there are json arrays.
+/// Because the actual datatype of json array is determined by its values, not by the pre-defined
+/// schema. So the datatype in schema could be lagged behind the actual one in the array.
+pub fn maybe_align_schema_with_json_arrays<'a>(
+    schema: &'a ArrowSchemaRef,
+    arrays: &[ArrayRef],
+) -> Cow<'a, ArrowSchemaRef> {
+    if schema
+        .fields()
         .iter()
-        .any(|x| matches!(x.data_type(), ArrowDataType::Struct(_)))
+        .any(|f| f.extension_type_name() == Some(JsonExtensionType::NAME))
     {
-        let schema = schema.arrow_schema();
         let mut fields = Vec::with_capacity(schema.fields().len());
         for (f, a) in schema.fields().iter().zip(arrays.iter()) {
-            let field_type = f.data_type();
-            let array_type = a.data_type();
-            match (field_type, array_type) {
-                (ArrowDataType::Struct(_), ArrowDataType::Struct(x)) => {
-                    let field = Field::new_struct(f.name(), x.clone(), f.is_nullable());
-                    fields.push(Arc::new(field));
+            if f.extension_type_name() == Some(JsonExtensionType::NAME) {
+                let field_type = f.data_type();
+                let array_type = a.data_type();
+                match (field_type, array_type) {
+                    (ArrowDataType::Struct(x), ArrowDataType::Struct(y)) if x != y => {
+                        common_telemetry::debug!(
+                            "Align field {} datatype: {field_type} => {array_type}",
+                            f.name(),
+                        );
+                        let field = Field::new_struct(f.name(), y.clone(), f.is_nullable())
+                            .with_metadata(f.metadata().clone());
+                        fields.push(Arc::new(field));
+                    }
+                    _ => fields.push(f.clone()),
                 }
-                _ => fields.push(f.clone()),
+            } else {
+                fields.push(f.clone())
             }
         }
         let schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
-        let schema = schema.try_into().context(SchemaConversionSnafu)?;
-        Ok(Arc::new(schema))
+        Cow::Owned(schema)
     } else {
-        // Fast path: must not need to amend if there are no struct arrays.
-        Ok(schema)
+        // Fast path: must not need to align if there are no json types.
+        Cow::Borrowed(schema)
     }
 }
 

@@ -2488,6 +2488,7 @@ name = "common-recordbatch"
 version = "0.18.0"
 dependencies = [
  "arc-swap",
+ "arrow-schema",
  "common-base",
  "common-error",
  "common-macro",

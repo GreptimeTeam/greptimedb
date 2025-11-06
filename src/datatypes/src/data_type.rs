@@ -15,7 +15,6 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::compute::cast as arrow_array_cast;
 use arrow::datatypes::{
     DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
 };
@@ -368,8 +367,10 @@ impl ConcreteDataType {
 
     /// Checks if the data type can cast to another data type.
     pub fn can_arrow_type_cast_to(&self, to_type: &ConcreteDataType) -> bool {
-        let array = arrow_array::new_empty_array(&self.as_arrow_type());
-        arrow_array_cast(array.as_ref(), &to_type.as_arrow_type()).is_ok()
+        match (self, to_type) {
+            (ConcreteDataType::Json(this), ConcreteDataType::Json(that)) => that.is_include(this),
+            _ => arrow::compute::can_cast_types(&self.as_arrow_type(), &to_type.as_arrow_type()),
+        }
     }
 
     /// Try to cast data type as a [`DurationType`].

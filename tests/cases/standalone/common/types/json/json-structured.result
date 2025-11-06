@@ -12,7 +12,6 @@ DESC TABLE t;
 +--------+----------------------+-----+------+---------+---------------+
 
 INSERT INTO t VALUES
-(1762128000000, '{}'),
 (1762128001000, '{"int": 1}'),
 (1762128002000, '{"int": 2, "list": [-2.0]}'),
 (1762128003000, '{"int": 3, "list": [-3.0], "nested": {"bool": false}}'),
@@ -43,7 +42,7 @@ Affected Rows: 1
 
 INSERT INTO t VALUES (1762128011000, '{}');
 
-Affected Rows: 1
+Error: 1004(InvalidArguments), Invalid InsertRequest, reason: empty structs are not supported, consider adding a dummy field
 
 INSERT INTO t VALUES
 (1762128012000, '{"int": 6, "list": [-6.0], "nested": {"string": "e", "bool": true}}'),
