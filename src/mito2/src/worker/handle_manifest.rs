@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::cache::CacheManagerRef;
@@ -31,8 +32,11 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
+use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
-use crate::region::version::VersionBuilder;
+use crate::region::opener::version_builder_from_manifest;
+use crate::region::options::RegionOptions;
+use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
@@ -102,13 +106,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         if change_result.result.is_ok() {
-            // Apply the metadata to region's version.
-            region.version_control.alter_schema(change_result.new_meta);
-
-            let version = region.version();
-            info!(
-                "Region {} is altered, metadata is {:?}, options: {:?}",
-                region.region_id, version.metadata, version.options,
+            // Updates the region metadata and format.
+            Self::update_region_version(
+                &region.version_control,
+                change_result.new_meta,
+                change_result.new_options,
+                &self.memtable_builder_provider,
             );
         }
 
@@ -177,15 +180,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .mutable
                 .new_with_part_duration(version.compaction_time_window),
         );
+        // Here it assumes the leader has backfilled the partition_expr of the metadata.
         let metadata = manifest.metadata.clone();
-        let version = VersionBuilder::new(metadata, new_mutable)
-            .add_files(region.file_purger.clone(), manifest.files.values().cloned())
-            .flushed_entry_id(manifest.flushed_entry_id)
-            .flushed_sequence(manifest.flushed_sequence)
-            .truncated_entry_id(manifest.truncated_entry_id)
-            .compaction_time_window(manifest.compaction_time_window)
-            .options(region_options)
-            .build();
+
+        let version_builder = version_builder_from_manifest(
+            &manifest,
+            metadata,
+            region.file_purger.clone(),
+            new_mutable,
+            region_options,
+        );
+        let version = version_builder.build();
         region.version_control.overwrite_current(Arc::new(version));
 
         let updated = manifest.manifest_version > original_manifest_version;
@@ -362,6 +367,7 @@ impl<S> RegionWorkerLoop<S> {
         region: MitoRegionRef,
         change: RegionChange,
         need_index: bool,
+        new_options: RegionOptions,
         sender: OptionOutputTx,
     ) {
         // Marks the region as altering.
@@ -389,6 +395,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                     new_meta,
                     need_index,
+                    new_options: Some(new_options),
                 }),
             };
             listener
@@ -405,6 +412,32 @@ impl<S> RegionWorkerLoop<S> {
                 );
             }
         });
+    }
+
+    fn update_region_version(
+        version_control: &VersionControlRef,
+        new_meta: RegionMetadataRef,
+        new_options: Option<RegionOptions>,
+        memtable_builder_provider: &MemtableBuilderProvider,
+    ) {
+        let options_changed = new_options.is_some();
+        let region_id = new_meta.region_id;
+        if let Some(new_options) = new_options {
+            // Needs to update the region with new format and memtables.
+            // Creates a new memtable builder for the new options as it may change the memtable type.
+            let new_memtable_builder = memtable_builder_provider.builder_for_options(&new_options);
+            version_control.alter_schema_and_format(new_meta, new_options, new_memtable_builder);
+        } else {
+            // Only changes the schema.
+            version_control.alter_schema(new_meta);
+        }
+
+        let version_data = version_control.current();
+        let version = version_data.version;
+        info!(
+            "Region {} is altered, metadata is {:?}, options: {:?}, options_changed: {}",
+            region_id, version.metadata, version.options, options_changed,
+        );
     }
 }
 

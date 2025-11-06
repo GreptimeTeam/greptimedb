@@ -210,12 +210,13 @@ impl VersionControl {
         version_data.version = new_version;
     }
 
-    /// Alter format of the region.
+    /// Alter schema and format of the region.
     ///
     /// It replaces existing mutable memtable with a memtable that uses the
     /// new format. Memtables of the version must be empty.
-    pub(crate) fn alter_format(
+    pub(crate) fn alter_schema_and_format(
         &self,
+        metadata: RegionMetadataRef,
         options: RegionOptions,
         memtable_builder: MemtableBuilderRef,
     ) {
@@ -232,6 +233,7 @@ impl VersionControl {
         debug_assert!(version.memtables.immutables().is_empty());
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
+                .metadata(metadata)
                 .options(options)
                 .memtables(MemtableVersion::new(new_mutable))
                 .build(),

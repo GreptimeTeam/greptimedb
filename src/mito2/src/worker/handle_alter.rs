@@ -135,11 +135,12 @@ impl<S> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, request: {:?}",
             region_id, version.metadata, request,
         );
-        self.handle_alter_region_metadata(region, version, request, sender);
+        self.handle_alter_region_with_empty_memtable(region, version, request, sender);
     }
 
-    /// Handles region metadata changes.
-    fn handle_alter_region_metadata(
+    // TODO(yingwen): Optional new options and sst format.
+    /// Handles region metadata and format changes when the region memtable is empty.
+    fn handle_alter_region_with_empty_memtable(
         &mut self,
         region: MitoRegionRef,
         version: VersionRef,
@@ -147,6 +148,8 @@ impl<S> RegionWorkerLoop<S> {
         sender: OptionOutputTx,
     ) {
         let need_index = need_change_index(&request.kind);
+        // TODO(yingwen): New options from request.
+        let new_options = version.options.clone();
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -157,9 +160,9 @@ impl<S> RegionWorkerLoop<S> {
         // Persist the metadata to region's manifest.
         let change = RegionChange {
             metadata: new_meta,
-            sst_format: region.sst_format(),
+            sst_format: new_options.sst_format.unwrap_or_default(),
         };
-        self.handle_manifest_region_change(region, change, need_index, sender);
+        self.handle_manifest_region_change(region, change, need_index, new_options, sender);
     }
 
     /// Handles requests that changes region options, like TTL. It only affects memory state
