@@ -34,7 +34,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
-use crate::region::opener::version_builder_from_manifest;
+use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
@@ -165,6 +165,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
         let version = region.version();
+        let mut region_options = version.options.clone();
+        let old_format = region_options.sst_format.unwrap_or_default();
+        // Updates the region options with the manifest.
+        sanitize_region_options(&manifest, &mut region_options);
         if !version.memtables.is_empty() {
             let current = region.version_control.current();
             warn!(
@@ -172,13 +176,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.region_id, manifest.manifest_version, current.last_entry_id
             );
         }
-        let region_options = version.options.clone();
+
+        // We should sanitize the region options before creating a new memtable.
+        let memtable_builder = if old_format != region_options.sst_format.unwrap_or_default() {
+            // Format changed, also needs to replace the memtable builder.
+            Some(
+                self.memtable_builder_provider
+                    .builder_for_options(&region_options),
+            )
+        } else {
+            None
+        };
         let new_mutable = Arc::new(
             region
                 .version()
                 .memtables
                 .mutable
-                .new_with_part_duration(version.compaction_time_window),
+                .new_with_part_duration(version.compaction_time_window, memtable_builder),
         );
         // Here it assumes the leader has backfilled the partition_expr of the metadata.
         let metadata = manifest.metadata.clone();

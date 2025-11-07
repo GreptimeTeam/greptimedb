@@ -493,12 +493,16 @@ impl TimePartitions {
 
     /// Creates a new empty partition list from this list and a `part_duration`.
     /// It falls back to the old partition duration if `part_duration` is `None`.
-    pub(crate) fn new_with_part_duration(&self, part_duration: Option<Duration>) -> Self {
+    pub(crate) fn new_with_part_duration(
+        &self,
+        part_duration: Option<Duration>,
+        memtable_builder: Option<MemtableBuilderRef>,
+    ) -> Self {
         debug_assert!(self.is_empty());
 
         Self::new(
             self.metadata.clone(),
-            self.builder.clone(),
+            memtable_builder.unwrap_or_else(|| self.builder.clone()),
             self.next_memtable_id(),
             Some(part_duration.unwrap_or(self.part_duration)),
         )
@@ -946,17 +950,17 @@ mod tests {
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
 
-        let new_parts = partitions.new_with_part_duration(Some(Duration::from_secs(5)));
+        let new_parts = partitions.new_with_part_duration(Some(Duration::from_secs(5)), None);
         assert_eq!(Duration::from_secs(5), new_parts.part_duration());
         assert_eq!(0, new_parts.next_memtable_id());
 
         // Won't update the duration if it's None.
-        let new_parts = new_parts.new_with_part_duration(None);
+        let new_parts = new_parts.new_with_part_duration(None, None);
         assert_eq!(Duration::from_secs(5), new_parts.part_duration());
         // Don't need to create new memtables.
         assert_eq!(0, new_parts.next_memtable_id());
 
-        let new_parts = new_parts.new_with_part_duration(Some(Duration::from_secs(10)));
+        let new_parts = new_parts.new_with_part_duration(Some(Duration::from_secs(10)), None);
         assert_eq!(Duration::from_secs(10), new_parts.part_duration());
         // Don't need to create new memtables.
         assert_eq!(0, new_parts.next_memtable_id());
@@ -964,7 +968,7 @@ mod tests {
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
         // Need to build a new memtable as duration is still None.
-        let new_parts = partitions.new_with_part_duration(None);
+        let new_parts = partitions.new_with_part_duration(None, None);
         assert_eq!(INITIAL_TIME_WINDOW, new_parts.part_duration());
         assert_eq!(0, new_parts.next_memtable_id());
     }

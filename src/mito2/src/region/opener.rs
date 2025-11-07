@@ -400,7 +400,7 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegionRef>> {
         let now = Instant::now();
-        let region_options = self.options.as_ref().unwrap().clone();
+        let mut region_options = self.options.as_ref().unwrap().clone();
 
         let region_manifest_options = Self::manifest_options(
             config,
@@ -430,6 +430,8 @@ impl RegionOpener {
         } else {
             manifest.metadata.clone()
         };
+        // Updates the region options with the manifest.
+        sanitize_region_options(&manifest, &mut region_options);
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -458,6 +460,7 @@ impl RegionOpener {
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
         );
+        // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
             .memtable_builder_provider
             .builder_for_options(&region_options);
@@ -601,9 +604,8 @@ pub(crate) fn version_builder_from_manifest(
     metadata: RegionMetadataRef,
     file_purger: FilePurgerRef,
     mutable: TimePartitionsRef,
-    mut region_options: RegionOptions,
+    region_options: RegionOptions,
 ) -> VersionBuilder {
-    sanitize_region_options(manifest, &mut region_options);
     VersionBuilder::new(metadata, mutable)
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)

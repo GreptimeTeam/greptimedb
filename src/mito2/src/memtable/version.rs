@@ -82,7 +82,7 @@ impl MemtableVersion {
             }
 
             // Update the time window.
-            let mutable = self.mutable.new_with_part_duration(time_window);
+            let mutable = self.mutable.new_with_part_duration(time_window, None);
             common_telemetry::debug!(
                 "Freeze empty memtable, update partition duration from {:?} to {:?}",
                 self.mutable.part_duration(),
