@@ -350,13 +350,11 @@ impl LocalGcWorker {
             unused_len, region_id
         );
 
+        // TODO(discord9): for now, ignore async index file as it's design is not stable, need to be improved once
+        // index file design is stable
         let file_pairs: Vec<(FileId, FileId)> = unused_files
             .iter()
-            .filter_map(|file_id| {
-                current_files
-                    .get(file_id)
-                    .map(|meta| (meta.file_id().file_id(), meta.index_file_id().file_id()))
-            })
+            .map(|file_id| (*file_id, *file_id))
             .collect();
 
         info!(
@@ -400,7 +398,6 @@ impl LocalGcWorker {
         region: &MitoRegionRef,
         deleted_files: Vec<FileId>,
     ) -> Result<()> {
-        // TODO(discord9): implement this
         debug!(
             "Trying to update manifest removed files for region {}",
             region.region_id()
