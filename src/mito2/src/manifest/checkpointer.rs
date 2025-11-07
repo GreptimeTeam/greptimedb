@@ -129,6 +129,8 @@ impl Checkpointer {
 
         manifest.removed_files.evict_old_removed_files(opt)?;
 
+        // TODO(discord9): consider also check object store to clear removed files that are already deleted? How costly it is?
+
         Ok(manifest)
     }
 

@@ -80,15 +80,16 @@ pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
 /// only manages the file references without deleting the actual files.
 ///
 pub fn create_file_purger(
+    gc_enabled: bool,
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
 ) -> FilePurgerRef {
-    if is_local_fs(&sst_layer) {
-        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
-    } else {
+    if gc_enabled && !is_local_fs(&sst_layer) {
         Arc::new(ObjectStoreFilePurger { file_ref_manager })
+    } else {
+        Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))
     }
 }
 

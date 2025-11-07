@@ -132,6 +132,7 @@ pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        file_removal_rate: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -271,9 +272,11 @@ impl From<store_api::region_engine::RegionManifestInfo> for RegionManifestInfo {
             store_api::region_engine::RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removal_rate,
             } => RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
+                file_removal_rate,
             },
             store_api::region_engine::RegionManifestInfo::Metric {
                 data_manifest_version,

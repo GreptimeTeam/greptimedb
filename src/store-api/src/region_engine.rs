@@ -204,7 +204,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
 
 /// The role of the region.
 /// TODO(weny): rename it to `RegionRoleState`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2)
     Follower,
@@ -497,6 +497,8 @@ pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        /// Number of files removed per hour.
+        file_removal_rate: u64,
     },
     Metric {
         data_manifest_version: u64,
@@ -508,10 +510,11 @@ pub enum RegionManifestInfo {
 
 impl RegionManifestInfo {
     /// Creates a new [RegionManifestInfo] for mito2 engine.
-    pub fn mito(manifest_version: u64, flushed_entry_id: u64) -> Self {
+    pub fn mito(manifest_version: u64, flushed_entry_id: u64, file_removal_rate: u64) -> Self {
         Self::Mito {
             manifest_version,
             flushed_entry_id,
+            file_removal_rate,
         }
     }
 
@@ -604,6 +607,7 @@ impl Default for RegionManifestInfo {
         Self::Mito {
             manifest_version: 0,
             flushed_entry_id: 0,
+            file_removal_rate: 0,
         }
     }
 }

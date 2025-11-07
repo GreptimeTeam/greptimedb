@@ -35,7 +35,7 @@ use crate::manifest::storage::{
     ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::{ManifestStats, RegionLeaderState, RegionRoleState};
 use crate::sst::FormatType;
 
 /// Options for [RegionManifestManager].
@@ -54,21 +54,15 @@ pub struct RegionManifestOptions {
 /// Options for updating `removed_files` field in [RegionManifest].
 #[derive(Debug, Clone)]
 pub struct RemoveFileOptions {
-    /// Number of removed files to keep in manifest's `removed_files` field before also
-    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
-    pub keep_count: usize,
-    /// Duration to keep removed files in manifest's `removed_files` field before also
-    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
-    pub keep_ttl: std::time::Duration,
+    /// Whether GC is enabled. If not, the removed files should always be empty when persisting manifest.
+    pub gc_enabled: bool,
 }
 
 #[cfg(any(test, feature = "test"))]
 impl Default for RemoveFileOptions {
+    #[allow(deprecated)]
     fn default() -> Self {
-        Self {
-            keep_count: 256,
-            keep_ttl: std::time::Duration::from_secs(3600),
-        }
+        Self { gc_enabled: false }
     }
 }
 
@@ -144,6 +138,7 @@ pub struct RegionManifestManager {
     last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
+    stats: ManifestStats,
     stopped: bool,
 }
 
@@ -153,17 +148,17 @@ impl RegionManifestManager {
         metadata: RegionMetadataRef,
         flushed_entry_id: u64,
         options: RegionManifestOptions,
-        total_manifest_size: Arc<AtomicU64>,
-        manifest_version: Arc<AtomicU64>,
         sst_format: FormatType,
+        stats: &ManifestStats,
     ) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
-            total_manifest_size,
+            stats.total_manifest_size.clone(),
         );
+        let manifest_version = stats.manifest_version.clone();
 
         info!(
             "Creating region manifest in {} with metadata {:?}, flushed_entry_id: {}",
@@ -213,11 +208,15 @@ impl RegionManifestManager {
 
         let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
         manifest_version.store(version, Ordering::Relaxed);
+        manifest
+            .removed_files
+            .update_file_removal_rate_to_stats(stats);
         Ok(Self {
             store,
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
+            stats: stats.clone(),
             stopped: false,
         })
     }
@@ -227,8 +226,7 @@ impl RegionManifestManager {
     /// Returns `Ok(None)` if no such manifest.
     pub async fn open(
         options: RegionManifestOptions,
-        total_manifest_size: Arc<AtomicU64>,
-        manifest_version: Arc<AtomicU64>,
+        stats: &ManifestStats,
     ) -> Result<Option<Self>> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["open"])
@@ -239,8 +237,9 @@ impl RegionManifestManager {
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
-            total_manifest_size,
+            stats.total_manifest_size.clone(),
         );
+        let manifest_version = stats.manifest_version.clone();
 
         // recover from storage
         // construct manifest builder
@@ -314,11 +313,15 @@ impl RegionManifestManager {
             last_checkpoint_version,
         );
         manifest_version.store(version, Ordering::Relaxed);
+        manifest
+            .removed_files
+            .update_file_removal_rate_to_stats(stats);
         Ok(Some(Self {
             store,
             last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
+            stats: stats.clone(),
             stopped: false,
         }))
     }
@@ -442,6 +445,9 @@ impl RegionManifestManager {
         );
 
         let version = self.last_version();
+        new_manifest
+            .removed_files
+            .update_file_removal_rate_to_stats(&self.stats);
         self.manifest = Arc::new(new_manifest);
         let last_version = self.set_version(self.manifest.manifest_version);
         info!(
@@ -469,6 +475,9 @@ impl RegionManifestManager {
         let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
         let manifest = builder.try_build()?;
         let last_version = self.set_version(manifest.manifest_version);
+        manifest
+            .removed_files
+            .update_file_removal_rate_to_stats(&self.stats);
         self.manifest = Arc::new(manifest);
         info!(
             "Installed region manifest from checkpoint: {}, region: {}",
@@ -523,6 +532,9 @@ impl RegionManifestManager {
             }
         }
         let new_manifest = manifest_builder.try_build()?;
+        new_manifest
+            .removed_files
+            .update_file_removal_rate_to_stats(&self.stats);
         let updated_manifest = self
             .checkpointer
             .update_manifest_removed_files(new_manifest)?;
@@ -532,6 +544,10 @@ impl RegionManifestManager {
             .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
 
         Ok(version)
+    }
+
+    pub(crate) fn set_manifest(&mut self, manifest: Arc<RegionManifest>) {
+        self.manifest = manifest;
     }
 
     /// Retrieves the current [RegionManifest].
@@ -923,6 +939,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1764);
+        assert_eq!(manifest_size, 1378);
     }
 }
