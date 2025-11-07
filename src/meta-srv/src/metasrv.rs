@@ -865,7 +865,6 @@ impl Metasrv {
 mod tests {
     use crate::metasrv::MetasrvNodeInfo;
 
-
     #[test]
     fn test_deserialize_metasrv_node_info() {
         let str = r#"{"addr":"127.0.0.1:4002","version":"0.1.0","git_commit":"1234567890","start_time_ms":1715145600}"#;
