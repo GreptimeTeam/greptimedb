@@ -313,11 +313,11 @@ impl RemovedFilesRecord {
         for record in &self.removed_files {
             if record.removed_at >= t_ms {
                 cnt += record.file_ids.len();
+                min_ts_after = match min_ts_after {
+                    Some(ts) => Some(ts.min(record.removed_at)),
+                    None => Some(record.removed_at),
+                };
             }
-            min_ts_after = match min_ts_after {
-                Some(ts) => Some(ts.min(record.removed_at)),
-                None => Some(record.removed_at),
-            };
         }
         (cnt as u64, min_ts_after)
     }
