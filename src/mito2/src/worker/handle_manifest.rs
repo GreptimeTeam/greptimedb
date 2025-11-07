@@ -249,6 +249,7 @@ impl<S> RegionWorkerLoop<S> {
                     sender,
                     edit,
                     result,
+                    expected_region_state: RegionLeaderState::Editing,
                 }),
             };
 
@@ -293,7 +294,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Sets the region as writable.
-        region.switch_state_to_writable(RegionLeaderState::Editing);
+        region.switch_state_to_writable(edit_result.expected_region_state);
 
         let _ = edit_result.sender.send(edit_result.result);
 

@@ -50,6 +50,7 @@ use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
+use crate::region::RegionLeaderState;
 use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
 use crate::wal::EntryId;
@@ -969,6 +970,8 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+    /// Expected region state while handling region edit result.
+    pub(crate) expected_region_state: RegionLeaderState,
 }
 
 #[derive(Debug)]

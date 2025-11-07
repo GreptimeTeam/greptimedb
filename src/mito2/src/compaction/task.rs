@@ -104,11 +104,12 @@ impl CompactionTaskImpl {
             committed_sequence: None,
         };
 
+        let current_region_state = RegionLeaderState::Writable;
         // 1. Update manifest
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = compaction_region
             .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list)
+            .update_manifest(current_region_state, action_list)
             .await
         {
             error!(
@@ -126,6 +127,7 @@ impl CompactionTaskImpl {
                 sender: expire_delete_sender,
                 edit,
                 result: Ok(()),
+                expected_region_state: current_region_state,
             }),
         })
         .await;
