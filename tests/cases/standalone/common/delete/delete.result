@@ -35,17 +35,81 @@ DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000::timestamp;
 
 Affected Rows: 1
 
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
++---------------------+-------+------+--------+
+| ts                  | host  | cpu  | memory |
++---------------------+-------+------+--------+
+| 2022-06-15T07:02:37 | host2 | 66.6 | 1024.0 |
+| 2022-06-15T07:02:37 | host3 | 66.6 | 1024.0 |
+| 2022-06-15T07:02:38 | host1 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:38 | host2 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:38 | host3 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:39 | host1 | 88.8 | 4096.0 |
+| 2022-06-15T07:02:39 | host2 | 88.8 | 4096.0 |
+| 2022-06-15T07:02:39 | host3 | 88.8 | 4096.0 |
++---------------------+-------+------+--------+
+
 DELETE FROM monitor WHERE host = 'host2';
 
 Affected Rows: 3
+
+ADMIN flush_table('monitor');
+
++------------------------------+
+| ADMIN flush_table('monitor') |
++------------------------------+
+| 0                            |
++------------------------------+
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
++---------------------+-------+------+--------+
+| ts                  | host  | cpu  | memory |
++---------------------+-------+------+--------+
+| 2022-06-15T07:02:37 | host3 | 66.6 | 1024.0 |
+| 2022-06-15T07:02:38 | host1 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:38 | host3 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:39 | host1 | 88.8 | 4096.0 |
+| 2022-06-15T07:02:39 | host3 | 88.8 | 4096.0 |
++---------------------+-------+------+--------+
 
 DELETE FROM monitor WHERE cpu = 66.6;
 
 Affected Rows: 1
 
+ADMIN flush_table('monitor');
+
++------------------------------+
+| ADMIN flush_table('monitor') |
++------------------------------+
+| 0                            |
++------------------------------+
+
+SELECT ts, host, cpu, memory FROM monitor WHERE cpu = 66.6 ORDER BY ts;
+
+++
+++
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
++---------------------+-------+------+--------+
+| ts                  | host  | cpu  | memory |
++---------------------+-------+------+--------+
+| 2022-06-15T07:02:38 | host1 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:38 | host3 | 77.7 | 2048.0 |
+| 2022-06-15T07:02:39 | host1 | 88.8 | 4096.0 |
+| 2022-06-15T07:02:39 | host3 | 88.8 | 4096.0 |
++---------------------+-------+------+--------+
+
 DELETE FROM monitor WHERE memory > 2048;
 
 Affected Rows: 2
+
+SELECT ts, host, cpu, memory FROM monitor WHERE memory > 2048 ORDER BY ts;
+
+++
+++
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 

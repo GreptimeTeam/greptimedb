@@ -613,6 +613,9 @@ jobs:
           - name: "MySQL Kvbackend"
             opts: "--setup-mysql"
             kafka: false
+          - name: "Flat format"
+            opts: "--enable-flat-format"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -808,7 +811,7 @@ jobs:
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
-        
+
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:

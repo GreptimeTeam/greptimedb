@@ -125,6 +125,7 @@ pub fn new_picker(
     compact_request_options: &compact_request::Options,
     compaction_options: &CompactionOptions,
     append_mode: bool,
+    max_background_tasks: Option<usize>,
 ) -> Arc<dyn Picker> {
     if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
@@ -140,6 +141,7 @@ pub fn new_picker(
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
                 append_mode,
+                max_background_tasks,
             }) as Arc<_>,
         }
     }

@@ -12,7 +12,6 @@
 
 <div align="center">
 <h3 align="center">
-  <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
   <a href="https://docs.greptime.com/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
   <a href="https://github.com/GreptimeTeam/greptimedb/issues/5446">Roadmap 2025</a>
@@ -104,16 +103,6 @@ Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/feat
   <img alt="GreptimeDB System Overview" src="docs/architecture.png">
 
 ## Try GreptimeDB
-
-### 1. [Live Demo](https://greptime.com/playground)
-
-Experience GreptimeDB directly in your browser.
-
-### 2. [GreptimeCloud](https://console.greptime.cloud/)
-
-Start instantly with a free cluster.
-
-### 3. Docker (Local Quickstart)
 
 ```shell
 docker pull greptime/greptimedb

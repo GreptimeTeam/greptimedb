@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,6 +28,7 @@ use common_function::scalars::udf::create_udf;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
+use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
@@ -42,8 +43,9 @@ use servers::error::{
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams};
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -263,7 +265,7 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             vec![wildcard()],
             filters,
-            vec![],
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             None,
             None,
             vec![],
@@ -322,6 +324,7 @@ async fn query_trace_table(
         })?;
 
     let is_data_model_v1 = table
+        .clone()
         .table_info()
         .meta
         .options
@@ -329,6 +332,14 @@ async fn query_trace_table(
         .get(TABLE_DATA_MODEL)
         .map(|s| s.as_str())
         == Some(TABLE_DATA_MODEL_TRACE_V1);
+
+    // collect to set
+    let col_names = table
+        .table_info()
+        .meta
+        .field_column_names()
+        .map(|s| format!("\"{}\"", s))
+        .collect::<HashSet<String>>();
 
     let df_context = create_df_context(query_engine)?;
 
@@ -342,7 +353,7 @@ async fn query_trace_table(
     let dataframe = filters
         .into_iter()
         .chain(tags.map_or(Ok(vec![]), |t| {
-            tags_filters(&dataframe, t, is_data_model_v1)
+            tags_filters(&dataframe, t, is_data_model_v1, &col_names)
         })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
@@ -472,23 +483,73 @@ fn json_tag_filters(
     Ok(filters)
 }
 
-fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Expr>> {
+/// Helper function to check if span_key or resource_key exists in col_names and create an expression.
+/// If neither exists, logs a warning and returns None.
+#[inline]
+fn check_col_and_build_expr<F>(
+    span_key: String,
+    resource_key: String,
+    key: &str,
+    col_names: &HashSet<String>,
+    expr_builder: F,
+) -> Option<Expr>
+where
+    F: FnOnce(String) -> Expr,
+{
+    if col_names.contains(&span_key) {
+        return Some(expr_builder(span_key));
+    }
+    if col_names.contains(&resource_key) {
+        return Some(expr_builder(resource_key));
+    }
+    warn!("tag key {} not found in table columns", key);
+    None
+}
+
+fn flatten_tag_filters(
+    tags: HashMap<String, JsonValue>,
+    col_names: &HashSet<String>,
+) -> ServerResult<Vec<Expr>> {
     let filters = tags
         .into_iter()
         .filter_map(|(key, value)| {
-            let key = format!("\"span_attributes.{}\"", key);
+            if key == KEY_OTEL_STATUS_ERROR_KEY && value == JsonValue::Bool(true) {
+                return Some(col(SPAN_STATUS_CODE).eq(lit(SPAN_STATUS_ERROR)));
+            }
+
+            // TODO(shuiyisong): add more precise mapping from key to col name
+            let span_key = format!("\"span_attributes.{}\"", key);
+            let resource_key = format!("\"resource_attributes.{}\"", key);
             match value {
-                JsonValue::String(value) => Some(col(key).eq(lit(value))),
+                JsonValue::String(value) => {
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).eq(lit(value))
+                    })
+                }
                 JsonValue::Number(value) => {
                     if value.is_f64() {
                         // safe to unwrap as checked previously
-                        Some(col(key).eq(lit(value.as_f64().unwrap())))
+                        let value = value.as_f64().unwrap();
+                        check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                            col(k).eq(lit(value))
+                        })
                     } else {
-                        Some(col(key).eq(lit(value.as_i64().unwrap())))
+                        let value = value.as_i64().unwrap();
+                        check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                            col(k).eq(lit(value))
+                        })
                     }
                 }
-                JsonValue::Bool(value) => Some(col(key).eq(lit(value))),
-                JsonValue::Null => Some(col(key).is_null()),
+                JsonValue::Bool(value) => {
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).eq(lit(value))
+                    })
+                }
+                JsonValue::Null => {
+                    check_col_and_build_expr(span_key, resource_key, &key, col_names, |k| {
+                        col(k).is_null()
+                    })
+                }
                 // not supported at the moment
                 JsonValue::Array(_value) => None,
                 JsonValue::Object(_value) => None,
@@ -502,9 +563,10 @@ fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
     is_data_model_v1: bool,
+    col_names: &HashSet<String>,
 ) -> ServerResult<Vec<Expr>> {
     if is_data_model_v1 {
-        flatten_tag_filters(tags)
+        flatten_tag_filters(tags, col_names)
     } else {
         json_tag_filters(dataframe, tags)
     }

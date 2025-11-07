@@ -29,10 +29,31 @@ with (
     on_physical_table = "metric_engine_partition",
 );
 
+create table invalid_logical_partition (
+    ts timestamp time index,
+    host string primary key,
+    cpu double,
+)
+partition on columns (host) (
+    host <= 'host1',
+    host > 'host1' and host <= 'host2',
+    host > 'host2' and host <= 'host3',
+    host > 'host3'
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
 create table logical_table_2 (
     ts timestamp time index,
     host string primary key,
     cpu double,
+)
+partition on columns (host) (
+    host <= 'host1',
+    host > 'host1' and host <= 'host2',
+    host > 'host2'
 )
 engine = metric
 with (
@@ -148,6 +169,8 @@ select * from logical_table_4;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN select * from logical_table_4;
+
+drop table logical_table_1;
 
 drop table logical_table_2;
 

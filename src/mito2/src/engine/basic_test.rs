@@ -675,6 +675,7 @@ async fn test_region_usage_with_format(flat_format: bool) {
 
     let region_stat = region.region_statistic();
     assert!(region_stat.wal_size > 0);
+    assert_eq!(region_stat.num_rows, 10);
 
     // delete some rows
     let rows = Rows {
@@ -685,6 +686,7 @@ async fn test_region_usage_with_format(flat_format: bool) {
 
     let region_stat = region.region_statistic();
     assert!(region_stat.wal_size > 0);
+    assert_eq!(region_stat.num_rows, 13);
 
     // flush region
     flush_region(&engine, region_id, None).await;
