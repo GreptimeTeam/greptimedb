@@ -558,7 +558,6 @@ impl PartitionMetrics {
     /// Merges `build_reader_cost`.
     pub(crate) fn inc_build_reader_cost(&self, cost: Duration) {
         self.0.build_reader_cost.add_duration(cost);
-        self.record_elapsed_compute(cost);
 
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.build_reader_cost += cost;
