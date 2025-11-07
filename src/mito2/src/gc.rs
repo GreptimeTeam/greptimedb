@@ -291,6 +291,8 @@ impl LocalGcWorker {
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
+        let in_manifest_file_cnt = current_files.len();
+
         let recently_removed_files = self.get_removed_files_expel_times(&manifest).await?;
 
         if recently_removed_files.is_empty() {
@@ -312,6 +314,8 @@ impl LocalGcWorker {
             .cloned()
             .chain(tmp_ref_files.clone().into_iter())
             .collect();
+
+        let in_used_file_cnt = in_used.len();
 
         let unused_files = self
             .list_to_be_deleted_files(region_id, &in_used, recently_removed_files, concurrency)

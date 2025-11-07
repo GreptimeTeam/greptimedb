@@ -22,7 +22,7 @@ use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::MitoRegionRef;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 
 /// File references for a region.
 /// It contains all files referenced by the region.
@@ -273,7 +273,7 @@ mod tests {
             expected_region_ref_manifest
         );
 
-        file_ref_mgr.remove_file(&file_meta);
+        file_ref_mgr.remove_file(file_meta.file_id());
 
         assert_eq!(
             file_ref_mgr
@@ -289,7 +289,7 @@ mod tests {
             expected_region_ref_manifest
         );
 
-        file_ref_mgr.remove_file(&file_meta);
+        file_ref_mgr.remove_file(file_meta.file_id());
 
         assert!(
             file_ref_mgr
