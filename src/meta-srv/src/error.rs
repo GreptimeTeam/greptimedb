@@ -994,8 +994,12 @@ pub enum Error {
 impl Error {
     /// Returns `true` if the error is retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Error::RetryLater { .. })
-            || matches!(self, Error::RetryLaterWithSource { .. })
+        matches!(
+            self,
+            Error::RetryLater { .. }
+                | Error::RetryLaterWithSource { .. }
+                | Error::MailboxTimeout { .. }
+        )
     }
 }
 
