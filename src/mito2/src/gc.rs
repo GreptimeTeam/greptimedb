@@ -43,7 +43,7 @@ use crate::error::{
 };
 use crate::manifest::action::RegionManifest;
 use crate::metrics::GC_DELETE_FILE_CNT;
-use crate::region::MitoRegionRef;
+use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::delete_files;
 use crate::sst::location::{self};
 
@@ -263,6 +263,15 @@ impl LocalGcWorker {
         let mut deleted_files = HashMap::new();
         let tmp_ref_files = self.read_tmp_ref_files(&mut outdated_regions).await?;
         for (region_id, region) in &self.regions {
+            if region.manifest_ctx.current_state() == RegionRoleState::Follower {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Region {} is in Follower state, should not run GC on follower regions",
+                        region_id
+                    ),
+                }
+                .fail();
+            }
             let tmp_ref_files = tmp_ref_files
                 .get(region_id)
                 .cloned()
