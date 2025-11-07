@@ -101,7 +101,7 @@ mod tests {
 
         let provider = Arc::new(MockContextProvider::new(HashMap::new())) as _;
         let err = state
-            .downgrade_leader_region(&mut ctx, &provider)
+            .rollback_downgraded_region(&mut ctx, &provider)
             .await
             .unwrap_err();
 

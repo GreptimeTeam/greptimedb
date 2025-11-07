@@ -661,12 +661,11 @@ impl TableRouteStorage {
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
-        let mut raw_table_routes = self.batch_get_inner(table_ids).await?;
-        self.remap_routes_addresses(&mut raw_table_routes).await?;
+        let raw_table_routes = self.batch_get_inner(table_ids).await?;
 
         Ok(raw_table_routes
             .into_iter()
-            .map(|x| x.map(|x| x.inner))
+            .map(|v| v.map(|x| x.inner))
             .collect())
     }
 
