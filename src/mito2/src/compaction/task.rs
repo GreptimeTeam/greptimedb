@@ -26,7 +26,7 @@ use crate::compaction::picker::{CompactionTask, PickerOutput};
 use crate::error::CompactRegionSnafu;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
-use crate::region::RegionLeaderState;
+use crate::region::RegionRoleState;
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditResult,
     WorkerRequest, WorkerRequestWithTime,
@@ -104,15 +104,23 @@ impl CompactionTaskImpl {
             committed_sequence: None,
         };
 
-        let current_region_state = RegionLeaderState::Writable;
         // 1. Update manifest
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        let RegionRoleState::Leader(current_region_state) =
+            compaction_region.manifest_ctx.current_state()
+        else {
+            warn!(
+                "Region {} not in leader state, skip removing expired files",
+                region_id
+            );
+            return;
+        };
         if let Err(e) = compaction_region
             .manifest_ctx
             .update_manifest(current_region_state, action_list)
             .await
         {
-            error!(
+            warn!(
                 e;
                 "Failed to update manifest for expired files removal, region: {region_id}, files: [{expired_files_str}]. Compaction will continue."
             );
@@ -127,7 +135,7 @@ impl CompactionTaskImpl {
                 sender: expire_delete_sender,
                 edit,
                 result: Ok(()),
-                expected_region_state: current_region_state,
+                update_region_state: false,
             }),
         })
         .await;
