@@ -375,12 +375,14 @@ pub struct MetasrvNodeInfo {
     // The node total cpu millicores
     #[serde(default)]
     pub total_cpu_millicores: i64,
-    #[serde(default)]
     // The node total memory bytes
+    #[serde(default)]
     pub total_memory_bytes: i64,
     /// The node build cpu usage millicores
+    #[serde(default)]
     pub cpu_usage_millicores: i64,
     /// The node build memory usage bytes
+    #[serde(default)]
     pub memory_usage_bytes: i64,
     // The node hostname
     #[serde(default)]
@@ -856,5 +858,21 @@ impl Metasrv {
             leader_region_registry,
             topic_stats_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::metasrv::MetasrvNodeInfo;
+
+
+    #[test]
+    fn test_deserialize_metasrv_node_info() {
+        let str = r#"{"addr":"127.0.0.1:4002","version":"0.1.0","git_commit":"1234567890","start_time_ms":1715145600}"#;
+        let node_info: MetasrvNodeInfo = serde_json::from_str(str).unwrap();
+        assert_eq!(node_info.addr, "127.0.0.1:4002");
+        assert_eq!(node_info.version, "0.1.0");
+        assert_eq!(node_info.git_commit, "1234567890");
+        assert_eq!(node_info.start_time_ms, 1715145600);
     }
 }
