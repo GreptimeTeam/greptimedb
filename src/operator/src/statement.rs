@@ -46,7 +46,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion_expr::LogicalPlan;
@@ -509,14 +509,10 @@ impl StatementExecutor {
                 //
                 if query_ctx.channel() == Channel::Postgres {
                     query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
-                } else if query_ctx.channel() == Channel::Mysql && var_name.starts_with("@@") {
-                    // Just ignore `SET @@` commands for MySQL
-                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 } else {
-                    return NotSupportedSnafu {
-                        feat: format!("Unsupported set variable {}", var_name),
-                    }
-                    .fail();
+                    // Just ignore `SET` commands for MySQL
+                    warn!("Unsupported set variable {}", var_name);
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 }
             }
         }
