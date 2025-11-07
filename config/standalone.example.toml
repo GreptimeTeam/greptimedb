@@ -731,8 +731,8 @@ fork_dictionary_bytes = "1GiB"
 [[region_engine]]
 ## Metric engine options.
 [region_engine.metric]
-## Whether to enable the experimental sparse primary key encoding.
-experimental_sparse_primary_key_encoding = false
+## Whether to use sparse primary key encoding.
+sparse_primary_key_encoding = true
 
 ## The logging options.
 [logging]
