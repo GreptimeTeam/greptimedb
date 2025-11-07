@@ -35,7 +35,7 @@ impl UpdateMetadata {
         let current_table_route_value = ctx.get_table_route_value().await?;
 
         if let Err(err) = table_metadata_manager
-            .update_leader_region_status(table_id, current_table_route_value, |route| {
+            .update_leader_region_status(table_id, &current_table_route_value, |route| {
                 if route.region.id == region_id {
                     Some(None)
                 } else {
@@ -45,14 +45,12 @@ impl UpdateMetadata {
             .await
             .context(error::TableMetadataManagerSnafu)
         {
-            ctx.remove_table_route_value();
             return Err(BoxedError::new(err)).context(error::RetryLaterWithSourceSnafu {
                 reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
             });
         }
 
         ctx.register_failure_detectors().await;
-        ctx.remove_table_route_value();
 
         Ok(())
     }
@@ -157,13 +155,10 @@ mod tests {
             .await
             .unwrap();
 
-        ctx.volatile_ctx.table_route = Some(old_table_route);
-
         let err = state
             .rollback_downgraded_region(&mut ctx)
             .await
             .unwrap_err();
-        assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(err.is_retryable());
         assert!(format!("{err:?}").contains("Failed to update the table route"));
         assert_eq!(rx.len(), 0);
@@ -237,8 +232,6 @@ mod tests {
             .as_any()
             .downcast_ref::<RegionMigrationAbort>()
             .unwrap();
-
-        assert!(ctx.volatile_ctx.table_route.is_none());
 
         let table_route = table_metadata_manager
             .table_route_manager()
