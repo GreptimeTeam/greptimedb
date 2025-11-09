@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::region::region_request::Body as RegionRequestBody;
-use api::v1::region::{CompactRequest, FlushRequest, RegionRequestHeader};
+use api::v1::region::{BuildIndexRequest, CompactRequest, FlushRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -27,7 +27,7 @@ use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::storage::RegionId;
-use table::requests::{CompactTableRequest, FlushTableRequest};
+use table::requests::{BuildIndexTableRequest, CompactTableRequest, FlushTableRequest};
 
 use crate::error::{
     CatalogSnafu, FindRegionLeaderSnafu, FindTablePartitionRuleSnafu, JoinTaskSnafu,
@@ -81,6 +81,39 @@ impl Requester {
             .collect();
 
         info!("Handle table manual flush request: {:?}", request);
+
+        self.do_request(
+            requests,
+            Some(build_db_string(&request.catalog_name, &request.schema_name)),
+            &ctx,
+        )
+        .await
+    }
+
+    /// Handle the request to build index for table.
+    pub async fn handle_table_build_index(
+        &self,
+        request: BuildIndexTableRequest,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let partitions = self
+            .get_table_partitions(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+            )
+            .await?;
+
+        let requests = partitions
+            .into_iter()
+            .map(|partition| {
+                RegionRequestBody::BuildIndex(BuildIndexRequest {
+                    region_id: partition.id.into(),
+                })
+            })
+            .collect();
+
+        info!("Handle table manual build index request: {:?}", request);
 
         self.do_request(
             requests,
@@ -201,6 +234,7 @@ impl Requester {
         let region_id = match req {
             RegionRequestBody::Flush(req) => req.region_id,
             RegionRequestBody::Compact(req) => req.region_id,
+            RegionRequestBody::BuildIndex(req) => req.region_id,
             _ => {
                 error!("Unsupported region request: {:?}", req);
                 return UnsupportedRegionRequestSnafu {}.fail();
