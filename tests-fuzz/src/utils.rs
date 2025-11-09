@@ -125,6 +125,18 @@ pub const GT_FUZZ_INPUT_MAX_TABLES: &str = "GT_FUZZ_INPUT_MAX_TABLES";
 pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
 pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
 pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
+pub const GT_FUZZ_INPUT_MAX_PARTITIONS: &str = "GT_FUZZ_INPUT_MAX_PARTITIONS";
+pub const FUZZ_OVERRIDE_PREFIX: &str = "GT_FUZZ_OVERRIDE_";
+
+/// Reads an override value for a fuzz parameter from env `GT_FUZZ_OVERRIDE_<NAME>`.
+pub fn get_fuzz_override<T>(name: &str) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    let _ = dotenv::dotenv();
+    let key = format!("{}{}", FUZZ_OVERRIDE_PREFIX, name.to_ascii_uppercase());
+    env::var(&key).ok().and_then(|v| v.parse().ok())
+}
 
 macro_rules! make_get_from_env_helper {
     ($key:expr, $default: expr) => {
@@ -144,6 +156,7 @@ make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 4);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 512);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 32);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 16);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_PARTITIONS, 32);
 
 /// Retrieves a value from the environment variables
 /// or returns a default value if the environment variable is not set.

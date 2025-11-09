@@ -46,7 +46,8 @@ use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::utils::{
-    Connections, get_gt_fuzz_input_max_columns, init_greptime_connections_via_env,
+    Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
+    get_gt_fuzz_input_max_columns, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
 struct FuzzContext {
@@ -209,9 +210,11 @@ fn generate_alter_table_expr<R: Rng + 'static>(
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
+        let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let actions = rng.random_range(1..256);
+        let max_actions = get_gt_fuzz_input_max_alter_actions();
+        let actions = get_fuzz_override::<usize>("ACTIONS")
+            .unwrap_or_else(|| rng.random_range(1..max_actions));
 
         Ok(FuzzInput { seed, actions })
     }
