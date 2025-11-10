@@ -738,7 +738,10 @@ pub async fn log_ingester(
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
-    debug!("receiving logs: {:?}", value);
+    debug!(
+        "receiving logs: {:?}",
+        serde_json::to_string(&value).unwrap()
+    );
 
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
