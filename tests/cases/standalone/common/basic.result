@@ -107,15 +107,14 @@ SELECT * from t1;
 | host1 | 1970-01-01T00:00:00     | 0.0 |
 +-------+-------------------------+-----+
 
--- issue #4649 should fail (do not support delete from logical table for now)
 delete from t1;
 
-Error: 1001(Unsupported), Unsupported region request: Delete
+Affected Rows: 2
 
--- issue #4649 should succeed
+-- do not support DELETE FROM physical table for now
 delete from phy;
 
-Affected Rows: 2
+Affected Rows: 0
 
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
 
