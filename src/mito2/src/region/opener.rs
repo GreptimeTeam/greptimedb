@@ -255,17 +255,19 @@ impl RegionOpener {
             }
         }
         // Safety: must be set before calling this method.
-        let options = self.options.take().unwrap();
+        let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
-        // Set the sst_format based on options or flat_format flag
+        // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
         } else if config.default_experimental_flat_format {
+            options.sst_format = Some(FormatType::Flat);
             FormatType::Flat
         } else {
             // Default to PrimaryKeyParquet for newly created regions
+            options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -293,7 +295,10 @@ impl RegionOpener {
             part_duration,
         ));
 
-        debug!("Create region {} with options: {:?}", region_id, options);
+        debug!(
+            "Create region {} with options: {:?}, default_flat_format: {}",
+            region_id, options, config.default_experimental_flat_format
+        );
 
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)

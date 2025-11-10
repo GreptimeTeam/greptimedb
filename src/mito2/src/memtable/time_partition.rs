@@ -353,12 +353,13 @@ impl TimePartitions {
                     .builder
                     .build(inner.alloc_memtable_id(), &self.metadata);
                 debug!(
-                    "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
+                    "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}, metadata: {:?}",
                     range,
                     self.metadata.region_id,
                     self.part_duration,
                     memtable.id(),
-                    inner.parts.len() + 1
+                    inner.parts.len() + 1,
+                    self.metadata,
                 );
                 let pos = inner.parts.len();
                 inner.parts.push(TimePartition {

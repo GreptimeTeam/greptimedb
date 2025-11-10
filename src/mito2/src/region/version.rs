@@ -223,8 +223,9 @@ impl VersionControl {
         let version = self.current().version;
         let part_duration = Some(version.memtables.mutable.part_duration());
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
+        // Use the new metadata to build `TimePartitions`.
         let new_mutable = Arc::new(TimePartitions::new(
-            version.metadata.clone(),
+            metadata.clone(),
             memtable_builder,
             next_memtable_id,
             part_duration,
@@ -262,7 +263,9 @@ impl VersionControl {
                 truncated_sequence,
             } => {
                 let new_version = Arc::new(
-                    VersionBuilder::new(version.metadata.clone(), new_mutable)
+                    VersionBuilder::from_version(version)
+                        .memtables(MemtableVersion::new(new_mutable))
+                        .clear_files()
                         .flushed_entry_id(truncated_entry_id)
                         .flushed_sequence(truncated_sequence)
                         .truncated_entry_id(Some(truncated_entry_id))
@@ -485,6 +488,12 @@ impl VersionBuilder {
         ssts.remove_files(files);
         self.ssts = Arc::new(ssts);
 
+        self
+    }
+
+    /// Clear all files in the builder.
+    pub(crate) fn clear_files(mut self) -> Self {
+        self.ssts = Arc::new(SstVersion::new());
         self
     }
 

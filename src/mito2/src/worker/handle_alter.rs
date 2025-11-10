@@ -135,8 +135,8 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         info!(
-            "Try to alter region {}, version.metadata: {:?}, request: {:?}",
-            region_id, version.metadata, request,
+            "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
+            region_id, version.metadata, version.options, request,
         );
         self.handle_alter_region_with_empty_memtable(region, version, request, sender);
     }
@@ -151,8 +151,7 @@ impl<S> RegionWorkerLoop<S> {
         sender: OptionOutputTx,
     ) {
         let need_index = need_change_index(&request.kind);
-        let new_options =
-            new_region_options_on_empty_memtable(version.options.clone(), &request.kind);
+        let new_options = new_region_options_on_empty_memtable(&version.options, &request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -163,7 +162,11 @@ impl<S> RegionWorkerLoop<S> {
         // Persist the metadata to region's manifest.
         let change = RegionChange {
             metadata: new_meta,
-            sst_format: new_options.sst_format.unwrap_or_default(),
+            sst_format: new_options
+                .as_ref()
+                .unwrap_or(&version.options)
+                .sst_format
+                .unwrap_or_default(),
         };
         self.handle_manifest_region_change(region, change, need_index, new_options, sender);
     }
@@ -236,14 +239,20 @@ impl<S> RegionWorkerLoop<S> {
     }
 }
 
+/// Returns the new region options if there are updates to the options.
 fn new_region_options_on_empty_memtable(
-    mut current_options: RegionOptions,
+    current_options: &RegionOptions,
     kind: &AlterKind,
-) -> RegionOptions {
+) -> Option<RegionOptions> {
     let AlterKind::SetRegionOptions { options } = kind else {
-        return current_options;
+        return None;
     };
 
+    if options.is_empty() {
+        return None;
+    }
+
+    let mut current_options = current_options.clone();
     for option in options {
         match option {
             SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
@@ -256,7 +265,7 @@ fn new_region_options_on_empty_memtable(
             }
         }
     }
-    current_options
+    Some(current_options)
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.

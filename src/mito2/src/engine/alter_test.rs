@@ -903,13 +903,13 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_write_stall_on_altering() {
+    common_telemetry::init_default_ut_logging();
+
     test_write_stall_on_altering_with_format(false).await;
     test_write_stall_on_altering_with_format(true).await;
 }
 
 async fn test_write_stall_on_altering_with_format(flat_format: bool) {
-    common_telemetry::init_default_ut_logging();
-
     let mut env = TestEnv::new().await;
     let listener = Arc::new(NotifyRegionChangeResultListener::default());
     let engine = env
@@ -1148,7 +1148,7 @@ async fn test_alter_region_sst_format_without_flush() {
             .sst_format;
         assert_eq!(current_format, expected);
     };
-    check_format(&engine, None);
+    check_format(&engine, Some(FormatType::PrimaryKey));
 
     // Inserts some data before alter
     let rows = Rows {

@@ -381,7 +381,7 @@ impl<S> RegionWorkerLoop<S> {
         region: MitoRegionRef,
         change: RegionChange,
         need_index: bool,
-        new_options: RegionOptions,
+        new_options: Option<RegionOptions>,
         sender: OptionOutputTx,
     ) {
         // Marks the region as altering.
@@ -409,7 +409,7 @@ impl<S> RegionWorkerLoop<S> {
                     result,
                     new_meta,
                     need_index,
-                    new_options: Some(new_options),
+                    new_options,
                 }),
             };
             listener
