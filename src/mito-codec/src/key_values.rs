@@ -278,7 +278,6 @@ impl SparseReadRowHelper {
         primary_key_encoding: PrimaryKeyEncoding,
     ) -> SparseReadRowHelper {
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            common_telemetry::info!("spares read row helper schema: {:?}", rows.schema);
             // Optimized case: when schema has exactly 3 columns (primary key, timestamp, and one field),
             // we can directly use their indices in order without building an explicit mapping.
             // The column order is: encoded primary key, timestamp, and field.
