@@ -846,8 +846,11 @@ impl RegionLoadCacheTask {
                 for file_handle in level.files.values() {
                     let file_meta = file_handle.meta_ref();
                     if file_meta.exists_index() {
-                        let puffin_key =
-                            IndexKey::new(file_meta.region_id, file_meta.file_id, FileType::Puffin);
+                        let puffin_key = IndexKey::new(
+                            file_meta.region_id,
+                            file_meta.index_file_id().file_id(),
+                            FileType::Puffin,
+                        );
 
                         if !file_cache.contains_key(&puffin_key) {
                             files_to_download.push((puffin_key, file_meta.index_file_size));

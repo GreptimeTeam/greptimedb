@@ -427,8 +427,11 @@ async fn edit_region(
             let is_index_exist = file_meta.exists_index();
             let index_file_size = file_meta.index_file_size();
 
-            let index_file_index_key =
-                IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
+            let index_file_index_key = IndexKey::new(
+                region_id,
+                file_meta.index_file_id().file_id(),
+                FileType::Puffin,
+            );
             let index_remote_path = location::index_file_path(
                 layer.table_dir(),
                 file_meta.file_id(),
