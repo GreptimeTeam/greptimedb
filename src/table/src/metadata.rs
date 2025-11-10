@@ -295,7 +295,7 @@ impl TableMeta {
                 SetRegionOption::Format(value) => {
                     new_options
                         .extra_options
-                        .insert(SST_FORMAT_KEY.to_string(), value.to_string());
+                        .insert(SST_FORMAT_KEY.to_string(), value.clone());
                 }
             }
         }
