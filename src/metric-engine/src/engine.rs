@@ -248,18 +248,7 @@ impl RegionEngine for MetricEngine {
                 }
             }
             RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
-            RegionRequest::Delete(_) => {
-                if self.inner.is_physical_region(region_id) {
-                    self.inner
-                        .mito
-                        .handle_request(region_id, request)
-                        .await
-                        .context(error::MitoDeleteOperationSnafu)
-                        .map(|response| response.affected_rows)
-                } else {
-                    UnsupportedRegionRequestSnafu { request }.fail()
-                }
-            }
+            RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
                     .inner

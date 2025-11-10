@@ -658,7 +658,8 @@ impl WorkerRequest {
             }
             RegionRequest::Delete(v) => {
                 let mut write_request =
-                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?;
+                    WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?
+                        .with_hint(v.hint);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
