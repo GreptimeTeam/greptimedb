@@ -23,6 +23,8 @@ use crate::Tool;
 use crate::data::export::ExportCommand;
 use crate::data::import::ImportCommand;
 
+pub(crate) const COPY_PATH_PLACEHOLDER: &str = "<PATH/TO/FILES>";
+
 /// Command for data operations including exporting data from and importing data into GreptimeDB.
 #[derive(Subcommand)]
 pub enum DataCommand {

@@ -102,6 +102,10 @@ pub struct BareCommand {
     /// Extra command line arguments when starting GreptimeDB binaries.
     #[clap(long)]
     extra_args: Vec<String>,
+
+    /// Enable flat format for storage engine (sets default_experimental_flat_format = true).
+    #[clap(long, default_value = "false")]
+    enable_flat_format: bool,
 }
 
 impl BareCommand {
@@ -170,6 +174,7 @@ impl BareCommand {
             setup_etcd: self.setup_etcd,
             setup_pg: self.setup_pg,
             setup_mysql: self.setup_mysql,
+            enable_flat_format: self.enable_flat_format,
         };
 
         let runner = Runner::new(

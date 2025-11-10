@@ -14,6 +14,7 @@
 
 mod convert;
 mod distance;
+mod elem_avg;
 mod elem_product;
 mod elem_sum;
 pub mod impl_conv;
@@ -64,6 +65,7 @@ impl VectorFunction {
         registry.register_scalar(vector_subvector::VectorSubvectorFunction::default());
         registry.register_scalar(elem_sum::ElemSumFunction::default());
         registry.register_scalar(elem_product::ElemProductFunction::default());
+        registry.register_scalar(elem_avg::ElemAvgFunction::default());
     }
 }
 

@@ -12,21 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::aggrs::vector::avg::VectorAvg;
-use crate::aggrs::vector::product::VectorProduct;
-use crate::aggrs::vector::sum::VectorSum;
-use crate::function_registry::FunctionRegistry;
-
-mod avg;
-mod product;
-mod sum;
-
-pub(crate) struct VectorFunction;
-
-impl VectorFunction {
-    pub fn register(registry: &FunctionRegistry) {
-        registry.register_aggr(VectorSum::uadf_impl());
-        registry.register_aggr(VectorProduct::uadf_impl());
-        registry.register_aggr(VectorAvg::uadf_impl());
-    }
-}
+pub mod json;

@@ -600,6 +600,8 @@ impl RegionServer {
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
+        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
+            .with_label_values(&[request.as_ref()]);
         let response = match &request {
             region_request::Body::Creates(_)
             | region_request::Body::Drops(_)
@@ -617,6 +619,9 @@ impl RegionServerHandler for RegionServer {
             _ => self.handle_requests_in_serial(request).await,
         }
         .map_err(BoxedError::new)
+        .inspect_err(|_| {
+            failed_requests_cnt.inc();
+        })
         .context(ExecuteGrpcRequestSnafu)?;
 
         Ok(RegionResponseV1 {
@@ -1230,6 +1235,11 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
+                if matches!(region_change, RegionChange::Ingest) {
+                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                        .with_label_values(&[request_type])
+                        .inc();
+                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)

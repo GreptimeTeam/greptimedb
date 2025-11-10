@@ -5728,65 +5728,22 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
 {
-    "data": [
+    "data":
+    [
         {
             "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-            "spans": [
-                {
-                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-                    "spanID": "008421dbbd33a3e9",
-                    "operationName": "access-mysql",
-                    "references": [],
-                    "startTime": 1738726754492421,
-                    "duration": 100000,
-                    "tags": [
-                        {
-                            "key": "net.peer.ip",
-                            "type": "string",
-                            "value": "1.2.3.4"
-                        },
-                        {
-                            "key": "operation.type",
-                            "type": "string",
-                            "value": "access-mysql"
-                        },
-                        {
-                            "key": "otel.scope.name",
-                            "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "otel.scope.version",
-                            "type": "string",
-                            "value": "1.0.0"
-                        },
-                        {
-                            "key": "otel.status_description",
-                            "type": "string",
-                            "value": "success"
-                        },
-                        {
-                            "key": "peer.service",
-                            "type": "string",
-                            "value": "test-jaeger-query-api"
-                        },
-                        {
-                            "key": "span.kind",
-                            "type": "string",
-                            "value": "server"
-                        }
-                    ],
-                    "logs": [],
-                    "processID": "p1"
-                },
+            "spans":
+            [
                 {
                     "traceID": "5611dce1bc9ebed65352d99a027b08ea",
                     "spanID": "ffa03416a7b9ea48",
                     "operationName": "access-redis",
-                    "references": [],
+                    "references":
+                    [],
                     "startTime": 1738726754492422,
                     "duration": 100000,
-                    "tags": [
+                    "tags":
+                    [
                         {
                             "key": "net.peer.ip",
                             "type": "string",
@@ -5823,14 +5780,68 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
                             "value": "server"
                         }
                     ],
-                    "logs": [],
+                    "logs":
+                    [],
+                    "processID": "p1"
+                },
+                {
+                    "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+                    "spanID": "008421dbbd33a3e9",
+                    "operationName": "access-mysql",
+                    "references":
+                    [],
+                    "startTime": 1738726754492421,
+                    "duration": 100000,
+                    "tags":
+                    [
+                        {
+                            "key": "net.peer.ip",
+                            "type": "string",
+                            "value": "1.2.3.4"
+                        },
+                        {
+                            "key": "operation.type",
+                            "type": "string",
+                            "value": "access-mysql"
+                        },
+                        {
+                            "key": "otel.scope.name",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "otel.scope.version",
+                            "type": "string",
+                            "value": "1.0.0"
+                        },
+                        {
+                            "key": "otel.status_description",
+                            "type": "string",
+                            "value": "success"
+                        },
+                        {
+                            "key": "peer.service",
+                            "type": "string",
+                            "value": "test-jaeger-query-api"
+                        },
+                        {
+                            "key": "span.kind",
+                            "type": "string",
+                            "value": "server"
+                        }
+                    ],
+                    "logs":
+                    [],
                     "processID": "p1"
                 }
             ],
-            "processes": {
-                "p1": {
+            "processes":
+            {
+                "p1":
+                {
                     "serviceName": "test-jaeger-query-api",
-                    "tags": []
+                    "tags":
+                    []
                 }
             }
         }
@@ -5838,7 +5849,8 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     "total": 0,
     "limit": 0,
     "offset": 0,
-    "errors": []
+    "errors":
+    []
 }
     "#;
 
@@ -6007,8 +6019,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                                 "spanId": "ffa03416a7b9ea49",
                                 "name": "access-pg",
                                 "kind": 2,
-                                "startTimeUnixNano": "1738726754492422000",
-                                "endTimeUnixNano": "1738726754592422000",
+                                "startTimeUnixNano": "1738726754492423000",
+                                "endTimeUnixNano": "1738726754592423000",
                                 "attributes": [
                                     {
                                         "key": "operation.type",
@@ -6061,6 +6073,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                 HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
             ),
             (
+                HeaderName::from_static("x-greptime-hints"),
+                HeaderValue::from_static("ttl=7d"),
+            ),
+            (
                 HeaderName::from_static("x-greptime-trace-table-name"),
                 HeaderValue::from_static(trace_table_name),
             ),
@@ -6071,6 +6087,24 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
+
+    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT UNSIGNED NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  append_mode = 'true',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
+    validate_data(
+        "trace_v1_create_table",
+        &client,
+        "show create table mytable;",
+        trace_table_sql,
+    )
+    .await;
+
+    let trace_meta_table_sql = "[[\"mytable_services\",\"CREATE TABLE IF NOT EXISTS \\\"mytable_services\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'false'\\n)\"]]";
+    validate_data(
+        "trace_v1_create_meta_table",
+        &client,
+        "show create table mytable_services;",
+        trace_meta_table_sql,
+    )
+    .await;
 
     // Test `/api/services` API.
     let res = client
@@ -6418,10 +6452,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
             "spans": [
                 {
                     "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-                    "spanID": "008421dbbd33a3e9",
-                    "operationName": "access-mysql",
+                    "spanID": "ffa03416a7b9ea48",
+                    "operationName": "access-redis",
                     "references": [],
-                    "startTime": 1738726754492421,
+                    "startTime": 1738726754492422,
                     "duration": 100000,
                     "tags": [
                         {
@@ -6432,7 +6466,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                         {
                             "key": "operation.type",
                             "type": "string",
-                            "value": "access-mysql"
+                            "value": "access-redis"
                         },
                         {
                             "key": "otel.scope.name",
@@ -6465,10 +6499,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                 },
                 {
                     "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-                    "spanID": "ffa03416a7b9ea48",
-                    "operationName": "access-redis",
+                    "spanID": "008421dbbd33a3e9",
+                    "operationName": "access-mysql",
                     "references": [],
-                    "startTime": 1738726754492422,
+                    "startTime": 1738726754492421,
                     "duration": 100000,
                     "tags": [
                         {
@@ -6479,7 +6513,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                         {
                             "key": "operation.type",
                             "type": "string",
-                            "value": "access-redis"
+                            "value": "access-mysql"
                         },
                         {
                             "key": "otel.scope.name",
@@ -6540,7 +6574,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     let expected = r#"
-{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492422,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"},{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-redis","processID":"p1","references":[],"spanID":"ffa03416a7b9ea48","startTime":1738726754492422,"tags":[{"key":"net.peer.ip","type":"string","value":"1.2.3.4"},{"key":"operation.type","type":"string","value":"access-redis"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-query-api"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"peer.service","type":"string","value":"test-jaeger-query-api"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"}],"errors":[],"limit":0,"offset":0,"total":0}
+{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-redis","processID":"p1","references":[],"spanID":"ffa03416a7b9ea48","startTime":1738726754492422,"tags":[{"key":"net.peer.ip","type":"string","value":"1.2.3.4"},{"key":"operation.type","type":"string","value":"access-redis"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-query-api"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"peer.service","type":"string","value":"test-jaeger-query-api"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"}],"traceID":"5611dce1bc9ebed65352d99a027b08ea"},{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492423,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"errors":[],"limit":0,"offset":0,"total":0}
     "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
@@ -6556,7 +6590,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     let expected = r#"
-{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492422,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"errors":[],"limit":0,"offset":0,"total":0}
+{"data":[{"processes":{"p1":{"serviceName":"test-jaeger-query-api","tags":[]}},"spans":[{"duration":100000,"logs":[],"operationName":"access-pg","processID":"p1","references":[],"spanID":"ffa03416a7b9ea49","startTime":1738726754492423,"tags":[{"key":"operation.type","type":"string","value":"access-pg"},{"key":"otel.scope.name","type":"string","value":"test-jaeger-find-traces"},{"key":"otel.scope.version","type":"string","value":"1.0.0"},{"key":"otel.status_description","type":"string","value":"success"},{"key":"span.kind","type":"string","value":"server"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"traceID":"5611dce1bc9ebed65352d99a027b08fa"}],"errors":[],"limit":0,"offset":0,"total":0}
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();

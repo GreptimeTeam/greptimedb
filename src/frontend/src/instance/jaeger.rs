@@ -265,7 +265,7 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             vec![wildcard()],
             filters,
-            vec![],
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             None,
             None,
             vec![],
