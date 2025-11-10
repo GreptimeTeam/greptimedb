@@ -48,22 +48,22 @@ runs:
         path: /tmp/greptime-*.log
         retention-days: 3
 
-    - name: Build greptime # Builds standard greptime binary
-      uses: ./.github/actions/build-greptime-binary
-      with:
-        base-image: ubuntu
-        features: servers/dashboard
-        cargo-profile: ${{ inputs.cargo-profile }}
-        artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
-        version: ${{ inputs.version }}
-        working-dir: ${{ inputs.working-dir }}
-        image-registry: ${{ inputs.image-registry }}
-        image-namespace: ${{ inputs.image-namespace }}
+    # - name: Build greptime # Builds standard greptime binary
+    #   uses: ./.github/actions/build-greptime-binary
+    #   with:
+    #     base-image: ubuntu
+    #     features: servers/dashboard
+    #     cargo-profile: ${{ inputs.cargo-profile }}
+    #     artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
+    #     version: ${{ inputs.version }}
+    #     working-dir: ${{ inputs.working-dir }}
+    #     image-registry: ${{ inputs.image-registry }}
+    #     image-namespace: ${{ inputs.image-namespace }}
 
-    - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
-      shell: bash
-      run: |
-        rm -rf ./target/
+    # - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
+    #   shell: bash
+    #   run: |
+    #     rm -rf ./target/
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
@@ -78,14 +78,14 @@ runs:
         image-registry: ${{ inputs.image-registry }}
         image-namespace: ${{ inputs.image-namespace }}
 
-    - name: Build greptime on android base image
-      uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds arm64 greptime binary for android if the host machine amd64.
-      with:
-        base-image: android
-        artifacts-dir: greptime-android-arm64-${{ inputs.version }}
-        version: ${{ inputs.version }}
-        working-dir: ${{ inputs.working-dir }}
-        build-android-artifacts: true
-        image-registry: ${{ inputs.image-registry }}
-        image-namespace: ${{ inputs.image-namespace }}
+    # - name: Build greptime on android base image
+    #   uses: ./.github/actions/build-greptime-binary
+    #   if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds arm64 greptime binary for android if the host machine amd64.
+    #   with:
+    #     base-image: android
+    #     artifacts-dir: greptime-android-arm64-${{ inputs.version }}
+    #     version: ${{ inputs.version }}
+    #     working-dir: ${{ inputs.working-dir }}
+    #     build-android-artifacts: true
+    #     image-registry: ${{ inputs.image-registry }}
+    #     image-namespace: ${{ inputs.image-namespace }}
